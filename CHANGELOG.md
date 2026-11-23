@@ -7,6 +7,7 @@
 - Switch: `--wait` shows the new steer's reply, `--notify-previous` sends a short notice to the replaced steer, handoff in English (default) or German.
 - Planning reports known provider exceptions (Copilot Claude models reject a thinking level).
 - Docs: concepts and safety model, configuration, steer instructions with task/answer template.
+- Steer slots A–Z freely selectable (single-steer default in `config.example.json`); `--adopt` takes any defined slot and plans only the adoption; `plan --slots A,B` overrides `prepare` per run.
 
 ## 0.0.0 – initial import
 

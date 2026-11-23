@@ -15,7 +15,7 @@ import { steerStatus, switchSteer, writeCheckpoint, parseCheckpointBlock, lastAs
 import { assessWorker, readGitState } from './workers.mjs';
 
 const USAGE = `Usage: paseo-factory <command> [options]
-  plan   <repo...> [--repos-file f.json] [--allow-fork] [--adopt A=<agent-id>] [--json] [--out f.json]
+  plan   <repo...> [--repos-file f.json] [--allow-fork] [--adopt A=<agent-id>] [--slots A,B] [--json] [--out f.json]
   apply  --confirm <hash>             run the stored dry-run plan; resumes after a failure
   status <repo> [--json]
   checkpoint <repo> --task <text> [--test <text>]... [--blocker <text>]... [--next <text>]
@@ -45,7 +45,7 @@ async function main() {
       config: { type: 'string' }, 'repos-file': { type: 'string' }, 'allow-fork': { type: 'boolean' },
       json: { type: 'boolean' }, confirm: { type: 'string' }, to: { type: 'string' }, apply: { type: 'boolean' },
       'no-send': { type: 'boolean' }, 'archive-workspace': { type: 'boolean' }, help: { type: 'boolean' },
-      adopt: { type: 'string', multiple: true }, out: { type: 'string' }, task: { type: 'string' },
+      adopt: { type: 'string', multiple: true }, slots: { type: 'string', multiple: true }, out: { type: 'string' }, task: { type: 'string' },
       test: { type: 'string', multiple: true }, blocker: { type: 'string', multiple: true },
       next: { type: 'string' }, 'from-agent': { type: 'string' }, wait: { type: 'boolean' },
       'notify-previous': { type: 'boolean' }, language: { type: 'string' },
@@ -72,10 +72,19 @@ async function main() {
 
     if (command === 'plan') {
       if (!entries.length) throw new Error('plan needs at least one repository');
-      const plans = await runner.runPlans(entries, { allowFork, adopt });
+      const slots = (values.slots ?? []).flatMap((v) => v.split(',')).map((s) => s.trim()).filter(Boolean).map((s) => s.toUpperCase());
+      for (const slot of slots) {
+        if (!/^[A-Z]$/.test(slot)) throw new Error(`--slots expects comma-separated slot letters A-Z, got ${slot}`);
+      }
+      if (new Set(slots).size !== slots.length) throw new Error('--slots contains duplicates');
+      for (const slot of slots) {
+        if (!config.steers.slots[slot]) throw new Error(`--slots names slot ${slot}, which is not defined in steers.slots`);
+      }
+      const slotsOverride = slots.length ? slots : undefined;
+      const plans = await runner.runPlans(entries, { allowFork, adopt, ...(slotsOverride ? { slots: slotsOverride } : {}) });
       const hash = planHash(plans, config);
       if (plans.some((p) => p.ops.length)) {
-        const stored = storeAuthorization(PLAN_DIR, createAuthorization(plans, config, { entries, allowFork, adopt }), config);
+        const stored = storeAuthorization(PLAN_DIR, createAuthorization(plans, config, { entries, allowFork, adopt, ...(slotsOverride ? { slots: slotsOverride } : {}) }), config);
         if (stored.status === 'kept' && !values.json) console.log(`Existing authorization kept (created ${stored.authorization.createdAt}).`);
       }
       if (values.out) writeFileSync(values.out, `${JSON.stringify({ generatedAt: new Date().toISOString(), hash, plans }, null, 2)}\n`);

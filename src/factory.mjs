@@ -18,9 +18,9 @@ export function createRunner({ config, client, gh, git, readState = readPaseoSta
   }
   return {
     discoverAll,
-    async runPlans(entries, { allowFork = false, adopt = {} } = {}) {
+    async runPlans(entries, { allowFork = false, adopt = {}, slots } = {}) {
       const discoveries = await discoverAll(entries);
-      return discoveries.map((d) => planRepository(d, config, { allowFork, adopt: adopt[d.forkName?.toLowerCase()] ?? adopt['*'] ?? {} }));
+      return discoveries.map((d) => planRepository(d, config, { allowFork, adopt: adopt[d.forkName?.toLowerCase()] ?? adopt['*'] ?? {}, slots }));
     },
   };
 }

@@ -117,6 +117,7 @@ export function storeAuthorization(dir, authorization, config, fs = { mkdirSync,
       && isDeepStrictEqual(existing.entries, authorization.entries)
       && existing.allowFork === authorization.allowFork
       && isDeepStrictEqual(existing.adopt, authorization.adopt)
+      && isDeepStrictEqual(existing.slots ?? null, authorization.slots ?? null)
       && Number.isFinite(Date.parse(existing.createdAt));
     if (!same) throw new ApplyRefused(`Stored authorization ${target} differs from this dry-run or is damaged; not replacing it`);
     return { status: 'kept', authorization: existing, file: target };
@@ -151,8 +152,8 @@ export function withApplyLock(fn, options) {
 }
 
 /** Everything apply may later do, frozen at dry-run time. */
-export function createAuthorization(plans, config, { entries, allowFork = false, adopt = {} }) {
-  return { version: 1, hash: planHash(plans, config), createdAt: new Date().toISOString(), entries, allowFork, adopt, plans: structuredClone(plans) };
+export function createAuthorization(plans, config, { entries, allowFork = false, adopt = {}, slots } = {}) {
+  return { version: 1, hash: planHash(plans, config), createdAt: new Date().toISOString(), entries, allowFork, adopt, ...(slots !== undefined ? { slots } : {}), plans: structuredClone(plans) };
 }
 
 function authorizedOps(plan) {
@@ -205,7 +206,7 @@ export async function applyPlans({ authorization, config, confirm, runPlans, exe
   if (!authorization) throw new ApplyRefused('No stored plan; run plan first and confirm its hash');
   if (!confirm || confirm !== authorization.hash) throw new ApplyRefused(`Apply needs --confirm ${authorization.hash} (hash of the stored dry-run)`);
   if (planHash(authorization.plans, config) !== authorization.hash) throw new ApplyRefused('Stored plan does not match the current config or was altered; run a new dry-run');
-  const options = { allowFork: authorization.allowFork, adopt: authorization.adopt };
+  const options = { allowFork: authorization.allowFork, adopt: authorization.adopt, ...(authorization.slots !== undefined ? { slots: authorization.slots } : {}) };
   const state = progress.load() ?? { hash: authorization.hash, started: false, results: {} };
   if (state.hash !== authorization.hash) throw new ApplyRefused('Progress belongs to a different plan');
   if (!state.started) {

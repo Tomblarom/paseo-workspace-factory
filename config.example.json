@@ -36,14 +36,10 @@
   },
   "steers": {
     "slots": {
-      "A": "codex-high",
-      "B": "claude-sonnet",
-      "C": "copilot-sonnet"
+      "A": "codex-high"
     },
     "prepare": [
-      "A",
-      "B",
-      "C"
+      "A"
     ],
     "initialActive": "A"
   },

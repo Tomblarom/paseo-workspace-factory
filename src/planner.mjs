@@ -28,13 +28,33 @@ function steerLabels(forkName, slot) {
   return { [LABEL.repo]: forkName, [LABEL.role]: 'steer', [LABEL.slot]: slot };
 }
 
-export function planRepository(discovery, config, { allowFork = false, adopt = {} } = {}) {
+export function planRepository(discovery, config, { allowFork = false, adopt = {}, slots } = {}) {
   const ops = [];
   const conflicts = [];
   const notes = [...(discovery.github?.notes ?? [])];
   const add = (key, kind, summary, params = {}) => ops.push({ key, kind, summary, params });
   const conflict = (key, reason) => conflicts.push({ key, reason });
   const { github, forkName } = discovery;
+
+  // Per-run slot selection (--slots overrides prepare; subset of defined slots).
+  let effectivePrepare = config.steers.prepare;
+  let effectiveInitialActive = config.steers.initialActive;
+  if (slots !== undefined) {
+    for (const slot of slots) {
+      if (!config.steers.slots[slot]) conflict(`steer.${slot}`, `--slots names slot ${slot}, which is not defined in steers.slots`);
+    }
+    effectivePrepare = [...new Set(slots.filter((s) => config.steers.slots[s]))];
+    if (effectivePrepare.length && !effectivePrepare.includes(effectiveInitialActive)) {
+      effectiveInitialActive = effectivePrepare[0];
+    }
+  }
+
+  // Adopting a defined slot outside prepare plans only the adopted slots,
+  // not the whole prepare list; the active steer must be one of them.
+  const definedAdopts = Object.keys(adopt).filter((s) => config.steers.slots[s]);
+  const adoptOutside = definedAdopts.some((s) => !effectivePrepare.includes(s));
+  const slotsToPlan = adoptOutside ? definedAdopts : effectivePrepare;
+  if (slotsToPlan.length && !slotsToPlan.includes(effectiveInitialActive)) effectiveInitialActive = slotsToPlan[0];
 
   // 1. GitHub fork
   if (github.fork.status === 'conflict') conflict('github.fork', github.fork.reason);
@@ -84,7 +104,7 @@ export function planRepository(discovery, config, { allowFork = false, adopt = {
   }
 
   // 3. Main workspace
-  const initial = { main: true, activeSteer: config.steers.initialActive, epoch: 1 };
+  const initial = { main: true, activeSteer: effectiveInitialActive, epoch: 1 };
   let main = discovery.mainWorkspace;
   if (discovery.mainCandidates.length > 1 && !main) {
     conflict('workspace.main', `Several main workspaces use ${checkoutPath}: ${discovery.mainCandidates.map((w) => `${w.id} "${w.title ?? w.name}"`).join(', ')}`);
@@ -113,10 +133,10 @@ export function planRepository(discovery, config, { allowFork = false, adopt = {
 
   // 4. Steer slots
   for (const slot of Object.keys(adopt)) {
-    if (!config.steers.prepare.includes(slot)) conflict(`steer.${slot}`, `--adopt names slot ${slot}, which is not prepared by the config`);
+    if (!config.steers.slots[slot]) conflict(`steer.${slot}`, `--adopt names slot ${slot}, which is not defined in steers.slots`);
   }
-  const catalogProblems = validateProfilesAgainstCatalog(config, discovery.providers, new Set(config.steers.prepare.map((slot) => config.steers.slots[slot])));
-  for (const slot of config.steers.prepare) {
+  const catalogProblems = validateProfilesAgainstCatalog(config, discovery.providers, new Set(slotsToPlan.map((slot) => config.steers.slots[slot])));
+  for (const slot of slotsToPlan) {
     const key = `steer.${slot}`;
     const profile = slotProfile(config, slot);
     const labelled = discovery.steers.labelled.filter((a) => a.labels[LABEL.slot] === slot);

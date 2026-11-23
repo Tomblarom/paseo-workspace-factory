@@ -14,9 +14,9 @@ The config is looked up in this order: `--config <path>`, `$PASEO_FACTORY_CONFIG
 | `workspaceTitle` | Title of the main workspace (`Main`). |
 | `handoffLanguage` | `en` (default) or `de`. |
 | `profiles.<name>` | `provider`, `model`, `thinking` (or `null` for the provider default), `mode`. Validated against the live provider catalog before a steer is planned. |
-| `steers.slots` | Slot letter → profile name. Changing a slot's profile does not change an existing steer; the plan only reports the difference. |
-| `steers.prepare` | Slots created for every repository. |
-| `steers.initialActive` | Active steer after provisioning. |
+| `steers.slots` | Slot letter (A–Z) → profile name. Changing a slot's profile does not change an existing steer; the plan only reports the difference. Default is a single steer `A`; add `B`, `C`, … with their profiles as needed. |
+| `steers.prepare` | Slots created for every repository (default `["A"]`). Overridden per run with `plan --slots` (must be a subset of defined slots). |
+| `steers.initialActive` | Active steer after provisioning (must be in `prepare`; with `--slots` it falls back to the first slot when needed). |
 | `workers.defaultProfile` | Profile name for workers. |
 | `runtime.stateDir` | Plans, progress, journals and locks (default `$XDG_STATE_HOME/paseo-workspace-factory`). |
 | `runtime.scratchDir` | Scratch repositories of live tests (default `<stateDir>/scratch`). |
@@ -25,6 +25,8 @@ The config is looked up in this order: `--config <path>`, `$PASEO_FACTORY_CONFIG
 | `runtime.paseo.passwordFile` | File with the daemon password, if the daemon requires one. |
 
 Environment overrides: `PASEO_FACTORY_STATE_DIR`, `PASEO_FACTORY_SCRATCH_DIR`, `PASEO_WS_URL`, `PASEO_FACTORY_PASEO_BIN`, `PASEO_PASSWORD_FILE`, `PASEO_PASSWORD`.
+
+Per-run slot selection: `plan <repo> --slots D` (comma-separated, e.g. `--slots B,D`) plans only those slots instead of `steers.prepare`. `--adopt X=<agent-id>` accepts any slot defined in `steers.slots`; adopting a slot outside `prepare` plans only the adopted slot(s), not the rest of `prepare`.
 
 ## Known provider exceptions
 

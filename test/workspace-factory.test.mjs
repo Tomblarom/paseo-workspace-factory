@@ -322,14 +322,14 @@ function executorsFor(world) {
   return createExecutors({ client: fakeClient(world), gh: fakeGh(world), git: fakeGit(world), paseoCli: fakePaseoCli(world), sleep: async () => {}, fs: worldFs(world) });
 }
 
-async function authorize(world, entries = [FIRMWARE], { config = CONFIG, allowFork = false, adopt = {} } = {}) {
-  const plans = await runnerFor(world, config).runPlans(entries, { allowFork, adopt });
-  return createAuthorization(plans, config, { entries, allowFork, adopt });
+async function authorize(world, entries = [FIRMWARE], { config = CONFIG, allowFork = false, adopt = {}, slots } = {}) {
+  const plans = await runnerFor(world, config).runPlans(entries, { allowFork, adopt, ...(slots ? { slots } : {}) });
+  return createAuthorization(plans, config, { entries, allowFork, adopt, ...(slots ? { slots } : {}) });
 }
 
 /** Dry-run + confirm + apply; `tamper` rewrites what rediscovery observes. */
-async function apply(world, entries = [FIRMWARE], { config = CONFIG, allowFork = false, adopt = {}, journal, authorization, progress, tamper, execute } = {}) {
-  const auth = authorization ?? (await authorize(world, entries, { config, allowFork, adopt }));
+async function apply(world, entries = [FIRMWARE], { config = CONFIG, allowFork = false, adopt = {}, slots, journal, authorization, progress, tamper, execute } = {}) {
+  const auth = authorization ?? (await authorize(world, entries, { config, allowFork, adopt, ...(slots ? { slots } : {}) }));
   const runner = runnerFor(world, config);
   return applyPlans({
     authorization: auth, config, confirm: auth.hash, progress, journal, lookupReceipt: fakeLookup(world),
@@ -1862,4 +1862,68 @@ test('catalog validation reports disabled providers, unknown models, thinking an
   assert.match(problems.x[0], /disabled/);
   assert.match(problems.y[0], /not offered/);
   assert.equal(problems.z.length, 2);
+});
+
+// ---------------------------------------------------------------- free slot selection (TODO 1.1-1.3)
+
+test('steer slots A-Z are free: any letters, any order, no minimum beyond one slot', () => {
+  const free = structuredClone(CONFIG);
+  free.steers = { slots: { Z: 'sol', Q: 'muse', M: 'agy' }, prepare: ['Q', 'Z'], initialActive: 'Q' };
+  assert.deepEqual(validateConfig(free), []);
+  const single = structuredClone(CONFIG);
+  single.steers = { slots: { M: 'sol' }, prepare: ['M'], initialActive: 'M' };
+  assert.deepEqual(validateConfig(single), []);
+  const noSlots = structuredClone(CONFIG);
+  noSlots.steers = { slots: {}, prepare: [], initialActive: 'A' };
+  assert.ok(validateConfig(noSlots).some((e) => /at least one slot/.test(e)));
+  const noPrepare = structuredClone(CONFIG);
+  noPrepare.steers = { slots: { A: 'sol' }, prepare: [], initialActive: 'A' };
+  assert.ok(validateConfig(noPrepare).some((e) => /prepare/.test(e)));
+});
+
+test('adopt accepts any defined slot outside prepare and plans only the adoption', async () => {
+  const config = structuredClone(CONFIG);
+  config.steers.slots.D = 'sol';
+  const { world, created: [legacy] } = legacyWorld([{ title: 'Steer D' }]);
+  const [p] = await plan(world, [FIRMWARE], { config, adopt: { '*': { D: legacy.id } } });
+  assert.deepEqual(keys(p), ['steer.D']);
+  assert.equal(p.ops[0].kind, 'paseo.agent.adopt');
+  const unknown = structuredClone(CONFIG);
+  const { world: w2, created: [other] } = legacyWorld([{ title: 'Steer Z' }]);
+  const [q] = await plan(w2, [FIRMWARE], { config: unknown, adopt: { '*': { Z: other.id } } });
+  assert.match(q.conflicts.find((c) => c.key === 'steer.Z').reason, /not defined in steers.slots/);
+});
+
+test('default factory starts with exactly one steer', async () => {
+  const example = JSON.parse(readFileSync(new URL('../config.example.json', import.meta.url), 'utf8'));
+  assert.deepEqual(Object.keys(example.steers.slots), ['A']);
+  assert.deepEqual(example.steers.prepare, ['A']);
+  assert.equal(example.steers.initialActive, 'A');
+  assert.deepEqual(validateConfig({ ...example, checkoutRoot: '/p' }), []);
+  const config = structuredClone(CONFIG);
+  config.steers = { slots: { A: 'sol' }, prepare: ['A'], initialActive: 'A' };
+  const [p] = await plan(makeWorld(), [FIRMWARE], { config });
+  assert.deepEqual(keys(p), ['checkout.clone', 'checkout.upstream-remote', 'workspace.main', 'steer.A']);
+});
+
+test('plan --slots overrides prepare for this run and adjusts initialActive', async () => {
+  const config = structuredClone(CONFIG);
+  config.steers.slots.D = 'sol';
+  let [p] = await plan(makeWorld(), [FIRMWARE], { config, slots: ['D'] });
+  assert.deepEqual(keys(p), ['checkout.clone', 'checkout.upstream-remote', 'workspace.main', 'steer.D']);
+  assert.equal(p.ops.find((o) => o.key === 'workspace.main').params.metadata[METADATA_KEY].activeSteer, 'D');
+  [p] = await plan(makeWorld(), [FIRMWARE], { config, slots: ['B', 'C'] });
+  assert.deepEqual(keys(p).filter((k) => k.startsWith('steer.')), ['steer.B', 'steer.C']);
+  assert.equal(p.ops.find((o) => o.key === 'workspace.main').params.metadata[METADATA_KEY].activeSteer, 'B');
+  [p] = await plan(makeWorld(), [FIRMWARE], { config, slots: ['A', 'C'] });
+  assert.equal(p.ops.find((o) => o.key === 'workspace.main').params.metadata[METADATA_KEY].activeSteer, 'A', 'initialActive kept when included');
+  const { report } = await apply(makeWorld(), [FIRMWARE], { config, slots: ['C'] });
+  assert.equal(report[0].status, 'complete', report[0].error);
+  assert.deepEqual(report[0].executed.map((e) => e.key), ['checkout.clone', 'checkout.upstream-remote', 'workspace.main', 'steer.C']);
+});
+
+test('plan --slots must be a subset of defined slots', async () => {
+  const [p] = await plan(makeWorld(), [FIRMWARE], { slots: ['Z'] });
+  assert.match(p.conflicts.find((c) => c.key === 'steer.Z').reason, /not defined in steers.slots/);
+  assert.equal(p.ops.some((o) => o.key === 'steer.Z'), false);
 });
