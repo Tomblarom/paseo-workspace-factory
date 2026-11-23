@@ -3,17 +3,59 @@
 import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { delimiter, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { daemonHost, runtime } from './runtime.mjs';
 import { pathToFileURL } from 'node:url';
 
 export const LABEL = {
-  repo: 'ari.wsf.repo',
-  role: 'ari.wsf.role',
-  slot: 'ari.wsf.slot',
+  repo: 'wsf.repo',
+  role: 'wsf.role',
+  slot: 'wsf.slot',
+  scope: 'wsf.scope',
+  owner: 'wsf.owner',
 };
 export const PARENT_LABEL = 'paseo.parent-agent-id';
-export const METADATA_KEY = 'ari.wsf';
+export const METADATA_KEY = 'wsf';
+
+/**
+ * Host-specific prefix the pilot used for factory labels and metadata keys.
+ * Still read (see below); a planned `labels.migrate` op rewrites it.
+ */
+export const LEGACY_PREFIX = 'ari.wsf';
+
+/** Maps one legacy key to its new counterpart (`ari.wsf.x` -> `wsf.x`); null for non-legacy keys. */
+export function newKeyForLegacyKey(oldKey) {
+  if (oldKey === LEGACY_PREFIX) return METADATA_KEY;
+  if (typeof oldKey === 'string' && oldKey.startsWith(`${LEGACY_PREFIX}.`)) return `${METADATA_KEY}${oldKey.slice(LEGACY_PREFIX.length)}`;
+  return null;
+}
+
+/** Legacy keys that still need migration: old keys without a persisted new counterpart. */
+export function pendingLegacyKeys(dict) {
+  if (!dict || typeof dict !== 'object') return [];
+  return Object.keys(dict).filter((key) => {
+    const mapped = newKeyForLegacyKey(key);
+    return mapped !== null && dict[mapped] === undefined;
+  });
+}
+
+/**
+ * Adds the new counterparts of legacy keys to a labels/metadata dict so all
+ * readers work unchanged. Mixed records keep both: the new prefix wins on read.
+ * Records with legacy keys are marked `legacyPrefix: true`; records that still
+ * need migration also carry `legacyPending: [old keys...]` (a plain
+ * counterpart check cannot tell persisted new keys from these inferred ones).
+ */
+function withNormalizedPrefix(record, field) {
+  const dict = record?.[field];
+  if (!dict || typeof dict !== 'object') return record;
+  const pending = pendingLegacyKeys(dict);
+  const legacy = pending.length > 0 || Object.keys(dict).some((key) => newKeyForLegacyKey(key) !== null);
+  if (!legacy) return record;
+  const normalized = { ...dict };
+  for (const key of pending) normalized[newKeyForLegacyKey(key)] = dict[key];
+  return { ...record, [field]: normalized, legacyPrefix: true, ...(pending.length ? { legacyPending: pending } : {}) };
+}
 
 const SILENT = { debug() {}, info() {}, warn() {}, error() {} };
 
@@ -68,7 +110,12 @@ export async function readPaseoState(client) {
     collectPages((cursor) => client.agents.list({ includeBackground: true, filter: { includeArchived: true, includeBackground: true }, page: page(cursor) })),
     client.providers.snapshot().then((result) => result.entries ?? []),
   ]);
-  return { projects, workspaces, agents: agentEntries.map((entry) => entry.agent ?? entry), providers };
+  return {
+    projects,
+    workspaces: workspaces.map((workspace) => withNormalizedPrefix(workspace, 'metadata')),
+    agents: agentEntries.map((entry) => withNormalizedPrefix(entry.agent ?? entry, 'labels')),
+    providers,
+  };
 }
 
 /** Runs the official CLI with JSON output. PASEO_AGENT_ID is removed so no parent can be inherited. */
@@ -94,32 +141,93 @@ export function parentOf(agent) {
 }
 
 /**
- * Read-only lookup of a daemon creation receipt by idempotency key. Paseo 0.16.2
- * exposes this only through the internal `creation.subscribe.request` (used by the
- * SDK itself to reattach to running creations), so it is isolated here, pinned to the
- * tested daemon version and fails closed. Returns the receipt snapshot or null when
+ * Paseo releases the receipt lookup was tested against. The lookup speaks the
+ * internal `creation.subscribe` protocol message (which the SDK itself uses to
+ * reattach to running creations); its shape is not part of the public SDK
+ * contract, so any other daemon or `@getpaseo/client` version fails closed
+ * instead of risking a create without a receipt. See "Version binding" in
+ * docs/configuration.md. Extend only after the live crash test passes there.
+ */
+export const RECEIPT_LOOKUP_TESTED_VERSIONS = ['0.16.2'];
+
+/**
+ * Version of the `@getpaseo/client` shipping with the installed CLI. The
+ * package does not export its package.json, so it is read from the filesystem
+ * next to the resolved client entry. Returns null when it cannot be verified.
+ */
+export function installedClientVersion(cliPath = paseoBinary()) {
+  const require = createRequire(realpathSync(cliPath));
+  let dir = dirname(require.resolve('@getpaseo/client'));
+  for (let guard = 0; guard < 6; guard += 1) {
+    const candidate = join(dir, 'package.json');
+    if (existsSync(candidate)) {
+      const pkg = JSON.parse(readFileSync(candidate, 'utf8'));
+      if (pkg?.name === '@getpaseo/client') return pkg.version ?? null;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+  return null;
+}
+
+/**
+ * Read-only lookup of a daemon creation receipt by idempotency key. Paseo
+ * exposes this only through the internal `creation.subscribe.request` (used by
+ * the SDK itself to reattach to running creations), so it is isolated here,
+ * pinned to the tested versions and fails closed: an untested SDK or daemon
+ * version, a missing `creationLifecycle` feature, or a failed import, connect
+ * or exchange throws — it never reports "no receipt" on failure, so callers
+ * never re-create without a receipt. Returns the receipt snapshot or null when
  * the daemon has no receipt. Side effect owned by the daemon: a receipt left
  * in-flight by a dead daemon run is marked outcomeUnknown when looked up.
  */
-export async function lookupCreationReceipt(kind, idempotencyKey, { url = runtime().paseo.url, cliPath = paseoBinary(), expectedVersion = '0.16.2' } = {}) {
-  const require = createRequire(realpathSync(cliPath));
-  const { DaemonClient } = await import(pathToFileURL(require.resolve('@getpaseo/client/internal/daemon-client')).href);
-  const daemon = new DaemonClient({ url, password: daemonPassword(), clientId: 'paseo-workspace-factory-receipt', logger: SILENT, reconnect: { enabled: false } });
-  await daemon.connect();
+export async function lookupCreationReceipt(kind, idempotencyKey, { url = runtime().paseo.url, cliPath = paseoBinary(), expectedVersion = RECEIPT_LOOKUP_TESTED_VERSIONS[0] } = {}) {
+  const tested = [expectedVersion];
+  let clientVersion;
   try {
+    clientVersion = installedClientVersion(cliPath);
+  } catch (error) {
+    throw new Error(`receipt lookup failed: cannot verify the installed @getpaseo/client version (${error.message}); refusing to create without a receipt`);
+  }
+  if (!tested.includes(clientVersion)) {
+    throw new Error(`receipt lookup refused: installed @getpaseo/client ${clientVersion ?? 'unknown'} is outside the tested versions (${tested.join(', ')}); refusing to create without a receipt`);
+  }
+  const require = createRequire(realpathSync(cliPath));
+  let DaemonClient;
+  try {
+    ({ DaemonClient } = await import(pathToFileURL(require.resolve('@getpaseo/client/internal/daemon-client')).href));
+  } catch (error) {
+    throw new Error(`receipt lookup failed: cannot load the internal DaemonClient from @getpaseo/client ${clientVersion} (${error.message}); refusing to create without a receipt`);
+  }
+  const daemon = new DaemonClient({ url, password: daemonPassword(), clientId: 'paseo-workspace-factory-receipt', logger: SILENT, reconnect: { enabled: false } });
+  try {
+    try {
+      await daemon.connect();
+    } catch (error) {
+      throw new Error(`receipt lookup failed: cannot reach the daemon at ${url} (${error.message}); refusing to create without a receipt`);
+    }
     const info = daemon.getLastServerInfoMessage();
     const version = info?.version ?? info?.daemonVersion;
-    if (version !== expectedVersion || info?.features?.creationLifecycle !== true) {
-      throw new Error(`receipt lookup is only verified for daemon ${expectedVersion} with creationLifecycle (found ${version})`);
+    if (!tested.includes(version)) {
+      throw new Error(`receipt lookup refused: daemon ${version ?? 'unknown'} is outside the tested versions (${tested.join(', ')}); refusing to create without a receipt`);
+    }
+    if (info?.features?.creationLifecycle !== true) {
+      throw new Error(`receipt lookup refused: daemon ${version} does not advertise creationLifecycle; refusing to create without a receipt`);
     }
     const requestId = `wsf-receipt-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    const response = await daemon.sendCorrelatedSessionRequest({
-      requestId,
-      message: { type: 'creation.subscribe.request', requestId, kind, idempotencyKey, subscribe: false },
-      responseType: 'creation.subscribe.response',
-      timeout: 15_000,
-    });
-    if (response?.error) throw new Error(`receipt lookup failed: ${response.error}`);
+    let response;
+    try {
+      response = await daemon.sendCorrelatedSessionRequest({
+        requestId,
+        message: { type: 'creation.subscribe.request', requestId, kind, idempotencyKey, subscribe: false },
+        responseType: 'creation.subscribe.response',
+        timeout: 15_000,
+      });
+    } catch (error) {
+      throw new Error(`receipt lookup failed: the creation.subscribe exchange failed (${error.message}); refusing to create without a receipt`);
+    }
+    if (response?.error) throw new Error(`receipt lookup failed: the daemon answered with an error (${response.error}); refusing to create without a receipt`);
     return response?.snapshot ?? null;
   } finally {
     await daemon.close().catch(() => {});

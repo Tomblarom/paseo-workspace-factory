@@ -6,7 +6,7 @@
 // retirement; archiving is disabled until these checks are proven on real data.
 import { LABEL, parentOf } from './paseo.mjs';
 
-export const LIFECYCLE_LABEL = 'ari.wsf.lifecycle'; // "reusable" keeps a worker
+export const LIFECYCLE_LABEL = 'wsf.lifecycle'; // "reusable" keeps a worker
 export const RETIREMENT_ENABLED = false;
 
 const BUSY = new Set(['running', 'initializing']);

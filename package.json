@@ -2,13 +2,15 @@
   "name": "paseo-workspace-factory",
   "version": "0.0.0",
   "private": true,
+  "license": "MIT",
   "description": "Provision and steer standardized Paseo workspaces from GitHub repositories.",
   "type": "module",
   "bin": {
     "paseo-factory": "src/cli.mjs"
   },
   "scripts": {
-    "test": "node --test --test-timeout=30000 test/workspace-factory.test.mjs"
+    "test": "node --experimental-strip-types --test --test-timeout=30000 test/*.test.mjs plugin/test/*.test.mjs",
+    "plugin:sync": "node scripts/plugin-sync.mjs"
   },
   "engines": {
     "node": ">=22"

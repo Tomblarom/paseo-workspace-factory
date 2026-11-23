@@ -19,6 +19,33 @@ export function defaultConfigPath() {
 export const KNOWN_UNSUPPORTED = [
   { provider: 'copilot', model: /^claude-/, field: 'thinking', reason: 'Copilot rejects a reasoning effort for Claude models; use thinking: null' },
 ];
+export const KNOWN_LIMIT_FIELDS = ['thinking', 'mode'];
+
+/**
+ * User-supplied exceptions from `knownLimits`, normalized to matcher rules.
+ * Invalid entries are skipped here; validateConfig() reports them.
+ */
+function configKnownLimits(config) {
+  const rules = [];
+  if (!Array.isArray(config?.knownLimits)) return rules;
+  for (const entry of config.knownLimits) {
+    if (!entry || typeof entry !== 'object') continue;
+    let pattern = null;
+    if (typeof entry.modelPattern === 'string' && entry.modelPattern) {
+      try {
+        pattern = new RegExp(entry.modelPattern);
+      } catch {
+        continue;
+      }
+    }
+    const model = typeof entry.model === 'string' && entry.model ? entry.model : undefined;
+    if (model === undefined && !pattern) continue;
+    if (!KNOWN_LIMIT_FIELDS.includes(entry.field)) continue;
+    if (typeof entry.reason !== 'string' || !entry.reason) continue;
+    rules.push({ provider: entry.provider, model, pattern, field: entry.field, reason: entry.reason });
+  }
+  return rules;
+}
 export const SLOT_PATTERN = /^[A-Z]$/;
 const OWNER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 
@@ -59,6 +86,32 @@ export function validateConfig(config) {
     }
   }
 
+  if (config.knownLimits !== undefined) {
+    if (!Array.isArray(config.knownLimits)) errors.push('knownLimits must be an array');
+    else config.knownLimits.forEach((entry, index) => {
+      const where = `knownLimits[${index}]`;
+      if (!entry || typeof entry !== 'object') {
+        errors.push(`${where} must be an object`);
+        return;
+      }
+      if (typeof entry.provider !== 'string' || !entry.provider) errors.push(`${where}.provider is required`);
+      if (entry.model === undefined && entry.modelPattern === undefined) errors.push(`${where} needs model or modelPattern`);
+      if (entry.model !== undefined && (typeof entry.model !== 'string' || !entry.model)) errors.push(`${where}.model must be a non-empty string`);
+      if (entry.modelPattern !== undefined) {
+        if (typeof entry.modelPattern !== 'string' || !entry.modelPattern) errors.push(`${where}.modelPattern must be a non-empty string`);
+        else {
+          try {
+            new RegExp(entry.modelPattern);
+          } catch {
+            errors.push(`${where}.modelPattern is not a valid regular expression`);
+          }
+        }
+      }
+      if (!KNOWN_LIMIT_FIELDS.includes(entry.field)) errors.push(`${where}.field must be thinking or mode`);
+      if (typeof entry.reason !== 'string' || !entry.reason.trim()) errors.push(`${where}.reason is required`);
+    });
+  }
+
   const slots = config.steers?.slots ?? {};
   if (!Object.keys(slots).length) errors.push('steers.slots must define at least one slot');
   for (const [slot, profile] of Object.entries(slots)) {
@@ -81,6 +134,23 @@ export function validateConfig(config) {
   }
   if (config.workers?.defaultProfile && !profiles[config.workers.defaultProfile]) {
     errors.push(`workers.defaultProfile references unknown profile "${config.workers.defaultProfile}"`);
+  }
+  if (config.advisors !== undefined) {
+    if (typeof config.advisors !== 'object' || config.advisors === null || Array.isArray(config.advisors)) errors.push('advisors must be an object');
+    else {
+      const advisorProfiles = config.advisors.profiles ?? {};
+      if (typeof advisorProfiles !== 'object' || advisorProfiles === null || Array.isArray(advisorProfiles)) errors.push('advisors.profiles must be an object');
+      else for (const [purpose, profile] of Object.entries(advisorProfiles)) {
+        if (!purpose) errors.push('advisors.profiles has an empty purpose name');
+        else if (!profiles[profile]) errors.push(`advisors.profiles.${purpose} references unknown profile "${profile}"`);
+      }
+    }
+  }
+  if (config.usage !== undefined) {
+    if (typeof config.usage !== 'object' || config.usage === null || Array.isArray(config.usage)) errors.push('usage must be an object');
+    else if (config.usage.warnContextTokens !== undefined && (!Number.isInteger(config.usage.warnContextTokens) || config.usage.warnContextTokens <= 0)) {
+      errors.push('usage.warnContextTokens must be a positive integer');
+    }
   }
   return errors;
 }
@@ -115,6 +185,12 @@ export function validateProfilesAgainstCatalog(config, providerEntries, profileN
       }
       for (const rule of KNOWN_UNSUPPORTED) {
         if (rule.provider === profile.provider && rule.model.test(profile.model) && profile[rule.field]) issues.push(rule.reason);
+      }
+      for (const rule of configKnownLimits(config)) {
+        if (rule.provider !== profile.provider || !profile[rule.field]) continue;
+        if (rule.model !== undefined && profile.model !== rule.model) continue;
+        if (rule.pattern && !rule.pattern.test(profile.model)) continue;
+        issues.push(rule.reason);
       }
       if (profile.mode && !(entry.modes ?? []).some((m) => m.id === profile.mode)) {
         issues.push(`mode "${profile.mode}" is not available for ${profile.provider} (available: ${(entry.modes ?? []).map((m) => m.id).join(', ')})`);
