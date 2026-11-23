@@ -57,7 +57,7 @@ export async function verifyCleanup({ manifest, client, agents, scratchBase = ru
     else {
       if (agent.id !== manifest.agent) reasons.push(`agent id mismatch (${agent.id})`);
       if (agent.workspaceId !== manifest.workspace) reasons.push(`agent belongs to ${agent.workspaceId}`);
-      if (agent.labels?.['ari.wsf.role'] !== 'integration-test') reasons.push('agent lacks the integration-test label');
+      if (agent.labels?.['wsf.role'] !== 'integration-test') reasons.push('agent lacks the integration-test label');
       if (parentOf(agent)) reasons.push(`agent has parent ${parentOf(agent)}`);
       if (!agent.archivedAt) targets.agent = agent.id;
     }

@@ -59,7 +59,7 @@ async function child(role, manifestFile) {
   const config = await loadConfig();
   const authorization = JSON.parse(readFileSync(manifest.authorizationFile, 'utf8'));
   const wsOp = authorization.plans[0].ops[0];
-  const client = await connect({ clientId: `ari-workspace-factory-crash-${role}` });
+  const client = await connect({ clientId: `paseo-workspace-factory-crash-${role}` });
   const observe = observerFor(manifest, wsOp);
   const real = createExecutors({ client, gh: null, git: null, paseoCli: null });
   const execute = role === 'crash'
@@ -98,10 +98,10 @@ async function main() {
     if (readdirSync(manifest.scratch).length) throw new Error('scratch is not empty');
     execFileSync('git', ['init', '-q', manifest.scratch]);
     writeFileSync(join(manifest.scratch, 'README.md'), 'workspace factory crash test scratch\n');
-    manifest.keys.workspace = `ari-wsf-crash:${run}:workspace`;
+    manifest.keys.workspace = `wsf-crash:${run}:workspace`;
     const wsOp = {
       key: 'workspace.main', kind: 'paseo.workspace.create', summary: 'Create scratch workspace',
-      params: { path: manifest.scratch, title: `WSF crash ${run}`, metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1 } }, idempotencyKey: manifest.keys.workspace },
+      params: { path: manifest.scratch, title: `WSF crash ${run}`, metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1 }, 'wsf.scratch': true }, idempotencyKey: manifest.keys.workspace },
     };
     const config = await loadConfig();
     const plans = [{ repo: manifest.repo, input: 'scratch', status: 'pending', ops: [wsOp], conflicts: [], notes: [] }];
@@ -142,7 +142,7 @@ async function main() {
     save();
 
     phase = 'verify';
-    const client = await connect({ clientId: 'ari-workspace-factory-crash-verify' });
+    const client = await connect({ clientId: 'paseo-workspace-factory-crash-verify' });
     const state = await readPaseoState(client);
     await client.close().catch(() => {});
     const atPath = state.workspaces.filter((w) => w.workspaceDirectory === manifest.scratch);

@@ -19,6 +19,11 @@ import { runtime } from './runtime.mjs';
 export class LockBusy extends Error {}
 export class LockError extends Error {}
 
+/** Shared lock name for one workspace's factory metadata (switch, checkpoint, fresh, retire, migrate, scope top-up). */
+export function workspaceLockName(workspaceId) {
+  return `workspace-${workspaceId}`;
+}
+
 const CONFLICT_EXIT = 75;
 const identityOf = (st) => `${st.dev}:${st.ino}`;
 
@@ -96,4 +101,9 @@ export async function withLock(name, fn, options) {
   } finally {
     await held.release();
   }
+}
+
+/** One call for the common case: run fn under the lock for one workspace's factory metadata (also used by the plugin). */
+export function withWorkspaceLock(workspaceId, fn, options) {
+  return withLock(workspaceLockName(workspaceId), fn, options);
 }

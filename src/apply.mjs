@@ -7,11 +7,14 @@
 import { lstatSync, realpathSync, mkdirSync, writeFileSync, linkSync, unlinkSync, readFileSync, renameSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 import { join, resolve } from 'node:path';
-import { withLock } from './lock.mjs';
+import { withLock, workspaceLockName } from './lock.mjs';
 import { planHash, WORKSPACE_REF } from './planner.mjs';
 import { getRepo, GitHubNotFound, remoteToFullName } from './github.mjs';
 import { inspectCloneTarget, readRemotes } from './local.mjs';
-import { LABEL, METADATA_KEY, parentOf } from './paseo.mjs';
+import { LABEL, METADATA_KEY, LEGACY_PREFIX, parentOf, newKeyForLegacyKey } from './paseo.mjs';
+import { validScope } from './scope.mjs';
+import { isWorktreeWorkspace } from './discovery.mjs';
+import { readGitState } from './workers.mjs';
 
 export class ApplyRefused extends Error {}
 export class NotAuthorized extends Error {}
@@ -118,6 +121,10 @@ export function storeAuthorization(dir, authorization, config, fs = { mkdirSync,
       && existing.allowFork === authorization.allowFork
       && isDeepStrictEqual(existing.adopt, authorization.adopt)
       && isDeepStrictEqual(existing.slots ?? null, authorization.slots ?? null)
+      && isDeepStrictEqual(existing.adoptWorker ?? {}, authorization.adoptWorker ?? {})
+      && (existing.detach ?? false) === (authorization.detach ?? false)
+      && (existing.retitle ?? false) === (authorization.retitle ?? false)
+      && (existing.renameProject ?? null) === (authorization.renameProject ?? null)
       && Number.isFinite(Date.parse(existing.createdAt));
     if (!same) throw new ApplyRefused(`Stored authorization ${target} differs from this dry-run or is damaged; not replacing it`);
     return { status: 'kept', authorization: existing, file: target };
@@ -152,8 +159,8 @@ export function withApplyLock(fn, options) {
 }
 
 /** Everything apply may later do, frozen at dry-run time. */
-export function createAuthorization(plans, config, { entries, allowFork = false, adopt = {}, slots } = {}) {
-  return { version: 1, hash: planHash(plans, config), createdAt: new Date().toISOString(), entries, allowFork, adopt, ...(slots !== undefined ? { slots } : {}), plans: structuredClone(plans) };
+export function createAuthorization(plans, config, { entries, allowFork = false, adopt = {}, slots, adoptWorker = {}, detach = false, retitle = false, renameProject = null } = {}) {
+  return { version: 1, hash: planHash(plans, config), createdAt: new Date().toISOString(), entries, allowFork, adopt, adoptWorker, detach, retitle, renameProject, ...(slots !== undefined ? { slots } : {}), plans: structuredClone(plans) };
 }
 
 function authorizedOps(plan) {
@@ -206,7 +213,7 @@ export async function applyPlans({ authorization, config, confirm, runPlans, exe
   if (!authorization) throw new ApplyRefused('No stored plan; run plan first and confirm its hash');
   if (!confirm || confirm !== authorization.hash) throw new ApplyRefused(`Apply needs --confirm ${authorization.hash} (hash of the stored dry-run)`);
   if (planHash(authorization.plans, config) !== authorization.hash) throw new ApplyRefused('Stored plan does not match the current config or was altered; run a new dry-run');
-  const options = { allowFork: authorization.allowFork, adopt: authorization.adopt, ...(authorization.slots !== undefined ? { slots: authorization.slots } : {}) };
+  const options = { allowFork: authorization.allowFork, adopt: authorization.adopt, adoptWorker: authorization.adoptWorker ?? {}, detach: authorization.detach ?? false, retitle: authorization.retitle ?? false, renameProject: authorization.renameProject ?? null, ...(authorization.slots !== undefined ? { slots: authorization.slots } : {}) };
   const state = progress.load() ?? { hash: authorization.hash, started: false, results: {} };
   if (state.hash !== authorization.hash) throw new ApplyRefused('Progress belongs to a different plan');
   if (!state.started) {
@@ -384,6 +391,97 @@ export function createExecutors({ client, gh, git, paseoCli, sleep = (ms) => new
       return { workspaceId: op.params.workspaceId };
     },
 
+    async 'paseo.workspace.scope'(op) {
+      const { workspaceId, scope } = op.params;
+      if (!validScope(scope)) throw new Error('paseo.workspace.scope needs a valid scope { id, kind, locator? }');
+      return withLock(workspaceLockName(workspaceId), async (held) => {
+        const handle = client.workspaces.ref(workspaceId);
+        const before = (await handle.refresh())?.metadata ?? {};
+        const base = { ...(before[LEGACY_PREFIX] ?? {}), ...(before[METADATA_KEY] ?? {}) };
+        if (base.main !== true) throw new Error(`Workspace ${workspaceId} carries no factory main metadata`);
+        if (validScope(base.scope)) throw new Error(`Workspace ${workspaceId} already carries scope ${JSON.stringify(base.scope.id)}`);
+        held.verify();
+        await handle.setMetadata({ [METADATA_KEY]: { ...base, scope: structuredClone(scope) } });
+        const after = (await handle.refresh())?.metadata?.[METADATA_KEY] ?? {};
+        if (!isDeepStrictEqual(after.scope, scope)) throw new Error(`Workspace ${workspaceId} scope not verifiable after write`);
+        for (const [key, value] of Object.entries(base)) {
+          if (key !== 'scope' && !isDeepStrictEqual(after[key], value)) throw new Error(`Workspace ${workspaceId} metadata field ${key} changed by the scope top-up`);
+        }
+        return { workspaceId, scope: scope.id };
+      });
+    },
+
+    async 'paseo.workspace.retitle'(op) {
+      const { workspaceId, title } = op.params;
+      if (typeof title !== 'string' || !title.trim()) throw new Error('paseo.workspace.retitle needs a title');
+      const before = await client.workspaces.ref(workspaceId).refresh();
+      if (!before) throw new Error(`Workspace ${workspaceId} is missing`);
+      if ((before.title ?? before.name) === title) throw new Error(`Workspace ${workspaceId} is already titled ${JSON.stringify(title)}`);
+      paseoCli(['workspace', 'rename', workspaceId, title]);
+      const after = await client.workspaces.ref(workspaceId).refresh();
+      if ((after?.title ?? after?.name) !== title) throw new Error(`Workspace ${workspaceId} title is ${JSON.stringify(after?.title ?? after?.name)}, expected ${JSON.stringify(title)}`);
+      return { workspaceId, title };
+    },
+
+    async 'paseo.project.rename'(op) {
+      const { projectId, name } = op.params;
+      if (typeof name !== 'string' || !name.trim()) throw new Error('paseo.project.rename needs a name');
+      paseoCli(['project', 'rename', projectId, name]);
+      const projects = await client.projects.list().then((result) => result.projects ?? []);
+      const project = projects.find((p) => p.projectId === projectId) ?? null;
+      if (project?.projectDisplayName !== name) throw new Error(`Project ${projectId} name is ${JSON.stringify(project?.projectDisplayName)}, expected ${JSON.stringify(name)}`);
+      return { projectId, name };
+    },
+
+    async 'agent.detach'(op) {
+      const { agentId, parent } = op.params;
+      const handle = client.agents.ref(agentId);
+      const before = (await handle.refresh())?.agent;
+      if (!before || before.archivedAt) throw new Error(`Agent ${agentId} is missing or archived`);
+      const current = parentOf(before);
+      if (!current) throw new Error(`Agent ${agentId} has no parent; nothing to detach`);
+      if (parent !== undefined && current !== parent) throw new Error(`Agent ${agentId} parent is ${current}, expected ${parent}`);
+      paseoCli(['agent', 'detach', agentId]);
+      const after = (await handle.refresh())?.agent;
+      if (parentOf(after)) throw new Error(`Agent ${agentId} still has parent ${parentOf(after)} after detach`);
+      return { agentId, detachedFrom: current };
+    },
+
+    async 'paseo.agent.worker'(op) {
+      const { agentId, workspaceId, labels } = op.params;
+      const handle = client.agents.ref(agentId);
+      const before = (await handle.refresh())?.agent;
+      if (!before || before.archivedAt) throw new Error(`Agent ${agentId} is missing or archived`);
+      if (before.workspaceId !== workspaceId) throw new Error(`Agent ${agentId} is in workspace ${before.workspaceId}, expected ${workspaceId}`);
+      if (before.labels?.[LABEL.role]) throw new Error(`Agent ${before.id} is already labelled ${before.labels[LABEL.role]}`);
+      const labelArg = Object.entries(labels).map(([k, v]) => `${k}=${v}`).join(',');
+      paseoCli(['agent', 'update', before.id, '--label', labelArg]);
+      const after = (await handle.refresh())?.agent;
+      for (const [key, value] of Object.entries(labels)) {
+        if (after?.labels?.[key] !== value) throw new Error(`Agent ${before.id} label ${key} is ${after?.labels?.[key]}, expected ${value}`);
+      }
+      return { agentId: after.id };
+    },
+
+    async 'scope.convert'(op) {
+      const { workspaceId, scope } = op.params;
+      if (!validScope(scope) || scope.kind !== 'hub') throw new Error('scope.convert needs a hub scope { id, kind: "hub", locator? }');
+      const handle = client.workspaces.ref(workspaceId);
+      const before = (await handle.refresh())?.metadata ?? {};
+      const base = { ...(before[LEGACY_PREFIX] ?? {}), ...(before[METADATA_KEY] ?? {}) };
+      if (base.main !== true) throw new Error(`Workspace ${workspaceId} carries no factory main metadata`);
+      if (validScope(base.scope) && base.scope.kind !== 'hub' && base.scope.kind !== 'dir') {
+        throw new Error(`Workspace ${workspaceId} carries a ${base.scope.kind} scope; only dir scopes convert to hub`);
+      }
+      await handle.setMetadata({ [METADATA_KEY]: { ...base, scope: structuredClone(scope) } });
+      const after = (await handle.refresh())?.metadata?.[METADATA_KEY] ?? {};
+      if (!isDeepStrictEqual(after.scope, scope)) throw new Error(`Workspace ${workspaceId} scope not verifiable after write`);
+      for (const [key, value] of Object.entries(base)) {
+        if (key !== 'scope' && !isDeepStrictEqual(after[key], value)) throw new Error(`Workspace ${workspaceId} metadata field ${key} changed by the conversion`);
+      }
+      return { workspaceId, scope: scope.id, convertedFrom: base.scope?.id ?? null };
+    },
+
     async 'paseo.agent.create'(op) {
       const { workspaceId, title, config: agentConfig, labels, idempotencyKey } = op.params;
       if (!workspaceId || workspaceId === WORKSPACE_REF || typeof workspaceId !== 'string') throw new Error('Main workspace is not resolved yet');
@@ -406,12 +504,226 @@ export function createExecutors({ client, gh, git, paseoCli, sleep = (ms) => new
       verifySteer(after, { workspaceId: before.workspaceId, labels: op.params.labels });
       return { agentId: after.id };
     },
+
+    async 'labels.migrate'(op) {
+      const { target, migrate } = op.params;
+      if (!Array.isArray(migrate) || !migrate.length) throw new Error('labels.migrate needs at least one legacy key');
+      for (const oldKey of migrate) {
+        if (!newKeyForLegacyKey(oldKey)) throw new Error(`Not a legacy key: ${oldKey}`);
+      }
+      if (target === 'workspace') return migrateWorkspaceMetadata(client, op.params);
+      if (target === 'agent') return migrateAgentLabels(client, paseoCli, op.params);
+      throw new Error(`labels.migrate needs target workspace or agent, got ${target}`);
+    },
+
+    async 'workspace.archive'(op) {
+      const { workspaceId, agents: plannedAgents } = op.params;
+      if (!workspaceId || !Array.isArray(plannedAgents)) throw new Error('workspace.archive needs workspaceId and the planned agent list');
+      const before = await client.workspaces.ref(workspaceId).refresh();
+      if (!before) throw new Error(`Workspace ${workspaceId} is missing; refusing to archive`);
+      const current = await listLiveAgents(client, workspaceId);
+      const running = current.filter((a) => CLEANUP_BUSY.has(a.status));
+      if (running.length) throw new Error(`Refusing to archive workspace ${workspaceId}: agent ${running[0].id} is ${running[0].status}; running agents are never archived`);
+      const currentIds = new Set(current.map((a) => a.id));
+      const planned = new Set(plannedAgents);
+      const added = [...currentIds].filter((id) => !planned.has(id)).sort();
+      const gone = [...planned].filter((id) => !currentIds.has(id)).sort();
+      if (added.length || gone.length) {
+        throw new Error(`Refusing to archive workspace ${workspaceId}: agent set changed since plan (added: ${added.join(', ') || 'none'}; gone: ${gone.join(', ') || 'none'})`);
+      }
+      if (isWorktreeWorkspace(before)) {
+        const gitState = readGitState(git, before.workspaceDirectory);
+        if (!gitState) throw new Error(`Refusing to archive worktree workspace ${workspaceId}: git state unreadable`);
+        if (gitState.dirty || gitState.untracked) throw new Error(`Refusing to archive worktree workspace ${workspaceId}: uncommitted changes`);
+        if (gitState.detached) throw new Error(`Refusing to archive worktree workspace ${workspaceId}: detached HEAD, commits would lose their reference`);
+        if (gitState.ahead === null) throw new Error(`Refusing to archive worktree workspace ${workspaceId}: no upstream to compare, commits may be unpublished`);
+        if (gitState.ahead > 0) throw new Error(`Refusing to archive worktree workspace ${workspaceId}: ${gitState.ahead} unpushed commit(s)`);
+        if (gitState.ignored > 0) {
+          const ignored = listIgnoredPaths(git, before.workspaceDirectory);
+          if (!ignored) throw new Error(`Refusing to archive worktree workspace ${workspaceId}: ignored state unreadable`);
+          const blocked = ignored.filter((path) => !IGNORED_ALLOWLIST.has(path.split('/')[0]));
+          if (blocked.length && !op.params.allowIgnored) {
+            const shown = blocked.slice(0, 5).join(', ');
+            throw new Error(`Refusing to archive worktree workspace ${workspaceId}: ignored files would be deleted (${shown}${blocked.length > 5 ? `, +${blocked.length - 5} more` : ''}); replan with --allow-ignored to confirm`);
+          }
+        }
+      }
+      const archivedBefore = new Set((await listWorkspaceAgents(client, workspaceId)).filter((a) => a.archivedAt).map((a) => a.id));
+      const result = await client.workspaces.archive(workspaceId);
+      if (result?.error) throw new Error(`Workspace archive failed: ${result.error}`);
+      for (const id of plannedAgents) {
+        const agent = (await client.agents.ref(id).refresh())?.agent;
+        if (!agent?.archivedAt) throw new Error(`Workspace ${workspaceId} archived, but agent ${id} is not archived; investigate before continuing`);
+      }
+      const coArchived = (await listWorkspaceAgents(client, workspaceId)).filter((a) => a.archivedAt && !archivedBefore.has(a.id) && !planned.has(a.id)).map((a) => a.id);
+      if (coArchived.length) throw new Error(`Workspace ${workspaceId} archived unplanned agent(s) ${coArchived.sort().join(', ')}; investigate before continuing`);
+      return { workspaceId, archived: true };
+    },
+
+    async 'project.delete'(op) {
+      const { projectId } = op.params;
+      if (!projectId) throw new Error('project.delete needs projectId');
+      const projects = (await client.projects.list())?.projects ?? [];
+      const project = projects.find((p) => p.projectId === projectId);
+      if (!project) throw new Error(`Project ${projectId} is missing; refusing to delete`);
+      const members = await listProjectWorkspaces(client, projectId);
+      if (members.length) throw new Error(`Refusing to delete project ${projectId}: not empty (${members.length} workspace(s): ${members.map((w) => w.id).join(', ')})`);
+      if (!project.projectKey) throw new Error(`Refusing to delete project ${projectId}: cannot verify archived members without a project key`);
+      const current = (await listArchivedProjectAgents(client, project.projectKey)).sort();
+      const planned = [...(op.params.archivedAgents ?? [])].sort();
+      const added = current.filter((id) => !planned.includes(id));
+      const gone = planned.filter((id) => !current.includes(id));
+      if (added.length || gone.length) {
+        throw new Error(`Refusing to delete project ${projectId}: archived members changed since plan (added: ${added.join(', ') || 'none'}; gone: ${gone.join(', ') || 'none'})`);
+      }
+      paseoCli(['project', 'delete', projectId]);
+      const remaining = (await client.projects.list())?.projects ?? [];
+      if (remaining.some((p) => p.projectId === projectId)) throw new Error(`Project ${projectId} still listed after delete`);
+      return { projectId, deleted: true };
+    },
+
+    async 'scope.retire'(op) {
+      const { workspaceId, epoch } = op.params;
+      if (!workspaceId || !Number.isInteger(epoch)) throw new Error('scope.retire needs workspaceId and the planned epoch');
+      return withLock(workspaceLockName(workspaceId), async (held) => {
+        const handle = client.workspaces.ref(workspaceId);
+        const meta = (await handle.refresh())?.metadata?.[METADATA_KEY];
+        if (!meta || typeof meta !== 'object') throw new Error(`Workspace ${workspaceId} has no factory state; refusing to retire`);
+        if (meta.epoch !== epoch) throw new Error(`Scope state changed (expected epoch ${epoch}, found ${meta.epoch}); replan`);
+        if (meta.retired === true && meta.activeSteer == null) return { workspaceId, retired: true, already: true };
+        const next = { ...meta, retired: true, activeSteer: null, epoch: meta.epoch + 1, previousSteer: meta.activeSteer ?? meta.previousSteer ?? null, retiredAt: new Date().toISOString() };
+        held.verify();
+        await handle.setMetadata({ [METADATA_KEY]: next });
+        const written = (await handle.refresh())?.metadata?.[METADATA_KEY];
+        if (written?.retired !== true || written?.activeSteer != null || written?.epoch !== meta.epoch + 1) throw new Error('Scope retire not verifiable after write');
+        return { workspaceId, retired: true, epoch: written.epoch };
+      });
+    },
   };
   return async function execute(op, config) {
     const handler = handlers[op.kind];
     if (!handler) throw new Error(`No executor for ${op.kind}`);
     return handler(op, config);
   };
+}
+
+/**
+ * Copies legacy workspace metadata keys to their new counterparts and removes
+ * the old ones (`null` removes a top-level key). A persisted new key always
+ * wins and is never overwritten. Verified by re-reading afterwards.
+ */
+async function migrateWorkspaceMetadata(client, { workspaceId, migrate }) {
+  return withLock(workspaceLockName(workspaceId), async (held) => {
+    const handle = client.workspaces.ref(workspaceId);
+    const before = (await handle.refresh())?.metadata ?? {};
+    const patch = {};
+    const expected = {};
+    for (const oldKey of migrate) {
+      const newKey = newKeyForLegacyKey(oldKey);
+      if (before[newKey] === undefined && before[oldKey] !== undefined) patch[newKey] = before[oldKey];
+      if (before[oldKey] !== undefined) patch[oldKey] = null;
+      if (before[newKey] !== undefined) expected[newKey] = before[newKey];
+      else if (before[oldKey] !== undefined) expected[newKey] = before[oldKey];
+    }
+    if (Object.keys(patch).length) {
+      held.verify();
+      await handle.setMetadata(patch);
+    }
+    const after = (await handle.refresh())?.metadata ?? {};
+    for (const oldKey of migrate) {
+      if (after[oldKey] !== undefined) throw new Error(`Legacy key ${oldKey} still present in workspace ${workspaceId}`);
+      const newKey = newKeyForLegacyKey(oldKey);
+      if (expected[newKey] !== undefined && !isDeepStrictEqual(after[newKey], expected[newKey])) {
+        throw new Error(`Migrated key ${newKey} not verifiable in workspace ${workspaceId}`);
+      }
+    }
+    return { workspaceId, migrated: migrate };
+  });
+}
+
+/**
+ * Persists the new counterparts of legacy agent labels via the native CLI.
+ * Old labels are left in place: neither the SDK nor `paseo agent update`
+ * can remove agent labels. Verified by re-reading afterwards.
+ */
+async function migrateAgentLabels(client, paseoCli, { agentId, migrate }) {
+  const handle = client.agents.ref(agentId);
+  const before = (await handle.refresh())?.agent;
+  if (!before || before.archivedAt) throw new Error(`Agent ${agentId} is missing or archived`);
+  const labels = {};
+  for (const oldKey of migrate) {
+    const newKey = newKeyForLegacyKey(oldKey);
+    if (before.labels?.[newKey] === undefined && before.labels?.[oldKey] !== undefined) labels[newKey] = before.labels[oldKey];
+  }
+  if (Object.keys(labels).length) {
+    paseoCli(['agent', 'update', before.id, '--label', Object.entries(labels).map(([k, v]) => `${k}=${v}`).join(',')]);
+  }
+  const after = (await handle.refresh())?.agent;
+  for (const [newKey, value] of Object.entries(labels)) {
+    if (after?.labels?.[newKey] !== value) throw new Error(`Agent ${before.id} label ${newKey} is ${after?.labels?.[newKey]}, expected ${value}`);
+  }
+  return { agentId: before.id, migrated: migrate, oldLabelsRemain: true };
+}
+
+const CLEANUP_BUSY = new Set(['running', 'initializing']);
+
+/** Paginated daemon lists, same guard as the central read. */
+async function collectListPages(list) {
+  const entries = [];
+  let cursor;
+  for (let guard = 0; guard < 1000; guard += 1) {
+    const page = await list(cursor);
+    entries.push(...(page.entries ?? []));
+    if (!page.pageInfo?.hasMore || !page.pageInfo.nextCursor) return entries;
+    cursor = page.pageInfo.nextCursor;
+  }
+  throw new Error('Pagination did not terminate');
+}
+
+/** Live agents of one workspace, freshly listed (archived ones are filtered out). */
+async function listLiveAgents(client, workspaceId) {
+  return (await listWorkspaceAgents(client, workspaceId)).filter((a) => !a.archivedAt);
+}
+
+/** All agents of one workspace, freshly listed (live and archived). */
+async function listWorkspaceAgents(client, workspaceId) {
+  const entries = await collectListPages((cursor) => client.agents.list({ includeBackground: true, filter: { includeArchived: true, includeBackground: true }, page: { limit: 200, ...(cursor ? { cursor } : {}) } }));
+  return entries.map((entry) => entry.agent ?? entry).filter((a) => a.workspaceId === workspaceId);
+}
+
+/** Build outputs that may be deleted with an archived worktree; anything else ignored refuses unless allowed. */
+const IGNORED_ALLOWLIST = new Set(['node_modules', 'dist', 'build', 'target', '__pycache__', '.venv']);
+
+/** Full ignored-path list, or null when unreadable. Mirrors the inventory parser in cleanup.mjs. */
+function listIgnoredPaths(git, dir) {
+  let output;
+  try {
+    output = git(dir, ['status', '--porcelain', '--ignored']);
+  } catch {
+    return null;
+  }
+  const paths = [];
+  for (const line of String(output ?? '').split('\n')) {
+    const match = line.match(/^!! (.+)$/);
+    if (!match) continue;
+    let path = match[1].trim();
+    if (path.startsWith('"') && path.endsWith('"')) path = path.slice(1, -1);
+    path = path.replace(/\/+$/, '');
+    if (path) paths.push(path);
+  }
+  return paths;
+}
+
+/** Archived agent ids of one project, including agents of vanished workspaces (server-side attribution). */
+async function listArchivedProjectAgents(client, projectKey) {
+  const entries = await collectListPages((cursor) => client.agents.list({ filter: { projectKeys: [projectKey], includeArchived: true }, page: { limit: 200, ...(cursor ? { cursor } : {}) } }));
+  return entries.map((entry) => entry.agent ?? entry).filter((a) => a.archivedAt).map((a) => a.id);
+}
+
+/** Workspaces of one project, freshly listed (archived ones vanish from the list). */
+async function listProjectWorkspaces(client, projectId) {
+  const entries = await collectListPages((cursor) => client.workspaces.list({ includeBackground: true, filter: { includeBackground: true, projectId }, page: { limit: 200, ...(cursor ? { cursor } : {}) } }));
+  return entries.filter((w) => w.projectId === projectId);
 }
 
 export function verifySteer(agent, { workspaceId, labels }) {

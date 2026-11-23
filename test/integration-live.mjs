@@ -43,7 +43,7 @@ async function run() {
     scratch: null, workspace: null, agent: null, keys: {}, error: null,
   };
   saveManifest(manifest);
-  const client = await connect({ clientId: 'ari-workspace-factory-integration' });
+  const client = await connect({ clientId: 'paseo-workspace-factory-integration' });
   try {
     // Setup: a brand-new dedicated scratch repository, never an existing workspace or repo.
     try {
@@ -70,7 +70,7 @@ async function run() {
       const profile = config.profiles[profileName];
       assert.deepEqual(validateProfilesAgainstCatalog(config, (await client.providers.snapshot()).entries, [profileName]), {}, 'profile must be startable');
 
-      manifest.keys.workspace = `ari-wsf-it:${id}:workspace`;
+      manifest.keys.workspace = `wsf-it:${id}:workspace`;
       saveManifest(manifest);
       const wsRequest = { source: { kind: 'directory', path: manifest.scratch }, title: `WSF integration ${id}`, metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1 } }, idempotencyKey: manifest.keys.workspace };
       const ws1 = await client.workspaces.create(wsRequest);
@@ -80,11 +80,11 @@ async function run() {
       assert.equal(ws2.id, ws1.id, 'same workspace key returns the same workspace');
       assert.equal((await ws1.refresh()).workspaceDirectory, manifest.scratch, 'workspace points to the scratch path');
 
-      manifest.keys.agent = `ari-wsf-it:${id}:agent`;
+      manifest.keys.agent = `wsf-it:${id}:agent`;
       saveManifest(manifest);
       const agentRequest = {
         config: { provider: `${profile.provider}/${profile.model}`, ...(profile.mode ? { modeId: profile.mode } : {}) },
-        title: 'WSF integration agent', labels: { 'ari.wsf.role': 'integration-test' }, idempotencyKey: manifest.keys.agent,
+        title: 'WSF integration agent', labels: { 'wsf.role': 'integration-test', 'wsf.scratch': 'true' }, idempotencyKey: manifest.keys.agent,
       };
       const a1 = await client.workspaces.ref(ws1.id).agents.create(agentRequest);
       manifest.agent = a1.id;
@@ -130,7 +130,7 @@ async function cleanup(file) {
     console.error('Refusing: functional phase did not pass; inspect first, then set WSF_LIVE_CLEANUP_FAILED=approved as well.');
     return 2;
   }
-  const client = await connect({ clientId: 'ari-workspace-factory-integration-cleanup' });
+  const client = await connect({ clientId: 'paseo-workspace-factory-integration-cleanup' });
   let outcome;
   try {
     const agents = await readPaseoState(client).then((s) => s.agents, () => null);
