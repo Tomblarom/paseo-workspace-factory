@@ -10,6 +10,8 @@ For each repository the factory sets up, idempotently and only after you confirm
 
 Exactly one steer coordinates at a time. When a provider limit is reached, the context grows too large or another model fits better, you record a short **checkpoint** and **switch** to another steer. The handoff message is built from Paseo and git state without a model call; workers stay where they are and are reused by agent id.
 
+A coordinating level reads one line per scope with `scopes` (active steer, epoch, checkpoint age, `hub:` escalations, context use); `scopes --candidates` lists unadopted workspaces with a plan suggestion. See [Scopes and the hub](docs/scopes-design.md).
+
 > Status: private preview. Not yet published; see [TODO.md](TODO.md) for what is missing before a release.
 
 ## Requirements
@@ -45,3 +47,4 @@ node src/cli.mjs switch <you>/<repo> --to B --apply --wait           # switch, d
 - [Concepts and safety model](docs/concepts.md)
 - [Configuration](docs/configuration.md)
 - [Steer instructions and task/answer template](docs/steer-instructions.md)
+- [Scopes and the hub](docs/scopes-design.md)
