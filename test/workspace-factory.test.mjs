@@ -26,7 +26,7 @@ import { LABEL, METADATA_KEY, PARENT_LABEL } from '../src/paseo.mjs';
 
 const CONFIG = {
   version: 1,
-  github: { owner: 'Tomblarom', cloneProtocol: 'https', upstreamRemote: 'upstream' },
+  github: { owner: 'example-owner', cloneProtocol: 'https', upstreamRemote: 'upstream' },
   checkoutRoot: '/p',
   workspaceTitle: 'Main',
   profiles: {
@@ -54,9 +54,9 @@ const api = (fullName, extra = {}) => {
 };
 const ref = (fullName) => ({ full_name: fullName, clone_url: `https://github.com/${fullName}.git`, ssh_url: `git@github.com:${fullName}.git` });
 
-const FIRMWARE = 'Tomblarom/Carvera_Firmware';
-const FW_PARENT = 'Carvera-Community/Carvera_Community_Firmware';
-const FW_SOURCE = 'MakeraInc/CarveraFirmware';
+const FIRMWARE = 'example-owner/example-repo';
+const FW_PARENT = 'upstream-owner/upstream-repo';
+const FW_SOURCE = 'source-owner/source-repo';
 
 function makeWorld() {
   return {
@@ -87,7 +87,7 @@ function fakeGh(world) {
     world.calls.push(['gh', ...args]);
     if (args[0] === 'repo' && args[1] === 'fork') {
       const upstream = world.repos[args[2]];
-      const full = `Tomblarom/${upstream.name}`;
+      const full = `example-owner/${upstream.name}`;
       world.repos[full] = api(full, { fork: true, parent: ref(upstream.full_name), source: ref(upstream.source?.full_name ?? upstream.full_name) });
       return '';
     }
@@ -343,8 +343,8 @@ async function apply(world, entries = [FIRMWARE], { config = CONFIG, allowFork =
 
 /** A fully provisioned firmware repository, as apply would leave it. */
 function provisioned(world) {
-  world.checkouts['/p/Carvera_Firmware'] = { remotes: { origin: `https://github.com/${FIRMWARE}.git`, upstream: `https://github.com/${FW_PARENT}.git` } };
-  const ws = addWorkspace(world, { path: '/p/Carvera_Firmware', title: 'Main', metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1 } } });
+  world.checkouts['/p/example-repo'] = { remotes: { origin: `https://github.com/${FIRMWARE}.git`, upstream: `https://github.com/${FW_PARENT}.git` } };
+  const ws = addWorkspace(world, { path: '/p/example-repo', title: 'Main', metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1, scope: { id: FIRMWARE, kind: 'github', locator: FIRMWARE } } } });
   const steers = {};
   for (const [slot, [provider, model]] of Object.entries({ A: ['codex', 'gpt-6.2-sol'], B: ['muse', 'muse-spark-1.3-contributor'], C: ['antigravity', 'gemini-3.8-flash-high'] })) {
     steers[slot] = addAgent(world, { provider, model, title: `Steer ${slot}`, workspaceId: ws.id, labels: { [LABEL.repo]: FIRMWARE, [LABEL.role]: 'steer', [LABEL.slot]: slot } });
@@ -357,16 +357,16 @@ const keys = (p) => p.ops.map((op) => op.key);
 // ---------------------------------------------------------------- GitHub
 
 test('repository input: URL, SSH, shorthand, .git and trailing slash; rejects junk', () => {
-  for (const input of ['https://github.com/Tomblarom/Carvera_Firmware', 'https://github.com/Tomblarom/Carvera_Firmware.git', 'https://github.com/Tomblarom/Carvera_Firmware/', 'git@github.com:Tomblarom/Carvera_Firmware.git', 'ssh://git@github.com/Tomblarom/Carvera_Firmware', 'Tomblarom/Carvera_Firmware']) {
+  for (const input of ['https://github.com/example-owner/example-repo', 'https://github.com/example-owner/example-repo.git', 'https://github.com/example-owner/example-repo/', 'git@github.com:example-owner/example-repo.git', 'ssh://git@github.com/example-owner/example-repo', 'example-owner/example-repo']) {
     assert.equal(parseRepoInput(input).fullName, FIRMWARE, input);
   }
-  for (const input of ['', 'Carvera_Firmware', 'https://gitlab.com/a/b', '../etc', 'a/b/c', '../x', 'https://github.com/a']) {
+  for (const input of ['', 'example-repo', 'https://gitlab.com/a/b', '../etc', 'a/b/c', '../x', 'https://github.com/a']) {
     assert.throws(() => parseRepoInput(input), /Not a GitHub repository/, input);
   }
 });
 
 test('own fork: direct parent and original source are kept apart', () => {
-  const result = resolveGitHub(fakeGh(makeWorld()), FIRMWARE, 'Tomblarom');
+  const result = resolveGitHub(fakeGh(makeWorld()), FIRMWARE, 'example-owner');
   assert.equal(result.fork.status, 'present');
   assert.equal(result.upstream.fullName, FW_PARENT);
   assert.equal(result.source.fullName, FW_SOURCE);
@@ -375,7 +375,7 @@ test('own fork: direct parent and original source are kept apart', () => {
 test('upstream input reuses an existing (renamed) fork in the same network', () => {
   const world = makeWorld();
   world.forks[FW_PARENT] = [FIRMWARE];
-  const result = resolveGitHub(fakeGh(world), FW_PARENT, 'Tomblarom');
+  const result = resolveGitHub(fakeGh(world), FW_PARENT, 'example-owner');
   assert.equal(result.fork.status, 'present');
   assert.equal(result.fork.repo.fullName, FIRMWARE);
   assert.equal(result.upstream.fullName, FW_PARENT);
@@ -383,28 +383,28 @@ test('upstream input reuses an existing (renamed) fork in the same network', () 
 
 test('same-named repository outside the fork network is a conflict, not a fork', () => {
   const world = makeWorld();
-  world.repos['Tomblarom/CarveraFirmware'] = api('Tomblarom/CarveraFirmware');
-  const result = resolveGitHub(fakeGh(world), FW_SOURCE, 'Tomblarom');
+  world.repos['example-owner/source-repo'] = api('example-owner/source-repo');
+  const result = resolveGitHub(fakeGh(world), FW_SOURCE, 'example-owner');
   assert.equal(result.fork.status, 'conflict');
 });
 
 test('renamed fork is found through the fork list; missing fork is reported', () => {
   const world = makeWorld();
-  world.repos['Tomblarom/fw-renamed'] = api('Tomblarom/fw-renamed', { fork: true, parent: ref(FW_SOURCE), source: ref(FW_SOURCE) });
-  world.forks[FW_SOURCE] = ['someone/x', 'Tomblarom/fw-renamed'];
-  assert.equal(resolveGitHub(fakeGh(world), FW_SOURCE, 'Tomblarom').fork.repo.fullName, 'Tomblarom/fw-renamed');
-  world.forks[FW_SOURCE] = ['Tomblarom/fw-renamed', 'tomblarom/fw-second'];
-  assert.equal(resolveGitHub(fakeGh(world), FW_SOURCE, 'Tomblarom').fork.status, 'conflict');
+  world.repos['example-owner/renamed-repo'] = api('example-owner/renamed-repo', { fork: true, parent: ref(FW_SOURCE), source: ref(FW_SOURCE) });
+  world.forks[FW_SOURCE] = ['someone/x', 'example-owner/renamed-repo'];
+  assert.equal(resolveGitHub(fakeGh(world), FW_SOURCE, 'example-owner').fork.repo.fullName, 'example-owner/renamed-repo');
+  world.forks[FW_SOURCE] = ['example-owner/renamed-repo', 'example-owner/second-repo'];
+  assert.equal(resolveGitHub(fakeGh(world), FW_SOURCE, 'example-owner').fork.status, 'conflict');
   const fresh = makeWorld();
   delete fresh.repos[FIRMWARE];
-  assert.deepEqual(resolveGitHub(fakeGh(fresh), FW_PARENT, 'Tomblarom').fork, { status: 'missing', planned: 'Tomblarom/Carvera_Community_Firmware' });
+  assert.deepEqual(resolveGitHub(fakeGh(fresh), FW_PARENT, 'example-owner').fork, { status: 'missing', planned: 'example-owner/upstream-repo' });
 });
 
 test('source input finds a fork of an intermediate fork through the owner fork list', () => {
   const world = makeWorld();
-  world.repos['Tomblarom/other'] = api('Tomblarom/other', { fork: true, parent: ref('y/x'), source: ref('y/x') });
-  world.ownerForks = [{ nameWithOwner: 'Tomblarom/other' }, { nameWithOwner: FIRMWARE }];
-  const result = resolveGitHub(fakeGh(world), FW_SOURCE, 'Tomblarom');
+  world.repos['example-owner/other'] = api('example-owner/other', { fork: true, parent: ref('y/x'), source: ref('y/x') });
+  world.ownerForks = [{ nameWithOwner: 'example-owner/other' }, { nameWithOwner: FIRMWARE }];
+  const result = resolveGitHub(fakeGh(world), FW_SOURCE, 'example-owner');
   assert.equal(result.fork.repo.fullName, FIRMWARE);
   assert.equal(result.upstream.fullName, FW_PARENT, 'the fork parent, not the requested source, is upstream');
 });
@@ -412,7 +412,7 @@ test('source input finds a fork of an intermediate fork through the owner fork l
 test('permission errors are not mistaken for a missing fork', () => {
   const world = makeWorld();
   world.hooks.ghError = new Error('gh api failed: HTTP 403: Resource not accessible');
-  assert.throws(() => resolveGitHub(fakeGh(world), FIRMWARE, 'Tomblarom'), /403/);
+  assert.throws(() => resolveGitHub(fakeGh(world), FIRMWARE, 'example-owner'), /403/);
 });
 
 // ---------------------------------------------------------------- local checkouts
@@ -431,10 +431,10 @@ test('scan finds nested checkouts, skips hidden/build dirs, dedups symlinks, mar
     realpathSync: (p) => real[p] ?? p,
     lstatSync: (p) => ({ isFile: () => gitDirs[p.slice(0, -5)] === 'file' }),
   };
-  const git = (cwd) => (cwd === '/p/a' ? 'remote.origin.url https://github.com/Tomblarom/a.git' : '');
+  const git = (cwd) => (cwd === '/p/a' ? 'remote.origin.url https://github.com/Example-Owner/a.git' : '');
   const found = scanCheckouts({ roots: ['/p'], knownDirs: ['/elsewhere/known', '/not/a/repo'], git, fs });
   assert.deepEqual(found.map((c) => c.path).sort(), ['/elsewhere/known', '/p/a', '/p/group/deep/repo']);
-  assert.equal(found.find((c) => c.path === '/p/a').repos.origin, 'tomblarom/a');
+  assert.equal(found.find((c) => c.path === '/p/a').repos.origin, 'example-owner/a');
   assert.equal(found.find((c) => c.path === '/p/group/deep/repo').linkedWorktree, true);
 });
 
@@ -483,19 +483,19 @@ test('fully provisioned repository plans nothing', async () => {
 
 test('checkout without Paseo project (interrupted clone registration) registers the project', async () => {
   const world = makeWorld();
-  world.checkouts['/p/Carvera_Firmware'] = { remotes: { origin: `https://github.com/${FIRMWARE}`, upstream: `https://github.com/${FW_PARENT}` } };
+  world.checkouts['/p/example-repo'] = { remotes: { origin: `https://github.com/${FIRMWARE}`, upstream: `https://github.com/${FW_PARENT}` } };
   const [p] = await plan(world);
   assert.deepEqual(keys(p), ['paseo.project', 'workspace.main', 'steer.A', 'steer.B', 'steer.C']);
 });
 
 test('occupied target directory is a conflict and nothing else is planned on it', async () => {
   const world = makeWorld();
-  world.checkouts['/p/Carvera_Firmware'] = { remotes: { origin: `https://github.com/${FW_SOURCE}` } };
+  world.checkouts['/p/example-repo'] = { remotes: { origin: `https://github.com/${FW_SOURCE}` } };
   const [p] = await plan(world);
   assert.equal(p.status, 'conflict');
   assert.match(p.conflicts[0].reason, /already exists/);
   world.checkouts = {};
-  world.occupied.add('/p/Carvera_Firmware');
+  world.occupied.add('/p/example-repo');
   assert.equal((await plan(world))[0].status, 'conflict');
 });
 
@@ -511,31 +511,31 @@ test('several checkouts of the fork need an explicit choice', async () => {
 
 test('upstream remote: missing is added, a different URL is a conflict', async () => {
   const world = makeWorld();
-  world.checkouts['/p/Carvera_Firmware'] = { remotes: { origin: `git@github.com:${FIRMWARE}.git` } };
-  addProject(world, '/p/Carvera_Firmware');
+  world.checkouts['/p/example-repo'] = { remotes: { origin: `git@github.com:${FIRMWARE}.git` } };
+  addProject(world, '/p/example-repo');
   assert.ok(keys((await plan(world))[0]).includes('checkout.upstream-remote'));
-  world.checkouts['/p/Carvera_Firmware'].remotes.upstream = `https://github.com/${FW_SOURCE}`;
+  world.checkouts['/p/example-repo'].remotes.upstream = `https://github.com/${FW_SOURCE}`;
   const [p] = await plan(world);
   assert.equal(p.conflicts[0].key, 'checkout.upstream-remote');
 });
 
 test('two main workspaces on the checkout are a conflict; task workspaces are not adopted', async () => {
   const world = makeWorld();
-  world.checkouts['/p/Carvera_Firmware'] = { remotes: { origin: `https://github.com/${FIRMWARE}`, upstream: `https://github.com/${FW_PARENT}` } };
-  addWorkspace(world, { path: '/p/Carvera_Firmware', title: 'Fix spindle PWM' });
+  world.checkouts['/p/example-repo'] = { remotes: { origin: `https://github.com/${FIRMWARE}`, upstream: `https://github.com/${FW_PARENT}` } };
+  addWorkspace(world, { path: '/p/example-repo', title: 'Fix spindle PWM' });
   let [p] = await plan(world);
   assert.equal(p.ops.find((op) => op.key === 'workspace.main').kind, 'paseo.workspace.create');
   assert.ok(p.notes.some((n) => n.includes('Fix spindle PWM')));
-  addWorkspace(world, { path: '/p/Carvera_Firmware', title: 'Main' });
-  addWorkspace(world, { path: '/p/Carvera_Firmware', title: 'Carvera_Firmware · Main' });
+  addWorkspace(world, { path: '/p/example-repo', title: 'Main' });
+  addWorkspace(world, { path: '/p/example-repo', title: 'example-repo · Main' });
   [p] = await plan(world);
   assert.equal(p.conflicts[0].key, 'workspace.main');
 });
 
 test('existing Main workspace without factory metadata is adopted, not recreated', async () => {
   const world = makeWorld();
-  world.checkouts['/p/Carvera_Firmware'] = { remotes: { origin: `https://github.com/${FIRMWARE}`, upstream: `https://github.com/${FW_PARENT}` } };
-  const ws = addWorkspace(world, { path: '/p/Carvera_Firmware', title: 'Main' });
+  world.checkouts['/p/example-repo'] = { remotes: { origin: `https://github.com/${FIRMWARE}`, upstream: `https://github.com/${FW_PARENT}` } };
+  const ws = addWorkspace(world, { path: '/p/example-repo', title: 'Main' });
   const [p] = await plan(world);
   assert.equal(p.ops[0].kind, 'paseo.workspace.metadata');
   assert.equal(p.ops.find((op) => op.key === 'steer.A').params.workspaceId, ws.id);
@@ -548,8 +548,8 @@ test('parent-linked steers are conflicts, never reused (labelled or legacy title
   let [p] = await plan(world);
   assert.deepEqual(p.conflicts.map((c) => c.key), ['steer.B']);
   const legacyWorld = makeWorld();
-  legacyWorld.checkouts['/p/Carvera_Firmware'] = { remotes: { origin: `https://github.com/${FIRMWARE}`, upstream: `https://github.com/${FW_PARENT}` } };
-  const ws = addWorkspace(legacyWorld, { path: '/p/Carvera_Firmware', title: 'Main', metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1 } } });
+  legacyWorld.checkouts['/p/example-repo'] = { remotes: { origin: `https://github.com/${FIRMWARE}`, upstream: `https://github.com/${FW_PARENT}` } };
+  const ws = addWorkspace(legacyWorld, { path: '/p/example-repo', title: 'Main', metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1 } } });
   addAgent(legacyWorld, { title: 'Steer A', provider: 'codex', model: 'gpt-6.2-sol', workspaceId: ws.id, labels: { [PARENT_LABEL]: 'coordinator-main' } });
   [p] = await plan(legacyWorld);
   assert.equal(p.conflicts[0].key, 'steer.A');
@@ -558,8 +558,8 @@ test('parent-linked steers are conflicts, never reused (labelled or legacy title
 
 function legacyWorld(agents) {
   const world = makeWorld();
-  world.checkouts['/p/Carvera_Firmware'] = { remotes: { origin: `https://github.com/${FIRMWARE}`, upstream: `https://github.com/${FW_PARENT}` } };
-  const ws = addWorkspace(world, { path: '/p/Carvera_Firmware', title: 'Main', metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1 } } });
+  world.checkouts['/p/example-repo'] = { remotes: { origin: `https://github.com/${FIRMWARE}`, upstream: `https://github.com/${FW_PARENT}` } };
+  const ws = addWorkspace(world, { path: '/p/example-repo', title: 'Main', metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1, scope: { id: FIRMWARE, kind: 'github', locator: FIRMWARE } } } });
   const created = agents.map((fields) => addAgent(world, { provider: 'claude', model: 'claude-opus-5-5', workspaceId: ws.id, ...fields }));
   return { world, ws, created };
 }
@@ -699,7 +699,7 @@ test('apply refuses without the stored hash, after config change or after state 
   const tampered = structuredClone(auth);
   tampered.plans[0].ops[0].params.parentDir = '/p/elsewhere';
   await assert.rejects(applyPlans({ ...args, authorization: tampered, confirm: auth.hash }), /altered/);
-  world.checkouts['/p/Carvera_Firmware'] = { remotes: { origin: `https://github.com/${FIRMWARE}` } }; // someone cloned meanwhile
+  world.checkouts['/p/example-repo'] = { remotes: { origin: `https://github.com/${FIRMWARE}` } }; // someone cloned meanwhile
   await assert.rejects(applyPlans({ ...args, confirm: auth.hash }), /State changed since the dry-run/);
   assert.equal(world.calls.filter((c) => !['gh', 'git'].includes(c[0])).length, 0, 'no writes');
 });
@@ -715,7 +715,7 @@ test('apply provisions end to end, verifies parent freedom, and a rerun is a no-
   assert.ok(steers.every((a) => !(PARENT_LABEL in a.labels)));
   const creates = world.calls.filter((c) => c[0] === 'agent.create').map((c) => c[1]);
   assert.ok(creates.every((o) => o.parent === undefined && o.prompt === undefined && o.idempotencyKey));
-  assert.deepEqual(world.checkouts['/p/Carvera_Firmware'].remotes.upstream, `https://github.com/${FW_PARENT}.git`);
+  assert.deepEqual(world.checkouts['/p/example-repo'].remotes.upstream, `https://github.com/${FW_PARENT}.git`);
   assert.equal(world.workspaces[0].metadata[METADATA_KEY].activeSteer, 'A');
   assert.equal(events.filter((e) => e.event === 'done').length, 6);
 
@@ -808,10 +808,10 @@ async function applyWithObservedChange(mutate, { prepare } = {}) {
 
 test('rediscovered parameters never extend the authorization (clone path, remotes, repo, kind)', async () => {
   const cases = [
-    ['clone path', (p) => (p.ops[0].params.expectedPath = '/p/other/Carvera_Firmware'), /expectedPath differs/],
+    ['clone path', (p) => (p.ops[0].params.expectedPath = '/p/other/example-repo'), /expectedPath differs/],
     ['clone parent', (p) => (p.ops[0].params.parentDir = '/p/other'), /parentDir differs/],
-    ['clone repo', (p) => (p.ops[0].params.repo = 'Tomblarom/Evil'), /repo differs/],
-    ['repository identity', (p) => (p.repo = 'Tomblarom/Other'), /identity changed/],
+    ['clone repo', (p) => (p.ops[0].params.repo = 'example-owner/evil'), /repo differs/],
+    ['repository identity', (p) => (p.repo = 'example-owner/other'), /identity changed/],
     ['operation kind', (p) => (p.ops[0].kind = 'git.remote.add'), /kind git.remote.add instead of paseo.clone/],
   ];
   for (const [name, mutate, expected] of cases) {
@@ -831,13 +831,13 @@ test('rediscovered parameters never extend the authorization (clone path, remote
     },
   });
   assert.match(report[0].error, /url differs/);
-  assert.equal(world.checkouts['/p/Carvera_Firmware'].remotes.upstream, undefined, 'remote not added');
+  assert.equal(world.checkouts['/p/example-repo'].remotes.upstream, undefined, 'remote not added');
 });
 
 test('changed provider/model or workspace placement of a steer is refused', async () => {
   const cases = [
     ['model', (op) => (op.params.config.provider = 'codex/gpt-6.2-astra'), /config differs/],
-    ['labels', (op) => (op.params.labels['ari.wsf.slot'] = 'Z'), /labels differs/],
+    ['labels', (op) => (op.params.labels['wsf.slot'] = 'Z'), /labels differs/],
     ['title', (op) => (op.params.title = 'Steer Z'), /title differs/],
     ['workspace', (op) => (op.params.workspaceId = 'wks_foreign000000001'), /workspaceId differs/],
   ];
@@ -867,7 +867,7 @@ test('symbolic workspace reference resolves only from this plan\'s verified resu
     tamper: (plans) => {
       if (step++ === 3) {
         // after clone + remote: a foreign Main workspace was created, so the plan skips workspace.main
-        const foreign = addWorkspace(world, { path: '/p/Carvera_Firmware', title: 'Main', metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1 } } });
+        const foreign = addWorkspace(world, { path: '/p/example-repo', title: 'Main', metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1, scope: { id: FIRMWARE, kind: 'github', locator: FIRMWARE } } } });
         world.hooks.foreign = foreign.id;
         return runnerFor(world).runPlans([FIRMWARE]);
       }
@@ -883,10 +883,10 @@ test('symbolic workspace reference resolves only from this plan\'s verified resu
 test('executor guards: unsafe or changed clone targets and foreign remotes are refused', async () => {
   const world = makeWorld();
   const execute = executorsFor(world);
-  const guard = inspectCloneTarget('/p', '/p', '/p/Carvera_Firmware', worldFs(world));
-  const clone = (params) => execute({ kind: 'paseo.clone', params: { repo: FIRMWARE, protocol: 'https', parentDir: '/p', expectedPath: '/p/Carvera_Firmware', guard, ...params } }, CONFIG);
-  await assert.rejects(clone({ parentDir: '/etc', expectedPath: '/etc/Carvera_Firmware' }), /unsafe/);
-  world.occupied.add('/p/Carvera_Firmware');
+  const guard = inspectCloneTarget('/p', '/p', '/p/example-repo', worldFs(world));
+  const clone = (params) => execute({ kind: 'paseo.clone', params: { repo: FIRMWARE, protocol: 'https', parentDir: '/p', expectedPath: '/p/example-repo', guard, ...params } }, CONFIG);
+  await assert.rejects(clone({ parentDir: '/etc', expectedPath: '/etc/example-repo' }), /unsafe/);
+  world.occupied.add('/p/example-repo');
   await assert.rejects(clone({}), /already exists/);
   world.occupied.clear();
   world.inodes['/p'] = 99; // parent replaced since the dry-run
@@ -946,8 +946,8 @@ const noLock = (_name, fn) => fn({ verify() {} });
 test('switch dry-run: deterministic handoff, missing checkpoint flagged, nothing written', async () => {
   const world = makeWorld();
   const { steers } = provisioned(world);
-  world.checkouts['/p/Carvera_Firmware'].sha = 'f00dfeedbeef00112233';
-  world.checkouts['/p/Carvera_Firmware'].untracked = ['notes.txt'];
+  world.checkouts['/p/example-repo'].sha = 'f00dfeedbeef00112233';
+  world.checkouts['/p/example-repo'].untracked = ['notes.txt'];
   addAgent(world, { title: 'Worker 1 · Tests', provider: 'muse', model: 'm', workspaceId: 'wks_wt', labels: { [PARENT_LABEL]: steers.A.id } });
   world.hooks.lastMessage = 'Als Nächstes Spindel-PWM. '.repeat(200);
   const result = await switchSteer({ client: fakeClient(world), discovery: await discoveryOf(world), toSlot: 'B', git: fakeGit(world), lock: testLock, language: 'de' });
@@ -982,7 +982,7 @@ test('switch apply: locked check-and-write, one handoff; a failed delivery keeps
   const { steers } = provisioned(world);
   const result = await switchSteer({ client: fakeClient(world), discovery: await discoveryOf(world), toSlot: 'C', apply: true, git: fakeGit(world), lock: testLock });
   assert.equal(result.applied && result.delivered, true);
-  assert.deepEqual({ ...world.workspaces[0].metadata[METADATA_KEY], switchedAt: undefined }, { main: true, activeSteer: 'C', epoch: 2, previousSteer: 'A', switchedAt: undefined });
+  assert.deepEqual({ ...world.workspaces[0].metadata[METADATA_KEY], switchedAt: undefined }, { main: true, activeSteer: 'C', epoch: 2, previousSteer: 'A', scope: { id: FIRMWARE, kind: 'github', locator: FIRMWARE }, switchedAt: undefined });
   assert.deepEqual(world.calls.filter((c) => c[0] === 'agent.send').map((c) => c[1]), [steers.C.id]);
   world.hooks.sendFails = true;
   const next = await switchSteer({ client: fakeClient(world), discovery: await discoveryOf(world), toSlot: 'A', apply: true, lock: testLock });
@@ -1236,7 +1236,7 @@ test('clone executor on a real filesystem: swapped parent refused, symlinked res
   const root = join(base, 'projects');
   mkdirSync(join(root, 'group'), { recursive: true });
   const config = { ...CONFIG, checkoutRoot: root };
-  const expectedPath = join(root, 'group', 'Carvera_Firmware');
+  const expectedPath = join(root, 'group', 'example-repo');
   const world = makeWorld();
   let cloneMode = 'good';
   const paseoCli = (args) => {
@@ -1299,7 +1299,7 @@ test('checkpoint next step is stored and shown; handoff is English by default', 
   const cp = await writeCheckpoint({ client: fakeClient(world), discovery: await discoveryOf(world), task: 'Review CI', next: 'only confirm the takeover', lock: testLock });
   assert.equal(cp.next, 'only confirm the takeover');
   const result = await switchSteer({ client: fakeClient(world), discovery: await discoveryOf(world), toSlot: 'B', git: fakeGit(world), lock: testLock, language: 'en' });
-  assert.match(result.packet, /Steer handoff for Tomblarom\/Carvera_Firmware: epoch 1 → 2/);
+  assert.match(result.packet, /Steer handoff for example-owner\/example-repo: epoch 1 → 2/);
   assert.match(result.packet, /- Next step: only confirm the takeover/);
   const status = steerStatus(await discoveryOf(world));
   const noNext = buildHandoff({ ...status, checkpoint: { task: 'x', epoch: 1 } }, { from: status.steers[0], to: status.steers[1], epoch: 1, language: 'de' });
@@ -1335,6 +1335,46 @@ test('known provider exceptions: Copilot Claude models reject a thinking level',
   const problems = validateProfilesAgainstCatalog(config, catalog, ['cop', 'copOk']);
   assert.match(problems.cop.join(), /Copilot rejects a reasoning effort/);
   assert.equal(problems.copOk, undefined);
+});
+
+test('knownLimits extends the built-in exceptions: exact model and pattern, only when the field is set', () => {
+  const config = structuredClone(CONFIG);
+  config.knownLimits = [
+    { provider: 'codex', model: 'gpt-6.2-sol', field: 'thinking', reason: 'Test limit: no thinking on this model' },
+    { provider: 'muse', modelPattern: '-contributor$', field: 'mode', reason: 'Test limit: no custom mode on contributor models' },
+  ];
+  config.profiles.flat = { provider: 'codex', model: 'gpt-6.2-sol', thinking: null, mode: 'full-access' };
+  const problems = validateProfilesAgainstCatalog(config, PROVIDERS, ['sol', 'muse', 'agy', 'flat']);
+  assert.match(problems.sol.join(), /Test limit: no thinking/);
+  assert.match(problems.muse.join(), /Test limit: no custom mode/);
+  assert.equal(problems.agy, undefined);
+  assert.equal(problems.flat, undefined, 'rule does not fire when the profile leaves the field unset');
+});
+
+test('knownLimits mismatch is a plan conflict with the reason, not an apply failure', async () => {
+  const config = structuredClone(CONFIG);
+  config.knownLimits = [{ provider: 'codex', modelPattern: '^gpt-', field: 'thinking', reason: 'Test limit: codex rejects thinking here' }];
+  const [p] = await plan(makeWorld(), [FIRMWARE], { config });
+  assert.equal(p.status, 'conflict');
+  assert.match(p.conflicts.find((c) => c.key === 'steer.A').reason, /Profile "sol" for Steer A is not startable: Test limit/);
+  assert.ok(keys(p).includes('steer.B') && keys(p).includes('steer.C'), 'unaffected slots are still planned');
+});
+
+test('knownLimits entries are validated', () => {
+  const good = structuredClone(CONFIG);
+  good.knownLimits = [{ provider: 'codex', model: 'gpt-6.2-sol', field: 'thinking', reason: 'why' }];
+  assert.deepEqual(validateConfig(good), []);
+  const bad = structuredClone(CONFIG);
+  bad.knownLimits = [
+    { provider: '', field: 'thinking', reason: 'why' },
+    { provider: 'codex', model: 'm', modelPattern: '([', field: 'prompt', reason: '' },
+    'nope',
+  ];
+  const errors = validateConfig(bad).join('\n');
+  for (const fragment of ['knownLimits[0].provider', 'needs model or modelPattern', 'not a valid regular expression', 'must be thinking or mode', 'reason is required', 'must be an object']) {
+    assert.match(errors, new RegExp(fragment.replace(/[[\]]/g, '\\$&')));
+  }
+  assert.ok(validateConfig({ ...structuredClone(CONFIG), knownLimits: {} }).some((e) => /knownLimits must be an array/.test(e)));
 });
 
 test('runtime settings: environment beats config beats defaults; config path lookup', () => {
@@ -1378,7 +1418,7 @@ test('worker retirement preview is conservative about turns, processes, referenc
   const agentStays = [
     [{ ...worker, status: 'running' }, base],
     [{ ...worker, activeTurn: { id: 't' } }, base],
-    [{ ...worker, labels: { ...worker.labels, 'ari.wsf.lifecycle': 'reusable' } }, base],
+    [{ ...worker, labels: { ...worker.labels, 'wsf.lifecycle': 'reusable' } }, base],
     [worker, { ...base, agents: [worker, { id: 'c', workspaceId: 'w9', labels: { [PARENT_LABEL]: 'k1' } }] }],
     [worker, { ...base, backgroundWork: [{ id: 'b' }] }],
     [worker, { ...base, backgroundWork: null }],
@@ -1438,8 +1478,8 @@ function dyingAt(world, key, { before = false } = {}) {
 async function crashAfterWorkspaceCreate({ firstOp = false } = {}) {
   const world = makeWorld();
   if (firstOp) {
-    world.checkouts['/p/Carvera_Firmware'] = { remotes: { origin: `https://github.com/${FIRMWARE}`, upstream: `https://github.com/${FW_PARENT}` } };
-    addProject(world, '/p/Carvera_Firmware');
+    world.checkouts['/p/example-repo'] = { remotes: { origin: `https://github.com/${FIRMWARE}`, upstream: `https://github.com/${FW_PARENT}` } };
+    addProject(world, '/p/example-repo');
   }
   const authorization = await authorize(world);
   const progress = memoryProgress();
@@ -1519,7 +1559,7 @@ test('a never-attempted workspace.main is never reconstructed', async () => {
     authorization,
     tamper: (plans) => {
       if (step++ === 3) {
-        addWorkspace(world, { path: '/p/Carvera_Firmware', title: 'Main', metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1 } } });
+        addWorkspace(world, { path: '/p/example-repo', title: 'Main', metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1, scope: { id: FIRMWARE, kind: 'github', locator: FIRMWARE } } } });
         return runnerFor(world).runPlans([FIRMWARE]);
       }
       return plans;
@@ -1607,8 +1647,8 @@ test('P0.1 progress without a prior attempt never adopts; agents are reconciled 
   const world = makeWorld();
   const authorization = await authorize(world);
   const progress = memoryProgress({ hash: authorization.hash, started: true, results: {}, attempted: [] });
-  addWorkspace(world, { path: '/p/Carvera_Firmware', title: 'Main', metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1 } } });
-  world.checkouts['/p/Carvera_Firmware'] = { remotes: { origin: `https://github.com/${FIRMWARE}.git`, upstream: `https://github.com/${FW_PARENT}.git` } };
+  addWorkspace(world, { path: '/p/example-repo', title: 'Main', metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1 } } });
+  world.checkouts['/p/example-repo'] = { remotes: { origin: `https://github.com/${FIRMWARE}.git`, upstream: `https://github.com/${FW_PARENT}.git` } };
   const resumed = await apply(world, [FIRMWARE], { authorization, progress });
   assert.equal(resumed.report[0].status, 'failed');
   assert.equal(world.calls.filter((c) => c[0] === 'receipt.lookup').length, 0);
@@ -1651,8 +1691,8 @@ test('P0.1 defensive paths: contradicting observation and unreconciled attempts 
   const world = makeWorld();
   const authorization = await authorize(world);
   const progress = memoryProgress({ hash: authorization.hash, started: true, results: {}, attempted: [`${FIRMWARE}#steer.A`] });
-  world.checkouts['/p/Carvera_Firmware'] = { remotes: { origin: `https://github.com/${FIRMWARE}.git`, upstream: `https://github.com/${FW_PARENT}.git` } };
-  addWorkspace(world, { path: '/p/Carvera_Firmware', title: 'Main', metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1 } } });
+  world.checkouts['/p/example-repo'] = { remotes: { origin: `https://github.com/${FIRMWARE}.git`, upstream: `https://github.com/${FW_PARENT}.git` } };
+  addWorkspace(world, { path: '/p/example-repo', title: 'Main', metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1, scope: { id: FIRMWARE, kind: 'github', locator: FIRMWARE } } } });
   const report = await apply(world, [FIRMWARE], { authorization, progress });
   assert.match(report.report[0].error, /attempted before without a stored result; refusing to repeat it unverified/);
   assert.equal(world.agents.length, 0);
@@ -1777,7 +1817,7 @@ function cleanupFixture() {
   const scratch = '/scratch/run-abc';
   const manifest = { scratch, workspace: 'wks_00000000000000aa', agent: 'agent-it', phases: { functional: 'passed' } };
   const workspace = { id: manifest.workspace, workspaceDirectory: scratch, workspaceKind: 'local_checkout', metadata: { [METADATA_KEY]: { main: true } } };
-  const agent = { id: 'agent-it', workspaceId: manifest.workspace, labels: { 'ari.wsf.role': 'integration-test' }, archivedAt: null };
+  const agent = { id: 'agent-it', workspaceId: manifest.workspace, labels: { 'wsf.role': 'integration-test' }, archivedAt: null };
   const calls = [];
   const state = { workspace, agent, refreshFails: false, agentMissing: false };
   const client = {
