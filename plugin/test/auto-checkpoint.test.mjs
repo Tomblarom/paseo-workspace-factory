@@ -97,10 +97,36 @@ test("completed block of the active steer writes the scope checkpoint", () => {
     lastTurnEndedAt: NOW,
     outcome: "completed",
     contextTokens: 12000,
+    openTurnId: null,
+    turnStartedAt: null,
     interrupted: null,
     lastActionFailed: null,
   });
   assert.equal(d.patchInterrupted, undefined);
+});
+
+test("every turn.after clears the open-turn tracking from turn.before", () => {
+  const completed = decideTurnUpdate(input({ block: BLOCK }));
+  assert.equal(completed.entryUpdate.openTurnId, null);
+  assert.equal(completed.entryUpdate.turnStartedAt, null);
+  const failed = decideTurnUpdate(input({ outcome: "failed", error: "x" }));
+  assert.equal(failed.entryUpdate.openTurnId, null);
+  assert.equal(failed.entryUpdate.turnStartedAt, null);
+  const cleanup = decideTurnUpdate(
+    input({
+      turnUserText: "/clear",
+      effect: {
+        sessionChanged: true,
+        compactionSeen: false,
+        markerSeen: false,
+        sessionNoteSeen: false,
+        turnReadable: true,
+      },
+      previous: { pendingAction: { kind: "clear", at: "then" } },
+    }),
+  );
+  assert.equal(cleanup.entryUpdate.openTurnId, null);
+  assert.equal(cleanup.entryUpdate.turnStartedAt, null);
 });
 
 test("completed block of another steer or worker lands in the note", () => {

@@ -1,0 +1,612 @@
+// needsResume flags (E4): limit patterns, failed-turn classification, boot
+// check flags for closed/interrupted steers, the attention feed rows, and the
+// F4 wake-to-resume wiring. Server modules load through the
+// ts-resolve-hooks remap; static assertions pin the turn-hook wiring the way
+// plugin/test/boot-check.test.mjs does.
+import test from "node:test";
+import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
+import { register } from "node:module";
+
+register("./ts-resolve-hooks.mjs", import.meta.url);
+
+const bootCheck = await import("../server/boot-check.ts");
+const sweep = await import("../server/cold-sweep.ts");
+const supervise = await import("../server/supervise.ts");
+import {
+  CLEANUP_DEFAULTS,
+  RESUME_LIMIT_PATTERNS,
+  bootResumeReason,
+  isLimitFailure,
+  isNeedsResumeReason,
+  needsResumeForFailedTurn,
+  countActiveResumeRows,
+  resumeReminderText,
+} from "../shared/idle-cleanup.ts";
+import { factoryResumeSettings } from "../shared/settings.ts";
+import { LABEL, METADATA_KEY } from "../../src/paseo.mjs";
+import { AGENTS_KEY } from "../../src/agent-state.mjs";
+import { WORKERS_KEY } from "../../src/supervision.mjs";
+import { CHECKPOINT_KEY } from "../../src/steer.mjs";
+
+const REPO = "example-owner/example-repo";
+const NOW = new Date("2026-11-24T12:00:00.000Z").getTime();
+const at = (ms) => new Date(ms).toISOString();
+const MIN = 60_000;
+const HOUR = 3_600_000;
+
+function makeWorld() {
+  return { workspaces: [], agents: [], timelines: {}, calls: [], seq: 0 };
+}
+
+function addWorkspace(world, { metadata }) {
+  const ws = {
+    id: `wks_${String(++world.seq).padStart(4, "0")}`,
+    projectId: "prj_1",
+    workspaceDirectory: "/p/demo",
+    workspaceKind: "local_checkout",
+    title: "Main",
+    name: "Main",
+    metadata: structuredClone(metadata),
+    createdAt: at(NOW - 24 * HOUR),
+  };
+  world.workspaces.push(ws);
+  return ws;
+}
+
+function addAgent(world, fields) {
+  const agent = {
+    id: `agent-${++world.seq}`,
+    provider: "claude",
+    model: "m",
+    status: "idle",
+    archivedAt: null,
+    labels: {},
+    metadata: {},
+    title: null,
+    workspaceId: null,
+    activeTurn: null,
+    pendingPermissions: [],
+    persistence: { sessionId: `sess-${world.seq}` },
+    updatedAt: at(NOW - MIN),
+    lastUserMessageAt: null,
+    ...fields,
+  };
+  world.agents.push(agent);
+  return agent;
+}
+
+function scopeMeta({ activeSteer = "A", epoch = 3, workers = {}, agents = {}, checkpoint = null } = {}) {
+  const meta = {
+    [METADATA_KEY]: { main: true, activeSteer, epoch, scope: { id: REPO, kind: "github", locator: REPO } },
+  };
+  if (Object.keys(workers).length) meta[WORKERS_KEY] = structuredClone(workers);
+  if (Object.keys(agents).length) meta[AGENTS_KEY] = structuredClone(agents);
+  if (checkpoint) meta[CHECKPOINT_KEY] = structuredClone(checkpoint);
+  return meta;
+}
+
+function fakeClient(world) {
+  const findWs = (id) => world.workspaces.find((w) => w.id === id) ?? null;
+  const findAgent = (id) => world.agents.find((a) => a.id === id) ?? null;
+  const page = (entries) => ({ entries: structuredClone(entries), pageInfo: { hasMore: false } });
+  return {
+    projects: { list: async () => ({ projects: [] }) },
+    workspaces: {
+      list: async () => page(world.workspaces),
+      ref: (id) => ({
+        refresh: async () => structuredClone(findWs(id)),
+        setMetadata: async (patch) => {
+          world.calls.push(["workspace.setMetadata", id, structuredClone(patch)]);
+          Object.assign(findWs(id).metadata, structuredClone(patch));
+        },
+      }),
+    },
+    agents: {
+      list: async () => page(world.agents),
+      ref: (id) => ({
+        refresh: async () => {
+          const agent = findAgent(id);
+          return agent ? { agent: structuredClone(agent) } : null;
+        },
+        send: async (text) => {
+          world.calls.push(["agent.send", id, text]);
+        },
+        setMetadata: async (patch) => {
+          Object.assign(findAgent(id).metadata, structuredClone(patch));
+        },
+        timeline: {
+          refetch: async () => ({ entries: structuredClone(world.timelines[id] ?? []) }),
+        },
+      }),
+    },
+    providers: { snapshot: async () => ({ entries: [] }) },
+  };
+}
+
+const noLock = (_name, fn) => fn({ verify() {} });
+const sendsTo = (world, id) =>
+  world.calls.filter((c) => c[0] === "agent.send" && c[1] === id).map((c) => c[2]);
+
+// ---------------------------------------------------------------------------
+// Limit patterns and failed-turn classification (pure).
+// ---------------------------------------------------------------------------
+
+test("RESUME_LIMIT_PATTERNS matches limit/quota failures only", () => {
+  assert.ok(Array.isArray(RESUME_LIMIT_PATTERNS) && RESUME_LIMIT_PATTERNS.length > 0);
+  for (const pattern of RESUME_LIMIT_PATTERNS) assert.ok(pattern instanceof RegExp);
+  for (const text of [
+    "Claude usage limit reached, resets 3pm",
+    "Usage Limit hit for claude-sonnet",
+    "ERROR: rate limit exceeded, retry later",
+    "RateLimit: too many requests",
+    "quota exceeded for this project",
+    "API quota reset in 10 minutes",
+    "request failed with HTTP 429",
+    "Limit reached: daily budget spent",
+  ]) {
+    assert.equal(isLimitFailure(text), true, text);
+  }
+  for (const text of [null, undefined, "", "turn failed: exit 1", "context window exceeded", "model overloaded, retry", "canceled by user"]) {
+    assert.equal(isLimitFailure(text), false, String(text));
+  }
+});
+
+test("needsResumeForFailedTurn flags failed steers as limit or failed", () => {
+  assert.deepEqual(
+    needsResumeForFailedTurn({ role: "steer", outcome: "failed", error: "rate limit exceeded", at: "t" }),
+    { reason: "limit", at: "t" },
+  );
+  assert.deepEqual(
+    needsResumeForFailedTurn({ role: "steer", outcome: "failed", error: "exit 1", at: "t" }),
+    { reason: "failed", at: "t" },
+  );
+  assert.deepEqual(
+    needsResumeForFailedTurn({ role: "steer", outcome: "failed", error: null, at: "t" }),
+    { reason: "failed", at: "t" },
+  );
+  assert.equal(
+    needsResumeForFailedTurn({ role: "worker", outcome: "failed", error: "rate limit", at: "t" }),
+    null,
+  );
+  assert.equal(
+    needsResumeForFailedTurn({ role: "steer", outcome: "canceled", error: "rate limit", at: "t" }),
+    null,
+  );
+  assert.equal(
+    needsResumeForFailedTurn({ role: "steer", outcome: "completed", error: null, at: "t" }),
+    null,
+  );
+  assert.equal(isNeedsResumeReason("daemon-restart"), true);
+  assert.equal(isNeedsResumeReason("limit"), true);
+  assert.equal(isNeedsResumeReason("failed"), true);
+  assert.equal(isNeedsResumeReason("cold"), true);
+  assert.equal(isNeedsResumeReason("idle"), false);
+  assert.equal(isNeedsResumeReason(null), false);
+});
+
+// ---------------------------------------------------------------------------
+// Boot check: closed or interrupted steers need resume.
+// ---------------------------------------------------------------------------
+
+const steerLabels = (slot) => ({ [LABEL.repo]: REPO, [LABEL.role]: "steer", [LABEL.slot]: slot, [LABEL.scope]: REPO });
+const bootDaemonStart = NOW - 5 * MIN;
+
+async function boot(world, extra = {}) {
+  const logged = [];
+  const marks = await bootCheck.runBootCheck({
+    paseo: fakeClient(world),
+    getDaemonStartedAt: () => at(bootDaemonStart),
+    now: () => at(NOW),
+    lock: noLock,
+    readExcerpt: async () => "tail",
+    readGit: () => null,
+    log: (message) => void logged.push(message),
+    getConfig: async () => ({ steers: { slots: { A: "p", B: "p", C: "adv" } }, profiles: { p: {}, adv: { advisor: true } } }),
+    ...extra,
+  });
+  return { marks, logged, entries: world.workspaces[0].metadata[AGENTS_KEY] ?? {} };
+}
+
+function bootWorld({ activeSteer = "A", agents }) {
+  const world = makeWorld();
+  const ws = addWorkspace(world, {
+    metadata: scopeMeta({ activeSteer, checkpoint: { task: "ship it", tests: [], blockers: [], next: null } }),
+  });
+  const made = {};
+  for (const [key, spec] of Object.entries(agents)) {
+    made[key] = addAgent(world, { title: key, workspaceId: ws.id, status: "closed", labels: steerLabels(spec.slot), ...spec.fields });
+  }
+  world.workspaces[0].metadata[AGENTS_KEY] = Object.fromEntries(
+    Object.entries(agents).filter(([, spec]) => spec.entry).map(([key, spec]) => [made[key].id, spec.entry]),
+  );
+  return { world, made };
+}
+
+test("boot rule: closed steer with an old turn is not marked", async () => {
+  const { world, made } = bootWorld({ agents: { b: { slot: "B", entry: { lastTurnEndedAt: at(NOW - 30 * HOUR) } } } });
+  const { marks, entries } = await boot(world);
+  assert.equal(marks.length, 0);
+  assert.equal(entries[made.b.id].needsResume, undefined);
+});
+
+test("boot rule: every recently active steer is marked, not only the active one", async () => {
+  const { world, made } = bootWorld({
+    activeSteer: "A",
+    agents: {
+      a: { slot: "A", entry: { lastTurnEndedAt: at(NOW - 2 * HOUR) } },
+      b: { slot: "B", entry: { lastTurnEndedAt: at(NOW - 2 * HOUR) } },
+    },
+  });
+  const { marks, entries, logged } = await boot(world);
+  assert.equal(marks.length, 2);
+  assert.deepEqual(entries[made.a.id].needsResume, { reason: "daemon-restart", at: at(NOW) });
+  assert.deepEqual(entries[made.b.id].needsResume, { reason: "daemon-restart", at: at(NOW) });
+  assert.match(logged.join("\n"), /0 open turn, 1 active recent, 1 recent/);
+});
+
+test("boot rule: active steer with a recent last turn is marked, an old one is not", async () => {
+  const recent = bootWorld({ agents: { a: { slot: "A", entry: { lastTurnEndedAt: at(NOW - 23 * HOUR) } } } });
+  const r = await boot(recent.world);
+  assert.equal(r.marks[0]?.cause, "closed");
+  assert.deepEqual(r.entries[recent.made.a.id].needsResume, { reason: "daemon-restart", at: at(NOW) });
+  assert.match(r.logged.join("\n"), /0 interrupted turn\(s\).*0 open turn, 1 active recent, 0 recent/);
+  const old = bootWorld({ agents: { a: { slot: "A", entry: { lastTurnEndedAt: at(NOW - 30 * HOUR) } } } });
+  const o = await boot(old.world);
+  assert.equal(o.marks.length, 0);
+  assert.equal(o.entries[old.made.a.id].needsResume, undefined);
+  const custom = await boot(bootWorld({ agents: { a: { slot: "A", entry: { lastTurnEndedAt: at(NOW - 30 * HOUR) } } } }).world, { getRecentHours: () => 48 });
+  assert.equal(custom.marks.length, 1);
+});
+
+test("boot rule: non-active steer with an open turn is marked and interrupted", async () => {
+  const { world, made } = bootWorld({
+    agents: { b: { slot: "B", fields: { status: "idle" }, entry: { openTurnId: "t1", turnStartedAt: at(NOW - 30 * MIN) } } },
+  });
+  const { marks, entries, logged } = await boot(world);
+  assert.equal(marks[0]?.cause, "interrupted");
+  assert.equal(entries[made.b.id].interrupted.reason, "daemon-restart");
+  assert.deepEqual(entries[made.b.id].needsResume, { reason: "daemon-restart", at: at(NOW) });
+  assert.match(logged.join("\n"), /1 interrupted turn\(s\).*1 open turn, 0 active recent, 0 recent/);
+});
+
+test("boot rule: advisor without an open turn is not marked, with one it is", async () => {
+  const idle = bootWorld({ activeSteer: "C", agents: { c: { slot: "C", entry: { lastTurnEndedAt: at(NOW - HOUR) } } } });
+  assert.equal((await boot(idle.world)).marks.length, 0);
+  const open = bootWorld({
+    agents: { c: { slot: "C", entry: { openTurnId: "t1", turnStartedAt: at(NOW - 30 * MIN) } } },
+  });
+  const o = await boot(open.world);
+  assert.equal(o.marks[0]?.cause, "interrupted");
+  assert.equal(o.entries[open.made.c.id].needsResume.reason, "daemon-restart");
+});
+
+test("boot rule: config failure fails closed for the active-recent rule", async () => {
+  const { world } = bootWorld({ agents: { a: { slot: "A", entry: { lastTurnEndedAt: at(NOW - HOUR) } } } });
+  const { marks } = await boot(world, { getConfig: async () => { throw new Error("x"); } });
+  assert.equal(marks.length, 0);
+});
+
+test("boot rule: foreign scope, missing scope label, missing slot, retired scope and archived are not marked", async () => {
+  const { world, made } = bootWorld({ agents: { a: { slot: "A", entry: { lastTurnEndedAt: at(NOW - HOUR) } } } });
+  const entry = { lastTurnEndedAt: at(NOW - HOUR) };
+  const noLabel = addAgent(world, { workspaceId: world.workspaces[0].id, status: "closed", labels: {} });
+  const foreign = addAgent(world, { workspaceId: world.workspaces[0].id, status: "closed", labels: { ...steerLabels("A"), [LABEL.scope]: "other/scope" } });
+  const noSlot = addAgent(world, { workspaceId: world.workspaces[0].id, status: "closed", labels: { [LABEL.repo]: REPO, [LABEL.role]: "steer", [LABEL.scope]: REPO } });
+  const archived = addAgent(world, { workspaceId: world.workspaces[0].id, status: "closed", archivedAt: at(NOW), labels: steerLabels("A") });
+  for (const agent of [noLabel, foreign, noSlot, archived]) world.workspaces[0].metadata[AGENTS_KEY][agent.id] = entry;
+  const { marks } = await boot(world);
+  assert.deepEqual(marks.map((m) => m.agentId), [made.a.id]);
+  world.workspaces[0].metadata[AGENTS_KEY][made.a.id] = entry;
+  delete world.workspaces[0].metadata[AGENTS_KEY][made.a.id].needsResume;
+  world.workspaces[0].metadata[METADATA_KEY].retired = true;
+  assert.equal((await boot(world)).marks.length, 0);
+});
+
+test("boot rule: stale daemon-restart entries are removed at the next boot, other reasons stay", async () => {
+  const { world, made } = bootWorld({
+    agents: {
+      b: { slot: "B", entry: { lastTurnEndedAt: at(NOW - 30 * HOUR), needsResume: { reason: "daemon-restart", at: at(NOW - HOUR) } } },
+      a: { slot: "A", entry: { lastTurnEndedAt: at(NOW - HOUR), needsResume: { reason: "daemon-restart", at: at(NOW - HOUR) } } },
+      c: { slot: "B", entry: { needsResume: { reason: "limit", at: at(NOW - HOUR) } } },
+    },
+  });
+  const { marks, entries, logged } = await boot(world);
+  assert.equal(marks.length, 0);
+  assert.equal(entries[made.b.id].needsResume, undefined);
+  assert.equal(entries[made.b.id].lastTurnEndedAt, at(NOW - 30 * HOUR));
+  assert.equal(entries[made.a.id].needsResume.reason, "daemon-restart");
+  assert.equal(entries[made.c.id].needsResume.reason, "limit");
+  assert.match(logged.join("\n"), /1 stale flag\(s\) removed/);
+});
+
+test("bootResumeReason marks active and non-active recent steers, advisors only with an open turn", () => {
+  const daemonStartedAt = at(NOW);
+  const recent = at(NOW - 2 * HOUR);
+  const old = at(NOW - 30 * HOUR);
+  assert.equal(bootResumeReason({ openTurn: false, active: true, advisor: false, lastTurnEndedAt: recent, daemonStartedAt, recentHours: 24 }), "active-recent");
+  assert.equal(bootResumeReason({ openTurn: false, active: false, advisor: false, lastTurnEndedAt: recent, daemonStartedAt, recentHours: 24 }), "recent");
+  assert.equal(bootResumeReason({ openTurn: false, active: false, advisor: false, lastTurnEndedAt: old, daemonStartedAt, recentHours: 24 }), null);
+  assert.equal(bootResumeReason({ openTurn: false, active: false, advisor: false, lastTurnEndedAt: null, daemonStartedAt, recentHours: 24 }), null);
+  assert.equal(bootResumeReason({ openTurn: false, active: false, advisor: true, lastTurnEndedAt: recent, daemonStartedAt, recentHours: 24 }), null);
+  assert.equal(bootResumeReason({ openTurn: true, active: false, advisor: true, lastTurnEndedAt: null, daemonStartedAt, recentHours: 24 }), "open-turn");
+});
+
+test("resumeReminderText: active keeps the short label, others name the last steer", () => {
+  assert.deepEqual(
+    resumeReminderText({ reasonLabel: "Neustart", canFresh: true, advisor: false, activeSteer: "A" }),
+    { pill: "Resume nötig · Neustart", title: "Resume nötig · Neustart", body: "" },
+  );
+  assert.deepEqual(
+    resumeReminderText({ reasonLabel: "Limit", canFresh: false, advisor: false, activeSteer: "A" }),
+    {
+      pill: "Zuletzt steuerte Steer A",
+      title: "Zuletzt steuerte Steer A",
+      body: "Du kannst hier weitermachen; dieser Steer wird dann zum steuernden.",
+    },
+  );
+  assert.deepEqual(
+    resumeReminderText({ reasonLabel: "Fehler", canFresh: false, advisor: true, activeSteer: "A" }).pill,
+    "Resume nötig · Fehler",
+  );
+  assert.match(
+    resumeReminderText({ reasonLabel: "Neustart", canFresh: false, advisor: false, activeSteer: null }).pill,
+    /ein anderer Steer/,
+  );
+});
+
+test("sidebar counter counts only resume rows of active steers", () => {
+  const rows = [
+    { reason: "daemon-restart", canFresh: true },
+    { reason: "daemon-restart", canFresh: false },
+    { reason: "limit", canFresh: true },
+    { reason: "cold", canFresh: true },
+    { canFresh: true },
+  ];
+  assert.equal(countActiveResumeRows(rows), 2);
+  assert.equal(countActiveResumeRows([]), 0);
+});
+
+test("runBootCheck keeps an existing needsResume reason", async () => {
+  const world = makeWorld();
+  const ws = addWorkspace(world, {
+    metadata: scopeMeta({
+      checkpoint: { task: "ship it", tests: [], blockers: [], next: null },
+    }),
+  });
+  const closed = addAgent(world, {
+    title: "Steer B",
+    status: "closed",
+    workspaceId: ws.id,
+    labels: { [LABEL.repo]: REPO, [LABEL.role]: "steer", [LABEL.slot]: "B", [LABEL.scope]: REPO },
+  });
+  world.workspaces[0].metadata[AGENTS_KEY] = {
+    [closed.id]: { needsResume: { reason: "limit", at: at(NOW - HOUR) } },
+  };
+  await bootCheck.runBootCheck({
+    paseo: fakeClient(world),
+    getDaemonStartedAt: () => at(NOW - 5 * MIN),
+    now: () => at(NOW),
+    lock: noLock,
+    readExcerpt: async () => null,
+    readGit: () => null,
+    log: () => {},
+  });
+  assert.deepEqual(world.workspaces[0].metadata[AGENTS_KEY][closed.id].needsResume, {
+    reason: "limit",
+    at: at(NOW - HOUR),
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Attention feed rows.
+// ---------------------------------------------------------------------------
+
+test("collectColdAgents carries reason: cold rows and needsResume rows", async () => {
+  const world = makeWorld();
+  const ws = addWorkspace(world, { metadata: scopeMeta({}) });
+  const cold = addAgent(world, {
+    title: "Steer A",
+    workspaceId: ws.id,
+    lastUsage: { contextWindowUsedTokens: 120_000 },
+    labels: { [LABEL.repo]: REPO, [LABEL.role]: "steer", [LABEL.slot]: "A", [LABEL.scope]: REPO },
+  });
+  const flagged = addAgent(world, {
+    title: "Steer B",
+    workspaceId: ws.id,
+    labels: { [LABEL.repo]: REPO, [LABEL.role]: "steer", [LABEL.slot]: "B", [LABEL.scope]: REPO },
+  });
+  const warm = addAgent(world, {
+    title: "Steer C",
+    workspaceId: ws.id,
+    lastUsage: { contextWindowUsedTokens: 120_000 },
+    labels: { [LABEL.repo]: REPO, [LABEL.role]: "steer", [LABEL.slot]: "C", [LABEL.scope]: REPO },
+  });
+  world.workspaces[0].metadata[AGENTS_KEY] = {
+    [cold.id]: { lastTurnEndedAt: at(NOW - 2 * HOUR) },
+    [flagged.id]: {
+      lastTurnEndedAt: at(NOW - 2 * MIN),
+      needsResume: { reason: "limit", at: at(NOW - MIN) },
+    },
+    [warm.id]: { lastTurnEndedAt: at(NOW - 2 * MIN) },
+  };
+  const rows = await sweep.collectColdAgents(
+    fakeClient(world),
+    { ...CLEANUP_DEFAULTS, mode: "compact-warm" },
+    NOW,
+  );
+  const byId = new Map(rows.map((r) => [r.agentId, r]));
+  assert.equal(byId.get(cold.id)?.reason, "cold");
+  assert.equal(byId.get(flagged.id)?.reason, "limit");
+  assert.equal(byId.has(warm.id), false);
+  assert.equal(byId.get(flagged.id)?.workspaceId, ws.id);
+  assert.equal(byId.get(flagged.id)?.slot, "B");
+  assert.equal(byId.get(flagged.id)?.activeSteer, "A");
+  assert.equal(byId.get(flagged.id)?.canFresh, false);
+  assert.equal(byId.get(flagged.id)?.advisor, false);
+  const advised = await sweep.collectColdAgents(
+    fakeClient(world),
+    { ...CLEANUP_DEFAULTS, mode: "compact-warm" },
+    NOW,
+    { steers: { slots: { A: "p", B: "adv" } }, profiles: { p: {}, adv: { advisor: true } } },
+  );
+  const advisedById = new Map(advised.map((r) => [r.agentId, r]));
+  assert.equal(advisedById.get(flagged.id)?.advisor, true);
+  assert.equal(advisedById.get(cold.id)?.advisor, false);
+});
+
+// ---------------------------------------------------------------------------
+// F4: a woken steer with needsResume gets an automatic resume.
+// ---------------------------------------------------------------------------
+
+test("sendScopeWake auto-resumes a flagged steer instead of the wake text", async () => {
+  supervise.resetSupervisionForTests();
+  const world = makeWorld();
+  const ws = addWorkspace(world, {
+    metadata: scopeMeta({
+      checkpoint: { task: "t", tests: [], blockers: [], next: null },
+    }),
+  });
+  const steerA = addAgent(world, {
+    title: "Steer A",
+    workspaceId: ws.id,
+    labels: { [LABEL.repo]: REPO, [LABEL.role]: "steer", [LABEL.slot]: "A", [LABEL.scope]: REPO },
+  });
+  const workerId = "worker-1";
+  world.workspaces[0].metadata[WORKERS_KEY] = {
+    [workerId]: {
+      task: "do it",
+      startedBy: "A",
+      startedAt: at(NOW - 30 * MIN),
+      epoch: 3,
+      state: "done",
+      status: "done",
+      resumes: 0,
+      lastWakeAt: null,
+      pendingWake: null,
+    },
+  };
+  world.workspaces[0].metadata[AGENTS_KEY] = {
+    [steerA.id]: { needsResume: { reason: "daemon-restart", at: at(NOW - HOUR) } },
+  };
+  const resumed = [];
+  const sent = await supervise.sendScopeWake(
+    fakeClient(world),
+    { scope: { id: REPO, workspaceId: ws.id }, events: [{ workerId, state: "done" }] },
+    {
+      settings: { enabled: true, batchMinutes: 10, watchdogMinutes: 15, staleMinutes: 60, answerMinutes: 10, maxAutoResumes: 2 },
+      lock: noLock,
+      log: () => {},
+      nowMs: NOW,
+      nowIso: at(NOW),
+      resumeSteer: async (_paseo, args) => {
+        resumed.push(args);
+        return { cleared: true };
+      },
+    },
+  );
+  assert.equal(sent.sent, true);
+  assert.equal(sent.resumed, true);
+  assert.equal(sent.target, steerA.id);
+  assert.equal(resumed.length, 1);
+  assert.equal(resumed[0].workspaceId, ws.id);
+  assert.equal(resumed[0].agentId, steerA.id);
+  assert.match(resumed[0].note, new RegExp(`worker ${workerId} done`));
+  assert.equal(sendsTo(world, steerA.id).length, 0, "no plain wake text on auto-resume");
+  const entry = world.workspaces[0].metadata[WORKERS_KEY][workerId];
+  assert.equal(entry.lastWakeAt, at(NOW));
+});
+
+test("sendScopeWake without a flag (or wiring) sends the plain wake text", async () => {
+  supervise.resetSupervisionForTests();
+  const world = makeWorld();
+  const ws = addWorkspace(world, {
+    metadata: scopeMeta({
+      checkpoint: { task: "t", tests: [], blockers: [], next: null },
+    }),
+  });
+  const steerA = addAgent(world, {
+    title: "Steer A",
+    workspaceId: ws.id,
+    labels: { [LABEL.repo]: REPO, [LABEL.role]: "steer", [LABEL.slot]: "A", [LABEL.scope]: REPO },
+  });
+  const workerId = "worker-1";
+  const register = () => ({
+    [workerId]: {
+      task: "do it",
+      startedBy: "A",
+      startedAt: at(NOW - 30 * MIN),
+      epoch: 3,
+      state: "done",
+      status: "done",
+      resumes: 0,
+      lastWakeAt: null,
+      pendingWake: null,
+    },
+  });
+  world.workspaces[0].metadata[WORKERS_KEY] = register();
+  const deps = {
+    settings: { enabled: true, batchMinutes: 10, watchdogMinutes: 15, staleMinutes: 60, answerMinutes: 10, maxAutoResumes: 2 },
+    lock: noLock,
+    log: () => {},
+    nowMs: NOW,
+    nowIso: at(NOW),
+  };
+  const plain = await supervise.sendScopeWake(
+    fakeClient(world),
+    { scope: { id: REPO, workspaceId: ws.id }, events: [{ workerId, state: "done" }] },
+    { ...deps, resumeSteer: async () => ({ cleared: true }) },
+  );
+  assert.equal(plain.sent, true);
+  assert.equal(plain.resumed, undefined);
+  assert.equal(sendsTo(world, steerA.id).length, 1);
+
+  // Flagged but unwired: falls back to the plain wake text.
+  world.workspaces[0].metadata[WORKERS_KEY] = register();
+  world.workspaces[0].metadata[AGENTS_KEY] = {
+    [steerA.id]: { needsResume: { reason: "failed", at: at(NOW - HOUR) } },
+  };
+  const fallback = await supervise.sendScopeWake(
+    fakeClient(world),
+    { scope: { id: REPO, workspaceId: ws.id }, events: [{ workerId, state: "done" }] },
+    deps,
+  );
+  assert.equal(fallback.sent, true);
+  assert.equal(fallback.resumed, undefined);
+  assert.equal(sendsTo(world, steerA.id).length, 2);
+});
+
+// ---------------------------------------------------------------------------
+// Static wiring (repo pattern): turn hook, entry, stub removal.
+// ---------------------------------------------------------------------------
+
+test("turn hook sends the resume brief after a verified resume clear", () => {
+  const turnHook = readFileSync(new URL("../server/turn-hook.ts", import.meta.url), "utf8");
+  assert.ok(turnHook.includes("RESUME_PENDING_REASON"), "distinguishes resume clears");
+  assert.ok(turnHook.includes("getResumeBrief"), "brief builder is a hook dep");
+  assert.ok(turnHook.includes("formatResumeMessage"), "brief goes out headed");
+  assert.ok(turnHook.includes("needsResumeForFailedTurn"), "failed steer turns flag");
+  assert.ok(turnHook.includes("needsResume: null"), "flag clears on success");
+  assert.ok(turnHook.includes("needsResume kept"), "a failed brief send keeps the pill");
+});
+
+test("server entry registers resume RPC, attention feed, and F4 wiring", () => {
+  const serverEntry = readFileSync(new URL("../index.server.ts", import.meta.url), "utf8");
+  assert.ok(serverEntry.includes("factoryResumeApply"), "resume RPC registered");
+  assert.ok(serverEntry.includes("factoryAttention"), "attention feed registered");
+  assert.ok(serverEntry.includes("factoryResumeSettings"), "resume settings registered");
+  assert.ok(serverEntry.includes("resumeSteer"), "F4 auto-resume wired");
+  assert.ok(serverEntry.includes("getResumeBrief"), "turn hook gets the brief builder");
+  const settingsModule = readFileSync(new URL("../shared/settings.ts", import.meta.url), "utf8");
+  assert.ok(settingsModule.includes('id: "factory-resume"'), "resume settings document exists");
+  assert.deepEqual(factoryResumeSettings.schema.parse({}), { providers: ["claude"], recentHours: 24 });
+});
+
+test("client stub is replaced by the shared contracts", () => {
+  assert.equal(existsSync(new URL("../client/resume-contract.ts", import.meta.url)), false);
+  for (const file of ["factory-submit.ts", "factory-store.ts", "cold-actions.tsx", "factory-panel.tsx"]) {
+    const source = readFileSync(new URL(`../client/${file}`, import.meta.url), "utf8");
+    assert.ok(!source.includes("resume-contract"), `${file} no longer imports the stub`);
+    assert.ok(source.includes("factoryResumeApply"), `${file} uses the shared contract`);
+  }
+});

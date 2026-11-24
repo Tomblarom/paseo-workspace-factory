@@ -1,17 +1,25 @@
 import type {
   PluginAgentCommandContext,
+  PluginButtonRegistration,
   PluginClientContext,
   PluginWorkspaceCommandContext,
 } from "@getpaseo/plugin/client";
-import { FactoryColdPanel, FactoryColdPillContent } from "./client/cold-panel.js";
+import {
+  FactoryColdPanel,
+  FactoryColdPillContent,
+  attentionRowsOf,
+  resumeReasonLabel,
+  resumeReasonOf,
+} from "./client/cold-panel.js";
 import { FactoryPanel } from "./client/factory-panel.js";
-import { FactorySidebarItem } from "./client/factory-sidebar-item.js";
+import { FactorySidebarItem, SETTINGS_SCREEN_ID } from "./client/factory-sidebar-item.js";
 import { submitFactoryCommand } from "./client/factory-submit.js";
+import { dismissFactoryResultPill, showFactoryResultPill } from "./client/result-pill.js";
 import { FactorySettings } from "./client/settings-factory.js";
 import { initSidebarController, syncSidebarFromSettings } from "./client/sidebar-visibility.js";
 import { assertSteerContext } from "./shared/agent-guard.js";
 import { factoryCold } from "./shared/factory.js";
-import { coldHintText } from "./shared/idle-cleanup.js";
+import { coldHintText, resumeReminderText } from "./shared/idle-cleanup.js";
 
 function guardAgent(agent: PluginAgentCommandContext["agent"], what: string): void {
   assertSteerContext(agent, what);
@@ -19,11 +27,6 @@ function guardAgent(agent: PluginAgentCommandContext["agent"], what: string): vo
 
 function openFactory({ openPanel }: PluginWorkspaceCommandContext | PluginAgentCommandContext): void {
   openPanel("factory");
-}
-
-interface ColdPill {
-  update: (patch: { label?: string }) => void;
-  remove: () => void;
 }
 
 export default function contribute(client: PluginClientContext) {
@@ -42,53 +45,75 @@ export default function contribute(client: PluginClientContext) {
   });
   client.addSlashCommand({
     name: "factory",
-    description: "Drive factory workspaces, with preview before writes",
-    argumentHint: "status|scopes|cleanup|plan|apply|checkpoint|switch|resume …",
+    description: "Hand work between steers, check status, set up projects (try: /factory help)",
+    argumentHint: "help | status | switch --to B | resume | plan …",
     context: "agent",
     async onSubmit({ args, agent, workspace, rpc, openPanel }) {
       guardAgent(agent, "/factory");
-      await submitFactoryCommand(args, {
+      // A new /factory call replaces the previous transient result pill.
+      dismissFactoryResultPill();
+      // Errors propagate and appear as an error toast; that is the only toast
+      // path in onSubmit.
+      const outcome = await submitFactoryCommand(args, {
         rpc,
         workspaceId: workspace.id,
         agentId: agent.id,
       });
-      openPanel("factory");
+      if (outcome.openPanel) {
+        openPanel("factory");
+      } else if (outcome.pill) {
+        showFactoryResultPill(client, {
+          workspaceId: workspace.id,
+          agentId: agent.id,
+          summary: outcome.pill,
+        });
+      }
     },
   });
-  // C6 composer pills: one "Kontext kalt" pill per cold factory agent, driven
-  // by the server's cold feed. Pills appear and disappear without a reload.
-  const coldPills = new Map<string, ColdPill>();
-  const coldFeed = client.subscribe(
+  // Attention composer pills: one pill per flagged factory agent, driven by
+  // the server's attention feed (factory.cold until R-A renames it). A steer
+  // that needs resume takes over the C6 cold pill instead of adding a second.
+  const attentionPills = new Map<string, PluginButtonRegistration>();
+  const attentionFeed = client.subscribe(
     factoryCold,
     {},
     (event) => {
-      const rows = Array.isArray((event as any)?.cold) ? ((event as any).cold as any[]) : [];
+      const rows = attentionRowsOf(event as any);
       const seen = new Set<string>();
       for (const row of rows) {
-        if (typeof row?.agentId !== "string" || typeof row?.workspaceId !== "string") continue;
         seen.add(row.agentId);
-        const label = coldHintText(row.contextTokens ?? 0, (row.idleMinutes ?? 0) * 60_000);
-        const known = coldPills.get(row.agentId);
+        const reason = resumeReasonOf(row);
+        const title = reason ? "Resume nötig" : "Kontext kalt";
+        const label = reason
+          ? resumeReminderText({
+              reasonLabel: resumeReasonLabel(reason),
+              canFresh: row.canFresh,
+              advisor: row.advisor,
+              activeSteer: row.activeSteer,
+            }).pill
+          : coldHintText(row.contextTokens ?? 0, (row.idleMinutes ?? 0) * 60_000);
+        const icon = reason ? "RotateCcw" : "Snowflake";
+        const known = attentionPills.get(row.agentId);
         if (known) {
           try {
-            known.update({ label });
+            known.update({ title, label, icon });
           } catch {
             // The composer went away; the next event re-adds the pill.
-            coldPills.delete(row.agentId);
+            attentionPills.delete(row.agentId);
           }
           continue;
         }
         try {
-          coldPills.set(
+          attentionPills.set(
             row.agentId,
             client.addComposerPill({
-              id: `factory-cold-${row.agentId}`,
+              id: `factory-attention-${row.agentId}`,
               workspaceId: row.workspaceId,
               agentId: row.agentId,
               button: {
-                title: "Kontext kalt",
+                title,
                 label,
-                icon: "Snowflake",
+                icon,
                 behavior: { kind: "popover", Content: FactoryColdPillContent },
               },
             }),
@@ -97,14 +122,14 @@ export default function contribute(client: PluginClientContext) {
           // The agent or composer is gone; skip it until the next event.
         }
       }
-      for (const [id, pill] of coldPills) {
+      for (const [id, pill] of attentionPills) {
         if (seen.has(id)) continue;
         try {
           pill.remove();
         } catch {
           // Already gone.
         }
-        coldPills.delete(id);
+        attentionPills.delete(id);
       }
     },
   );
@@ -162,21 +187,27 @@ export default function contribute(client: PluginClientContext) {
   });
   client.addSettingsScreen({
     id: "factory-settings",
-    title: "Factory",
+    title: "Workspace Factory",
     icon: "Factory",
+    Component: FactorySettings,
+  });
+  client.addScreen({
+    id: SETTINGS_SCREEN_ID,
+    title: "Workspace Factory",
     Component: FactorySettings,
   });
   initSidebarController(client, FactorySidebarItem);
   void syncSidebarFromSettings();
   return () => {
-    void coldFeed.release().catch(() => {});
-    for (const pill of coldPills.values()) {
+    void attentionFeed.release().catch(() => {});
+    for (const pill of attentionPills.values()) {
       try {
         pill.remove();
       } catch {
         // Already gone.
       }
     }
-    coldPills.clear();
+    attentionPills.clear();
+    dismissFactoryResultPill();
   };
 }

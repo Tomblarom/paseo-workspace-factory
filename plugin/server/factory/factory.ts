@@ -7,13 +7,36 @@ import { discoverRepository, normalizeEntry } from './discovery.js';
 import { scanCheckouts, inspectCloneTarget } from './local.js';
 import { readPaseoState } from './paseo.js';
 import { planRepository } from './planner.js';
-import { listScopes } from './scope.js';
+import { listScopes, resolveScope, scopeToEntry } from './scope.js';
+
+/**
+ * Plans existing scopes by id: before discovery, an address that hits a live
+ * scope (scope id or workspace:<id>) is rewritten to that scope's own entry,
+ * keeping per-entry options (--domain, --name, ...). A workspace:<id> on a
+ * non-worktree workspace with a live scope thus plans that scope instead of
+ * failing as "not a worktree workspace". Legacy local/<folder> aliases keep
+ * their own lookup (ambiguity checks unchanged). Ambiguous addresses throw
+ * ScopeConflict like status/resolveTargetEntry.
+ */
+function resolvePlanEntry(entry, paseoState) {
+  const scope = resolveScope(entry, paseoState);
+  if (!scope || scope.deprecatedAlias === true) return entry;
+  const base = scopeToEntry(scope);
+  if (typeof entry === 'string' || !entry || typeof entry !== 'object' || Array.isArray(entry)) return base;
+  const keep = {};
+  for (const key of ['name', 'subject', 'hub', 'domain', 'main', 'checkout', 'parentDir']) {
+    if (entry[key] !== undefined) keep[key] = entry[key];
+  }
+  if (!Object.keys(keep).length) return base;
+  return typeof base === 'string' ? { repo: base, ...keep } : { ...base, ...keep };
+}
 
 export function createRunner({ config, client, gh, git, readState = readPaseoState, scan = scanCheckouts, inspectTarget = inspectCloneTarget, realpath = realpathSync, existsDir } = {}) {
   async function discoverAll(entries) {
     const paseo = await readState(client);
     const liveScopes = listScopes(paseo);
-    const normalized = entries.map((e) => normalizeEntry(e, config));
+    const resolved = entries.map((e) => resolvePlanEntry(e, paseo));
+    const normalized = resolved.map((e) => normalizeEntry(e, config));
     const roots = [...new Set([
       config.checkoutRoot,
       ...normalized.map((n) => n.parentDir),
@@ -24,7 +47,7 @@ export function createRunner({ config, client, gh, git, readState = readPaseoSta
       ...paseo.workspaces.map((w) => w.workspaceDirectory),
     ];
     const checkouts = scan({ roots, knownDirs, git });
-    return entries.map((entry) => discoverRepository(entry, { config, gh, git, checkouts, paseo, realpath, inspectTarget, liveScopes, ...(existsDir ? { existsDir } : {}) }));
+    return resolved.map((entry) => discoverRepository(entry, { config, gh, git, checkouts, paseo, realpath, inspectTarget, liveScopes, ...(existsDir ? { existsDir } : {}) }));
   }
   // Location identity for the cross-entry scope check: same workspace (or same
   // expected path while creating) is the same scope addressed twice, not a dup.

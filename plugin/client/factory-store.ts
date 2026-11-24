@@ -1,11 +1,15 @@
 import type { RpcOutput } from "@getpaseo/plugin";
 import type {
   factoryApply,
+  factoryAssignPreview,
   factoryCheckpoint,
   factoryCheckpointPreview,
   factoryCleanup,
+  factoryFreshPreview,
   factoryPlan,
+  factoryRelocatePreview,
   factoryResume,
+  factoryResumeApply,
   factoryScopes,
   factoryScopesCandidates,
   factoryStatus,
@@ -16,6 +20,13 @@ import type {
 export interface CheckpointPreviewInputs {
   task?: string;
   fromAgent?: string;
+  tests: string[];
+  blockers: string[];
+  next?: string;
+}
+
+export interface AssignPreviewInputs {
+  task: string;
   tests: string[];
   blockers: string[];
   next?: string;
@@ -52,7 +63,38 @@ export type FactoryPanelResult =
       preview: RpcOutput<typeof factorySwitchPreview>;
     }
   | { kind: "switched"; repo: string; at: string; result: RpcOutput<typeof factorySwitch> }
+  | {
+      kind: "freshPreview";
+      repo?: string;
+      workspaceId: string;
+      at: string;
+      preview: RpcOutput<typeof factoryFreshPreview>;
+    }
+  | {
+      kind: "relocatePreview";
+      repo?: string;
+      workspaceId: string;
+      to: string;
+      at: string;
+      preview: RpcOutput<typeof factoryRelocatePreview>;
+    }
+  | {
+      kind: "assignPreview";
+      repo?: string;
+      workspaceId: string;
+      at: string;
+      inputs: AssignPreviewInputs;
+      preview: RpcOutput<typeof factoryAssignPreview>;
+    }
   | { kind: "resume"; repo: string; at: string; resume: RpcOutput<typeof factoryResume> }
+  | { kind: "resumePreview"; workspaceId: string; agentId: string; at: string }
+  | {
+      kind: "resumeApplied";
+      workspaceId: string;
+      agentId: string;
+      at: string;
+      applied: RpcOutput<typeof factoryResumeApply>;
+    }
   | { kind: "info"; at: string; text: string }
   | { kind: "error"; at: string; message: string };
 

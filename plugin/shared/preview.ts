@@ -68,3 +68,39 @@ export interface FreshPreviewIdentity {
 export function freshFingerprint(identity: FreshPreviewIdentity): string {
   return fingerprintOf({ kind: "factory.fresh", ...identity });
 }
+
+export interface ResumePreviewIdentity {
+  agentId: string;
+  status: string | null;
+  sessionId: string | null;
+  checkpointAt: string | null;
+}
+
+export function resumeFingerprint(identity: ResumePreviewIdentity): string {
+  return fingerprintOf({ kind: "factory.resume.apply", ...identity });
+}
+
+export interface AssignPreviewIdentity {
+  scope: string;
+  epoch: number;
+  task: string;
+  tests: string[];
+  blockers: string[];
+  next: string | null;
+}
+
+export function assignFingerprint(identity: AssignPreviewIdentity): string {
+  return fingerprintOf({ kind: "factory.assign", ...identity });
+}
+
+export interface RelocatePreviewIdentity {
+  scope: string;
+  fromWorkspace: string;
+  toDir: string;
+  steers: string[];
+  checkpoint: boolean;
+}
+
+export function relocateFingerprint(identity: RelocatePreviewIdentity): string {
+  return fingerprintOf({ kind: "factory.relocate", ...identity });
+}

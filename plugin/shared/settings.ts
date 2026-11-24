@@ -1,11 +1,40 @@
 import { defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
 
+/**
+ * factory-config v1 -> v2: workerDefault becomes workerPriority=[workerDefault];
+ * every profile gets advisor=false and sensitive (muse without an explicit
+ * flag is sensitive, everything else is not). Already-v2 values pass through.
+ */
+export function migrateFactoryConfig(values: unknown, fromVersion: number): unknown {
+  if (fromVersion >= 2 || !values || typeof values !== "object") return values;
+  const old = values as Record<string, any>;
+  const profiles: Record<string, any> = {};
+  for (const [name, raw] of Object.entries(old.profiles ?? {})) {
+    const profile = (raw ?? {}) as Record<string, any>;
+    profiles[name] = {
+      ...profile,
+      advisor: typeof profile.advisor === "boolean" ? profile.advisor : false,
+      sensitive: typeof profile.sensitive === "boolean" ? profile.sensitive : profile.provider === "muse",
+    };
+  }
+  const { workerDefault, ...rest } = old;
+  const next: Record<string, any> = { ...rest, profiles };
+  if (!Array.isArray(rest.workerPriority) && typeof workerDefault === "string" && workerDefault) {
+    next.workerPriority = [workerDefault];
+  }
+  return next;
+}
+
 const profileSchema = z.object({
   provider: z.string().min(1),
   model: z.string().min(1),
   thinking: z.string().nullable().default(null),
   mode: z.string().nullable().default(null),
+  // v2: advisor profiles are second-opinion steers, never coordinators or workers.
+  advisor: z.boolean().default(false),
+  // v2: sensitive profiles only get sanitized technical tasks.
+  sensitive: z.boolean().default(false),
 });
 
 const defaultProfile = {
@@ -13,21 +42,31 @@ const defaultProfile = {
   model: "gpt-6.2-sol",
   thinking: "high",
   mode: "full-access",
+  advisor: false,
+  sensitive: false,
 };
 
-// Factory configuration subset owned by the plugin: steer slots, prepare list,
-// start steer, worker default profile, and the profiles they reference.
+// Factory configuration subset owned by the plugin: steer slots (slot order =
+// priority), prepare list, start steer, prioritized worker list, and the
+// profiles they reference. v1 -> v2: workerDefault becomes workerPriority,
+// profiles gain advisor/sensitive (see migrateFactoryConfig above).
 // Defaults mirror the single-steer example config; {} parses into this document.
 export const factoryConfigSettings = defineSettings({
   id: "factory-config",
   scope: "host",
-  version: 1,
+  version: 2,
+  migrate: (values, fromVersion) => migrateFactoryConfig(values, fromVersion),
   schema: z.object({
     profiles: z.record(z.string(), profileSchema).default({ "factory-default": defaultProfile }),
     slots: z.record(z.string(), z.string()).default({ A: "factory-default" }),
     prepare: z.array(z.string()).default(["A"]),
     initialActive: z.string().default("A"),
-    workerDefault: z.string().default("factory-default"),
+    workerPriority: z.array(z.string()).min(1).default(["factory-default"]),
+    quota: z.object({
+      exhaustedPct: z.number().min(0).max(100).default(90),
+      warnPct: z.number().min(0).max(100).default(75),
+    }).default({ exhaustedPct: 90, warnPct: 75 }),
+    quotaSampleMinutes: z.number().int().min(10).default(10),
   }),
 });
 
@@ -59,5 +98,44 @@ export const factoryCleanupSettings = defineSettings({
     seedAfterClear: z.boolean().default(false),
     clearAcknowledged: z.boolean().default(false),
     dailyCap: z.number().int().min(1).default(20),
+  }),
+});
+
+// Manual resume (R-A): which providers accept /clear during /factory resume.
+// Defaults mirror RESUME_CLEAR_DEFAULTS in shared/idle-cleanup.ts; {} parses
+// into a complete document. Providers outside the list get the brief only.
+export const factoryResumeSettings = defineSettings({
+  id: "factory-resume",
+  scope: "host",
+  version: 1,
+  schema: z.object({
+    providers: z.array(z.string().min(1)).min(1).default(["claude"]),
+    recentHours: z.number().int().min(1).default(24),
+  }),
+});
+
+// Worker supervision (S-B): wake cadence, watchdog, and failover.
+// Defaults mirror SUPERVISION_SETTINGS_DEFAULTS in shared/supervise.ts; {}
+// parses into a complete document. `enabled` off silences the whole
+// supervision side (registration, wakes, watchdog); the register keeps
+// whatever the CLI wrote.
+export const factorySupervisionSettings = defineSettings({
+  id: "factory-supervision",
+  scope: "host",
+  version: 1,
+  schema: z.object({
+    enabled: z.boolean().default(true),
+    // Kept for config compatibility; immediate wakes use wakeDebounceSeconds.
+    batchMinutes: z.number().int().min(0).default(0),
+    wakeDebounceSeconds: z.number().int().min(0).default(20),
+    watchdogMinutes: z.number().int().min(1).default(15),
+    staleMinutes: z.number().int().min(1).default(60),
+    answerMinutes: z.number().int().min(1).default(10),
+    maxAutoResumes: z.number().int().min(0).default(2),
+    quota: z.object({
+      exhaustedPct: z.number().min(0).max(100).default(90),
+      warnPct: z.number().min(0).max(100).default(75),
+    }).default({ exhaustedPct: 90, warnPct: 75 }),
+    quotaSampleMinutes: z.number().int().min(10).default(10),
   }),
 });

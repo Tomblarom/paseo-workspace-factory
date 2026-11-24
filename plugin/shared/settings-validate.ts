@@ -6,6 +6,8 @@ export interface FactoryProfileValue {
   model: string;
   thinking: string | null;
   mode: string | null;
+  advisor: boolean;
+  sensitive: boolean;
 }
 
 export interface FactorySettingsValues {
@@ -13,7 +15,53 @@ export interface FactorySettingsValues {
   slots: Record<string, string>;
   prepare: string[];
   initialActive: string;
-  workerDefault: string;
+  workerPriority: string[];
+  quota: { exhaustedPct: number; warnPct: number };
+  quotaSampleMinutes: number;
+}
+
+/**
+ * Settings document that equals `config` for everything the plugin owns.
+ * Profiles keep the stored ones and add every profile `config` references or
+ * changed, so file-only profiles are copied only when they become used.
+ */
+export function settingsFromConfig(config: any, current: FactorySettingsValues): FactorySettingsValues {
+  const slots: Record<string, string> = { ...(config.steers?.slots ?? {}) };
+  const priority: string[] = Array.isArray(config.workers?.priority)
+    ? [...config.workers.priority]
+    : config.workers?.defaultProfile
+      ? [config.workers.defaultProfile]
+      : [];
+  const profiles: Record<string, FactoryProfileValue> = {};
+  for (const [name, p] of Object.entries<any>(config.profiles ?? {})) {
+    const stored = current.profiles?.[name];
+    const used = Object.values(slots).includes(name) || priority.includes(name);
+    const flagsChanged = stored && (stored.advisor === true) !== (p.advisor === true);
+    const sensChanged = stored && Boolean(stored.sensitive) !== Boolean(p.sensitive ?? p.provider === "muse");
+    const different = stored && (stored.provider !== p.provider || stored.model !== p.model || (stored.thinking ?? null) !== (p.thinking ?? null) || (stored.mode ?? null) !== (p.mode ?? null));
+    if (!stored && !used) continue;
+    if (stored && !used && !flagsChanged && !sensChanged && !different) {
+      profiles[name] = stored;
+      continue;
+    }
+    profiles[name] = {
+      provider: p.provider,
+      model: p.model,
+      thinking: p.thinking ?? null,
+      mode: p.mode ?? null,
+      advisor: p.advisor === true,
+      sensitive: typeof p.sensitive === "boolean" ? p.sensitive : p.provider === "muse",
+    };
+  }
+  return {
+    profiles,
+    slots,
+    prepare: [...(config.steers?.prepare ?? current.prepare)],
+    initialActive: config.steers?.initialActive ?? current.initialActive,
+    workerPriority: priority,
+    quota: current.quota ?? { exhaustedPct: 90, warnPct: 75 },
+    quotaSampleMinutes: current.quotaSampleMinutes ?? 10,
+  };
 }
 
 export interface ProviderEntry {
@@ -57,6 +105,28 @@ export interface CleanupSettingsValues {
   seedAfterClear: boolean;
   clearAcknowledged: boolean;
   dailyCap: number;
+}
+
+export interface QuotaSettingsValues {
+  quota: { exhaustedPct: number; warnPct: number };
+  quotaSampleMinutes: number;
+}
+
+export function validateQuotaSettings(values: QuotaSettingsValues): string[] {
+  if (!values || typeof values !== "object") return ["settings must be an object"];
+  const errors: string[] = [];
+  for (const key of ["exhaustedPct", "warnPct"] as const) {
+    const value = values.quota?.[key];
+    if (value === undefined) continue;
+    if (!Number.isFinite(value) || value < 0 || value > 100) {
+      errors.push(`quota.${key} must be a number from 0 to 100`);
+    }
+  }
+  if (values.quotaSampleMinutes !== undefined &&
+      (!Number.isInteger(values.quotaSampleMinutes) || values.quotaSampleMinutes < 10)) {
+    errors.push("quotaSampleMinutes must be an integer of at least 10 minutes");
+  }
+  return errors;
 }
 
 /** Structural check of the C5 cleanup document. Empty means valid. */
@@ -104,6 +174,7 @@ export function validateCleanupSettings(values: CleanupSettingsValues): string[]
 export function validateFactorySettings(values: FactorySettingsValues): string[] {
   const errors: string[] = [];
   if (!values || typeof values !== "object") return ["settings must be an object"];
+  errors.push(...validateQuotaSettings(values));
   const profiles = values.profiles ?? {};
   if (typeof profiles !== "object" || !Object.keys(profiles).length) {
     errors.push("profiles must define at least one profile");
@@ -138,15 +209,36 @@ export function validateFactorySettings(values: FactorySettingsValues): string[]
   if (!prepare.includes(values.initialActive)) {
     errors.push("initialActive must be one of prepare");
   }
-  if (!profiles[values.workerDefault]) {
-    errors.push(`workerDefault references unknown profile ${JSON.stringify(values.workerDefault)}`);
+  const priority = values.workerPriority ?? [];
+  if (!Array.isArray(priority) || !priority.length) {
+    errors.push("workerPriority must list at least one profile");
+  } else {
+    for (const name of priority) {
+      if (!profiles[name]) errors.push(`workerPriority references unknown profile ${JSON.stringify(name)}`);
+      else if (profiles[name].advisor === true) errors.push(`workerPriority profile ${JSON.stringify(name)} is tagged as advisor`);
+    }
+    if (new Set(priority).size !== priority.length) errors.push("workerPriority contains duplicates");
+  }
+  for (const [name, p] of Object.entries(profiles)) {
+    for (const key of ["advisor", "sensitive"] as const) {
+      const flag: unknown = (p as Partial<FactoryProfileValue>)?.[key];
+      if (flag !== undefined && typeof flag !== "boolean") errors.push(`profiles.${name}.${key} must be a boolean`);
+    }
+  }
+  const isAdvisorSlot = (slot: string) => profiles[slots[slot]]?.advisor === true;
+  if (Object.keys(slots).length && Object.keys(slots).every(isAdvisorSlot)) {
+    errors.push("at least one steer slot needs a non-advisor profile");
+  }
+  if (slots[values.initialActive] && isAdvisorSlot(values.initialActive)) {
+    errors.push(`initialActive ${values.initialActive} is an advisor slot; pick a coordinating steer`);
   }
   return errors;
 }
 
 /**
  * Layers the host-scope settings document over the config file: profiles merge
- * per name, slots/prepare/initialActive/workerDefault replace the file values.
+ * per name, slots/prepare/initialActive/workerPriority replace the file values
+ * (workers.defaultProfile follows priority[0] for older readers).
  * Everything else (github, checkoutRoot, runtime, knownLimits) stays file-owned.
  */
 export function mergeFactoryConfig(fileConfig: any, settings: FactorySettingsValues): any {
@@ -158,7 +250,13 @@ export function mergeFactoryConfig(fileConfig: any, settings: FactorySettingsVal
     prepare: [...settings.prepare],
     initialActive: settings.initialActive,
   };
-  next.workers = { ...(fileConfig.workers ?? {}), defaultProfile: settings.workerDefault };
+  next.workers = {
+    ...(fileConfig.workers ?? {}),
+    priority: [...settings.workerPriority],
+    defaultProfile: settings.workerPriority[0],
+  };
+  next.quota = { ...(fileConfig.quota ?? {}), ...settings.quota };
+  next.quotaSampleMinutes = settings.quotaSampleMinutes;
   return next;
 }
 

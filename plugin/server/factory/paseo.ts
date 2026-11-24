@@ -143,6 +143,57 @@ export function parentOf(agent) {
 }
 
 /**
+ * "parent <id>" for an agent with a parent, else null. Single wording source
+ * for the parent display in plan hints, `scopes --candidates` and the panel.
+ */
+export function describeParent(agent) {
+  const parent = parentOf(agent);
+  return parent === null ? null : `parent ${parent}`;
+}
+
+/**
+ * Context-window usage from an agent snapshot (`lastUsage`), or null when Paseo
+ * reports none. Only context numbers are used; nothing is estimated. The account
+ * quotas of `paseo usage` are deliberately not shown per agent: they belong to a
+ * provider account, not to an agent.
+ */
+export function agentUsage(agent) {
+  const snapshot = agent?.lastUsage ?? agent?.LastUsage ?? null;
+  const used = snapshot?.contextWindowUsedTokens ?? snapshot?.ContextWindowUsedTokens;
+  const max = snapshot?.contextWindowMaxTokens ?? snapshot?.ContextWindowMaxTokens;
+  if (!Number.isFinite(used) || !Number.isFinite(max)) return null;
+  return { usedTokens: used, maxTokens: max };
+}
+
+/** Restart reasons written by the boot check (P1) and drain (P3). */
+export const RESTART_REASONS = ['daemon-restart', 'planned-restart'];
+
+/** True for an interrupted reason that means "killed by a restart". */
+export function isRestartReason(reason) {
+  return typeof reason === 'string' && RESTART_REASONS.includes(reason);
+}
+
+/** Single wording source for the restart-interruption line in status/scopes/resume. */
+export function restartMessage(agentId) {
+  return `Agent ${agentId} durch Neustart unterbrochen`;
+}
+
+/**
+ * Daemon start time from `paseo daemon status --json` (field `startedAt`,
+ * verified on Paseo 0.16.2). Returns null when unreadable (fail closed: no
+ * heuristic marks). Takes the CLI wrapper so tests can inject a fake.
+ */
+export function daemonStartedAt(paseoCli) {
+  try {
+    const status = paseoCli(['daemon', 'status']);
+    const startedAt = status?.startedAt;
+    return typeof startedAt === 'string' && startedAt ? startedAt : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Paseo releases the receipt lookup was tested against. The lookup speaks the
  * internal `creation.subscribe` protocol message (which the SDK itself uses to
  * reattach to running creations); its shape is not part of the public SDK

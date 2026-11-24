@@ -7,7 +7,9 @@ import {
   factoryFreshPreview,
   factoryHistoryOpen,
   factoryResume,
+  factoryResumeApply,
 } from "../shared/factory.js";
+import type { NeedsResumeReason } from "./cold-panel.js";
 
 interface ColdActionsProps {
   agentId: string;
@@ -15,6 +17,10 @@ interface ColdActionsProps {
   /** Fresh is manual-only and additive; offered only to the active steer. */
   canFresh: boolean;
   hasHistory: boolean;
+  /** Set when the attention feed flags this steer for resume; shows "Resume jetzt". */
+  needsResume: NeedsResumeReason | null;
+  /** Non-active, non-advisor steer: resume also takes over coordination. */
+  takeover: boolean;
   theme: PluginHostProps["theme"];
   compact: boolean;
 }
@@ -38,10 +44,13 @@ export function ColdActions({
   workspaceId,
   canFresh,
   hasHistory,
+  needsResume,
+  takeover,
   theme,
   compact,
 }: ColdActionsProps) {
   const callResume = useRpc(factoryResume);
+  const callResumeApply = useRpc(factoryResumeApply);
   const callFreshPreview = useRpc(factoryFreshPreview);
   const callFresh = useRpc(factoryFresh);
   const callHistory = useRpc(factoryHistoryOpen);
@@ -80,6 +89,29 @@ export function ColdActions({
     try {
       const result = await callResume({ agentId, workspaceId });
       setBrief(result.brief);
+    } catch (error) {
+      fail(error);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const onResumeApply = async () => {
+    setBusy("resumeApply");
+    setError(null);
+    setNotice(null);
+    try {
+      const applied = await callResumeApply({
+        agentId,
+        workspaceId,
+        ...(takeover ? { takeover: true as const } : {}),
+      });
+      setBrief(null);
+      setNotice(
+        typeof applied.detail === "string" && applied.detail !== ""
+          ? applied.detail
+          : "Resume läuft: Der Kontext wird geleert, danach kommt der Resume-Brief in die Timeline.",
+      );
     } catch (error) {
       fail(error);
     } finally {
@@ -147,6 +179,17 @@ export function ColdActions({
   return (
     <View style={styles.actions}>
       <View style={styles.row}>
+        {needsResume ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Resume now"
+            style={styles.button}
+            disabled={busy !== null}
+            onPress={() => void onResumeApply()}
+          >
+            <Text style={styles.buttonText}>{busy === "resumeApply" ? "…" : "Resume jetzt"}</Text>
+          </Pressable>
+        ) : null}
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Show resume brief"
@@ -154,7 +197,7 @@ export function ColdActions({
           disabled={busy !== null}
           onPress={() => void onResume()}
         >
-          <Text style={styles.buttonText}>{busy === "resume" ? "…" : "Resume"}</Text>
+          <Text style={styles.buttonText}>{busy === "resume" ? "…" : "Brief lesen"}</Text>
         </Pressable>
         {canFresh ? (
           <Pressable

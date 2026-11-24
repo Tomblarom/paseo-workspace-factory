@@ -16,7 +16,8 @@
     "shared/"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.mjs"
   },
   "devDependencies": {
     "@getpaseo/plugin": "0.16.2",

@@ -17,7 +17,7 @@ function validSettings() {
     slots: { A: "factory-default", B: "spare" },
     prepare: ["A", "B"],
     initialActive: "A",
-    workerDefault: "spare",
+    workerPriority: ["spare"],
   };
 }
 
@@ -29,7 +29,7 @@ test("validateFactorySettings accepts a complete document", () => {
       slots: { A: "d" },
       prepare: ["A"],
       initialActive: "A",
-      workerDefault: "d",
+      workerPriority: ["d"],
     }),
     [],
   );
@@ -63,8 +63,8 @@ test("validateFactorySettings reports structural problems", () => {
   assert.match(JSON.stringify(validateFactorySettings(badActive)), /initialActive/);
 
   const badWorker = validSettings();
-  badWorker.workerDefault = "missing";
-  assert.match(JSON.stringify(validateFactorySettings(badWorker)), /workerDefault/);
+  badWorker.workerPriority = ["missing"];
+  assert.match(JSON.stringify(validateFactorySettings(badWorker)), /workerPriority/);
 
   const badProfile = validSettings();
   badProfile.profiles["factory-default"] = { provider: "", model: "m", thinking: null, mode: null };

@@ -11,6 +11,7 @@ import {
   decideCleanupAction,
   hasKeepContext,
   isCold,
+  isSupervisionProtectedState,
   pushPreviousSession,
   scanCleanupEvidence,
   sendCleanupCommand,
@@ -324,6 +325,56 @@ test("cleanupInputOf maps snapshots, entries, and checkpoints", () => {
   assert.equal(missing.contextTokens, null);
   assert.equal(missing.pendingPermissionCount, 0);
   assert.equal(missing.lastTurnEndedAt, null);
+});
+
+test("C5 skips supervised workers the steer has not seen yet", () => {
+  assert.equal(isSupervisionProtectedState("running"), true);
+  assert.equal(isSupervisionProtectedState("blocked"), true);
+  assert.equal(isSupervisionProtectedState("interrupted"), true);
+  assert.equal(isSupervisionProtectedState("done"), false);
+  assert.equal(isSupervisionProtectedState("partial"), false);
+  assert.equal(isSupervisionProtectedState("stale"), false);
+  assert.equal(isSupervisionProtectedState(null), false);
+  assert.equal(isSupervisionProtectedState(undefined), false);
+  for (const workerState of ["running", "blocked", "interrupted"]) {
+    const denied = decideCleanupAction(
+      input({
+        labels: { "wsf.scope": "s", "wsf.role": "worker" },
+        entry: { note: "task: x", noteAt: at(NOW - HOUR) },
+        workerState,
+      }),
+    );
+    assert.equal(denied.action, null, workerState);
+    assert.match(denied.reason, /steer has not seen it yet/);
+  }
+  for (const workerState of ["done", "partial", "stale", null, undefined]) {
+    const worker = decideCleanupAction(
+      input({
+        labels: { "wsf.scope": "s", "wsf.role": "worker" },
+        entry: { note: "task: x", noteAt: at(NOW - HOUR), lastTurnEndedAt: at(NOW - 2 * HOUR) },
+        workerState,
+      }),
+    );
+    assert.equal(worker.action, "compact-warm", String(workerState));
+  }
+});
+
+test("cleanupInputOf carries the supervision register state", () => {
+  const agent = { id: "w-1", labels: { "wsf.scope": "s", "wsf.role": "worker" }, provider: "claude", status: "idle", archivedAt: null };
+  assert.equal(
+    cleanupInputOf({
+      agent, entry: null, checkpoint: null, activeSteer: "A", settings: CLEANUP_DEFAULTS,
+      actionsToday: 0, effectBlocked: false, nowMs: NOW, workerState: "blocked",
+    }).workerState,
+    "blocked",
+  );
+  assert.equal(
+    cleanupInputOf({
+      agent, entry: null, checkpoint: null, activeSteer: "A", settings: CLEANUP_DEFAULTS,
+      actionsToday: 0, effectBlocked: false, nowMs: NOW,
+    }).workerState,
+    null,
+  );
 });
 
 test("sendCleanupCommand sends through the SDK without options", async () => {

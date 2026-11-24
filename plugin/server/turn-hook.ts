@@ -8,11 +8,18 @@ import {
   parseCheckpointBlock,
   readGitSnapshot,
 } from "./factory/steer.js";
+import { updateAgentEntry } from "./factory/agent-state.js";
 import { captureSweepPaseo, noteEffectFailure } from "./cold-sweep.js";
 import {
+  RESUME_PENDING_REASON,
   SEED_AFTER_CLEAR,
+  formatResumeMessage,
+  needsResumeForFailedTurn,
   scanCleanupEvidence,
 } from "../shared/idle-cleanup.js";
+import { firstUserText } from "../shared/supervise.js";
+import { extractTurnUsage, mergeTurnUsage } from "./quota.js";
+import { runFailoverCheck } from "./supervise.js";
 import {
   checkRace,
   cleanupCommandKind,
@@ -37,9 +44,41 @@ interface TurnHookContext {
   signal?: unknown;
 }
 
+interface TurnBeforePayload {
+  agent: { id: string };
+  turnId: string | null;
+}
+
 export interface TurnHookDeps {
   /** Reads the C5 settings for the seed-after-clear step; absent means no seed. */
   getCleanupSettings?: () => Promise<{ seedAfterClear: boolean } | null>;
+  /** Builds the resume brief after a verified resume clear; absent means none. */
+  getResumeBrief?: (paseo: any, workspaceId: string, agentId: string) => Promise<string>;
+  /** Clock for open-turn tracking; defaults to the current time. */
+  now?: () => string;
+  getConfig?: () => Promise<any>;
+  getSupervisionSettings?: () => Promise<any>;
+}
+
+/**
+ * P1 open-turn tracking: records turn start so a daemon restart that kills
+ * the turn without turn.after can be detected at boot. Never throws.
+ */
+export async function handleTurnBefore(
+  payload: TurnBeforePayload,
+  context: TurnHookContext,
+  deps: TurnHookDeps = {},
+): Promise<void> {
+  captureSweepPaseo(context?.paseo);
+  try {
+    await runTurnBefore(payload, context.paseo, deps);
+  } catch (error) {
+    console.error(
+      `[factory] turn-before hook failed for agent ${payload?.agent?.id ?? "?"}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
 }
 
 /**
@@ -63,13 +102,30 @@ export async function handleTurnAfter(
   }
 }
 
-function firstUserText(entries: unknown): string | null {
-  if (!Array.isArray(entries)) return null;
-  for (const entry of entries) {
-    const item = (entry as { item?: { type?: unknown; text?: unknown } } | null)?.item;
-    if (item?.type === "user_message" && typeof item.text === "string") return item.text;
-  }
-  return null;
+async function runTurnBefore(payload: TurnBeforePayload, paseo: any, deps: TurnHookDeps): Promise<void> {
+  const agentId = payload?.agent?.id;
+  if (!agentId) return;
+  const snap: any = await paseo.agents.ref(agentId).refresh().catch(() => null);
+  const agent: any = snap?.agent ?? null;
+  if (!agent || agent.archivedAt) return;
+  const identity = factoryIdentity(agent.labels ?? null);
+  if (!identity) return;
+  const paseoState: any = await readPaseoState(paseo);
+  const scope: any = listScopes(paseoState).find((s: any) => s.id === identity.scopeId) ?? null;
+  if (!scope) return;
+  const mainId: string = scope.workspaceId;
+  const meta = scope.workspace?.metadata ?? {};
+  const wsf = asRecord(meta[METADATA_KEY]);
+  if (!wsf) return;
+  const now = deps.now ? deps.now() : new Date().toISOString();
+  const update = updateAgentEntry as unknown as (args: any) => Promise<any>;
+  await update({
+    client: paseo,
+    workspaceId: mainId,
+    agentId,
+    patch: { openTurnId: payload.turnId ?? null, turnStartedAt: now },
+    liveIds: null,
+  });
 }
 
 function failureText(outcome: TurnPayload["outcome"]): string | null {
@@ -139,6 +195,7 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
   const lastAnswer = lastAssistantText({ entries });
   const block = kind === "completed" && lastAnswer ? parseCheckpointBlock(lastAnswer) : null;
   const usage: any = agentUsage(agent);
+  const turnUsage = extractTurnUsage(payload, agent);
   const git = kind === "completed" ? null : readGitSnapshot(createGit(), scope.directory ?? null);
   const turnUserText = firstUserText(entries);
 
@@ -183,6 +240,23 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
     now: new Date().toISOString(),
   });
 
+  // E4 needsResume bookkeeping for ordinary turns (resume-cleanup turns are
+  // handled after the write, once the brief is sent): a failed steer turn
+  // flags, a completed turn clears. Cleanup turns of our own never flag.
+  const isCleanupTurn = Boolean(pending && cleanupCommandKind(turnUserText));
+  let needsResumePatch: Record<string, unknown> | null = null;
+  if (!isCleanupTurn && kind === "completed" && previous?.needsResume) {
+    needsResumePatch = { needsResume: null };
+  } else if (!isCleanupTurn && kind === "failed") {
+    const flagged = needsResumeForFailedTurn({
+      role: identity.role,
+      outcome: kind,
+      error: failureText(payload.outcome),
+      at: new Date().toISOString(),
+    });
+    if (flagged) needsResumePatch = { needsResume: flagged };
+  }
+
   // One core lock helper names and takes workspace locks (never duplicated here).
   const lockOptions: any = undefined;
   await withWorkspaceLock(mainId, async (held: any) => {
@@ -212,8 +286,13 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
     }
     // Merge onto the fresh entry so concurrent fields (e.g. a pendingAction
     // C5 set after our read) survive; resolving clears it explicitly.
-    const prev = asRecord(freshAgents[agentId]) ?? {};
-    const merged = { ...prev, ...(decision.entryUpdate ?? {}) };
+    const prev: Record<string, any> = asRecord(freshAgents[agentId]) ?? {};
+    const merged: Record<string, any> = {
+      ...prev,
+      ...(decision.entryUpdate ?? {}),
+      ...(needsResumePatch ?? {}),
+      ...(turnUsage ? { usage: mergeTurnUsage(prev.usage, turnUsage) } : {}),
+    };
     if (decision.resolvePending) merged.pendingAction = null;
     const patch: Record<string, unknown> = { [AGENTS_KEY]: { ...freshAgents, [agentId]: merged } };
     const freshCheckpoint =
@@ -232,15 +311,76 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
     console.log(`[factory] turn hook: ${decision.log}`);
   }, lockOptions);
 
+  if (needsResumePatch?.needsResume && (needsResumePatch.needsResume as any).reason === "limit") {
+    try {
+      const settings = (await deps.getSupervisionSettings?.()) ?? {
+        enabled: true,
+        answerMinutes: 0,
+        batchMinutes: 10,
+        watchdogMinutes: 15,
+        staleMinutes: 60,
+        maxAutoResumes: 2,
+      };
+      await runFailoverCheck(paseo, scope, {
+        settings,
+        force: true,
+        getConfig: deps.getConfig,
+        failingPool: typeof agent.provider === "string" ? agent.provider : null,
+      });
+    } catch (error) {
+      console.error(
+        `[factory] turn hook: limit failover failed (${error instanceof Error ? error.message : String(error)})`,
+      );
+    }
+  }
+
+  // A resume clear replaces the seed with the full brief: after a verified
+  // (or unverifiable but completed) clear the brief goes into the fresh
+  // timeline; after effectFailed it arrives with the not-cleared notice. The
+  // flag clears only once the brief is sent, so a failed send keeps the pill.
+  const pendingReason = asRecord(previous?.pendingAction)?.reason;
+  const cleared = asRecord(decision.entryUpdate?.cleared);
+  const resumeDone =
+    pendingReason === RESUME_PENDING_REASON &&
+    kind === "completed" &&
+    !decision.dropSelf &&
+    (cleared !== null || decision.effectFailed === true);
   if (decision.effectFailed) {
     noteEffectFailure(
       `a cleanup command to ${agentId} arrived as text without effect (see wsf.agents.${agentId}.lastActionFailed)`,
     );
+    if (!resumeDone) return;
+  }
+  if (resumeDone) {
+    if (!deps.getResumeBrief) {
+      console.error(`[factory] turn hook: resume brief for ${agentId} not sent (no brief builder wired)`);
+      return;
+    }
+    try {
+      const brief = await deps.getResumeBrief(paseo, mainId, agentId);
+      const note = asRecord(previous?.pendingAction)?.note;
+      const full = typeof note === "string" && note ? `${brief}\n\n${note}` : brief;
+      await paseo.agents.ref(agentId).send(
+        formatResumeMessage(full, { cleared: decision.effectFailed !== true }),
+      );
+      const update = updateAgentEntry as unknown as (args: any) => Promise<any>;
+      await update({
+        client: paseo,
+        workspaceId: mainId,
+        agentId,
+        patch: { needsResume: null },
+        liveIds: null,
+      });
+      console.log(`[factory] turn hook: sent resume brief to ${agentId}`);
+    } catch (error) {
+      console.error(
+        `[factory] turn hook: resume brief to ${agentId} failed (${error instanceof Error ? error.message : String(error)}); needsResume kept`,
+      );
+    }
     return;
   }
   // Optional one-line seed after a verified clear: it costs one small turn and
   // tells the resumed agent to load the resume brief first.
-  const cleared = asRecord(decision.entryUpdate?.cleared);
   if (cleared?.mode === "clear" && deps.getCleanupSettings) {
     try {
       const settings = await deps.getCleanupSettings();

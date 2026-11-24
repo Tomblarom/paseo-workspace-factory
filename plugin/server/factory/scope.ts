@@ -20,6 +20,16 @@ export function validScope(value) {
     && SCOPE_KINDS.includes(value.kind));
 }
 
+/** Case-insensitive scope id comparison (stored/live spelling stays canonical for display). */
+export function sameScopeId(a, b) {
+  return typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
+}
+
+/** Domain pointer of a stored scope field: the domain scope id, or null when unset. Logical only, never a parent. */
+export function domainOfScope(value) {
+  return value && typeof value.domain === 'string' && value.domain.trim() ? value.domain : null;
+}
+
 /** Ambiguous address (or duplicate scope id); candidates carry id, kind, workspace id and path. */
 export class ScopeConflict extends Error {
   constructor(message, candidates = [], code = 'ambiguous') {
@@ -87,6 +97,7 @@ export function listScopes(paseoState) {
         kind: stored.kind,
         locator: typeof stored.locator === 'string' && stored.locator ? stored.locator : null,
         ...(stored.parent !== undefined ? { parent: stored.parent } : {}),
+        ...(domainOfScope(stored) ? { domain: domainOfScope(stored) } : {}),
         ...baseOf(w),
       });
       continue;
@@ -138,17 +149,18 @@ export function keyOfAddress(address) {
 }
 
 /**
- * Resolves an address to a live scope: exact scope id -> workspace id
- * (wks_.../workspace:<id>) -> path -> legacy alias local/<folder> (flagged
- * with deprecatedAlias). Returns null when no live scope matches; throws
- * ScopeConflict when the address (or a duplicated id) is ambiguous.
+ * Resolves an address to a live scope: scope id (case-insensitive; the stored
+ * id is the canonical form) -> workspace id (wks_.../workspace:<id>) -> path
+ * -> legacy alias local/<folder> (flagged with deprecatedAlias). Returns null
+ * when no live scope matches; throws ScopeConflict when the address (or a
+ * duplicated id) is ambiguous.
  */
 export function resolveScope(address, paseoState) {
   const scopes = listScopes(paseoState);
   const raw = (keyOfAddress(address) ?? '').trim();
   if (!raw) return null;
 
-  const byId = scopes.filter((s) => s.id === raw);
+  const byId = scopes.filter((s) => s.id.toLowerCase() === raw.toLowerCase());
   if (byId.length === 1) return { ...byId[0] };
   if (byId.length > 1) {
     const candidates = byId.map(candidateOf);
@@ -197,11 +209,15 @@ export function resolveScope(address, paseoState) {
   return null;
 }
 
-/** Maps a resolved scope back to a discovery entry (github keeps owner/repo verbatim). */
+/**
+ * Maps a resolved scope back to a discovery entry (github keeps owner/repo
+ * verbatim). Live fields win over the stored locator: a stale locator (kept
+ * for stable identity) must not misroute discovery to a missing workspace.
+ */
 export function scopeToEntry(scope) {
   if (scope.kind === 'github') return scope.locator;
-  if (scope.kind === 'dir') return { local: scope.locator ?? scope.directory };
-  if (scope.kind === 'workspace') return { workspace: scope.locator ?? scope.workspaceId };
-  const locator = scope.locator ?? scope.directory ?? scope.workspaceId;
+  if (scope.kind === 'dir') return { local: scope.directory ?? scope.locator };
+  if (scope.kind === 'workspace') return { workspace: scope.workspaceId ?? scope.locator };
+  const locator = scope.directory ?? scope.locator ?? scope.workspaceId;
   return /^wks_[A-Za-z0-9]+$/.test(String(locator ?? '')) ? { workspace: locator } : { local: locator };
 }

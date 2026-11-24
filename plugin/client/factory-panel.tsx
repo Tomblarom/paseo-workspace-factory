@@ -7,21 +7,30 @@ import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import type { TextStyle, ViewStyle } from "react-native";
 import {
   factoryApply,
+  factoryAssign,
+  factoryAssignPreview,
   factoryCheckpoint,
   factoryCheckpointPreview,
   factoryCleanup,
+  factoryFresh,
+  factoryFreshPreview,
   factoryPlan,
+  factoryRelocate,
+  factoryRelocatePreview,
   factoryResume,
+  factoryResumeApply,
   factoryScopes,
   factoryScopesCandidates,
   factoryStatus,
   factorySwitch,
   factorySwitchPreview,
 } from "../shared/factory.js";
+import { factoryHelp } from "../shared/factory-args.js";
 import {
   getFactoryResult,
   setFactoryResult,
   subscribeFactoryResult,
+  type AssignPreviewInputs,
   type CheckpointPreviewInputs,
   type FactoryPanelResult,
 } from "./factory-store.js";
@@ -64,6 +73,10 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
   const callScopeCandidates = useRpc(factoryScopesCandidates);
   const callCleanup = useRpc(factoryCleanup);
   const callResume = useRpc(factoryResume);
+  const callResumeApply = useRpc(factoryResumeApply);
+  const callFresh = useRpc(factoryFresh);
+  const callRelocate = useRpc(factoryRelocate);
+  const callAssign = useRpc(factoryAssign);
   const [repo, setRepo] = useState("");
   const [result, setResult] = useState<FactoryPanelResult | null>(() => getFactoryResult());
   useEffect(() => subscribeFactoryResult(() => setResult(getFactoryResult())), []);
@@ -213,6 +226,77 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
       }),
     onError: fail,
   });
+  const resumeApplyMutation = useMutation({
+    mutationFn: async (vars: { workspaceId: string; agentId: string }) =>
+      callResumeApply({ workspaceId: vars.workspaceId, agentId: vars.agentId, takeover: true }),
+    onSuccess: (applied, vars) =>
+      setFactoryResult({
+        kind: "resumeApplied",
+        workspaceId: vars.workspaceId,
+        agentId: vars.agentId,
+        at: new Date().toISOString(),
+        applied,
+      }),
+    onError: fail,
+  });
+  const freshMutation = useMutation({
+    mutationFn: async (vars: { repo?: string; workspaceId: string; fingerprint: string }) =>
+      vars.repo
+        ? callFresh({ repo: vars.repo, fingerprint: vars.fingerprint })
+        : callFresh({ workspaceId: vars.workspaceId, fingerprint: vars.fingerprint }),
+    onSuccess: (fresh) =>
+      setFactoryResult({
+        kind: "info",
+        at: new Date().toISOString(),
+        text: [
+          `Fresh Steer ${text(field(fresh, "slot"))} is active (epoch ${text(field(fresh, "epoch"))}).`,
+          `The old agent (${text(field(fresh, "from"))}) keeps its tab; archive it in Paseo when done.`,
+        ].join("\n"),
+      }),
+    onError: fail,
+  });
+  const relocateMutation = useMutation({
+    mutationFn: async (vars: { repo?: string; workspaceId: string; to: string; fingerprint: string }) =>
+      vars.repo
+        ? callRelocate({ repo: vars.repo, to: vars.to, fingerprint: vars.fingerprint })
+        : callRelocate({ workspaceId: vars.workspaceId, to: vars.to, fingerprint: vars.fingerprint }),
+    onSuccess: (relocated) =>
+      setFactoryResult({
+        kind: "info",
+        at: new Date().toISOString(),
+        text: [
+          `Relocated ${text(field(relocated, "scope"))} ${text(field(relocated, "fromWorkspace"))} → ${text(field(relocated, "toDir"))} (${text(field(relocated, "toWorkspace") ?? "new workspace")}) · epoch 1.`,
+          "The retired scope keeps its agents; archive it via /factory cleanup --plan.",
+        ].join("\n"),
+      }),
+    onError: fail,
+  });
+  const assignMutation = useMutation({
+    mutationFn: async (vars: {
+      repo?: string;
+      workspaceId: string;
+      fingerprint: string;
+      inputs: AssignPreviewInputs;
+    }) =>
+      callAssign({
+        ...(vars.repo ? { repo: vars.repo } : { workspaceId: vars.workspaceId }),
+        fingerprint: vars.fingerprint,
+        ...vars.inputs,
+      }),
+    onSuccess: (assigned) =>
+      setFactoryResult({
+        kind: "info",
+        at: new Date().toISOString(),
+        text: [
+          `Assigned ${text(field(assigned, "scope"))} epoch ${text(field(assigned, "epoch"))} · Steer ${text(field(assigned, "slot"))} ${text(field(assigned, "steerId"))}.`,
+          field(assigned, "delivered") ? "Delivered." : "Not delivered.",
+          field(assigned, "deliveryError") ? text(field(assigned, "deliveryError")) : "",
+        ]
+          .filter(Boolean)
+          .join(" "),
+      }),
+    onError: fail,
+  });
   const busy =
     statusMutation.isPending ||
     planMutation.isPending ||
@@ -222,7 +306,11 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
     scopesMutation.isPending ||
     scopeCandidatesMutation.isPending ||
     cleanupMutation.isPending ||
-    resumeMutation.isPending;
+    resumeMutation.isPending ||
+    resumeApplyMutation.isPending ||
+    freshMutation.isPending ||
+    relocateMutation.isPending ||
+    assignMutation.isPending;
 
   const confirmCheckpoint = () => {
     if (result?.kind !== "checkpointPreview") return;
@@ -242,16 +330,53 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
       fingerprint: result.preview.fingerprint,
     });
   };
+  const confirmResume = () => {
+    if (result?.kind !== "resumePreview") return;
+    resumeApplyMutation.mutate({ workspaceId: result.workspaceId, agentId: result.agentId });
+  };
+  const confirmFresh = () => {
+    if (result?.kind !== "freshPreview") return;
+    freshMutation.mutate({
+      repo: result.repo,
+      workspaceId: result.workspaceId,
+      fingerprint: result.preview.fingerprint,
+    });
+  };
+  const confirmRelocate = () => {
+    if (result?.kind !== "relocatePreview") return;
+    relocateMutation.mutate({
+      repo: result.repo,
+      workspaceId: result.workspaceId,
+      to: result.to,
+      fingerprint: result.preview.fingerprint,
+    });
+  };
+  const confirmAssign = () => {
+    if (result?.kind !== "assignPreview") return;
+    assignMutation.mutate({
+      repo: result.repo,
+      workspaceId: result.workspaceId,
+      fingerprint: result.preview.fingerprint,
+      inputs: result.inputs,
+    });
+  };
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={{ gap: styles.screen.gap }}>
       <Text style={styles.title}>Factory</Text>
-      <Text style={styles.label}>Scope address (id, wks_…, path, or legacy local/folder); empty uses this workspace</Text>
+      <Text style={styles.hint}>
+        Coordinate several steers per project: see who is in charge, save checkpoints and hand
+        over. Changes always show a preview with a confirm button first.
+      </Text>
+      <Text style={styles.label}>
+        Project (optional): owner/repo, scope id, workspace id (wks_…) or folder path. Leave empty for
+        this workspace.
+      </Text>
       <TextInput
         style={styles.input}
         value={repo}
         onChangeText={setRepo}
-        placeholder="scope, empty for this workspace"
+        placeholder="empty = this workspace"
         placeholderTextColor={theme.colors.foregroundMuted}
         autoCapitalize="none"
         autoCorrect={false}
@@ -279,7 +404,7 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
       <View style={styles.row}>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="List live scopes"
+          accessibilityLabel="List managed projects"
           style={styles.button}
           disabled={busy}
           onPress={() => scopesMutation.mutate()}
@@ -288,7 +413,7 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
         </Pressable>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="List adoption candidates"
+          accessibilityLabel="List workspaces the factory could take over"
           style={styles.button}
           disabled={busy}
           onPress={() => scopeCandidatesMutation.mutate()}
@@ -297,7 +422,7 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
         </Pressable>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Show cleanup report"
+          accessibilityLabel="Show leftovers to tidy up (read only)"
           style={styles.button}
           disabled={busy}
           onPress={() => cleanupMutation.mutate()}
@@ -306,12 +431,23 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
         </Pressable>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Show resume brief"
+          accessibilityLabel="Show a short report to continue after a break"
           style={styles.button}
           disabled={busy}
           onPress={() => resumeMutation.mutate(repo.trim())}
         >
           <Text style={styles.buttonText}>Resume</Text>
+        </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Show the /factory commands with examples"
+          style={styles.button}
+          disabled={busy}
+          onPress={() =>
+            setFactoryResult({ kind: "info", at: new Date().toISOString(), text: factoryHelp() })
+          }
+        >
+          <Text style={styles.buttonText}>Help</Text>
         </Pressable>
       </View>
       {busy ? <Text style={styles.label}>Working…</Text> : null}
@@ -323,6 +459,10 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
           apply: (hash: string) => applyMutation.mutate(hash),
           confirmCheckpoint,
           confirmSwitch,
+          confirmResume,
+          confirmFresh,
+          confirmRelocate,
+          confirmAssign,
         }}
       />
       <Text style={styles.hint}>
@@ -333,7 +473,7 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
   );
 }
 
-type Styles = {
+export type FactoryResultStyles = {
   label: TextStyle;
   body: TextStyle;
   hash: TextStyle;
@@ -345,14 +485,21 @@ type Styles = {
   buttonText: TextStyle;
 };
 
-interface PanelActions {
+export interface FactoryResultActions {
   busy: boolean;
   apply: (hash: string) => void;
   confirmCheckpoint: () => void;
   confirmSwitch: () => void;
+  confirmResume: () => void;
+  confirmFresh: () => void;
+  confirmRelocate: () => void;
+  confirmAssign: () => void;
 }
 
-function ResultView({
+type Styles = FactoryResultStyles;
+type PanelActions = FactoryResultActions;
+
+export function ResultView({
   result,
   styles,
   actions,
@@ -362,7 +509,10 @@ function ResultView({
   actions: PanelActions;
 }) {
   if (!result) {
-    return <Text style={styles.label}>No result yet. Run /factory status or /factory plan.</Text>;
+    return <Text style={styles.label}>
+        Nothing to show yet. Tap Status to see who is in charge, or Help for the commands. In a
+        steer chat, type /factory help.
+      </Text>;
   }
   if (result.kind === "error") {
     return <Text style={styles.error}>{result.message}</Text>;
@@ -415,8 +565,38 @@ function ResultView({
       />
     );
   }
+  if (result.kind === "freshPreview") {
+    return <FreshPreviewView at={result.at} preview={result.preview} styles={styles} actions={actions} />;
+  }
+  if (result.kind === "relocatePreview") {
+    return <RelocatePreviewView at={result.at} preview={result.preview} styles={styles} actions={actions} />;
+  }
+  if (result.kind === "assignPreview") {
+    return <AssignPreviewView at={result.at} preview={result.preview} styles={styles} actions={actions} />;
+  }
   if (result.kind === "resume") {
     return <ResumeView repo={result.repo} at={result.at} resume={result.resume} styles={styles} />;
+  }
+  if (result.kind === "resumePreview") {
+    return (
+      <ResumePreviewView
+        workspaceId={result.workspaceId}
+        agentId={result.agentId}
+        at={result.at}
+        styles={styles}
+        actions={actions}
+      />
+    );
+  }
+  if (result.kind === "resumeApplied") {
+    return (
+      <ResumeAppliedView
+        agentId={result.agentId}
+        at={result.at}
+        applied={result.applied}
+        styles={styles}
+      />
+    );
   }
   return <SwitchedView at={result.at} result={result.result} styles={styles} />;
 }
@@ -440,6 +620,69 @@ function ResumeView({
       </Text>
       <Text style={styles.label}>{at}</Text>
       <Text style={styles.body}>{resume.brief}</Text>
+    </View>
+  );
+}
+
+function ResumePreviewView({
+  agentId,
+  at,
+  styles,
+  actions,
+}: {
+  workspaceId: string;
+  agentId: string;
+  at: string;
+  styles: Styles;
+  actions: PanelActions;
+}) {
+  return (
+    <View style={styles.card}>
+      <Text style={styles.body}>Resume preview for agent {agentId}</Text>
+      <Text style={styles.label}>{at}</Text>
+      <Text style={styles.body}>
+        Confirming saves a checkpoint, clears that agent&apos;s context and sends the resume brief
+        into its fresh timeline. The old history stays reachable via the saved session. When the
+        steer is not the active one, it also takes over coordination.
+      </Text>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`Confirm resume for ${agentId}`}
+        style={styles.button}
+        disabled={actions.busy}
+        onPress={actions.confirmResume}
+      >
+        <Text style={styles.buttonText}>Confirm resume</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+function ResumeAppliedView({
+  agentId,
+  at,
+  applied,
+  styles,
+}: {
+  agentId: string;
+  at: string;
+  applied: RpcOutput<typeof factoryResumeApply>;
+  styles: Styles;
+}) {
+  const detail = typeof applied.detail === "string" ? applied.detail : null;
+  const tookOver = (applied as { tookOver?: { from: string; to: string; epoch: number } | null }).tookOver ?? null;
+  return (
+    <View style={styles.card}>
+      <Text style={styles.ok}>Resume started for {text(applied.agentId ?? agentId)}.</Text>
+      <Text style={styles.label}>{at}</Text>
+      {tookOver ? (
+        <Text style={styles.body}>
+          Steer {tookOver.to} is now in charge (was {tookOver.from}, round {tookOver.epoch}).
+        </Text>
+      ) : null}
+      <Text style={styles.body}>
+        {detail ?? "The context is cleared first; the resume brief arrives in the timeline after."}
+      </Text>
     </View>
   );
 }
@@ -474,19 +717,22 @@ function StatusView({
   return (
     <View style={styles.card}>
       <Text style={styles.body}>
-        {repo} · active Steer {text(state?.activeSteer)} (epoch {text(state?.epoch)})
+        {repo} · Steer {text(state?.activeSteer)} is in charge (round {text(state?.epoch)})
       </Text>
       {scope.id ? (
         <Text style={styles.label}>
           Scope {text(scope.id)} [{text(scope.kind)}]
-          {deprecatedAlias ? " · legacy local/ alias, prefer the scope id" : ""}
+          {deprecatedAlias ? " · old local/ name; use the scope id next time" : ""}
         </Text>
       ) : null}
       <Text style={styles.label}>{at}</Text>
       {checkpoint?.task ? (
-        <Text style={styles.body}>Checkpoint: {text(checkpoint.task)}</Text>
+        <Text style={styles.body}>Current task: {text(checkpoint.task)}</Text>
       ) : (
-        <Text style={styles.label}>Checkpoint: none</Text>
+        <Text style={styles.label}>
+          No checkpoint yet: ask the active steer to end its answer with a CHECKPOINT block, then
+          /factory checkpoint --from-agent &lt;its id&gt;.
+        </Text>
       )}
       {steers.map((s) => {
         const want = expected[s.slot];
@@ -495,7 +741,7 @@ function StatusView({
         return (
           <Text key={String(s.id)} style={drifts ? styles.conflict : styles.body}>
             Steer {text(s.slot)} {text(s.id)} {text(s.provider)}/{text(s.model)} {text(s.status)}
-            {s.parent ? " PARENT" : ""}
+            {s.parent ? ` (parent ${text(s.parent)}; steers should be top-level)` : ""}
             {drifts ? ` (profile ${text(want?.profile)} says ${text(want?.provider)}/${text(want?.model)})` : ""}
           </Text>
         );
@@ -506,7 +752,7 @@ function StatusView({
           {text(field(w, "model"))} {text(field(w, "status"))}
         </Text>
       ))}
-      <Text style={styles.label}>Recommended order: {order.join(", ") || "none"}</Text>
+      <Text style={styles.label}>Suggested tab order: {order.join(", ") || "none"}</Text>
     </View>
   );
 }
@@ -522,9 +768,12 @@ function ScopesView({
 }) {
   return (
     <View style={styles.card}>
-      <Text style={styles.body}>Live scopes ({scopes.rows.length})</Text>
+      <Text style={styles.body}>Managed projects ({scopes.rows.length})</Text>
       <Text style={styles.label}>{at}</Text>
-      {scopes.rows.length === 0 ? <Text style={styles.label}>No live scopes.</Text> : null}
+      {scopes.rows.length === 0 ? <Text style={styles.label}>
+          No managed projects yet. Set one up with /factory plan owner/repo, or tap Candidates to see
+          existing workspaces you can take over.
+        </Text> : null}
       {scopes.rows.map((row) => {
         const active = asRecord(field(row, "active"));
         const checkpoint = asRecord(field(row, "checkpoint"));
@@ -532,11 +781,11 @@ function ScopesView({
         const escalations = asList(checkpoint.escalations);
         return (
           <Text key={String(row.workspaceId)} style={styles.body}>
-            {text(row.id)} [{text(row.kind)}] · steer {text(active.slot)}/{text(active.model)} ·
-            epoch {text(field(row, "epoch"))} · cp {formatAge(checkpoint.ageMs)} ·
+            {text(row.id)} [{text(row.kind)}] · Steer {text(active.slot)} ({text(active.model)}) in
+            charge · round {text(field(row, "epoch"))} · checkpoint age {formatAge(checkpoint.ageMs)} ·
             next: {checkpoint.next ? text(checkpoint.next) : "-"} ·
-            hub: {escalations.length ? escalations.map(text).join("; ") : "-"} ·
-            ctx {usage.usedTokens !== undefined ? `${text(usage.usedTokens)}/${text(usage.maxTokens)}` : "n/a"}
+            needs hub: {escalations.length ? escalations.map(text).join("; ") : "-"} ·
+            context {usage.usedTokens !== undefined ? `${text(usage.usedTokens)}/${text(usage.maxTokens)}` : "unknown"}
           </Text>
         );
       })}
@@ -555,15 +804,34 @@ function ScopeCandidatesView({
 }) {
   return (
     <View style={styles.card}>
-      <Text style={styles.body}>Adoption candidates ({candidates.rows.length})</Text>
+      <Text style={styles.body}>Workspaces the factory could take over ({candidates.rows.length})</Text>
       <Text style={styles.label}>{at}</Text>
-      {candidates.rows.length === 0 ? <Text style={styles.label}>No adoption candidates.</Text> : null}
+      {candidates.rows.length === 0 ? <Text style={styles.label}>None: every workspace is already managed.</Text> : null}
       {candidates.rows.map((row) => (
-        <Text key={String(row.workspaceId)} style={styles.body}>
-          {text(row.workspaceId)} {text(row.title)} · {text(row.directory)} ·
-          project {text(row.projectKind)} · worktree {row.worktree ? "yes" : "no"} ·
-          agents {row.agents.length} · plan: {text(row.suggestedPlan)}
-        </Text>
+        <View key={String(row.workspaceId)}>
+          <Text style={styles.body}>
+            {text(row.workspaceId)} {text(row.title)} · {text(row.directory)} ·
+            project {text(row.projectKind)} · worktree {row.worktree ? "yes" : "no"} ·
+            agents {row.agents.length} · plan: {text(row.suggestedPlan)}
+          </Text>
+          {row.agents.map((agent, i) => {
+            const a = asRecord(agent);
+            const parentId = field(a, "parentId");
+            const legacyParent = field(a, "parent") === true;
+            return (
+              <Text key={String(field(a, "id") ?? i)} style={styles.label}>
+                {text(field(a, "id"))} &quot;{text(field(a, "title") ?? field(a, "id"))}&quot; (
+                {text(field(a, "provider"))}/{text(field(a, "model"))},{" "}
+                {text(field(a, "status"))})
+                {typeof parentId === "string" && parentId
+                  ? ` parent ${parentId}`
+                  : legacyParent
+                    ? " parent"
+                    : ""}
+              </Text>
+            );
+          })}
+        </View>
       ))}
     </View>
   );
@@ -583,7 +851,7 @@ function CleanupView({
       <Text style={styles.body}>Cleanup report ({cleanup.candidates.length}) · read only</Text>
       <Text style={styles.label}>{at}</Text>
       {cleanup.candidates.length === 0 ? (
-        <Text style={styles.label}>No cleanup candidates.</Text>
+        <Text style={styles.label}>Nothing to tidy up.</Text>
       ) : null}
       {cleanup.candidates.map((candidate, i) => {
         const loss = asRecord(candidate.loss);
@@ -824,4 +1092,127 @@ function SwitchedView({
 
 function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+}
+
+function FreshPreviewView({
+  at,
+  preview,
+  styles,
+  actions,
+}: {
+  at: string;
+  preview: RpcOutput<typeof factoryFreshPreview>;
+  styles: Styles;
+  actions: PanelActions;
+}) {
+  return (
+    <View style={styles.card}>
+      <Text style={styles.body}>
+        Fresh preview: new agent for Steer {preview.slot} (epoch {preview.epoch}) · profile{" "}
+        {text(preview.profile)} ({text(preview.provider)}/{text(preview.model)})
+      </Text>
+      <Text style={styles.label}>{at}</Text>
+      {!preview.checkpoint ? (
+        <Text style={styles.conflict}>NO task checkpoint. Confirm it with the user first.</Text>
+      ) : null}
+      <Text style={styles.body}>{preview.packet}</Text>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`Confirm fresh Steer ${preview.slot}`}
+        style={styles.button}
+        disabled={actions.busy}
+        onPress={actions.confirmFresh}
+      >
+        <Text style={styles.buttonText}>Fresh and deliver</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+function RelocatePreviewView({
+  at,
+  preview,
+  styles,
+  actions,
+}: {
+  at: string;
+  preview: RpcOutput<typeof factoryRelocatePreview>;
+  styles: Styles;
+  actions: PanelActions;
+}) {
+  const steers = asList(preview.steers);
+  const notes = asList(preview.notes);
+  return (
+    <View style={styles.card}>
+      <Text style={styles.body}>
+        Relocate preview: {text(preview.scope)} {text(preview.fromWorkspace)} → {text(preview.toDir)}
+        {preview.toWorkspace ? ` (workspace ${text(preview.toWorkspace)})` : " (new workspace)"}
+      </Text>
+      <Text style={styles.label}>{at}</Text>
+      <Text style={styles.body}>
+        {steers.length} steer(s) · epoch 1 · movedTo {text(preview.movedTo)}
+        {preview.checkpoint ? "" : " · NO task checkpoint"}
+      </Text>
+      {notes.map((note, index) => (
+        <Text key={index} style={styles.label}>
+          Note: {text(note)}
+        </Text>
+      ))}
+      {steers.map((steer, index) => (
+        <Text key={index} style={styles.body}>
+          Steer {text(field(steer, "slot"))}: profile {text(field(steer, "profile"))} (
+          {text(field(steer, "provider"))}/{text(field(steer, "model"))})
+        </Text>
+      ))}
+      <Text style={styles.label}>
+        The retired scope keeps its agents; archive it via /factory cleanup --plan.
+      </Text>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`Confirm relocate to ${text(preview.toDir)}`}
+        style={styles.button}
+        disabled={actions.busy}
+        onPress={actions.confirmRelocate}
+      >
+        <Text style={styles.buttonText}>Relocate and deliver</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+function AssignPreviewView({
+  at,
+  preview,
+  styles,
+  actions,
+}: {
+  at: string;
+  preview: RpcOutput<typeof factoryAssignPreview>;
+  styles: Styles;
+  actions: PanelActions;
+}) {
+  return (
+    <View style={styles.card}>
+      <Text style={styles.body}>
+        Assign preview for {text(preview.scope)} (epoch {preview.epoch}): Steer {preview.slot} (
+        {text(preview.steerId)})
+      </Text>
+      <Text style={styles.label}>{at}</Text>
+      {preview.previous ? (
+        <Text style={styles.label}>Replaces task: {preview.previous}</Text>
+      ) : (
+        <Text style={styles.label}>No previous checkpoint.</Text>
+      )}
+      <Text style={styles.body}>{preview.packet}</Text>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`Confirm assign to Steer ${preview.slot}`}
+        style={styles.button}
+        disabled={actions.busy}
+        onPress={actions.confirmAssign}
+      >
+        <Text style={styles.buttonText}>Assign and deliver</Text>
+      </Pressable>
+    </View>
+  );
 }

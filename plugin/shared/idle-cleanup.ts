@@ -11,6 +11,159 @@ export const SEED_AFTER_CLEAR =
 /** Old session ids kept per agent for "open old history" (C6). */
 export const PREVIOUS_SESSIONS_MAX = 5;
 
+/** Header marking a resume brief in the agent timeline (R-A). */
+export const RESUME_BRIEF_HEADER = "[Factory resume]";
+/** pendingAction.reason for a resume clear; the turn hook sends the brief for these. */
+export const RESUME_PENDING_REASON = "resume";
+/** pendingAction.reason for an automatic C5 sweep clear (seed path, unchanged). */
+export const SWEEP_PENDING_REASON = "idle";
+/** Notice heading the brief when it arrives without a cleared context. */
+export const RESUME_NOT_CLEARED_NOTICE =
+  "Kontext nicht geleert: der Clear-Befehl blieb ohne Wirkung; der Brief unten ist der aktuelle Stand.";
+
+/** Why a steer needs `/factory resume` (E4); "cold" keeps the C6 hint shape. */
+export type NeedsResumeReason = "daemon-restart" | "limit" | "failed" | "cold";
+
+export interface NeedsResume {
+  reason: NeedsResumeReason;
+  at: string;
+}
+
+export function isNeedsResumeReason(value: unknown): value is NeedsResumeReason {
+  return value === "daemon-restart" || value === "limit" || value === "failed" || value === "cold";
+}
+
+/**
+ * Failure-text patterns that classify a failed steer turn as a provider limit
+ * (E4). Best-effort until live failures pin the exact wording per provider
+ * (claude usage limit, codex rate limit); everything else counts as "failed".
+ */
+export const RESUME_LIMIT_PATTERNS: readonly RegExp[] = [
+  /usage\s*limit/i,
+  /rate\s*limit/i,
+  /too many requests/i,
+  /\bquota\b/i,
+  /\blimit\s*(reached|exceeded|reset|hit)\b/i,
+  /http\s*429\b/i,
+];
+
+/** True when a turn failure text looks like a provider limit or quota. */
+export function isLimitFailure(text: string | null | undefined): boolean {
+  if (typeof text !== "string" || !text) return false;
+  return RESUME_LIMIT_PATTERNS.some((pattern) => {
+    pattern.lastIndex = 0;
+    return pattern.test(text);
+  });
+}
+
+/**
+ * needsResume value for a failed steer turn (limit vs failed), else null.
+ * Only steers are resumed; workers and canceled turns never flag.
+ */
+export function needsResumeForFailedTurn(args: {
+  role: string;
+  outcome: string;
+  error: string | null;
+  at: string;
+}): NeedsResume | null {
+  if (args.role !== "steer" || args.outcome !== "failed") return null;
+  return { reason: isLimitFailure(args.error) ? "limit" : "failed", at: args.at };
+}
+
+/** Providers allowed to receive /clear during `/factory resume`. */
+export interface ResumeClearSettings {
+  providers: string[];
+  /** Boot check: a steer whose last turn ended this recently before the daemon start is marked. */
+  recentHours: number;
+}
+
+/** Mirrors the defaults of the host-scope resume settings document. */
+export const RESUME_CLEAR_DEFAULTS: ResumeClearSettings = {
+  providers: ["claude"],
+  recentHours: 24,
+};
+
+export type BootResumeReason = "open-turn" | "active-recent" | "recent";
+
+/**
+ * Boot-check rule for needsResume (steers only). `closed` alone is never a
+ * reason: after a daemon restart nearly everything is closed. Marked when
+ * (a) a turn was open at the restart, or (b) the steer's last turn ended less
+ * than `recentHours` before the daemon start — the active steer (`active`)
+ * and every other recently active steer alike. The reminder text differs
+ * (see resumeReminderText), but the flag is the same. Advisors qualify only
+ * under (a).
+ */
+export function bootResumeReason(args: {
+  openTurn: boolean;
+  active: boolean;
+  advisor: boolean;
+  lastTurnEndedAt: string | null | undefined;
+  daemonStartedAt: string;
+  recentHours: number;
+}): BootResumeReason | null {
+  if (args.openTurn) return "open-turn";
+  if (args.advisor) return null;
+  const ended = Date.parse(String(args.lastTurnEndedAt ?? ""));
+  const started = Date.parse(args.daemonStartedAt);
+  if (!Number.isFinite(ended) || !Number.isFinite(started)) return null;
+  if (started - ended >= args.recentHours * 3_600_000) return null;
+  return args.active ? "active-recent" : "recent";
+}
+
+/**
+ * Reminder text for a steer flagged with needsResume. The active steer (and
+ * any advisor, which can never take over) keeps the short "Resume nötig ·
+ * <Grund>"; any other recently active steer is told who steered last and
+ * that resuming here takes over coordination.
+ */
+export function resumeReminderText(args: {
+  reasonLabel: string;
+  canFresh: boolean;
+  advisor: boolean;
+  activeSteer: string | null | undefined;
+}): { pill: string; title: string; body: string } {
+  const active = `Resume nötig · ${args.reasonLabel}`;
+  if (args.canFresh || args.advisor) return { pill: active, title: active, body: "" };
+  const who = args.activeSteer ? `Steer ${args.activeSteer}` : "ein anderer Steer";
+  return {
+    pill: `Zuletzt steuerte ${who}`,
+    title: `Zuletzt steuerte ${who}`,
+    body: "Du kannst hier weitermachen; dieser Steer wird dann zum steuernden.",
+  };
+}
+
+/** Sidebar counter: attention rows that need resume AND belong to an active steer (canFresh). */
+export function countActiveResumeRows(
+  rows: readonly { reason?: string; canFresh?: boolean }[],
+): number {
+  return rows.filter(
+    (row) =>
+      (row.reason === "daemon-restart" || row.reason === "limit" || row.reason === "failed") &&
+      row.canFresh === true,
+  ).length;
+}
+
+/** True when the provider may be cleared during resume (E1 matrix). */
+export function mayResumeClear(
+  provider: unknown,
+  settings: ResumeClearSettings | null | undefined,
+): boolean {
+  if (typeof provider !== "string" || !provider) return false;
+  return (settings?.providers ?? RESUME_CLEAR_DEFAULTS.providers).includes(provider);
+}
+
+/**
+ * Full timeline message for a resume brief: the header plus the brief, or the
+ * header plus the not-cleared notice when the context was kept (effectFailed
+ * or a provider without clear support).
+ */
+export function formatResumeMessage(brief: string, opts?: { cleared?: boolean }): string {
+  const body = brief.trim();
+  if (opts?.cleared === false) return `${RESUME_BRIEF_HEADER} (${RESUME_NOT_CLEARED_NOTICE})\n${body}`;
+  return `${RESUME_BRIEF_HEADER}\n${body}`;
+}
+
 // Label keys mirror LABEL in core paseo.mjs (shared/ must not import server/).
 const SCOPE_KEY = "wsf.scope";
 const ROLE_KEY = "wsf.role";
@@ -85,11 +238,26 @@ export interface CleanupInput {
   checkpoint: Record<string, unknown> | null;
   /** The agent's own wsf.agents entry, if any. */
   entry: Record<string, unknown> | null;
+  /**
+   * The agent's wsf.workers register state, if any (read by the server sweep;
+   * absent or null means unsupervised). Supervision-protected states skip.
+   */
+  workerState?: string | null;
   settings: CleanupSettings;
   actionsToday: number;
   /** A cleanup command demonstrably had no effect; the mode is off. */
   effectBlocked: boolean;
   nowMs: number;
+}
+
+/**
+ * Idle cleanup (C5) skips agents whose register state is running, blocked or
+ * interrupted, so an unfinished worker is not cleared before its steer has
+ * seen it. Mirrors isCleanupProtected in core supervision.mjs (shared/ must
+ * not import server/).
+ */
+export function isSupervisionProtectedState(state: unknown): boolean {
+  return state === "running" || state === "blocked" || state === "interrupted";
 }
 
 export interface CleanupDecision {
@@ -143,6 +311,8 @@ export function cleanupInputOf(args: {
   actionsToday: number;
   effectBlocked: boolean;
   nowMs: number;
+  /** The agent's wsf.workers register state, if any. */
+  workerState?: string | null;
 }): CleanupInput {
   const lastTurnEndedAt = args.entry?.lastTurnEndedAt;
   return {
@@ -159,6 +329,7 @@ export function cleanupInputOf(args: {
     activeSteer: args.activeSteer,
     checkpoint: args.checkpoint,
     entry: args.entry,
+    workerState: args.workerState ?? null,
     settings: args.settings,
     actionsToday: args.actionsToday,
     effectBlocked: args.effectBlocked,
@@ -190,6 +361,9 @@ export function decideCleanupAction(input: CleanupInput): CleanupDecision {
     return deny(`provider ${input.provider} is not in providers`);
   }
   if (input.archivedAt) return deny("agent is archived");
+  if (isSupervisionProtectedState(input.workerState ?? null)) {
+    return deny(`supervised worker is ${input.workerState}; the steer has not seen it yet`);
+  }
   if (input.status !== "idle") return deny(`agent is ${input.status}`);
   if (input.pendingPermissionCount > 0) return deny("a permission request is pending");
   if (input.entry?.pendingAction) return deny("a cleanup action is already pending");

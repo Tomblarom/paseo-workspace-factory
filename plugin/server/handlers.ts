@@ -5,24 +5,37 @@ import type { RpcInput } from "@getpaseo/plugin";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import {
   factoryApply,
+  factoryAssign,
+  factoryAssignPreview,
   factoryCheckpoint,
   factoryCheckpointPreview,
   factoryCleanup,
+  factoryCleanupPlan,
+  factoryDrain,
   factoryFresh,
   factoryFreshPreview,
   factoryHistoryOpen,
+  factoryModelsCatalog,
   factoryPlan,
+  factoryRelocate,
+  factoryRelocatePreview,
   factoryResume,
+  factoryResumeApply,
+  factoryRetire,
   factoryScopes,
   factoryScopesCandidates,
   factoryStatus,
   factorySwitch,
   factorySwitchPreview,
+  factoryWorkerPick,
+  factoryWorkers,
 } from "../shared/factory.js";
 import {
+  assignFingerprint,
   checkpointFingerprint,
   freshFingerprint,
   isPlanHash,
+  relocateFingerprint,
   switchFingerprint,
 } from "../shared/preview.js";
 import {
@@ -33,14 +46,28 @@ import {
   storeAuthorization,
   withApplyLock,
 } from "./factory/apply.js";
-import { collectCleanupCandidates } from "./factory/cleanup.js";
+import { assignScope } from "./factory/assign.js";
+import {
+  attachProjectArchivedAgents,
+  collectCleanupCandidates,
+  formatLoss,
+  planCleanupOps,
+  selectApplyRunPlans,
+} from "./factory/cleanup.js";
+import { isAdvisorSlot, isSensitiveProfile, workerPriority } from "./factory/config.js";
+import { DRAIN_DEFAULT_TIMEOUT_MS, drain, parseTimeout } from "./factory/drain.js";
 import { createRunner } from "./factory/factory.js";
 import { createGh } from "./factory/github.js";
 import { createGit } from "./factory/local.js";
+import { formatCatalog, paseoRunFlags, resolveProfile } from "./factory/models.js";
 import { planHash } from "./factory/planner.js";
+import { relocateScope } from "./factory/relocate.js";
+import { formatWorkersText, readWorkers, workersReport } from "./factory/supervision.js";
+import { assessWorker, readGitState } from "./factory/workers.js";
 import {
   LABEL,
   LEGACY_PREFIX,
+  METADATA_KEY,
   createPaseoCli,
   daemonPassword,
   lookupCreationReceipt,
@@ -48,6 +75,8 @@ import {
   readPaseoState,
 } from "./factory/paseo.js";
 import { daemonHost, runtime } from "./factory/runtime.js";
+import { applyResume } from "./resume-apply.js";
+import type { ResumeClearSettings } from "../shared/idle-cleanup.js";
 import { listScopes } from "./factory/scope.js";
 import { scopeCandidates, scopeRows } from "./factory/scopes-view.js";
 import { AGENTS_KEY } from "./factory/agent-state.js";
@@ -63,6 +92,7 @@ import {
   writeCheckpoint,
 } from "./factory/steer.js";
 import type { ConfigLoader } from "./config.js";
+import { getQuotaSnapshot } from "./quota.js";
 
 /** Slot to configured provider/model, so the panel can show profile drift. */
 function expectedProfiles(config: any): Record<string, { profile: string; provider: string; model: string }> {
@@ -94,20 +124,26 @@ async function resolveEntryForAddress(
 ): Promise<{ target: any; scope: any; deprecatedAlias: boolean }> {
   const address = repo?.trim() || (workspaceId ? `workspace:${workspaceId}` : "");
   if (!address) {
-    throw new Error("Pass a scope address, or run where a workspace is focused");
+    throw new Error(
+      "Which project? Pass a scope address (owner/repo, scope id, wks_… or folder path), or run the command inside a workspace.",
+    );
   }
   const paseoState: any = await readPaseoState(paseo);
   const resolved: any = resolveTargetEntry(address, paseoState);
   if (!resolved.scope) {
     const wid = workspaceIdFromAddress(address);
     const ws = wid ? paseoState.workspaces.find((w: any) => w.id === wid) : null;
-    if (wid && !ws) throw new Error(`Unknown workspace ${JSON.stringify(wid)}`);
+    if (wid && !ws) throw new Error(
+        `Unknown workspace ${JSON.stringify(wid)}. Check the id, or run /factory scopes to see the managed projects.`,
+      );
     if (ws) {
       const title = ws.title ?? ws.name ?? ws.id;
       const suggestion =
         scopeCandidates(paseoState).find((c: any) => c.workspaceId === ws.id)?.suggestedPlan ??
         `paseo-factory plan workspace:${ws.id}`;
-      throw new Error(`Workspace "${title}" has no factory scope. Adopt it first: ${suggestion}`);
+      throw new Error(
+        `Workspace "${title}" is not managed by the factory yet. To set it up, preview a plan: ${suggestion}`,
+      );
     }
   }
   return {
@@ -191,6 +227,9 @@ export async function getResume(
     agentState: discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null,
     git: status.workspace ? readGitBrief(git, status.workspace.directory) : null,
     scope: discovery.scope ?? scope ?? null,
+    config,
+    quotaSnapshot: getQuotaSnapshot(),
+    quotaWarnPct: config.quota?.warnPct ?? 75,
   };
   const brief: string = buildResumeBrief(status, briefOptions);
   return {
@@ -200,6 +239,119 @@ export async function getResume(
     agentId,
     brief,
   };
+}
+
+/**
+ * Builds the resume brief for one steer (shared by the resume RPC and the
+ * turn hook, which sends the brief after a verified resume clear). Scope
+ * resolution mirrors getResume: the agent's scope label wins, else the
+ * workspace address.
+ */
+export function createResumeBriefBuilder(loader: ConfigLoader) {
+  return async (paseo: any, workspaceId: string, agentId: string): Promise<string> => {
+    const found: any = (await readPaseoState(paseo)).agents.find((a: any) => a.id === agentId);
+    const scopeId = found?.labels?.[LABEL.scope] ?? found?.labels?.[`${LEGACY_PREFIX}.scope`];
+    const address =
+      typeof scopeId === "string" && scopeId ? scopeId : `workspace:${workspaceId}`;
+    const config = await loader.loadEffectiveConfig();
+    const { target, scope } = await resolveEntryForAddress(paseo, address, workspaceId);
+    const runnerOptions: any = { config, client: paseo, gh: createGh(), git: createGit() };
+    const runner = createRunner(runnerOptions);
+    const [discovery] = await runner.discoverAll([target]);
+    const status: any = steerStatus(discovery);
+    const git = createGit();
+    const briefOptions: any = {
+      agentId,
+      agentState: discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null,
+      git: status.workspace ? readGitBrief(git, status.workspace.directory) : null,
+      scope: discovery.scope ?? scope ?? null,
+    };
+    return buildResumeBrief(status, briefOptions);
+  };
+}
+
+export async function applyResumeRpc(
+  input: RpcInput<typeof factoryResumeApply>,
+  { paseo }: PluginHandlerContext,
+  loader: ConfigLoader,
+  extra?: {
+    getResumeSettings?: () => Promise<ResumeClearSettings | null>;
+    buildBrief?: (paseo: any, workspaceId: string, agentId: string) => Promise<string>;
+  },
+): Promise<any> {
+  const applied: any = await applyResume(
+    paseo,
+    {
+      workspaceId: input.workspaceId,
+      agentId: input.agentId,
+      ...(input.fingerprint ? { fingerprint: input.fingerprint } : {}),
+    },
+    {
+      ...(extra?.getResumeSettings ? { getResumeSettings: extra.getResumeSettings } : {}),
+      buildBrief: extra?.buildBrief ?? createResumeBriefBuilder(loader),
+    },
+  );
+  // Resume AND takeover for a non-active steer: after the resume the steer
+  // becomes the controlling one (self-takeover: no handoff to itself, no
+  // wait). Advisors and already-active steers skip; a failed takeover never
+  // undoes the resume, it is only reported.
+  let tookOver: { from: string; to: string; epoch: number } | null = null;
+  let takeoverSkipped: string | null = null;
+  if (input.takeover === true) {
+    try {
+      const taken = await takeoverIfNonActive(paseo, loader, input.agentId);
+      if (taken) tookOver = taken;
+    } catch (error) {
+      takeoverSkipped = error instanceof Error ? error.message : String(error);
+    }
+  }
+  return {
+    ...applied,
+    tookOver,
+    takeoverSkipped,
+    detail:
+      `${applied.detail}` +
+      (tookOver ? ` Steer ${tookOver.to} is now in charge (was ${tookOver.from}, round ${tookOver.epoch}).` : "") +
+      (takeoverSkipped ? ` Takeover skipped: ${takeoverSkipped}` : ""),
+  };
+}
+
+/**
+ * Self-takeover after a resume: makes the steer the active one when it is
+ * not. Returns null when it already is. Advisors refuse (they never
+ * coordinate), as does any other switch refusal.
+ */
+async function takeoverIfNonActive(
+  paseo: any,
+  loader: ConfigLoader,
+  agentId: string,
+): Promise<{ from: string; to: string; epoch: number } | null> {
+  const found: any = (await readPaseoState(paseo)).agents.find((a: any) => a.id === agentId);
+  const scopeId = found?.labels?.[LABEL.scope] ?? found?.labels?.[`${LEGACY_PREFIX}.scope`];
+  const slot = found?.labels?.[LABEL.slot] ?? found?.labels?.[`${LEGACY_PREFIX}.slot`];
+  if (typeof scopeId !== "string" || !scopeId) throw new Error("agent has no factory scope label");
+  if (typeof slot !== "string" || !/^[A-Z]$/.test(slot)) throw new Error("agent has no steer slot label");
+  const config = await loader.loadEffectiveConfig();
+  if ((isAdvisorSlot as unknown as (c: unknown, s: string) => boolean)(config, slot)) {
+    throw new Error("advisor steers never coordinate");
+  }
+  const { target } = await resolveEntryForAddress(paseo, scopeId, undefined);
+  const runnerOptions: any = { config, client: paseo, gh: createGh(), git: createGit() };
+  const [discovery] = await createRunner(runnerOptions).discoverAll([target]);
+  const status: any = steerStatus(discovery);
+  if (status.state?.activeSteer === slot) return null;
+  const switchOptions: any = {
+    client: paseo,
+    discovery,
+    toSlot: slot,
+    apply: true,
+    send: false,
+    git: createGit(),
+    config,
+    callerId: agentId,
+  };
+  const switched: any = await switchSteer(switchOptions);
+  return { from: switched.from, to: switched.to, epoch: switched.epoch };
 }
 
 export async function previewFresh(
@@ -244,7 +396,7 @@ export async function applyFresh(
   const fresh = freshFingerprint({ repo: dry.repo, slot: dry.slot, epoch: dry.epoch });
   if (fresh !== input.fingerprint) {
     throw new Error(
-      "The fresh preview is stale (steer state changed); run it again and confirm the new preview",
+      "Something changed since the fresh preview (for example another switch). Open the preview again and confirm the new one.",
     );
   }
   const executeOptions: any = {
@@ -284,7 +436,7 @@ export async function openHistory(
   const sessions = entries[agentId]?.previousSessions;
   const sessionId = Array.isArray(sessions) && sessions.length ? sessions[sessions.length - 1] : null;
   if (typeof sessionId !== "string" || !sessionId || sessionId.startsWith("-")) {
-    throw new Error(`Agent ${agentId} has no saved previous session to open`);
+    throw new Error(`Agent ${agentId} has no saved earlier chat to open (nothing was cleared yet).`);
   }
   const provider = typeof agent.provider === "string" && agent.provider ? agent.provider : "claude";
   // CLI import on click only (manual, additive: a new tab). Env mirrors the
@@ -418,7 +570,7 @@ export async function applySwitch(
   const fresh = switchFingerprint({ repo: dry.repo, from: dry.from, to: dry.to, epoch: dry.epoch });
   if (fresh !== input.fingerprint) {
     throw new Error(
-      "The switch preview is stale (steer state changed); run /factory switch again and confirm the new preview",
+      "Something changed since the switch preview (for example another switch or checkpoint). Run /factory switch again and confirm the new preview.",
     );
   }
   const applyOptions: any = { client: paseo, discovery, toSlot: to, apply: true, send: true, git };
@@ -479,7 +631,9 @@ export async function previewCheckpoint(
   const { discovery, scope, deprecatedAlias } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
   const status: any = steerStatus(discovery);
   if (!status.workspace || !status.state) {
-    throw new Error("No factory main workspace with steer state; run the factory first");
+    throw new Error(
+      "This project is not set up by the factory yet (no main workspace with steers). Run /factory plan, then /factory apply <hash>.",
+    );
   }
   const fields = await resolveCheckpointFields(paseo, status, discovery, input);
   const epoch = status.state.epoch ?? null;
@@ -510,7 +664,9 @@ export async function writeCheckpointRpc(
   const { discovery } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
   const status: any = steerStatus(discovery);
   if (!status.workspace || !status.state) {
-    throw new Error("No factory main workspace with steer state; run the factory first");
+    throw new Error(
+      "This project is not set up by the factory yet (no main workspace with steers). Run /factory plan, then /factory apply <hash>.",
+    );
   }
   const fields = await resolveCheckpointFields(paseo, status, discovery, input);
   const epoch = status.state.epoch ?? null;
@@ -525,7 +681,7 @@ export async function writeCheckpointRpc(
   });
   if (fresh !== input.fingerprint) {
     throw new Error(
-      "The checkpoint preview is stale (steer state or the agent answer changed); preview again and confirm",
+      "Something changed since the checkpoint preview (steer state or the agent's answer). Run /factory checkpoint again and confirm the new preview.",
     );
   }
   const writeOptions: any = { client: paseo, discovery, ...fields };
@@ -539,7 +695,7 @@ export async function applyPlan(
   loader: ConfigLoader,
 ): Promise<any> {
   if (!isPlanHash(input.hash)) {
-    throw new Error("apply needs a 16-hex plan hash from a stored dry-run");
+    throw new Error("apply needs the 16-character plan hash shown at the end of /factory plan");
   }
   const config = await loader.loadEffectiveConfig();
   const planDir = runtime().planDir;
@@ -550,7 +706,9 @@ export async function applyPlan(
     try {
       authorization = JSON.parse(readFileSync(join(planDir, `${input.hash}.json`), "utf8"));
     } catch {
-      throw new Error(`No stored plan for hash ${input.hash}; run /factory plan first`);
+      throw new Error(
+        `No saved plan with hash ${input.hash}. Run /factory plan, check the preview, then apply the hash it shows.`,
+      );
     }
     mkdirSync(journalDir, { recursive: true, mode: 0o700 });
     const journalFile = join(journalDir, `${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`);
@@ -567,10 +725,15 @@ export async function applyPlan(
       lookupReceipt: lookupCreationReceipt,
       progress: fileProgress(join(planDir, `${input.hash}.progress.json`)),
       guard: () => held.verify(),
-      runPlans: (list: any, options: any) => {
-        const runnerOptions: any = { config, client: paseo, gh: createGh(), git: createGit() };
-        return createRunner(runnerOptions).runPlans(list, options);
-      },
+      // Cleanup authorizations re-plan from the stored filter, like the CLI.
+      runPlans: (selectApplyRunPlans as any)(authorization, {
+        repoRunPlans: (list: any, options: any) => {
+          const runnerOptions: any = { config, client: paseo, gh: createGh(), git: createGit() };
+          return createRunner(runnerOptions).runPlans(list, options);
+        },
+        client: paseo,
+        git: createGit(),
+      }),
       execute: createExecutors(executeOptions),
       journal: (event: any) => {
         held.verify();
@@ -584,4 +747,329 @@ export async function applyPlan(
     return { ...outcome, journal: journalFile };
   }, lockOptions);
   return result;
+}
+
+export async function getModelsCatalog(
+  _input: RpcInput<typeof factoryModelsCatalog>,
+  { paseo }: PluginHandlerContext,
+): Promise<any> {
+  const entries = ((await paseo.providers.snapshot()) as any)?.entries ?? [];
+  return { text: (formatCatalog as any)(entries) };
+}
+
+export async function getWorkers(
+  input: RpcInput<typeof factoryWorkers>,
+  { paseo }: PluginHandlerContext,
+  loader: ConfigLoader,
+): Promise<any> {
+  const { discovery } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
+  const status: any = steerStatus(discovery);
+  const scopeId = discovery.scope?.id ?? status.repo;
+  const epoch = discovery.mainWorkspace?.metadata?.[METADATA_KEY]?.epoch ?? null;
+  const report = (workersReport as any)((readWorkers as any)(discovery.mainWorkspace?.metadata ?? null));
+  return {
+    scope: scopeId,
+    epoch,
+    workers: report,
+    text: (formatWorkersText as any)(scopeId, epoch, report),
+  };
+}
+
+export async function getRetire(
+  input: RpcInput<typeof factoryRetire>,
+  { paseo }: PluginHandlerContext,
+): Promise<any> {
+  const agentId = input.agentId.trim();
+  const state: any = await readPaseoState(paseo);
+  const worker = state.agents.find((a: any) => a.id === agentId);
+  const ws = state.workspaces.find((w: any) => w.id === worker?.workspaceId);
+  const backgroundWork = worker
+    ? await paseo.agents.ref(worker.id).backgroundWork.list().catch(() => null)
+    : null;
+  const terminals = ws
+    ? await paseo.terminals.list({ workspaceId: ws.id }).then((r: any) => r.entries ?? []).catch(() => null)
+    : null;
+  const gitState = ws ? (readGitState as any)(createGit(), ws.workspaceDirectory) : null;
+  const assessment: any = (assessWorker as any)(worker, { ...state, gitState, backgroundWork, terminals });
+  const lines = [
+    `Retire preview for ${agentId} (preview only; archiving is disabled).`,
+    assessment.archiveAgent
+      ? "Agent: archivable."
+      : `Agent: blocked (${(assessment.reasons ?? []).join("; ") || "unknown reason"}).`,
+    assessment.archiveWorkspace
+      ? "Workspace: archivable."
+      : `Workspace: kept (${(assessment.workspaceReasons ?? []).join("; ") || "unknown reason"}).`,
+  ];
+  return { agentId, assessment, text: lines.join("\n") };
+}
+
+export async function pickWorker(
+  input: RpcInput<typeof factoryWorkerPick>,
+  { paseo }: PluginHandlerContext,
+  loader: ConfigLoader,
+): Promise<any> {
+  const config = await loader.loadEffectiveConfig();
+  let entries: any[];
+  let repoPublic: boolean | null = null;
+  if (input.repo || input.workspaceId) {
+    const { discovery } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
+    entries = discovery.providers ?? [];
+    const priv = discovery.github?.fork?.repo?.private;
+    repoPublic = priv === false ? true : priv === true ? false : null;
+  } else {
+    entries = ((await paseo.providers.snapshot()) as any)?.entries ?? [];
+  }
+  const { profile, skipped } = (resolveProfile as any)(config, entries, (workerPriority as any)(config), {
+    role: "worker",
+    repoPublic,
+  });
+  if (!profile) {
+    const tried = skipped.length
+      ? skipped.map((s: any) => `"${s.name}" (${s.reason})`).join("; ")
+      : "no worker profiles configured";
+    throw new Error(`No startable worker profile (tried ${tried})`);
+  }
+  const sensitive = (isSensitiveProfile as any)(config, profile.name);
+  const text = [
+    `Worker pick: "${profile.name}" (${profile.provider}/${profile.model})${sensitive ? " [sensitive: give only sanitized technical tasks]" : ""}`,
+    `paseo run ${(paseoRunFlags as any)(profile)}`,
+    ...skipped.map((s: any) => `skipped "${s.name}": ${s.reason}`),
+  ].join("\n");
+  return {
+    profile: profile.name,
+    provider: profile.provider,
+    model: profile.model,
+    thinking: profile.thinking ?? null,
+    mode: profile.mode ?? null,
+    sensitive,
+    flags: (paseoRunFlags as any)(profile),
+    skipped,
+    text,
+  };
+}
+
+export async function runDrain(
+  input: RpcInput<typeof factoryDrain>,
+  { paseo }: PluginHandlerContext,
+): Promise<any> {
+  const timeoutMs = input.timeout === undefined ? (DRAIN_DEFAULT_TIMEOUT_MS as number) : (parseTimeout as any)(input.timeout);
+  const result: any = await (drain as any)({ client: paseo, timeoutMs, git: createGit() });
+  return { ...result, text: formatDrainText(result) };
+}
+
+function formatDrainText(result: any): string {
+  const waited = `${Math.round((result.waitedMs ?? 0) / 1000)}s`;
+  const timeout = `${Math.round((result.timeoutMs ?? 0) / 1000)}s`;
+  const initial = result.initial ?? [];
+  if (result.clean && !initial.length) return "Drain: no running factory agents — safe to restart.";
+  if (result.clean) return `Drain: ${initial.length} factory agent(s) idle after ${waited} — safe to restart.`;
+  const markedIds = new Set((result.marked ?? []).map((m: any) => m.agentId));
+  const lines = [
+    `Drain: timeout after ${waited} (limit ${timeout}), ${result.running.length} still running — marked planned-restart:`,
+  ];
+  for (const a of result.running) {
+    const what = a.role === "steer" && a.slot ? `steer ${a.slot}` : a.role;
+    lines.push(
+      `  - ${a.id} ${what} in ${a.scopeId} ${a.status}${markedIds.has(a.id) ? " — marked planned-restart" : " — NOT marked (scope gone)"}`,
+    );
+  }
+  lines.push("Restart would interrupt them; run status/resume for the last answer tails.");
+  return lines.join("\n");
+}
+
+export async function previewAssign(
+  input: RpcInput<typeof factoryAssignPreview>,
+  { paseo }: PluginHandlerContext,
+  loader: ConfigLoader,
+): Promise<any> {
+  const { discovery, scope } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
+  void scope;
+  const dry: any = await (assignScope as any)({
+    client: paseo,
+    discovery,
+    task: input.task,
+    tests: input.tests ?? [],
+    blockers: input.blockers ?? [],
+    next: input.next ?? null,
+    apply: false,
+  });
+  return {
+    scope: dry.scope,
+    epoch: dry.epoch,
+    slot: dry.slot,
+    steerId: dry.steerId,
+    previous: dry.previous,
+    packet: dry.packet,
+    packetChars: dry.packetChars,
+    fingerprint: assignFingerprint({
+      scope: dry.scope,
+      epoch: dry.epoch,
+      task: dry.fields.task,
+      tests: dry.fields.tests,
+      blockers: dry.fields.blockers,
+      next: dry.fields.next,
+    }),
+  };
+}
+
+export async function applyAssign(
+  input: RpcInput<typeof factoryAssign>,
+  { paseo }: PluginHandlerContext,
+  loader: ConfigLoader,
+): Promise<any> {
+  const { discovery } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
+  const dry: any = await (assignScope as any)({
+    client: paseo,
+    discovery,
+    task: input.task,
+    tests: input.tests ?? [],
+    blockers: input.blockers ?? [],
+    next: input.next ?? null,
+    apply: false,
+  });
+  const fresh = assignFingerprint({
+    scope: dry.scope,
+    epoch: dry.epoch,
+    task: dry.fields.task,
+    tests: dry.fields.tests,
+    blockers: dry.fields.blockers,
+    next: dry.fields.next,
+  });
+  if (fresh !== input.fingerprint) {
+    throw new Error(
+      "Something changed since the assign preview (for example a switch). Run /factory assign again and confirm the new preview.",
+    );
+  }
+  const applied: any = await (assignScope as any)({
+    client: paseo,
+    discovery,
+    task: input.task,
+    tests: input.tests ?? [],
+    blockers: input.blockers ?? [],
+    next: input.next ?? null,
+    apply: true,
+    send: true,
+    expectEpoch: dry.epoch,
+    assignedBy: null,
+  });
+  return applied;
+}
+
+export async function previewRelocate(
+  input: RpcInput<typeof factoryRelocatePreview>,
+  { paseo }: PluginHandlerContext,
+  loader: ConfigLoader,
+): Promise<any> {
+  const { config, discovery, scope } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
+  void scope;
+  const dry: any = await (relocateScope as any)({
+    client: paseo,
+    discovery,
+    config,
+    to: input.to,
+    apply: false,
+    git: createGit(),
+  });
+  return {
+    scope: dry.scope,
+    fromWorkspace: dry.fromWorkspace,
+    toDir: dry.toDir,
+    toWorkspace: dry.toWorkspace,
+    adoptedWorkspace: dry.adoptedWorkspace,
+    movedTo: dry.movedTo,
+    checkpoint: dry.checkpoint,
+    notes: dry.notes,
+    steers: dry.steers,
+    packets: dry.packets,
+    fingerprint: relocateFingerprint({
+      scope: dry.scope,
+      fromWorkspace: dry.fromWorkspace,
+      toDir: dry.toDir,
+      steers: dry.steers.map((s: any) => `${s.slot}:${s.profile}`),
+      checkpoint: dry.checkpoint,
+    }),
+  };
+}
+
+export async function applyRelocate(
+  input: RpcInput<typeof factoryRelocate>,
+  { paseo }: PluginHandlerContext,
+  loader: ConfigLoader,
+): Promise<any> {
+  const { config, discovery } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
+  const git = createGit();
+  const dry: any = await (relocateScope as any)({
+    client: paseo,
+    discovery,
+    config,
+    to: input.to,
+    apply: false,
+    git,
+  });
+  const fresh = relocateFingerprint({
+    scope: dry.scope,
+    fromWorkspace: dry.fromWorkspace,
+    toDir: dry.toDir,
+    steers: dry.steers.map((s: any) => `${s.slot}:${s.profile}`),
+    checkpoint: dry.checkpoint,
+  });
+  if (fresh !== input.fingerprint) {
+    throw new Error(
+      "Something changed since the relocate preview (for example another relocate). Run /factory relocate again and confirm the new preview.",
+    );
+  }
+  const executeOptions: any = { client: paseo, gh: createGh(), git, paseoCli: createPaseoCli() };
+  const applied: any = await (relocateScope as any)({
+    client: paseo,
+    discovery,
+    config,
+    to: input.to,
+    apply: true,
+    git,
+    lookupReceipt: lookupCreationReceipt,
+    execute: createExecutors(executeOptions),
+  });
+  return applied;
+}
+
+export async function planCleanup(
+  input: RpcInput<typeof factoryCleanupPlan>,
+  { paseo }: PluginHandlerContext,
+  loader: ConfigLoader,
+): Promise<any> {
+  const config = await loader.loadEffectiveConfig();
+  const only = input.only?.length ? [...input.only] : null;
+  const paseoState: any = await (attachProjectArchivedAgents as any)(await readPaseoState(paseo), paseo);
+  const { ops, hints } = (planCleanupOps as any)(paseoState, {
+    allowDestructive: input.allowDestructive ?? false,
+    allowIgnored: input.allowIgnored ?? false,
+    only,
+    git: createGit(),
+  });
+  const plans = [
+    {
+      repo: "cleanup",
+      input: "cleanup",
+      status: ops.length ? "pending" : "complete",
+      ops,
+      conflicts: [],
+      notes: [
+        ...hints.map((h: any) => `hint ${h.id}: ${h.reason}`),
+        ...ops
+          .filter((op: any) => op.kind !== "scope.retire" && op.loss)
+          .map((op: any) => `DESTRUCTIVE ${op.key}: loss ${(formatLoss as any)(op.loss)}`),
+      ],
+      observed: {},
+    },
+  ];
+  const hash = planHash(plans, config);
+  if (ops.length) {
+    const stored = storeAuthorization(
+      runtime().planDir,
+      { ...(createAuthorization as any)(plans, config, { entries: [{ cleanup: { allowDestructive: input.allowDestructive ?? false, allowIgnored: input.allowIgnored ?? false, only } }] }), kind: "cleanup" },
+      config,
+    );
+    void stored;
+  }
+  return { hash, plans, hints };
 }

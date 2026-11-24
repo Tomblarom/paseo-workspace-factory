@@ -12,32 +12,66 @@
 // serialized by a per-workspace flock on this host; agents, the UI and other hosts
 // are not blocked. Between held.verify() and the daemon write remains a short
 // window in which a replaced lock file is not noticed.
-import { LABEL, METADATA_KEY, parentOf } from './paseo.js';
+import { LABEL, METADATA_KEY, parentOf, agentUsage, isRestartReason, restartMessage } from './paseo.js';
 import { withLock, workspaceLockName } from './lock.js';
 import { runtime } from './runtime.js';
-import { slotProfile, validateProfilesAgainstCatalog } from './config.js';
+import { isAdvisorSlot, isSensitiveSlot } from './config.js';
+import { resolveProfile, steerFallbackList, usedProfilesByLiveSteers } from './models.js';
 import { idempotencyKey, requestDigest } from './planner.js';
 import { createExecutors } from './apply.js';
-import { resolveScope, scopeToEntry } from './scope.js';
+import { resolveScope, scopeToEntry, sameScopeId, domainOfScope } from './scope.js';
+import { STEER_TITLE } from './discovery.js';
 import { AGENTS_KEY } from './agent-state.js';
+import { openWorkers as openRegisterWorkers, readWorkers } from './supervision.js';
+import { formatQuotaLine, profilePool } from './quota.js';
 
 export const CHECKPOINT_KEY = `${METADATA_KEY}.checkpoint`;
 export class SwitchRefused extends Error {}
+export { agentUsage };
 
 const BUSY = new Set(['running', 'initializing']);
 
 /**
- * Context-window usage from an agent snapshot (`lastUsage`), or null when Paseo
- * reports none. Only context numbers are used; nothing is estimated. The account
- * quotas of `paseo usage` are deliberately not shown per agent: they belong to a
- * provider account, not to an agent.
+ * Restart interruptions (P2) from the scope flag and the agent-level records:
+ * every entry whose interrupted reason is daemon-restart or planned-restart.
+ * Sorted by agent id for deterministic output. Heuristic guesses are added by
+ * the caller (steerStatus, scopeRows, buildResumeBrief) with heuristic: true.
  */
-export function agentUsage(agent) {
-  const snapshot = agent?.lastUsage ?? agent?.LastUsage ?? null;
-  const used = snapshot?.contextWindowUsedTokens ?? snapshot?.ContextWindowUsedTokens;
-  const max = snapshot?.contextWindowMaxTokens ?? snapshot?.ContextWindowMaxTokens;
-  if (!Number.isFinite(used) || !Number.isFinite(max)) return null;
-  return { usedTokens: used, maxTokens: max };
+export function restartInterruptions({ checkpoint = null, agentState = null } = {}) {
+  const out = [];
+  const seen = new Set();
+  const agents = agentState && typeof agentState === 'object' ? agentState : {};
+  for (const [agentId, entry] of Object.entries(agents)) {
+    const reason = entry?.interrupted?.reason;
+    if (isRestartReason(reason) && !seen.has(agentId)) {
+      seen.add(agentId);
+      out.push({ agentId, reason, at: entry.interrupted.at ?? null, heuristic: false });
+    }
+  }
+  const flag = checkpoint?.interrupted;
+  if (flag && typeof flag === 'object' && isRestartReason(flag.reason) && typeof flag.agentId === 'string' && flag.agentId && !seen.has(flag.agentId)) {
+    seen.add(flag.agentId);
+    out.push({ agentId: flag.agentId, reason: flag.reason, at: flag.at ?? null, heuristic: false });
+  }
+  out.sort((a, b) => a.agentId.localeCompare(b.agentId));
+  return out;
+}
+
+/**
+ * Heuristic restart guess without the plugin (P2): the daemon started after
+ * the last CHECKPOINT, the agent is idle, and its last turn carried no
+ * CHECKPOINT block. Fails closed on missing or unparsable input: unknown
+ * last-turn state (null/undefined) never marks.
+ */
+export function isHeuristicRestart({ daemonStartedAt, checkpointAt, agentStatus, lastTurnHadCheckpoint }) {
+  if (agentStatus !== 'idle') return false;
+  if (lastTurnHadCheckpoint !== false) return false;
+  if (typeof daemonStartedAt !== 'string' || !daemonStartedAt) return false;
+  if (typeof checkpointAt !== 'string' || !checkpointAt) return false;
+  const daemonMs = Date.parse(daemonStartedAt);
+  const cpMs = Date.parse(checkpointAt);
+  if (!Number.isFinite(daemonMs) || !Number.isFinite(cpMs)) return false;
+  return daemonMs > cpMs;
 }
 
 /**
@@ -52,19 +86,59 @@ export function resolveTargetEntry(address, paseoState) {
   return { entry: scopeToEntry(scope), scope, deprecatedAlias: scope.deprecatedAlias === true };
 }
 
-export function steerStatus(discovery, { warnContextTokens } = {}) {
+export function steerStatus(discovery, { warnContextTokens, daemonStartedAt = null, lastTurnCheckpoints = null, config = null } = {}) {
   const main = discovery.mainWorkspace;
   const state = main?.metadata?.[METADATA_KEY] ?? null;
+  const checkpoint = main?.metadata?.[CHECKPOINT_KEY] ?? null;
+  const agentState = main?.metadata?.[AGENTS_KEY] ?? null;
   const retiredId = typeof state?.previousSteer === 'string' && !/^[A-Z]$/.test(state.previousSteer) ? state.previousSteer : null;
+  const marked = restartInterruptions({ checkpoint, agentState });
+  const markedIds = new Set(marked.map((m) => m.agentId));
+  const checkpointAt = checkpoint?.capturedAt ?? checkpoint?.updatedAt ?? null;
+  const heuristicIds = new Set();
+  if (daemonStartedAt && lastTurnCheckpoints && typeof lastTurnCheckpoints === 'object' && checkpointAt) {
+    for (const a of [...(discovery.steers.labelled ?? []), ...(discovery.workers ?? [])]) {
+      if (!a || a.archivedAt || markedIds.has(a.id)) continue;
+      if (isHeuristicRestart({ daemonStartedAt, checkpointAt, agentStatus: a.status, lastTurnHadCheckpoint: lastTurnCheckpoints[a.id] })) {
+        heuristicIds.add(a.id);
+      }
+    }
+  }
+  const heuristic = [...heuristicIds].sort().map((agentId) => ({ agentId, reason: 'daemon-restart', at: null, heuristic: true }));
+  const restartInterrupted = [...marked, ...heuristic].sort((a, b) => a.agentId.localeCompare(b.agentId));
+  const withInterruption = (id) => {
+    const record = agentState?.[id]?.interrupted ?? null;
+    if (record && typeof record === 'object') return { interrupted: record, reason: record.reason ?? null };
+    if (heuristicIds.has(id)) return { interrupted: { reason: 'daemon-restart', heuristic: true, at: null }, reason: 'daemon-restart' };
+    return {};
+  };
   const steers = discovery.steers.labelled
     .filter((a) => !a.archivedAt)
-    .map((a) => ({ slot: a.labels[LABEL.slot], id: a.id, title: a.title, provider: a.provider, model: a.model, status: a.status, parent: parentOf(a), workspaceId: a.workspaceId, usage: agentUsage(a), retired: retiredId !== null && a.id === retiredId }))
+    .map((a) => ({ slot: a.labels[LABEL.slot], id: a.id, title: a.title, provider: a.provider, model: a.model, status: a.status, parent: parentOf(a), workspaceId: a.workspaceId, usage: agentUsage(a), retired: retiredId !== null && a.id === retiredId, ...(config ? { advisor: isAdvisorSlot(config, a.labels[LABEL.slot]), sensitive: isSensitiveSlot(config, a.labels[LABEL.slot]) } : {}), ...withInterruption(a.id) }))
     .sort((a, b) => a.slot.localeCompare(b.slot));
   const steerById = new Map(steers.map((s) => [s.id, s]));
-  const workers = discovery.workers.map((w) => ({
-    id: w.id, title: w.title, provider: w.provider, model: w.model, status: w.status, cwd: w.cwd,
-    parentSlot: steerById.get(parentOf(w))?.slot ?? null, parent: parentOf(w), usage: agentUsage(w),
-    workspaceId: w.workspaceId ?? null, owner: w.labels?.[LABEL.owner] ?? null,
+  // Unlabelled steer candidates by id (lettered and digit-titled): a worker
+  // whose parent is such a candidate names it instead of "Steer ?".
+  const candidateById = new Map();
+  for (const a of [...(discovery.steers.legacy ?? []), ...(discovery.steers.digitCandidates ?? [])]) {
+    candidateById.set(a.id, {
+      id: a.id, title: a.title ?? null,
+      slot: (a.title ?? '').trim().match(STEER_TITLE)?.[1] ?? null,
+    });
+  }
+  const workers = discovery.workers.map((w) => {
+    const parent = parentOf(w);
+    return {
+      id: w.id, title: w.title, provider: w.provider, model: w.model, status: w.status, cwd: w.cwd,
+      parentSlot: (parent && steerById.get(parent)?.slot) ?? null, parent, usage: agentUsage(w),
+      parentCandidate: parent && !steerById.has(parent) ? (candidateById.get(parent) ?? null) : null,
+      workspaceId: w.workspaceId ?? null, owner: w.labels?.[LABEL.owner] ?? null,
+      ...withInterruption(w.id),
+    };
+  });
+  const candidates = [...(discovery.steers.legacy ?? []), ...(discovery.steers.digitCandidates ?? [])].map((a) => ({
+    id: a.id, title: a.title ?? null, slot: (a.title ?? '').trim().match(STEER_TITLE)?.[1] ?? null,
+    provider: a.provider, model: a.model, status: a.status, parent: parentOf(a), usage: agentUsage(a),
   }));
   const usageWarnings = [];
   if (Number.isInteger(warnContextTokens) && warnContextTokens > 0) {
@@ -75,17 +149,39 @@ export function steerStatus(discovery, { warnContextTokens } = {}) {
       if (w.usage && w.usage.usedTokens > warnContextTokens) usageWarnings.push({ kind: 'worker', slot: null, id: w.id, usedTokens: w.usage.usedTokens, maxTokens: w.usage.maxTokens });
     }
   }
+  // Domain role: the stored pointer wins (a planned --domain is not status).
+  const domain = domainOfScope(state?.scope) ?? domainOfScope(discovery.scope) ?? null;
+  const domainChildren = (discovery.liveScopes ?? []).filter((s) => sameScopeId(s.domain, discovery.forkName)).map((s) => s.id);
+  const warnings = [];
+  if (config) {
+    for (const s of steers) {
+      const profileName = config.steers?.slots?.[s.slot];
+      const expected = profileName ? config.profiles?.[profileName] : null;
+      if (expected && (s.provider !== expected.provider || s.model !== expected.model)) {
+        warnings.push(`Steer ${s.slot} runs ${s.provider}/${s.model} but slot profile "${profileName}" names ${expected.provider}/${expected.model}`);
+      }
+    }
+    if (state?.activeSteer && isAdvisorSlot(config, state.activeSteer)) {
+      warnings.push(`Active Steer ${state.activeSteer} is an advisor (profile "${config.steers.slots[state.activeSteer]}"); advisors never coordinate`);
+    }
+  }
   return {
     repo: discovery.forkName,
+    domain,
+    domainChildren,
     workspace: main ? { id: main.id, title: main.title ?? main.name, directory: main.workspaceDirectory } : null,
     // Adopted worktree workspaces carry the same steer state; the flag only
     // tells status consumers where the main workspace lives.
     worktree: discovery.worktree ? { workspaceId: discovery.worktree.workspaceId ?? main?.id ?? null, directory: discovery.worktree.directory ?? main?.workspaceDirectory ?? null } : null,
     state,
-    checkpoint: main?.metadata?.[CHECKPOINT_KEY] ?? null,
+    checkpoint,
     steers,
     workers,
+    openWorkers: openRegisterWorkers(readWorkers(main?.metadata ?? null)),
+    candidates,
     usageWarnings,
+    ...(config ? { warnings } : {}),
+    ...(restartInterrupted.length ? { restartInterrupted } : {}),
   };
 }
 
@@ -174,9 +270,10 @@ export function formatCheckpointBlock({ task, tests = [], blockers = [], next = 
  * Deterministic handoff text from Paseo/git state. No model call is made to build
  * it; the receiving steer still reads it as normal input on its next turn.
  */
-export function buildHandoff(status, { from, to, epoch, git, lastMessage, maxLastChars = 800, language = 'en' }) {
+export function buildHandoff(status, { from, to, epoch, git, lastMessage, maxLastChars = 800, language = 'en', workerModel = null }) {
   const t = TEXT[language] ?? TEXT.en;
   const lines = [t.head(status.repo, epoch), t.active(to, from), `Workspace ${status.workspace.id} · ${status.workspace.directory}`, git ? t.git(git) : t.noGit];
+  if (workerModel) lines.push(workerModel);
   const cp = status.checkpoint;
   if (!cp?.task) {
     lines.push(t.noCheckpoint);
@@ -186,11 +283,18 @@ export function buildHandoff(status, { from, to, epoch, git, lastMessage, maxLas
     lines.push(`- ${t.tests}: ${cp.tests?.length ? cp.tests.join('; ') : t.none}`);
     lines.push(`- ${t.blockers}: ${cp.blockers?.length ? cp.blockers.join('; ') : t.none}`);
     lines.push(`- ${t.next}: ${cp.next ? cp.next : t.noNext}`);
+    if (cp.source === 'failover' && cp.failover) lines.push(`- Failover: takeover from ${cp.failover.previousSteer ?? '?'} (${cp.failover.reason ?? 'no reason recorded'})`);
     lines.push(formatCheckpointBlock(cp));
   }
-  if (status.workers.length) {
+  const supervised = new Map((status.openWorkers ?? []).map((e) => [e.id, e]));
+  const supervisedSuffix = (id) => {
+    const e = supervised.get(id);
+    return e ? ` · supervised ${e.state}: ${clip(e.task ?? '', 120) || '(no task)'}` : '';
+  };
+  if (status.workers.length || supervised.size) {
     lines.push(t.workers);
-    for (const w of status.workers) lines.push(`- ${w.id} „${w.title}“ ${w.provider}/${w.model} · ${w.status}${w.parentSlot ? ` · ${t.parent} ${w.parentSlot}` : ''}${w.owner && !w.parentSlot ? ` · owner ${w.owner}` : ''}${w.workspaceId && status.workspace && w.workspaceId !== status.workspace.id ? ` · workspace ${w.workspaceId}` : ''}`);
+    for (const w of status.workers) lines.push(`- ${w.id} „${w.title}“ ${w.provider}/${w.model} · ${w.status}${w.parentSlot ? ` · ${t.parent} ${w.parentSlot}` : ''}${!w.parentSlot && w.parentCandidate ? ` · ${t.parent} candidate "${w.parentCandidate.title}" ${w.parentCandidate.id}` : ''}${w.owner && !w.parentSlot ? ` · owner ${w.owner}` : ''}${w.workspaceId && status.workspace && w.workspaceId !== status.workspace.id ? ` · workspace ${w.workspaceId}` : ''}${supervisedSuffix(w.id)}`);
+    for (const e of [...supervised.values()].filter((entry) => !status.workers.some((w) => w.id === entry.id))) lines.push(`- ${e.id} (agent not live) · supervised ${e.state}: ${clip(e.task ?? '', 120) || '(no task)'}`);
   } else {
     lines.push(t.noWorkers);
   }
@@ -217,22 +321,32 @@ function ageAgo(when, now) {
 
 /**
  * Resume brief for a cold agent: scope header, checkpoint with source/age and
- * stale/interrupted warnings, git, worker notes, open hub items. Deterministic
- * (no wall-clock time inside, only the age), English only. `agentState` is the
- * `wsf.agents` map for excerpts and worker notes; `git` a readGitBrief result.
+ * stale/interrupted warnings, restart lines, git, worker notes, open hub
+ * items. Deterministic (no wall-clock time inside, only the age), English
+ * only except the fixed German restart line. `agentState` is the `wsf.agents`
+ * map for excerpts and worker notes; `git` a readGitBrief result.
+ * `daemonStartedAt` plus `lastTurnCheckpoints` (agent id -> bool, false means
+ * the last turn had no CHECKPOINT) enable the heuristic restart guess; without
+ * them only plugin-marked interruptions are shown.
  */
-export function buildResumeBrief(status, { agentId = null, agentState = null, git = null, scope = null, now = () => Date.now() } = {}) {
+export function buildResumeBrief(status, { agentId = null, agentState = null, git = null, scope = null, now = () => Date.now(), daemonStartedAt = null, lastTurnCheckpoints = null, config = null, workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75 } = {}) {
   const id = scope?.id ?? status.repo;
   const kind = scope?.kind ?? 'unknown';
   const epoch = status.state?.epoch ?? '?';
+  const domain = scope?.domain ?? status.domain ?? null;
   const active = status.steers.find((s) => s.slot === status.state?.activeSteer) ?? null;
-  const lines = [`Resume brief for ${id} (${kind}) · epoch ${epoch} · active steer ${status.state?.activeSteer ?? '?'}${active ? ` (${active.id})` : ''}.`];
+  const lines = [`Resume brief for ${id} (${kind}) · epoch ${epoch} · active steer ${status.state?.activeSteer ?? '?'}${active ? ` (${active.id})` : ''}${domain ? ` · domain ${domain}` : ''}.`];
   const callerSteer = agentId ? status.steers.find((s) => s.id === agentId) ?? null : null;
   const callerWorker = !callerSteer && agentId ? (status.workers ?? []).find((w) => w.id === agentId) ?? null : null;
-  if (callerSteer && callerSteer.id === active?.id) lines.push('You are the active steer of this scope.');
+  if (config && callerSteer && isAdvisorSlot(config, callerSteer.slot)) lines.push('You are an advisor steer: answer only, never coordinate or take over.');
+  else if (callerSteer && callerSteer.id === active?.id) lines.push('You are the active steer of this scope.');
   else if (callerSteer) lines.push('You are not active: answer only, do not coordinate.');
   else if (callerWorker) lines.push(`You are worker "${callerWorker.title}"; your owner is Steer ${callerWorker.owner ?? callerWorker.parentSlot ?? '?'} — continue from the checkpoint below.`);
   else lines.push('Caller unknown; treat this brief as read-only context.');
+  if (workerModel) lines.push(workerModel);
+  const quotaPool = active ? profilePool(config?.profiles?.[config?.steers?.slots?.[active.slot]]) : null;
+  const quotaLine = formatQuotaLine(config, quotaSnapshot, { currentPool: quotaPool, warnPct: quotaWarnPct });
+  if (quotaLine) lines.push(quotaLine);
 
   const cp = status.checkpoint;
   const agents = agentState && typeof agentState === 'object' ? agentState : {};
@@ -245,6 +359,7 @@ export function buildResumeBrief(status, { agentId = null, agentState = null, gi
     lines.push(`- Tests: ${cp.tests?.length ? clip(cp.tests.join('; '), 300) : 'none recorded'}`);
     lines.push(`- Open blockers: ${cp.blockers?.length ? clip(cp.blockers.join('; '), 300) : 'none recorded'}`);
     lines.push(`- Next step: ${cp.next ? clip(cp.next, 300) : 'not recorded'}`);
+    if (cp.source === 'failover' && cp.failover) lines.push(`Failover from ${cp.failover.previousSteer ?? '?'}: ${cp.failover.reason ?? 'no reason recorded'}`);
     if (cp.epoch !== null && cp.epoch !== undefined && status.state?.epoch !== null && status.state?.epoch !== undefined && cp.epoch !== status.state.epoch) {
       lines.push(`! Checkpoint is stale: from epoch ${cp.epoch}, scope is at epoch ${status.state.epoch} — verify before continuing.`);
     }
@@ -254,6 +369,21 @@ export function buildResumeBrief(status, { agentId = null, agentState = null, gi
       lines.push(typeof excerpt === 'string' && excerpt ? clip(excerpt, 800) : '(no excerpt recorded)');
     }
   }
+  const marked = restartInterruptions({ checkpoint: cp, agentState: agents });
+  const markedIds = new Set(marked.map((m) => m.agentId));
+  const heuristic = [];
+  const checkpointAt = cp?.capturedAt ?? cp?.updatedAt ?? null;
+  if (daemonStartedAt && lastTurnCheckpoints && typeof lastTurnCheckpoints === 'object' && checkpointAt) {
+    for (const a of [...(status.steers ?? []), ...(status.workers ?? [])]) {
+      if (!a || markedIds.has(a.id)) continue;
+      if (isHeuristicRestart({ daemonStartedAt, checkpointAt, agentStatus: a.status, lastTurnHadCheckpoint: lastTurnCheckpoints[a.id] })) {
+        heuristic.push({ agentId: a.id, reason: 'daemon-restart', at: null, heuristic: true });
+      }
+    }
+  }
+  for (const r of [...marked, ...heuristic].sort((a, b) => a.agentId.localeCompare(b.agentId))) {
+    lines.push(`! ${restartMessage(r.agentId)} (${r.reason}${r.heuristic ? ', vermutet' : ''})`);
+  }
   if (git) {
     const sync = git.ahead === null && git.behind === null ? 'no upstream' : `ahead ${git.ahead ?? '?'}/behind ${git.behind ?? '?'}`;
     lines.push(`Git: ${git.branch} @ ${String(git.sha ?? '').slice(0, 12)} · ${sync} · ${git.changed ? `${git.changed} changed files:` : 'clean'}`);
@@ -262,16 +392,20 @@ export function buildResumeBrief(status, { agentId = null, agentState = null, gi
     lines.push('Git: state unreadable – check it yourself before starting.');
   }
   const workers = status.workers ?? [];
-  if (!workers.length) {
+  const supervised = new Map((status.openWorkers ?? []).map((e) => [e.id, e]));
+  const registerOnly = [...supervised.values()].filter((e) => !workers.some((w) => w.id === e.id));
+  if (!workers.length && !registerOnly.length) {
     lines.push('Workers: none.');
   } else {
     lines.push('Workers (reuse by agent id):');
     for (const w of workers.slice(0, BRIEF_WORKERS_SHOWN)) {
       const note = agents[w.id]?.note;
       const firstLine = typeof note === 'string' && note.trim() ? clip(note.trim().split('\n')[0], 120) : 'no note';
-      lines.push(`- ${w.id} "${w.title}" ${w.status} · ${firstLine}`);
+      const e = supervised.get(w.id);
+      lines.push(`- ${w.id} "${w.title}" ${w.status} · ${firstLine}${e ? ` · supervised: ${e.state} ${clip(e.task ?? '', 120)}` : ''}`);
     }
     if (workers.length > BRIEF_WORKERS_SHOWN) lines.push(`- … +${workers.length - BRIEF_WORKERS_SHOWN} more workers`);
+    for (const e of registerOnly) lines.push(`- ${e.id} (agent not live) · supervised: ${e.state} ${clip(e.task ?? '', 120)}`);
   }
   const escalations = (cp?.blockers ?? []).filter((b) => typeof b === 'string' && b.startsWith('hub:'));
   if (escalations.length) {
@@ -280,6 +414,19 @@ export function buildResumeBrief(status, { agentId = null, agentState = null, gi
     if (escalations.length > 10) lines.push(`- … +${escalations.length - 10} more hub items`);
   } else {
     lines.push('Open hub items: none.');
+  }
+  // Domain routing (only when the scope has a domain or escalated to one, so
+  // briefs without a domain stay byte-identical): `domain:` blockers go to the
+  // domain steer, `hub:` ones further to the hub.
+  const domainItems = (cp?.blockers ?? []).filter((b) => typeof b === 'string' && b.startsWith('domain:'));
+  if (domain || domainItems.length) {
+    if (domainItems.length) {
+      lines.push(`Open domain items (escalated to the domain steer${domain ? ` ${domain}` : ''}):`);
+      for (const item of domainItems.slice(0, 10)) lines.push(`- ${clip(item, 200)}`);
+      if (domainItems.length > 10) lines.push(`- … +${domainItems.length - 10} more domain items`);
+    } else {
+      lines.push('Open domain items: none.');
+    }
   }
   const text = lines.join('\n');
   if (text.length <= BRIEF_BUDGET) return text;
@@ -292,8 +439,8 @@ export function buildResumeBrief(status, { agentId = null, agentState = null, gi
  * receiving agent and the verify-git line. Without interruption this is
  * exactly buildHandoff.
  */
-function handoffWithBrief(status, args, { discovery, git, language }) {
-  const packet = buildHandoff(status, args);
+function handoffWithBrief(status, args, { discovery, git, language, workerModel = null, quotaSnapshot = null, quotaWarnPct = 75 }) {
+  const packet = buildHandoff(status, { ...args, workerModel });
   const at = status.checkpoint?.interrupted?.at ?? null;
   if (at === null && !status.checkpoint?.interrupted) return packet;
   const brief = buildResumeBrief(status, {
@@ -301,6 +448,9 @@ function handoffWithBrief(status, args, { discovery, git, language }) {
     agentState: discovery?.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null,
     git: git ? readGitBrief(git, status.workspace.directory) : null,
     scope: discovery?.scope ?? null,
+    workerModel,
+    quotaSnapshot,
+    quotaWarnPct,
   });
   const line = language === 'de'
     ? `Der vorherige Steer wurde um ${at ?? 'unbekannter Zeit'} unterbrochen; Git-Stand vor dem Weitermachen prüfen.`
@@ -314,11 +464,13 @@ const NONE = /^(keine?|none|n\/a|-)\.?$/i;
  * Parses the last `CHECKPOINT` block of an agent answer, fenced or bare:
  *   ```text
  *   CHECKPOINT
- *   - task: …   - tests: …   - blockers: …   - next: …   (- workers: …)
+ *   - task: …   - tests: …   - blockers: …   - next: …   (- workers: …)   (- status: …)
  *   ```
- * Dashes, the fence and the `workers` line (informational, ignored) are
+ * Dashes, the fence, the `workers` line (informational, ignored) and the
+ * optional `status` line (`done`|`partial`|`blocked`, case-insensitive) are
  * optional; values "none"/"keine" become empty lists. Returns null without a
- * block or task.
+ * block or task. Blocks without a status line parse to the previous shape
+ * (no `status` key), so old readers keep working.
  */
 export function parseCheckpointBlock(text) {
   if (typeof text !== 'string') return null;
@@ -333,7 +485,7 @@ export function parseCheckpointBlock(text) {
   if (start < 0) return null;
   const fields = {};
   for (const line of lines.slice(start + 1)) {
-    const match = line.match(/^\s*[-*]?\s*(task|tests|blockers|next)\s*:\s*(.*)$/i);
+    const match = line.match(/^\s*[-*]?\s*(task|tests|blockers|next|status)\s*:\s*(.*)$/i);
     if (match) fields[match[1].toLowerCase()] = match[2].trim();
     else if (line.trim() === '' || /^\s*```/.test(line)) continue;
     else if (/^\s*[-*]?\s*workers\s*:/i.test(line)) continue;
@@ -341,7 +493,11 @@ export function parseCheckpointBlock(text) {
   }
   if (!fields.task) return null;
   const list = (value) => (!value || NONE.test(value) ? [] : [value]);
-  return { task: fields.task, tests: list(fields.tests), blockers: list(fields.blockers), next: fields.next && !NONE.test(fields.next) ? fields.next : null };
+  const status = typeof fields.status === 'string' && /^(done|partial|blocked)$/i.test(fields.status.trim()) ? fields.status.trim().toLowerCase() : null;
+  return {
+    task: fields.task, tests: list(fields.tests), blockers: list(fields.blockers), next: fields.next && !NONE.test(fields.next) ? fields.next : null,
+    ...(status ? { status } : {}),
+  };
 }
 
 export function lastAssistantText(timelinePayload) {
@@ -365,7 +521,7 @@ function refuseIfRetired(status) {
  * re-read, check the expected epoch and active steer, write, read back, release;
  * the handoff is delivered after the lock is released.
  */
-export async function switchSteer({ client, discovery, toSlot, apply = false, send = true, wait = false, waitTimeoutMs = 600_000, notifyPrevious = false, language = runtime().handoffLanguage, git, lock = withLock, now = () => new Date() }) {
+export async function switchSteer({ client, discovery, toSlot, apply = false, send = true, wait = false, waitTimeoutMs = 600_000, notifyPrevious = false, language = runtime().handoffLanguage, git, lock = withLock, now = () => new Date(), config = null, workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, callerId = process.env.PASEO_AGENT_ID }) {
   const status = steerStatus(discovery);
   if (!status.workspace || !status.state) throw new SwitchRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
@@ -374,12 +530,16 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
   const to = status.steers.find((s) => s.slot === toSlot);
   if (!to) throw new SwitchRefused(`Steer ${toSlot} does not exist for ${status.repo}`);
   if (toSlot === expected.activeSteer) throw new SwitchRefused(`Steer ${toSlot} is already active`);
+  if (config && isAdvisorSlot(config, toSlot)) {
+    throw new SwitchRefused(`Steer ${toSlot} is an advisor (profile ${config.steers.slots[toSlot]}); remove the advisor tag to make it a coordinator`);
+  }
   const ambiguous = (slot) => status.steers.filter((s) => s.slot === slot);
   if (ambiguous(toSlot).length > 1) throw new SwitchRefused(`Steer ${toSlot} has several live agents (${ambiguous(toSlot).map((s) => s.id).join(', ')}); archive the retired one in Paseo, then rerun`);
   if (from && ambiguous(from.slot).length > 1) throw new SwitchRefused(`Active Steer ${from.slot} has several live agents (${ambiguous(from.slot).map((s) => s.id).join(', ')}); archive the retired one in Paseo, then rerun`);
   if (to.parent) throw new SwitchRefused(`Steer ${toSlot} has parent ${to.parent}; refusing to make it coordinator`);
   if (to.workspaceId !== status.workspace.id) throw new SwitchRefused(`Steer ${toSlot} is not in the main workspace`);
-  if (BUSY.has(to.status)) throw new SwitchRefused(`Steer ${toSlot} is ${to.status}`);
+  const selfTakeover = Boolean(callerId) && callerId === to.id; // the target requests its own takeover: it is the running caller
+  if (!selfTakeover && BUSY.has(to.status)) throw new SwitchRefused(`Steer ${toSlot} is ${to.status}`);
   if (from && BUSY.has(from.status)) throw new SwitchRefused(`Active Steer ${from.slot} is ${from.status}; stop it or wait for its turn to end first`);
 
   let lastMessage = null;
@@ -392,10 +552,10 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
   }
   const fromInfo = from ?? { slot: expected.activeSteer, id: 'unknown' };
   const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory) : null;
-  const packet = handoffWithBrief(status, { from: fromInfo, to, epoch: expected.epoch, git: gitSnapshot, lastMessage, language }, { discovery, git, language });
+  const packet = handoffWithBrief(status, { from: fromInfo, to, epoch: expected.epoch, git: gitSnapshot, lastMessage, language }, { discovery, git, language, workerModel, quotaSnapshot, quotaWarnPct });
   const result = {
     repo: status.repo, from: fromInfo.slot, to: toSlot, epoch: expected.epoch + 1, packet,
-    packetChars: packet.length, checkpoint: Boolean(status.checkpoint?.task), applied: false, delivered: false, deliveryError: null, reply: null, previousNotified: false,
+    packetChars: packet.length, checkpoint: Boolean(status.checkpoint?.task), applied: false, delivered: false, deliveryError: null, reply: null, previousNotified: false, selfTakeover,
   };
   if (!apply) return result;
 
@@ -412,7 +572,7 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
     if (written?.epoch !== next.epoch || written?.activeSteer !== toSlot) throw new Error('Steer switch not verifiable after write');
   });
   result.applied = true;
-  if (send) {
+  if (send && !selfTakeover) { // never message oneself; the brief is only returned
     try {
       await client.agents.ref(to.id).send(packet);
       result.delivered = true;
@@ -428,7 +588,7 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
       result.previousNotified = false;
     }
   }
-  if (wait && result.delivered) {
+  if (wait && result.delivered && !selfTakeover) {
     const handle = client.agents.ref(to.id);
     await handle.waitForFinish(waitTimeoutMs);
     result.reply = lastAssistantText(await handle.timeline.refetch({ direction: 'tail', limit: 20 }));
@@ -448,7 +608,7 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
  * refuse it as ambiguous. The packet preview names a placeholder id; the applied
  * packet carries the real one.
  */
-export async function freshSteer({ client, discovery, config, apply = false, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, now = () => new Date() }) {
+export async function freshSteer({ client, discovery, config, apply = false, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, now = () => new Date(), workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 90 }) {
   const status = steerStatus(discovery);
   if (!status.workspace || !status.state) throw new SwitchRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
@@ -460,9 +620,16 @@ export async function freshSteer({ client, discovery, config, apply = false, lan
   if (single && BUSY.has(single.status)) throw new SwitchRefused(`Active Steer ${slot} is ${single.status}; stop it or wait for its turn to end first`);
   const profileName = config?.steers?.slots?.[slot];
   if (!profileName || !config.profiles?.[profileName]) throw new SwitchRefused(`Steer slot ${slot} references unknown profile "${profileName}"`);
-  const profile = slotProfile(config, slot);
-  const problems = validateProfilesAgainstCatalog(config, discovery.providers, [profile.name]);
-  if (problems[profile.name]) throw new SwitchRefused(`Profile "${profile.name}" for Steer ${slot} is not startable: ${problems[profile.name].join('; ')}`);
+  const advisorSlot = isAdvisorSlot(config, slot);
+  const used = usedProfilesByLiveSteers(config, status.steers.filter((s) => s.slot !== slot));
+  const { profile, skipped } = resolveProfile(config, discovery.providers, steerFallbackList(config, slot), {
+    role: 'steer', advisorSlot, usedProfiles: used,
+    quotaSnapshot, quotaExhaustedPct,
+  });
+  if (!profile) throw new SwitchRefused(`Profile "${profileName}" for Steer ${slot} is not startable${skipped[0] ? `: ${skipped[0].reason}` : ''} (no fallback available)`);
+  const warnings = [];
+  if (advisorSlot) warnings.push(`Steer ${slot} is an advisor (profile "${profileName}"); advisors never coordinate`);
+  if (profile.name !== profileName) warnings.push(`Profile "${profileName}" is not startable (${skipped[0]?.reason ?? 'unknown reason'}); using fallback "${profile.name}"`);
 
   // Same create request the planner builds for a slot (mirrored here; planner
   // internals are not exported), bound to the current epoch so a retry before the
@@ -481,10 +648,11 @@ export async function freshSteer({ client, discovery, config, apply = false, lan
     repo: status.repo, slot, from: single?.id ?? null, to: null, epoch: expected.epoch + 1, profile: profile.name,
     provider: profile.provider, model: profile.model, idempotencyKey: key, packet: '', packetChars: 0,
     checkpoint: Boolean(status.checkpoint?.task), applied: false, delivered: false, deliveryError: null, previousNotified: false, reused: false,
+    warnings, fallbackFrom: profile.name !== profileName ? profileName : null,
   };
   if (!apply) {
     if (!single) throw new SwitchRefused(`Steer ${slot} has several live agents (${holders.map((s) => s.id).join(', ')}); if a previous fresh apply was interrupted, rerun with --apply to recover it, otherwise archive the retired one in Paseo`);
-    result.packet = handoffWithBrief(status, { from: single, to: { slot, id: 'new agent, created on apply' }, epoch: expected.epoch, git: gitSnapshot, lastMessage: await hintOf(client, single.id), language }, { discovery, git, language });
+    result.packet = handoffWithBrief(status, { from: single, to: { slot, id: 'new agent, created on apply' }, epoch: expected.epoch, git: gitSnapshot, lastMessage: await hintOf(client, single.id), language }, { discovery, git, language, workerModel, quotaSnapshot, quotaWarnPct });
     result.packetChars = result.packet.length;
     return result;
   }
@@ -545,7 +713,7 @@ export async function freshSteer({ client, discovery, config, apply = false, lan
   result.from = from.id;
   result.applied = true;
   result.to = freshId;
-  result.packet = handoffWithBrief(status, { from, to: { slot, id: freshId }, epoch: expected.epoch, git: gitSnapshot, lastMessage: await hintOf(client, from.id), language }, { discovery, git, language });
+  result.packet = handoffWithBrief(status, { from, to: { slot, id: freshId }, epoch: expected.epoch, git: gitSnapshot, lastMessage: await hintOf(client, from.id), language }, { discovery, git, language, workerModel, quotaSnapshot, quotaWarnPct });
   result.packetChars = result.packet.length;
   try {
     await client.agents.ref(freshId).send(result.packet);
@@ -570,8 +738,8 @@ export async function hintOf(client, agentId) {
   }
 }
 
-/** Records a short task checkpoint for the current epoch (same lock as switches). A fresh checkpoint clears the interrupted flag — except source `auto`, which never clears it. */
-export async function writeCheckpoint({ client, discovery, task, tests = [], blockers = [], next = null, source = 'manual', agentId = null, turnId = null, lock = withLock, now = () => new Date() }) {
+/** Records a short task checkpoint for the current epoch (same lock as switches). A fresh checkpoint clears the interrupted flag — except source `auto`, which never clears it. Source `failover` logs a takeover with the previous steer and reason. */
+export async function writeCheckpoint({ client, discovery, task, tests = [], blockers = [], next = null, source = 'manual', agentId = null, turnId = null, previousSteer = null, failoverReason = null, lock = withLock, now = () => new Date() }) {
   const status = steerStatus(discovery);
   if (!status.workspace || !status.state) throw new SwitchRefused('No factory main workspace with steer state');
   if (typeof task !== 'string' || !task.trim()) throw new SwitchRefused('A checkpoint needs a task');
@@ -580,7 +748,7 @@ export async function writeCheckpoint({ client, discovery, task, tests = [], blo
     const metadata = (await workspace.refresh())?.metadata ?? {};
     const fresh = metadata[METADATA_KEY];
     const stamp = now().toISOString();
-    const checkpoint = { task: task.trim(), tests, blockers, next: next?.trim() || null, epoch: fresh?.epoch ?? null, updatedAt: stamp, source, agentId, turnId, capturedAt: stamp, interrupted: source === 'auto' ? (metadata[CHECKPOINT_KEY]?.interrupted ?? null) : null };
+    const checkpoint = { task: task.trim(), tests, blockers, next: next?.trim() || null, epoch: fresh?.epoch ?? null, updatedAt: stamp, source, agentId, turnId, capturedAt: stamp, interrupted: source === 'auto' ? (metadata[CHECKPOINT_KEY]?.interrupted ?? null) : null, ...(source === 'failover' ? { failover: { previousSteer, reason: failoverReason } } : {}) };
     held.verify();
     await workspace.setMetadata({ [CHECKPOINT_KEY]: checkpoint });
     return checkpoint;

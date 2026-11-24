@@ -20,7 +20,7 @@ export function setSidebarVisible(visible: boolean): void {
   if (visible && !removeItem) {
     removeItem = clientRef.addSidebarHeaderItem({
       id: "factory",
-      title: "Factory",
+      title: "Workspace Factory",
       Component: itemComponent,
     });
   } else if (!visible && removeItem) {

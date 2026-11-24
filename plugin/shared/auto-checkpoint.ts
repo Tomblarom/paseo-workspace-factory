@@ -145,6 +145,9 @@ export function decideTurnUpdate(input: TurnDecisionInput): TurnDecision {
     lastTurnEndedAt: at,
     outcome: input.outcome,
     contextTokens: input.contextTokens,
+    // P1: every turn.after clears the open-turn tracking from turn.before.
+    openTurnId: null,
+    turnStartedAt: null,
   };
   const pending = (input.previous?.pendingAction ?? null) as {
     kind?: unknown;

@@ -59,6 +59,9 @@ function summarize(data) {
     sshUrl: data.ssh_url,
     htmlUrl: data.html_url,
     canPush: data.permissions ? Boolean(data.permissions.push) : null,
+    // Publicity for the adoption privacy rule (restricted providers only run
+    // on public code). Fail-closed: a missing flag stays null (unknown).
+    private: typeof data.private === 'boolean' ? data.private : null,
     parent: ref(data.parent),
     source: ref(data.source),
   };

@@ -16,6 +16,8 @@ export function isWorkerAgent(agent: GuardAgent | null | undefined): boolean {
 /** Throws when the command runs in a worker; Paseo shows the message as a toast. */
 export function assertSteerContext(agent: GuardAgent | null | undefined, what = "/factory"): void {
   if (isWorkerAgent(agent)) {
-    throw new Error(`${what} is not available in workers; run it in a steer or the main workspace.`);
+    throw new Error(
+      `${what} is not available in workers (helper agents). Open a steer tab (Steer A, B, …) or the main workspace and run it there.`,
+    );
   }
 }

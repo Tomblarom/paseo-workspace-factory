@@ -7,7 +7,7 @@ import {
 } from "../shared/settings-validate.js";
 
 export interface HostSettingsReader {
-  read(): Promise<{ status: string; values?: unknown; error?: string }>;
+  read(): Promise<{ status: string; revision?: string; values?: unknown; error?: string }>;
 }
 
 export async function loadFileConfig(configPath?: string): Promise<any> {

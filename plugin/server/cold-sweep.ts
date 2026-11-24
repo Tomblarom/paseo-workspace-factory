@@ -1,14 +1,21 @@
 import { AGENTS_KEY, updateAgentEntry } from "./factory/agent-state.js";
+import { isAdvisorSlot } from "./factory/config.js";
 import { LEGACY_PREFIX, METADATA_KEY, readPaseoState } from "./factory/paseo.js";
 import { listScopes } from "./factory/scope.js";
+import { WORKERS_KEY } from "./factory/supervision.js";
 import {
+  CLEAR_COMMAND,
+  COMPACT_COMMAND,
+  SWEEP_PENDING_REASON,
   cleanupIdentity,
   cleanupInputOf,
   decideCleanupAction,
   isCold,
+  isNeedsResumeReason,
   pushPreviousSession,
   sendCleanupCommand,
   type CleanupSettings,
+  type NeedsResumeReason,
 } from "../shared/idle-cleanup.js";
 
 const CHECKPOINT_KEY = `${METADATA_KEY}.checkpoint`;
@@ -89,6 +96,16 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+/** Advisor flag for the attention row; unknown config means not advisor. */
+function isAdvisorSlotOf(config: unknown, slot: string): boolean {
+  if (!config || typeof config !== "object") return false;
+  try {
+    return (isAdvisorSlot as unknown as (c: unknown, s: string) => boolean)(config, slot);
+  } catch {
+    return false;
+  }
+}
+
 interface ScopeLookup {
   scopes: any[];
   byId: Map<string, any>;
@@ -105,6 +122,7 @@ function scopeReads(scope: any): {
   activeSteer: unknown;
   checkpoint: Record<string, unknown> | null;
   entries: Record<string, unknown>;
+  workers: Record<string, unknown>;
 } | null {
   const mainId = scope?.workspaceId;
   const meta = scope?.workspace?.metadata ?? {};
@@ -116,7 +134,14 @@ function scopeReads(scope: any): {
     checkpoint:
       asRecord(meta[CHECKPOINT_KEY]) ?? asRecord(meta[LEGACY_CHECKPOINT_KEY]),
     entries: asRecord(meta[AGENTS_KEY]) ?? {},
+    workers: asRecord((meta as Record<string, unknown>)[WORKERS_KEY as string]) ?? {},
   };
+}
+
+/** The agent's supervision register state, if any (C5 skips protected ones). */
+function workerStateOf(workers: Record<string, unknown>, agentId: string): string | null {
+  const state = asRecord(workers[agentId])?.state;
+  return typeof state === "string" ? state : null;
 }
 
 export interface SweepResult {
@@ -202,6 +227,7 @@ async function sweepAgent(
       actionsToday: actionsToday(nowMs),
       effectBlocked: isEffectBlocked(),
       nowMs,
+      workerState: workerStateOf(reads.workers, agent.id),
     }),
   );
   if (!first.action || !first.command) return null;
@@ -214,6 +240,7 @@ async function sweepAgent(
   if (!freshWsf) return null;
   const freshEntries = asRecord(freshMeta[AGENTS_KEY]) ?? {};
   const freshEntry = asRecord(freshEntries[agent.id]);
+  const freshWorkers = asRecord((freshMeta as Record<string, unknown>)[WORKERS_KEY as string]) ?? {};
   const recheck = decideCleanupAction(
     cleanupInputOf({
       agent: freshAgent,
@@ -224,6 +251,7 @@ async function sweepAgent(
       actionsToday: actionsToday(Date.now()),
       effectBlocked: isEffectBlocked(),
       nowMs: Date.now(),
+      workerState: workerStateOf(freshWorkers, agent.id),
     }),
   );
   if (!recheck.action || !recheck.command) return null;
@@ -232,27 +260,111 @@ async function sweepAgent(
     typeof freshAgent?.persistence?.sessionId === "string"
       ? (freshAgent.persistence.sessionId as string)
       : null;
-  const at = new Date().toISOString();
   try {
-    await sendCleanupCommand(paseo, agent.id, recheck.command);
+    await runCleanup(paseo, agent.id, kind, SWEEP_PENDING_REASON, {
+      workspaceId: reads.mainId,
+      liveIds,
+      sessionId,
+      previousSessions: freshEntry?.previousSessions,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    await updateEntry({
-      client: paseo,
-      workspaceId: reads.mainId,
-      agentId: agent.id,
-      patch: { lastActionFailed: { at, error: message.slice(0, 300) } },
-      liveIds,
-    }).catch(() => null);
     log(`[factory] idle cleanup: send to ${agent.id} failed (${message}); retry needs a new real turn`);
     return { agentId: agent.id, action: recheck.action, sent: false, reason: message };
   }
   countAction(nowMs);
-  const patch: Record<string, unknown> = {
-    pendingAction: { kind, at, sessionId },
-  };
+  log(`[factory] idle cleanup: sent ${recheck.action} to ${agent.id}`);
+  return { agentId: agent.id, action: recheck.action, sent: true, reason: recheck.reason };
+}
+
+export type CleanupKind = "clear" | "compact";
+
+export interface RunCleanupOptions {
+  /** Main workspace id; resolved from the agent labels when absent. */
+  workspaceId?: string;
+  liveIds?: string[] | null;
+  /** Pre-clear session id; read from the agent snapshot when absent. */
+  sessionId?: string | null;
+  /** Known previous sessions; read from fresh metadata when absent. */
+  previousSessions?: unknown;
+  /** F4 wake note, carried on pendingAction until the turn hook sends the brief. */
+  note?: string;
+  /** Lock for the entry write; tests only (defaults to the real one). */
+  lock?: (name: string, fn: (held: { verify: () => void }) => Promise<any>) => Promise<any>;
+}
+
+export interface RunCleanupResult {
+  workspaceId: string;
+  sessionId: string | null;
+  kind: CleanupKind;
+  reason: string;
+}
+
+/**
+ * Sends one cleanup command and records pendingAction (plus the previous
+ * session id for clear). Shared by the C5 sweep (reason "idle") and manual
+ * `/factory resume` (reason "resume", which makes the turn hook send the full
+ * brief instead of the seed). On send failure the entry gains lastActionFailed
+ * and the original error is rethrown. Daily-cap counting stays with the sweep:
+ * manual resume is not capped.
+ */
+export async function runCleanup(
+  paseo: any,
+  agentId: string,
+  kind: CleanupKind,
+  reason: string,
+  opts: RunCleanupOptions = {},
+): Promise<RunCleanupResult> {
+  let workspaceId = opts.workspaceId ?? null;
+  let liveIds: string[] | null = opts.liveIds ?? null;
+  let previous: unknown = opts.previousSessions;
+  if (!workspaceId) {
+    const state: any = await readPaseoState(paseo);
+    const agent: any = (state.agents ?? []).find((a: any) => a?.id === agentId) ?? null;
+    if (!agent) throw new Error(`Unknown agent ${JSON.stringify(agentId)}`);
+    const identity = cleanupIdentity(agent.labels ?? null);
+    if (!identity) throw new Error(`Agent ${agentId} is not a factory steer or worker`);
+    const scope: any =
+      listScopes(state).find((s: any) => s.id === identity.scopeId) ?? null;
+    if (!scope) throw new Error(`Agent ${agentId} has no live factory scope`);
+    workspaceId = scope.workspaceId;
+    liveIds = (state.agents ?? []).map((a: any) => a.id);
+    previous ??= asRecord(asRecord(scope.workspace?.metadata?.[AGENTS_KEY])?.[agentId])
+      ?.previousSessions;
+  }
+  if (!workspaceId) throw new Error(`Agent ${agentId} has no live factory scope`);
+  let sessionId: string | null;
+  if (opts.sessionId !== undefined) {
+    sessionId = opts.sessionId;
+  } else {
+    const snap: any = await paseo.agents.ref(agentId).refresh().catch(() => null);
+    const current = snap?.agent?.persistence?.sessionId;
+    sessionId = typeof current === "string" ? current : null;
+  }
+  if (previous === undefined) {
+    const freshMeta =
+      (await paseo.workspaces.ref(workspaceId).refresh().catch(() => null))?.metadata ?? {};
+    previous = asRecord(asRecord(freshMeta[AGENTS_KEY])?.[agentId])?.previousSessions;
+  }
+  const at = new Date().toISOString();
+  try {
+    await sendCleanupCommand(paseo, agentId, kind === "clear" ? CLEAR_COMMAND : COMPACT_COMMAND);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await updateEntry({
+      client: paseo,
+      workspaceId,
+      agentId,
+      patch: { lastActionFailed: { at, error: message.slice(0, 300) } },
+      liveIds,
+      ...(opts.lock ? { lock: opts.lock } : {}),
+    }).catch(() => null);
+    throw error;
+  }
+  const pendingAction: Record<string, unknown> = { kind, at, sessionId, reason };
+  if (typeof opts.note === "string" && opts.note) pendingAction.note = opts.note.slice(0, 1500);
+  const patch: Record<string, unknown> = { pendingAction };
   if (kind === "clear") {
-    const previous = freshEntry?.previousSessions;
     patch.previousSessions = pushPreviousSession(
       Array.isArray(previous) ? (previous as string[]) : null,
       sessionId,
@@ -260,13 +372,13 @@ async function sweepAgent(
   }
   await updateEntry({
     client: paseo,
-    workspaceId: reads.mainId,
-    agentId: agent.id,
+    workspaceId,
+    agentId,
     patch,
     liveIds,
+    ...(opts.lock ? { lock: opts.lock } : {}),
   });
-  log(`[factory] idle cleanup: sent ${recheck.action} to ${agent.id}`);
-  return { agentId: agent.id, action: recheck.action, sent: true, reason: recheck.reason };
+  return { workspaceId, sessionId, kind, reason };
 }
 
 export interface TimerDeps {
@@ -317,17 +429,28 @@ export interface ColdAgent {
   idleMinutes: number;
   hasHistory: boolean;
   canFresh: boolean;
+  /** Why the row needs attention; plain cold rows carry "cold". */
+  reason: NeedsResumeReason;
+  /** Own slot letter (steers), so the client can name a takeover. */
+  slot: string | null;
+  /** The scope's active steer slot, so a non-active reminder can name it. */
+  activeSteer: string | null;
+  /** Advisor steers never take over, so they keep the active reminder text. */
+  advisor: boolean;
 }
 
 export interface ColdFeedDeps {
   readSettings: () => Promise<CleanupSettings | null>;
   intervalMs?: number;
+  /** Effective config for the advisor flag; absent means no advisor known. */
+  getConfig?: () => Promise<unknown>;
 }
 
 /**
- * Serves the factory.cold subscription (C6): pushes the cold list on
- * subscribe and every minute after. Returns void — settling a promise would
- * close the subscription. Also lends the daemon handle to the sweep timer.
+ * Serves the factory.attention subscription (factory.cold stays as an alias):
+ * pushes the attention list on subscribe and every minute after. Returns
+ * void — settling a promise would close the subscription. Also lends the
+ * daemon handle to the sweep timer.
  */
 export function serveColdSubscription(
   _input: unknown,
@@ -341,8 +464,10 @@ export function serveColdSubscription(
     try {
       const settings = await deps.readSettings();
       if (!settings) return;
-      const cold = await collectColdAgents(context.paseo, settings);
+      const config = deps.getConfig ? await deps.getConfig().catch(() => null) : null;
+      const cold = await collectColdAgents(context.paseo, settings, Date.now(), config);
       await context.push({
+        attention: cold,
         cold,
         autoDisabled: isEffectBlocked(),
         autoDisabledReason: effectBlockReason() ?? undefined,
@@ -374,6 +499,7 @@ export async function collectColdAgents(
   paseo: any,
   settings: CleanupSettings,
   nowMs: number = Date.now(),
+  config: unknown = null,
 ): Promise<ColdAgent[]> {
   const state: any = await readPaseoState(paseo);
   const lookup: ScopeLookup = { scopes: listScopes(state), byId: new Map() };
@@ -386,7 +512,13 @@ export async function collectColdAgents(
     const reads = scope ? scopeReads(scope) : null;
     if (!scope || !reads) continue;
     const entry = asRecord(reads.entries[agent.id]);
-    if (entry?.pendingAction) continue;
+    const needsResume = asRecord(entry?.needsResume);
+    const needsReason = isNeedsResumeReason(needsResume?.reason)
+      ? (needsResume.reason as NeedsResumeReason)
+      : null;
+    // A resume in flight still shows its pill (the RPC is idempotent); plain
+    // cold rows with a pending C5 action stay hidden as before.
+    if (!needsReason && entry?.pendingAction) continue;
     const used = agent?.lastUsage?.contextWindowUsedTokens;
     const contextTokens =
       typeof used === "number" && Number.isFinite(used)
@@ -396,31 +528,35 @@ export async function collectColdAgents(
           : null;
     const lastTurnEndedAt =
       typeof entry?.lastTurnEndedAt === "string" ? (entry.lastTurnEndedAt as string) : null;
-    if (
-      !isCold({
+    const coldNow =
+      contextTokens !== null &&
+      lastTurnEndedAt !== null &&
+      isCold({
         lastTurnEndedAt,
         contextTokens,
         idleMinutes: settings.idleMinutes,
         minContextTokens: settings.minContextTokens,
         nowMs,
-      }) ||
-      contextTokens === null ||
-      lastTurnEndedAt === null
-    ) {
-      continue;
-    }
+      });
+    if (!coldNow && !needsReason) continue;
     const previous = entry?.previousSessions;
+    const slot = identity.role === "steer" && typeof identity.slot === "string" ? identity.slot : null;
+    const activeSteer = typeof reads.activeSteer === "string" ? reads.activeSteer : null;
     cold.push({
       workspaceId: reads.mainId,
       agentId: agent.id,
       title: typeof agent.title === "string" ? agent.title : null,
-      contextTokens,
-      idleMinutes: Math.floor((nowMs - Date.parse(lastTurnEndedAt)) / 60_000),
+      contextTokens: contextTokens ?? 0,
+      idleMinutes:
+        lastTurnEndedAt !== null
+          ? Math.max(0, Math.floor((nowMs - Date.parse(lastTurnEndedAt)) / 60_000))
+          : 0,
       hasHistory: Array.isArray(previous) && previous.length > 0,
-      canFresh:
-        identity.role === "steer" &&
-        typeof identity.slot === "string" &&
-        identity.slot === reads.activeSteer,
+      canFresh: slot !== null && slot === activeSteer,
+      reason: needsReason ?? "cold",
+      slot,
+      activeSteer,
+      advisor: slot !== null && isAdvisorSlotOf(config, slot),
     });
   }
   return cold;
