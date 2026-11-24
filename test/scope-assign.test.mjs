@@ -3,9 +3,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { execFileSync } from 'node:child_process';
-import { assignScope, buildAssignment, AssignRefused } from '../src/assign.mjs';
+import { assignScope, buildAssignment, AssignRefused, ASSIGNMENT_KEY } from '../src/assign.mjs';
 import { LABEL, METADATA_KEY, PARENT_LABEL } from '../src/paseo.mjs';
-import { CHECKPOINT_KEY } from '../src/steer.mjs';
+import { CHECKPOINT_KEY, parseCheckpointBlock } from '../src/steer.mjs';
 
 const REPO = 'example-owner/example-repo';
 
@@ -113,6 +113,32 @@ test('assigned checkpoints record source and assigner', async () => {
   const result = await assign(world, discoveryOf(world), { apply: true, assignedBy: 'hub-agent-1' });
   assert.equal(result.checkpoint.source, 'assign');
   assert.equal(result.checkpoint.assignedBy, 'hub-agent-1');
+});
+
+test('apply records the report target and the packet names it before the real block', async () => {
+  const world = makeWorld();
+  provisioned(world);
+  const result = await assign(world, discoveryOf(world), { apply: true, assignedBy: 'hub-agent-1' });
+  const record = world.workspaces[0].metadata[ASSIGNMENT_KEY];
+  assert.equal(record.by, 'hub-agent-1');
+  assert.equal(record.reportedAt, null);
+  assert.equal(record.epoch, result.epoch);
+  assert.match(result.packet, /the factory sends this block to the requester hub-agent-1 automatically/);
+  assert.match(result.packet, /- status: done \| partial \| blocked/);
+  // The rules' format example comes first: the last block is the real assignment.
+  assert.equal(parseCheckpointBlock(result.packet).task, result.fields.task);
+});
+
+test('explicit reportTo wins; no requester clears the record', async () => {
+  const world = makeWorld();
+  provisioned(world);
+  await assign(world, discoveryOf(world), { apply: true, assignedBy: 'hub-agent-1', reportTo: 'steer-e' });
+  assert.equal(world.workspaces[0].metadata[ASSIGNMENT_KEY].by, 'steer-e');
+  const again = makeWorld();
+  provisioned(again);
+  const result = await assign(again, discoveryOf(again), { apply: true });
+  assert.equal(again.workspaces[0].metadata[ASSIGNMENT_KEY], null);
+  assert.doesNotMatch(result.packet, /sends this block to the requester/);
 });
 
 test('epoch or steer drift between discovery and apply refuses without writes', async () => {

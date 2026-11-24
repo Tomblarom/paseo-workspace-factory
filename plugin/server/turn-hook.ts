@@ -18,6 +18,8 @@ import {
   scanCleanupEvidence,
 } from "../shared/idle-cleanup.js";
 import { firstUserText } from "../shared/supervise.js";
+import { decideAssignmentReport } from "../shared/assignment-report.js";
+import { ASSIGNMENT_KEY } from "./factory/assign.js";
 import { extractTurnUsage, mergeTurnUsage } from "./quota.js";
 import { proactiveHintDecision, runFailoverCheck } from "./supervise.js";
 import {
@@ -219,6 +221,59 @@ async function proactiveHintForTurn(args: {
   }
 }
 
+/**
+ * Sends the done/blocked CHECKPOINT of an assigned active steer to the agent
+ * that asked (wsf.assignment.by), once: reportedAt is stamped under the
+ * workspace lock before sending, so two turn hooks never both report.
+ * Never throws.
+ */
+async function reportAssignment(args: {
+  paseo: any;
+  mainId: string;
+  scopeId: string;
+  agentId: string;
+  identity: { role: string; slot: string | null };
+  kind: string;
+  block: any;
+  lastAnswer: string | null;
+}): Promise<void> {
+  const { paseo, mainId, agentId } = args;
+  try {
+    let decision: ReturnType<typeof decideAssignmentReport> | null = null;
+    await withWorkspaceLock(mainId, async (held: any) => {
+      const snap: any = await paseo.workspaces.ref(mainId).refresh().catch(() => null);
+      const meta = snap?.metadata ?? {};
+      const wsf = asRecord(meta[METADATA_KEY]);
+      const assignment = asRecord(meta[ASSIGNMENT_KEY]);
+      decision = decideAssignmentReport({
+        assignment,
+        agentId,
+        slot: args.identity.slot,
+        role: args.identity.role,
+        activeSteer: wsf?.activeSteer,
+        epoch: wsf?.epoch,
+        outcome: args.kind,
+        scopeId: args.scopeId,
+        block: args.block,
+        lastAnswer: args.lastAnswer,
+      });
+      if (!decision.report || !assignment) return;
+      held.verify();
+      await paseo.workspaces.ref(mainId).setMetadata({
+        [ASSIGNMENT_KEY]: { ...assignment, reportedAt: new Date().toISOString(), reportStatus: decision.status },
+      });
+    }, undefined);
+    const sent = decision as ReturnType<typeof decideAssignmentReport> | null;
+    if (!sent?.report || !sent.to || !sent.text) return;
+    await paseo.agents.ref(sent.to).send(sent.text);
+    console.log(`[factory] turn hook: reported ${sent.status} of ${agentId} to ${sent.to}`);
+  } catch (error) {
+    console.error(
+      `[factory] turn hook: assignment report for ${agentId} failed (${error instanceof Error ? error.message : String(error)})`,
+    );
+  }
+}
+
 async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps): Promise<void> {
   const agentId = payload?.agent?.id;
   if (!agentId) return;
@@ -393,6 +448,8 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
     await paseo.workspaces.ref(mainId).setMetadata(patch);
     console.log(`[factory] turn hook: ${decision.log}`);
   }, lockOptions);
+
+  await reportAssignment({ paseo, mainId, scopeId: scope.id, agentId, identity, kind, block, lastAnswer });
 
   if (proactiveHint) {
     try {

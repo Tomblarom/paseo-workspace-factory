@@ -261,6 +261,27 @@ const TEXT = {
  * Field names stay fixed English so parseCheckpointBlock reads them back in any
  * handoff language; empty values become "none".
  */
+/**
+ * Compact steer rules for packets that reach steers outside this repository
+ * (their AGENTS.md does not carry the factory rules): the exact CHECKPOINT
+ * format, and who receives the report when the factory knows a requester.
+ */
+export function checkpointRules({ reportTo = null } = {}) {
+  return [
+    'Factory rules for this scope: end every answer that changes the task state with exactly this fenced block (keys in English, values in any language; status is done, partial or blocked):',
+    '```text',
+    'CHECKPOINT',
+    '- task: <one line>',
+    '- tests: <commands and results, or none>',
+    '- status: done | partial | blocked',
+    '- blockers: <items, or none>',
+    '- next: <next step, or none>',
+    '```',
+    'Do not replace it with a heading such as "## CHECKPOINT" or prose; the factory parses this block.',
+    ...(reportTo ? [`When the status is done or blocked, the factory sends this block to the requester ${reportTo} automatically; do not message it yourself.`] : []),
+  ].join('\n');
+}
+
 export function formatCheckpointBlock({ task, tests = [], blockers = [], next = null }) {
   const oneLine = (value) => String(value ?? '').replace(/\s*\n\s*/g, ' ').trim();
   const list = (values) => (values?.length ? values.map(oneLine).filter(Boolean).join('; ') : 'none');
@@ -479,7 +500,8 @@ export function parseCheckpointBlock(text) {
   const lines = text.split('\n');
   let start = -1;
   for (let i = lines.length - 1; i >= 0; i -= 1) {
-    if (/^\s*`*\s*CHECKPOINT\s*:?\s*`*\s*$/.test(lines[i])) {
+    // Accepts the fenced/bare form plus Markdown headings (`## CHECKPOINT`, `**CHECKPOINT**`).
+    if (/^\s*(?:#{1,6}\s*)?(?:\*\*|__)?`*\s*CHECKPOINT\s*:?\s*`*(?:\*\*|__)?\s*$/i.test(lines[i])) {
       start = i;
       break;
     }

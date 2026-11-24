@@ -38,7 +38,7 @@ const USAGE = `Usage: paseo-factory <command> [options]
   switch <repo> --to <slot> [--apply] [--no-send] [--wait] [--notify-previous] [--language en|de]
   fresh <repo> [--apply]       hand the active steer to a new agent of the same slot/profile
   relocate <scope> --to <path|project> [--apply]
-  assign <scope> --task <text> [--test <text>]... [--blocker <text>]... [--next <text>] [--apply] [--no-send]
+  assign <scope> --task <text> [--test <text>]... [--blocker <text>]... [--next <text>] [--report-to <agent-id>] [--apply] [--no-send]   (report-to defaults to the calling agent)
   resume [scope] [--agent <id>] [--json]   cold-start brief: task, next step, git, workers
   workers [scope] [--json]           print the worker register (task, state, resumes)
   retire <agent-id>                  preview only; archiving is disabled
@@ -250,7 +250,7 @@ async function main() {
     options: {
       config: { type: 'string' }, 'repos-file': { type: 'string' }, 'allow-fork': { type: 'boolean' },
       json: { type: 'boolean' }, confirm: { type: 'string' }, to: { type: 'string' }, apply: { type: 'boolean' },
-      'no-send': { type: 'boolean' }, 'archive-workspace': { type: 'boolean' }, help: { type: 'boolean' },
+      'no-send': { type: 'boolean' }, 'report-to': { type: 'string' }, 'archive-workspace': { type: 'boolean' }, help: { type: 'boolean' },
       adopt: { type: 'string', multiple: true }, slots: { type: 'string', multiple: true }, out: { type: 'string' }, task: { type: 'string' },
       test: { type: 'string', multiple: true }, blocker: { type: 'string', multiple: true },
       next: { type: 'string' }, 'from-agent': { type: 'string' }, wait: { type: 'boolean' }, 'expect-epoch': { type: 'string' },
@@ -577,6 +577,7 @@ async function main() {
           client, discovery, task: values.task, tests: values.test ?? [], blockers: values.blocker ?? [],
           next: values.next ?? null, apply: Boolean(values.apply), send: !values['no-send'],
           assignedBy: process.env.PASEO_AGENT_ID ?? null,
+          reportTo: values['report-to'] ?? process.env.PASEO_AGENT_ID ?? null,
           workerModel: workerModelLine(config, discovery),
           ...(expectEpoch !== undefined ? { expectEpoch } : {}),
         });

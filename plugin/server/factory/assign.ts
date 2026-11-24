@@ -5,17 +5,25 @@
 // delivers it to the active scope steer. A busy steer is allowed: unlike a
 // switch, an assignment changes neither the active steer nor the epoch, and
 // sending only queues a message. Retired scopes refuse.
-import { CHECKPOINT_KEY, formatCheckpointBlock, steerStatus } from './steer.js';
+import { CHECKPOINT_KEY, checkpointRules, formatCheckpointBlock, steerStatus } from './steer.js';
 import { METADATA_KEY } from './paseo.js';
 import { withLock, workspaceLockName } from './lock.js';
 import { formatQuotaLine } from './quota.js';
 
 export class AssignRefused extends Error {}
 
+/**
+ * Who asked for the current assignment and whether the report went out:
+ * { by, epoch, at, reportedAt }. Kept apart from the checkpoint, which turn
+ * hooks overwrite; the plugin turn hook reports a done/blocked CHECKPOINT of
+ * the active steer to `by` once and stamps reportedAt.
+ */
+export const ASSIGNMENT_KEY = `${METADATA_KEY}.assignment`;
+
 const none = 'none recorded';
 
 /** Deterministic assignment packet (no wall-clock time, so preview == delivery). */
-export function buildAssignment(status, { slot, steerId, epoch, task, tests, blockers, next, workerModel = null, config = null, quotaSnapshot = null, quotaWarnPct = 75, zerosub = null }) {
+export function buildAssignment(status, { slot, steerId, epoch, task, tests, blockers, next, workerModel = null, config = null, quotaSnapshot = null, quotaWarnPct = 75, zerosub = null, reportTo = null }) {
   const lines = [
     `Assignment for ${status.repo} (epoch ${epoch}).`,
     `Active steer ${slot} (${steerId}): this assignment replaces the recorded checkpoint.`,
@@ -28,6 +36,8 @@ export function buildAssignment(status, { slot, steerId, epoch, task, tests, blo
     `- Tests: ${tests?.length ? tests.join('; ') : none}`,
     `- Open blockers: ${blockers?.length ? blockers.join('; ') : none}`,
     `- Next step: ${next ? next : 'not recorded'}`,
+    // Rules first: their format example is a block too, and readers take the LAST block.
+    checkpointRules({ reportTo }),
     formatCheckpointBlock({ task, tests, blockers, next }),
   ];
   return lines.join('\n');
@@ -39,7 +49,7 @@ export function buildAssignment(status, { slot, steerId, epoch, task, tests, blo
  * --expect-epoch from the preview), write, read back, release; delivery
  * happens after the lock is released.
  */
-export async function assignScope({ client, discovery, task, tests = [], blockers = [], next = null, apply = false, send = true, expectEpoch, assignedBy = null, lock = withLock, now = () => new Date(), workerModel = null, config = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, zerosub = null }) {
+export async function assignScope({ client, discovery, task, tests = [], blockers = [], next = null, apply = false, send = true, expectEpoch, assignedBy = null, reportTo = assignedBy, lock = withLock, now = () => new Date(), workerModel = null, config = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, zerosub = null }) {
   const status = steerStatus(discovery);
   if (!status.workspace || !status.state) throw new AssignRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
@@ -58,11 +68,12 @@ export async function assignScope({ client, discovery, task, tests = [], blocker
   }
 
   const fields = { task: task.trim(), tests, blockers, next: next?.trim() || null };
-  const packet = buildAssignment(status, { slot: target.slot, steerId: target.id, epoch: expected.epoch, workerModel, config, quotaSnapshot, quotaWarnPct, zerosub, ...fields });
+  const report = typeof reportTo === 'string' && reportTo.trim() && reportTo.trim() !== target.id ? reportTo.trim() : null;
+  const packet = buildAssignment(status, { slot: target.slot, steerId: target.id, epoch: expected.epoch, workerModel, config, quotaSnapshot, quotaWarnPct, zerosub, reportTo: report, ...fields });
   const result = {
     scope: status.repo, epoch: expected.epoch, slot: target.slot, steerId: target.id,
     domain: status.domain ?? null, domainChildren: [...(status.domainChildren ?? [])],
-    fields, packet, packetChars: packet.length, previous: status.checkpoint?.task ?? null,
+    fields, reportTo: report, packet, packetChars: packet.length, previous: status.checkpoint?.task ?? null,
     applied: false, delivered: false, deliveryError: null,
   };
   if (!apply) return result;
@@ -77,7 +88,7 @@ export async function assignScope({ client, discovery, task, tests = [], blocker
     const stamp = now().toISOString();
     const checkpoint = { ...fields, epoch: fresh.epoch, updatedAt: stamp, source: 'assign', assignedBy, capturedAt: stamp, interrupted: null };
     held.verify(); // the lock file must still be the locked inode right before the write
-    await workspace.setMetadata({ [CHECKPOINT_KEY]: checkpoint });
+    await workspace.setMetadata({ [CHECKPOINT_KEY]: checkpoint, [ASSIGNMENT_KEY]: report ? { by: report, epoch: fresh.epoch, at: stamp, reportedAt: null } : null });
     const written = (await workspace.refresh())?.metadata?.[CHECKPOINT_KEY];
     if (written?.task !== checkpoint.task || written?.epoch !== checkpoint.epoch) throw new Error('Assignment checkpoint not verifiable after write');
     result.checkpoint = checkpoint;
