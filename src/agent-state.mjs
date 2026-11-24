@@ -1,7 +1,17 @@
-// Per-agent state for cold resume (C3): the `wsf.agents` map in the scope's
-// main workspace metadata plus the scope checkpoint's interrupted flag.
-// All writes go through the workspace lock; agent labels stay string-only,
-// so turn/note/interrupt records live here, keyed by agent id.
+// Per-agent state for cold resume (C3) plus open-turn tracking (P1): the
+// `wsf.agents` map in the scope's main workspace metadata plus the scope
+// checkpoint's interrupted flag. All writes go through the workspace lock;
+// agent labels stay string-only, so turn/note/interrupt records live here,
+// keyed by agent id.
+//
+// Data model per entry:
+//   lastTurnId, lastTurnEndedAt, outcome,
+//   openTurnId, turnStartedAt,      // set on agent.turn.before, cleared (null) on turn.after
+//   contextTokens, note, noteAt,
+//   interrupted: { at, outcome, error, excerpt, git, reason } | null,
+//   cleared, pendingAction, lastActionFailed, previousSessions, actionVerified
+// interrupted.reason is "daemon-restart" | "planned-restart" for restart
+// markings (P1/P3); failed/canceled turns (C2) carry no reason.
 import { isDeepStrictEqual } from 'node:util';
 import { METADATA_KEY } from './paseo.mjs';
 import { withLock, workspaceLockName } from './lock.mjs';
@@ -57,21 +67,54 @@ export async function updateAgentEntry({ client, workspaceId, agentId, patch, li
 }
 
 /**
- * Flags the scope checkpoint as interrupted ({agentId, at}), keeping task and
- * next untouched. Returns null without a checkpoint (nothing to flag); the
- * agent-level interrupted record still exists in that case.
+ * Flags the scope checkpoint as interrupted ({agentId, at} plus an optional
+ * reason), keeping task and next untouched. Returns null without a checkpoint
+ * (nothing to flag); the agent-level interrupted record still exists in that
+ * case. The reason is omitted when not given, so C2 flags stay unchanged.
  */
-export async function flagCheckpointInterrupted({ client, workspaceId, agentId, at = null, lock = withLock, now = () => new Date() }) {
+export async function flagCheckpointInterrupted({ client, workspaceId, agentId, at = null, reason = null, lock = withLock, now = () => new Date() }) {
   const workspace = client.workspaces.ref(workspaceId);
   return lock(workspaceLockName(workspaceId), async (held) => {
     const metadata = (await workspace.refresh())?.metadata ?? {};
     const checkpoint = metadata[CHECKPOINT_AGENTS_KEY] ?? null;
     if (!checkpoint || typeof checkpoint !== 'object') return null;
-    const flagged = { ...checkpoint, interrupted: { agentId, at: at ?? now().toISOString() } };
+    const flagged = { ...checkpoint, interrupted: { agentId, at: at ?? now().toISOString(), ...(reason ? { reason } : {}) } };
     held.verify();
     await workspace.setMetadata({ [CHECKPOINT_AGENTS_KEY]: flagged });
     const written = (await workspace.refresh())?.metadata?.[CHECKPOINT_AGENTS_KEY];
     if (written?.interrupted?.agentId !== agentId) throw new Error(`Interrupted flag not verifiable after write in workspace ${workspaceId}`);
     return written;
   });
+}
+
+/**
+ * True when the entry tracks an open turn that started before the daemon
+ * started: the turn died with the restart and never reached turn.after.
+ * Fails closed on missing or unparsable timestamps (no mark).
+ */
+export function isOpenTurnBeforeRestart(entry, daemonStartedAt) {
+  if (!entry || typeof entry !== 'object') return false;
+  const started = entry.turnStartedAt;
+  if (typeof started !== 'string' || !started) return false;
+  if (typeof daemonStartedAt !== 'string' || !daemonStartedAt) return false;
+  const turnMs = Date.parse(started);
+  const daemonMs = Date.parse(daemonStartedAt);
+  if (!Number.isFinite(turnMs) || !Number.isFinite(daemonMs)) return false;
+  return turnMs < daemonMs;
+}
+
+/**
+ * Builds one restart interrupted record (P1 daemon-restart, P3
+ * planned-restart) in the C2 shape plus the reason. Bounds are clipped, never
+ * rejected. Outcome defaults to canceled: the turn never completed.
+ */
+export function buildRestartInterrupted({ at, reason, error = null, excerpt = null, git = null, outcome = 'canceled' }) {
+  return {
+    at,
+    outcome,
+    error: typeof error === 'string' && error ? clipText(error, ERROR_MAX) : null,
+    excerpt: typeof excerpt === 'string' && excerpt ? clipText(excerpt.length > EXCERPT_MAX ? excerpt.slice(-EXCERPT_MAX) : excerpt, EXCERPT_MAX) : null,
+    git: git ?? null,
+    reason,
+  };
 }

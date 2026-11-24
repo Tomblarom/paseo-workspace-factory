@@ -13,7 +13,8 @@ import { isDeepStrictEqual } from 'node:util';
 import { LABEL, METADATA_KEY, readPaseoState } from './paseo.mjs';
 import { withLock, workspaceLockName } from './lock.mjs';
 import { runtime } from './runtime.mjs';
-import { slotProfile, validateProfilesAgainstCatalog } from './config.mjs';
+import { isAdvisorSlot } from './config.mjs';
+import { resolveProfile, steerFallbackList, usedProfilesByLiveSteers } from './models.mjs';
 import { idempotencyKey, requestDigest } from './planner.mjs';
 import { createExecutors } from './apply.mjs';
 import { CHECKPOINT_KEY, steerStatus, buildHandoff, hintOf, previousSteerNotice, readGitSnapshot } from './steer.mjs';
@@ -81,7 +82,7 @@ function checkedReceipt(lookupReceipt, kind, key, idOf) {
  * movedTo. Idempotency keys bind the target directory (not the workspace
  * id), so preview and apply show the same keys.
  */
-export async function relocateScope({ client, discovery, config, to, apply = false, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, readState = readPaseoState, existsDir = defaultExistsDir }) {
+export async function relocateScope({ client, discovery, config, to, apply = false, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, readState = readPaseoState, existsDir = defaultExistsDir, workerModel = null }) {
   const status = steerStatus(discovery);
   if (!status.workspace || !status.state) throw new RelocateRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
@@ -101,11 +102,23 @@ export async function relocateScope({ client, discovery, config, to, apply = fal
   if (unmappable.length) {
     throw new RelocateRefused(`Cannot relocate steers without a configured slot (${unmappable.map((s) => s.id).join(', ')}); define their slots or archive them first`);
   }
-  const profiles = new Map(holders.map((s) => [s.slot, slotProfile(config, s.slot)]));
-  const problems = validateProfilesAgainstCatalog(config, discovery.providers, [...new Set([...profiles.values()].map((p) => p.name))]);
-  const blocked = [...profiles.entries()].filter(([, p]) => problems[p.name]);
-  if (blocked.length) {
-    throw new RelocateRefused(blocked.map(([slot, p]) => `Profile "${p.name}" for Steer ${slot} is not startable: ${problems[p.name].join('; ')}`).join(' | '));
+  const profiles = new Map();
+  const notes = [];
+  const assigned = new Set();
+  for (const holder of holders) {
+    const own = config.steers.slots[holder.slot];
+    const used = [...usedProfilesByLiveSteers(config, holders.filter((h) => h.id !== holder.id)), ...assigned];
+    const { profile, skipped } = resolveProfile(config, discovery.providers, steerFallbackList(config, holder.slot), {
+      role: 'steer', advisorSlot: isAdvisorSlot(config, holder.slot), usedProfiles: used,
+    });
+    if (!profile) {
+      throw new RelocateRefused(`Profile "${own}" for Steer ${holder.slot} is not startable${skipped[0] ? `: ${skipped[0].reason}` : ''} (no fallback available)`);
+    }
+    profiles.set(holder.slot, profile);
+    assigned.add(profile.name);
+    if (profile.name !== own) {
+      notes.push(`Steer ${holder.slot}: profile "${own}" is not startable (${skipped[0]?.reason ?? 'unknown reason'}); using fallback "${profile.name}"`);
+    }
   }
 
   const atTarget = (workspaces) => (workspaces ?? []).filter((w) => {
@@ -150,12 +163,12 @@ export async function relocateScope({ client, discovery, config, to, apply = fal
   });
   const packetFor = (holder, toId, lastMessage) => {
     const cover = `Scope relocated: ${status.workspace.id} → ${target.dir} (${toId}).`;
-    return `${cover}\n${buildHandoff(status, { from: holder, to: { slot: holder.slot, id: toId }, epoch: expected.epoch, git: gitSnapshot, lastMessage, language })}`;
+    return `${cover}\n${buildHandoff(status, { from: holder, to: { slot: holder.slot, id: toId }, epoch: expected.epoch, git: gitSnapshot, lastMessage, language, workerModel })}`;
   };
   const previewTarget = assessTarget(state.workspaces);
   const result = {
     scope: status.repo, fromWorkspace: status.workspace.id, toWorkspace: previewTarget.workspace?.id ?? null,
-    adoptedWorkspace: previewTarget.mode !== 'create',
+    adoptedWorkspace: previewTarget.mode !== 'create', notes,
     toDir: target.dir, epoch: 1, movedTo: target.dir, checkpoint: Boolean(status.checkpoint?.task), applied: false,
     workspaceKey, steers: previews.map((p) => ({ ...p, to: null, reused: false })),
     packets: [], delivered: [], deliveryErrors: [], previousNotified: [], notifyErrors: [],

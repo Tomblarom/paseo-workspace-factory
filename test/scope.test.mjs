@@ -123,7 +123,9 @@ test('resolveTargetEntry passes unknown addresses through and maps known ones', 
   assert.equal(github.entry, 'Example/demo', 'github maps back verbatim');
   assert.equal(github.deprecatedAlias, false);
   const wrongCase = resolveTargetEntry('example/demo', s);
-  assert.equal(wrongCase.scope, null, 'case mismatch falls back to legacy gh resolution');
+  assert.equal(wrongCase.scope?.id, 'Example/demo', 'id match is case-insensitive; the stored id is the canonical form');
+  assert.equal(wrongCase.entry, 'Example/demo');
+  assert.equal(wrongCase.deprecatedAlias, false);
   const alias = resolveTargetEntry('local/feat', s);
   assert.deepEqual(alias.entry, { workspace: wt.id });
   assert.equal(alias.deprecatedAlias, true);

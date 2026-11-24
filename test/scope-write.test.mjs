@@ -212,8 +212,8 @@ test('worktree id is <parent>@<branch> with a github parent from the project ori
   world.checkouts['/wt/feat'] = { remotes: {}, linkedWorktree: true, branch: 'feat' };
   addWorktree(world, { mainPath: '/p/demo', worktreePath: '/wt/feat' });
   const [d] = await runnerFor(world).discoverAll([{ local: '/wt/feat' }]);
-  assert.deepEqual(d.scope.parent, { id: 'example/demo', kind: 'github' });
-  assert.equal(d.forkName, 'example/demo@feat');
+  assert.deepEqual(d.scope.parent, { id: 'Example/demo', kind: 'github' });
+  assert.equal(d.forkName, 'Example/demo@feat');
   assert.equal(ghCalls(world).length, 0, 'parent detection is local git data, no network');
 });
 

@@ -60,17 +60,27 @@ test('formatCatalog lists providers, models, thinking options and modes', () => 
 test('slot set on a new slot derives <provider>-<model> and stays valid', () => {
   const before = structuredClone(CONFIG);
   const planned = planSlotSet(CONFIG, PROVIDERS, {
-    slot: 'B', provider: 'muse', model: 'muse-spark-1.3-contributor', thinking: null, mode: 'allowAll',
+    slot: 'B', provider: 'codex', model: 'gpt-6.2-sol', thinking: 'low', mode: 'auto',
   });
-  assert.equal(planned.profileName, 'muse-muse-spark-1.3-contributor');
+  assert.equal(planned.profileName, 'codex-gpt-6.2-sol');
   assert.equal(planned.config.steers.slots.B, planned.profileName);
   assert.deepEqual(planned.config.profiles[planned.profileName], {
-    provider: 'muse', model: 'muse-spark-1.3-contributor', thinking: null, mode: 'allowAll',
+    provider: 'codex', model: 'gpt-6.2-sol', thinking: 'low', mode: 'auto',
   });
-  assert.match(planned.summary, /Slot B → profile/);
+  assert.match(planned.summary, /steer slots: \[A:sol\] → \[A:sol, B:codex-gpt-6\.2-sol\]/);
   assert.match(planned.hint, /Existing steers are unchanged/);
   assert.deepEqual(validateConfig(planned.config), []);
   assert.deepEqual(CONFIG, before, 'input config is not mutated');
+});
+
+test('slot set reuses an identical profile instead of deriving a duplicate', () => {
+  const planned = planSlotSet(CONFIG, PROVIDERS, {
+    slot: 'B', provider: 'muse', model: 'muse-spark-1.3-contributor', thinking: null, mode: 'allowAll',
+  });
+  assert.equal(planned.profileName, 'muse');
+  assert.equal(planned.config.steers.slots.B, 'muse');
+  assert.ok(!planned.config.profiles['muse-muse-spark-1.3-contributor'], 'no duplicate profile created');
+  assert.match(planned.notes.join('\n'), /Reusing existing profile "muse"/);
 });
 
 test('slot set on an existing slot reuses its profile and keeps omitted flags', () => {
@@ -94,25 +104,27 @@ test('slot set with --profile creates and points at the named profile', () => {
   }), /--profile must be a non-empty name/);
 });
 
-test('slot set validates against the catalog including knownLimits', () => {
-  assert.throws(() => planSlotSet(CONFIG, PROVIDERS, { slot: 'B', provider: 'nope', model: 'x' }), /not startable.*not configured/);
-  assert.throws(() => planSlotSet(CONFIG, PROVIDERS, { slot: 'B', provider: 'codex', model: 'nope' }), /not startable.*not offered/);
-  assert.throws(() => planSlotSet(CONFIG, PROVIDERS, {
-    slot: 'B', provider: 'codex', model: 'gpt-6.2-sol', thinking: 'ultra', mode: 'auto',
-  }), /not startable.*thinking "ultra"/);
-  assert.throws(() => planSlotSet(CONFIG, PROVIDERS, {
-    slot: 'B', provider: 'codex', model: 'gpt-6.2-sol', mode: 'nope',
-  }), /not startable.*mode "nope"/);
-  assert.throws(() => planSlotSet(CONFIG, PROVIDERS, {
-    slot: 'B', provider: 'copilot', model: 'claude-sonnet-5.5', thinking: 'high', mode: 'allow-all',
-  }), /not startable.*Copilot rejects a reasoning effort/);
+test('slot set stores unavailable models with a warning, including knownLimits', () => {
+  const cases = [
+    [{ slot: 'B', provider: 'nope', model: 'x' }, /not startable.*not configured/],
+    [{ slot: 'B', provider: 'codex', model: 'nope' }, /not startable.*not offered/],
+    [{ slot: 'B', provider: 'codex', model: 'gpt-6.2-sol', thinking: 'ultra', mode: 'auto' }, /not startable.*thinking "ultra"/],
+    [{ slot: 'B', provider: 'codex', model: 'gpt-6.2-sol', mode: 'nope' }, /not startable.*mode "nope"/],
+    [{ slot: 'B', provider: 'copilot', model: 'claude-sonnet-5.5', thinking: 'high', mode: 'allow-all' }, /not startable.*Copilot rejects a reasoning effort/],
+  ];
+  for (const [input, pattern] of cases) {
+    const planned = planSlotSet(CONFIG, PROVIDERS, input);
+    assert.match(planned.warnings.join('\n'), pattern);
+    assert.equal(planned.config.steers.slots.B, planned.profileName, 'stored despite the warning');
+  }
   const limited = structuredClone(CONFIG);
   limited.knownLimits = [{ provider: 'codex', model: 'gpt-6.2-sol', field: 'mode', reason: 'custom limit hit' }];
-  assert.throws(() => planSlotSet(limited, PROVIDERS, {
+  const planned = planSlotSet(limited, PROVIDERS, {
     slot: 'B', provider: 'codex', model: 'gpt-6.2-sol', mode: 'auto',
-  }), /not startable.*custom limit hit/);
-  for (const bad of ['a', 'AA', '', null]) {
-    assert.throws(() => planSlotSet(CONFIG, PROVIDERS, { slot: bad, provider: 'codex', model: 'gpt-6.2-sol' }), /single capital letter/, String(bad));
+  });
+  assert.match(planned.warnings.join('\n'), /not startable.*custom limit hit/);
+  for (const bad of ['AA', '', null, '0']) {
+    assert.throws(() => planSlotSet(CONFIG, PROVIDERS, { slot: bad, provider: 'codex', model: 'gpt-6.2-sol' }), /slot letter|position|target/i, String(bad));
   }
 });
 
@@ -126,7 +138,7 @@ test('slot rm keeps the profile and repairs prepare/initialActive', () => {
   assert.deepEqual(removed.config.steers.prepare, ['A']);
   assert.equal(removed.config.steers.initialActive, 'A');
   assert.ok(removed.config.profiles.extra, 'profile is kept');
-  assert.match(removed.summary, /Slot B removed/);
+  assert.match(removed.summary, /\[A:sol, B:extra\] → \[A:sol\].*slot B removed, profile "extra" kept/);
   assert.deepEqual(validateConfig(removed.config), []);
 
   const active = structuredClone(two);
@@ -143,18 +155,22 @@ test('slot rm keeps the profile and repairs prepare/initialActive', () => {
   assert.throws(() => planSlotRemove(CONFIG, 'Z'), /not defined/);
 });
 
-test('worker-default with a profile name validates and sets the default', () => {
+test('worker-default with a profile name inserts it at the front', () => {
   const planned = planWorkerDefault(CONFIG, PROVIDERS, { spec: 'sol' });
   assert.equal(planned.profileName, 'sol');
+  assert.deepEqual(planned.after, ['sol', 'muse']);
   assert.equal(planned.config.workers.defaultProfile, 'sol');
+  assert.match(planned.summary, /\[muse\] → \[sol, muse\]/);
   assert.throws(() => planWorkerDefault(CONFIG, PROVIDERS, { spec: 'missing' }), /Unknown profile/);
   assert.throws(() => planWorkerDefault(CONFIG, PROVIDERS, { spec: 'sol', thinking: 'high' }), /takes no --thinking/);
   const broken = structuredClone(CONFIG);
   broken.profiles.sol.model = 'nope';
-  assert.throws(() => planWorkerDefault(broken, PROVIDERS, { spec: 'sol' }), /not startable/);
+  const stored = planWorkerDefault(broken, PROVIDERS, { spec: 'sol' });
+  assert.match(stored.warnings.join('\n'), /not startable/);
+  assert.deepEqual(stored.after, ['sol', 'muse']);
 });
 
-test('worker-default with provider/model creates the profile and sets the default', () => {
+test('worker-default with provider/model creates the profile and inserts it', () => {
   const planned = planWorkerDefault(CONFIG, PROVIDERS, {
     spec: 'codex/gpt-6.2-sol', thinking: 'low', mode: 'auto', profile: 'worker-low',
   });
@@ -162,8 +178,12 @@ test('worker-default with provider/model creates the profile and sets the defaul
   assert.equal(planned.config.workers.defaultProfile, 'worker-low');
   assert.deepEqual(validateConfig(planned.config), []);
   const derived = planWorkerDefault(CONFIG, PROVIDERS, { spec: 'muse/muse-spark-1.3-contributor' });
-  assert.equal(derived.profileName, 'muse-muse-spark-1.3-contributor');
-  assert.throws(() => planWorkerDefault(CONFIG, PROVIDERS, { spec: 'codex/nope' }), /not startable/);
+  assert.equal(derived.profileName, 'muse-muse-spark-1.3-contributor', 'omitted flags form a different combination, no merge');
+  assert.deepEqual(derived.config.profiles['muse-muse-spark-1.3-contributor'], { provider: 'muse', model: 'muse-spark-1.3-contributor', thinking: null });
+  const moved = planWorkerDefault(CONFIG, PROVIDERS, { spec: 'muse' });
+  assert.deepEqual(moved.after, ['muse'], 're-inserting the same profile moves it, no duplicate');
+  const stored = planWorkerDefault(CONFIG, PROVIDERS, { spec: 'codex/nope' });
+  assert.match(stored.warnings.join('\n'), /not startable/);
 });
 
 test('atomic write keeps the file mode and leaves no tmp file', async (t) => {

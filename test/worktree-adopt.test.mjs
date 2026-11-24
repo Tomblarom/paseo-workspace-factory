@@ -4,7 +4,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { execFileSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { normalizeEntry, isWorktreeWorkspace } from '../src/discovery.mjs';
+import { GitHubNotFound, remoteToFullName } from '../src/github.mjs';
 import { createRunner } from '../src/factory.mjs';
 import { applyPlans, createExecutors, createAuthorization } from '../src/apply.mjs';
 import { switchSteer, steerStatus, writeCheckpoint } from '../src/steer.mjs';
@@ -426,4 +431,210 @@ test('CLI usage documents worktree adoption', () => {
   const out = execFileSync('node', ['src/cli.mjs', '--help'], { encoding: 'utf8' });
   assert.match(out, /worktree/);
   assert.match(out, /workspace:<id>/);
+});
+
+// --------------------------------- github --main adoption (#3): a worktree
+// workspace becomes the main workspace of a github scope; the scope id stays
+// owner/repo, no duplicate project or workspace is created.
+
+const MOBILE = 'example/mobile';
+
+const ghApi = (fullName, extra = {}) => {
+  const [owner, name] = fullName.split('/');
+  return {
+    full_name: fullName, name, owner: { login: owner }, fork: false, archived: false, default_branch: 'main',
+    clone_url: `https://github.com/${fullName}.git`, ssh_url: `git@github.com:${fullName}.git`, html_url: `https://github.com/${fullName}`, ...extra,
+  };
+};
+
+function fakeGhOwned(world) {
+  return (args) => {
+    const path = args.find((a) => typeof a === 'string' && a.startsWith('repos/'));
+    const full = path.slice('repos/'.length);
+    const hit = Object.keys(world.repos ?? {}).find((k) => k.toLowerCase() === full.toLowerCase());
+    if (!hit) throw new GitHubNotFound(`HTTP 404: Not Found (${full})`);
+    return JSON.stringify(world.repos[hit]);
+  };
+}
+
+function worldScanWithRepos(world) {
+  return () => Object.entries(world.checkouts).map(([path, c]) => ({
+    path,
+    linkedWorktree: Boolean(c.linkedWorktree),
+    remotes: { ...(c.remotes ?? {}) },
+    repos: Object.fromEntries(Object.entries(c.remotes ?? {}).map(([n, u]) => [n, remoteToFullName(u)])),
+  }));
+}
+
+function runnerForGithub(world, config = CONFIG) {
+  return createRunner({
+    config,
+    client: null,
+    gh: fakeGhOwned(world),
+    git: fakeGit(world),
+    readState: async () => structuredClone({ projects: world.projects, workspaces: world.workspaces, agents: world.agents, providers: world.providers }),
+    scan: worldScanWithRepos(world),
+    inspectTarget: () => { throw new Error('clone target must not be inspected for --main adoption'); },
+    realpath: (p) => p,
+    existsDir: fakeExistsDir(world),
+  });
+}
+
+function githubMainWorld() {
+  const world = makeWorld();
+  world.repos = { [MOBILE]: ghApi(MOBILE) };
+  world.checkouts['/p/mobile'] = { remotes: { origin: `https://github.com/${MOBILE}.git` } };
+  world.checkouts[WT_DIR] = { remotes: { origin: `https://github.com/${MOBILE}.git` }, linkedWorktree: true };
+  addProject(world, '/p/mobile');
+  return world;
+}
+
+const CLI = fileURLToPath(new URL('../src/cli.mjs', import.meta.url));
+
+function runCli(t, args, { reposFile = null } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'factory-main-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, 'config.json'), JSON.stringify(CONFIG));
+  const argv = ['--config', join(dir, 'config.json'), ...args];
+  if (reposFile) {
+    const reposPath = join(dir, 'repos.json');
+    writeFileSync(reposPath, JSON.stringify(reposFile));
+    argv.push('--repos-file', reposPath);
+  }
+  try {
+    const stdout = execFileSync('node', [CLI, ...argv], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    return { status: 0, stdout, stderr: '' };
+  } catch (error) {
+    return { status: error.status ?? 1, stdout: error.stdout ?? '', stderr: error.stderr ?? '' };
+  }
+}
+
+test('--main: normalizeEntry accepts workspace refs and refuses non-github entries', () => {
+  assert.equal(normalizeEntry({ repo: MOBILE, main: 'workspace:wks_abc123' }, CONFIG).mainWorkspaceId, 'wks_abc123');
+  assert.equal(normalizeEntry({ repo: MOBILE, main: 'wks_abc123' }, CONFIG).mainWorkspaceId, 'wks_abc123');
+  assert.equal(normalizeEntry({ repo: MOBILE, main: 'worktree:wks_abc123' }, CONFIG).mainWorkspaceId, 'wks_abc123');
+  assert.throws(() => normalizeEntry({ repo: MOBILE, main: '/p/mobile' }, CONFIG), /Not a workspace reference in "main"/);
+  assert.throws(() => normalizeEntry({ repo: MOBILE, main: 'workspace:wks_1', checkout: '/p/mobile' }, CONFIG), /must not combine "main" with "checkout"/);
+  assert.throws(() => normalizeEntry({ local: '/p/mobile', main: 'workspace:wks_1' }, CONFIG), /only supported for github/);
+  assert.throws(() => normalizeEntry({ workspace: 'wks_1', main: 'workspace:wks_1' }, CONFIG), /only supported for github/);
+  assert.throws(() => normalizeEntry({ repo: 'local/demo', main: 'workspace:wks_1' }, CONFIG), /only supported for github/);
+});
+
+test('--main: github discovery adopts the named worktree, scope id stays owner/repo', async () => {
+  const world = githubMainWorld();
+  const wt = addWorktree(world, { mainPath: '/p/mobile' });
+  const [d] = await runnerForGithub(world).discoverAll([{ repo: MOBILE, main: `workspace:${wt.id}` }]);
+  assert.deepEqual(d.checkoutIssues, []);
+  assert.equal(d.forkName, MOBILE);
+  assert.deepEqual(d.scope, { id: MOBILE, kind: 'github', locator: MOBILE });
+  assert.equal(d.mainWorkspace?.id, wt.id);
+  assert.equal(d.checkout?.path, WT_DIR);
+  assert.ok(d.worktree);
+  assert.equal(d.projects.length, 1);
+  assert.equal(d.projects[0].projectRootPath, '/p/mobile');
+});
+
+test('--main: plan writes github metadata on the worktree, no duplicate project/workspace', async () => {
+  const world = githubMainWorld();
+  const wt = addWorktree(world, { mainPath: '/p/mobile' });
+  const [p] = await runnerForGithub(world).runPlans([{ repo: MOBILE, main: wt.id }]);
+  assert.equal(p.repo, MOBILE);
+  assert.equal(p.status, 'pending');
+  assert.deepEqual(keys(p), ['workspace.main.adopt', 'steer.A', 'steer.B']);
+  const adopt = p.ops.find((op) => op.key === 'workspace.main.adopt');
+  assert.equal(adopt.kind, 'paseo.workspace.metadata');
+  assert.equal(adopt.params.workspaceId, wt.id);
+  assert.deepEqual(adopt.params.metadata[METADATA_KEY].scope, { id: MOBILE, kind: 'github', locator: MOBILE });
+  assert.deepEqual(adopt.params.expectWorktree, { directory: WT_DIR });
+  assert.ok(p.notes.some((n) => n.startsWith('Related checkout left untouched')), p.notes.join('\n'));
+});
+
+test('--main: unknown, non-worktree and foreign-repo workspaces are conflicts', async () => {
+  const world = githubMainWorld();
+  addWorktree(world, { mainPath: '/p/mobile' });
+  const plain = addPlainWorkspace(world, { path: '/p/mobile' });
+  const [missing] = await runnerForGithub(world).runPlans([{ repo: MOBILE, main: 'wks_doesnotexist0001' }]);
+  assert.equal(missing.status, 'conflict');
+  assert.match(missing.conflicts[0].reason, /not found/);
+  const [notWorktree] = await runnerForGithub(world).runPlans([{ repo: MOBILE, main: plain.id }]);
+  assert.equal(notWorktree.status, 'conflict');
+  assert.match(notWorktree.conflicts[0].reason, /not a worktree workspace/);
+  const foreign = addWorktree(world, { mainPath: '/p/other', worktreePath: '/wt/other-feat', title: 'Other · feat' });
+  world.checkouts['/wt/other-feat'] = { remotes: { origin: 'https://github.com/example/other.git' }, linkedWorktree: true };
+  const [wrongRepo] = await runnerForGithub(world).runPlans([{ repo: MOBILE, main: foreign.id }]);
+  assert.equal(wrongRepo.status, 'conflict');
+  assert.match(wrongRepo.conflicts[0].reason, /not of example\/mobile/);
+});
+
+test('--main: apply adopts the worktree with fakes and creates nothing', async () => {
+  const world = githubMainWorld();
+  const wt = addWorktree(world, { mainPath: '/p/mobile' });
+  const entries = [{ repo: MOBILE, main: wt.id }];
+  const runner = runnerForGithub(world);
+  const plans = await runner.runPlans(entries);
+  const authorization = createAuthorization(plans, CONFIG, { entries, allowFork: false, adopt: {} });
+  const result = await applyPlans({
+    authorization, config: CONFIG, confirm: authorization.hash,
+    lookupReceipt: fakeLookup(world),
+    runPlans: (list, options) => runner.runPlans(list, options),
+    execute: createExecutors({ client: fakeClient(world), gh: fakeGhOwned(world), git: fakeGit(world), paseoCli: fakePaseoCli(world), sleep: async () => {} }),
+  });
+  assert.equal(result.report[0].status, 'complete', result.report[0].error);
+  assert.equal(world.workspaces.length, 1, 'no duplicate workspace');
+  assert.equal(world.projects.length, 1, 'no duplicate project');
+  assert.deepEqual(wt.metadata[METADATA_KEY].scope, { id: MOBILE, kind: 'github', locator: MOBILE });
+  const [after] = await runner.runPlans(entries);
+  assert.equal(after.status, 'complete');
+});
+
+test('--main: apply re-checks the worktree precondition (moved or converted workspace)', async () => {
+  const world = githubMainWorld();
+  const wt = addWorktree(world, { mainPath: '/p/mobile' });
+  const execute = createExecutors({ client: fakeClient(world), gh: fakeGhOwned(world), git: fakeGit(world), paseoCli: fakePaseoCli(world), sleep: async () => {} });
+  const op = { key: 'workspace.main.adopt', kind: 'paseo.workspace.metadata', params: { workspaceId: wt.id, metadata: { [METADATA_KEY]: { main: true } }, expectWorktree: { directory: WT_DIR } } };
+  wt.workspaceDirectory = '/wt/moved';
+  await assert.rejects(() => execute(op, CONFIG), /moved from/);
+  wt.workspaceDirectory = WT_DIR;
+  wt.workspaceKind = 'local_checkout';
+  delete wt.project.checkout.isPaseoOwnedWorktree;
+  await assert.rejects(() => execute(op, CONFIG), /no longer a worktree/);
+});
+
+test('--main: plan and status find the adopted worktree main without the flag', async () => {
+  const world = githubMainWorld();
+  const wt = addWorktree(world, { mainPath: '/p/mobile' });
+  const runner = runnerForGithub(world);
+  const [planned] = await runner.runPlans([{ repo: MOBILE, main: wt.id }]);
+  assert.deepEqual(keys(planned), ['workspace.main.adopt', 'steer.A', 'steer.B']);
+  const authorization = createAuthorization(planned ? [planned] : [], CONFIG, { entries: [{ repo: MOBILE, main: wt.id }], allowFork: false, adopt: {} });
+  const result = await applyPlans({
+    authorization, config: CONFIG, confirm: authorization.hash,
+    lookupReceipt: fakeLookup(world),
+    runPlans: (list, options) => runner.runPlans(list, options),
+    execute: createExecutors({ client: fakeClient(world), gh: fakeGhOwned(world), git: fakeGit(world), paseoCli: fakePaseoCli(world), sleep: async () => {} }),
+  });
+  assert.equal(result.report[0].status, 'complete', result.report[0].error);
+  const [replan] = await runner.runPlans([MOBILE]);
+  assert.equal(replan.observed.mainWorkspace?.id, wt.id);
+  assert.ok(!keys(replan).includes('workspace.main'), 'no duplicate workspace planned');
+  assert.ok(!keys(replan).includes('paseo.project'), 'no duplicate project planned');
+  const [d] = await runner.discoverAll([MOBILE]);
+  assert.equal(d.mainWorkspace?.id, wt.id);
+  const status = steerStatus(d);
+  assert.equal(status.repo, MOBILE);
+  assert.equal(status.workspace?.id, wt.id);
+});
+
+test('--main: CLI flag validation', (t) => {
+  let out = runCli(t, ['--help']);
+  assert.match(out.stdout, /--main workspace:<id>/);
+  out = runCli(t, ['plan', 'example/a', 'example/b', '--main', 'workspace:wks_abc123']);
+  assert.equal(out.status, 1);
+  assert.match(out.stderr, /--main needs exactly one repository entry/);
+  out = runCli(t, ['status', MOBILE, '--main', 'workspace:wks_abc123']);
+  assert.equal(out.status, 1);
+  assert.match(out.stderr, /--main is only accepted with plan/);
+  out = runCli(t, ['plan', MOBILE, '--checkout', '/p/x', '--main', 'workspace:wks_abc123']);
+  assert.equal(out.status, 1);
+  assert.match(out.stderr, /conflicts with the entry "checkout"/);
 });

@@ -2,12 +2,30 @@
 // the Paseo project, main workspace, steers and workers that belong to it.
 import { basename, join, resolve } from 'node:path';
 import { realpathSync, statSync } from 'node:fs';
-import { resolveGitHub, remoteToFullName } from './github.mjs';
+import { resolveGitHub, parseRepoInput } from './github.mjs';
 import { classifyCheckouts, inspectCloneTarget } from './local.mjs';
 import { LABEL, METADATA_KEY, parentOf } from './paseo.mjs';
 import { validScope } from './scope.mjs';
 
-const STEER_TITLE = /^Steer ([A-Z])$/;
+/**
+ * Legacy steer titles: "Steer A" plus an optional suffix — bracketed
+ * ("Steer A [kn]", "Steer A (kn)") or after a separator ("Steer A · fp") —
+ * matched case-insensitively ("steer a"). Group 1 is always the UPPERCASE slot
+ * letter, so planner.mjs:300 (`match(STEER_TITLE)[1] === slot`) works unchanged.
+ * A digit ("Steer 3") never matches here: it is only a digit candidate, never
+ * auto-assigned (see STEER_DIGIT_TITLE).
+ */
+const STEER_TITLE_PATTERN = String.raw`^steer\s+([a-z])(?:\s*(?:\([^()]*\)|\[[^\]]*\])|\s*[·\-–—:|]\s*\S.*)?$`;
+class SteerTitleRegExp extends RegExp {
+  exec(value) {
+    const match = super.exec(value);
+    if (match) match[1] = match[1].toUpperCase();
+    return match;
+  }
+}
+const STEER_TITLE = new SteerTitleRegExp(STEER_TITLE_PATTERN, 'i');
+/** Digit steer titles ("Steer 3", same suffix rules): candidates for explicit --adopt only. */
+const STEER_DIGIT_TITLE = /^steer\s+(\d+)(?:\s*(?:\([^()]*\)|\[[^\]]*\])|\s*[·\-–—:|]\s*\S.*)?$/i;
 const MAIN_TITLE = /(^|· )Main$/;
 
 function real(path, realpath = realpathSync) {
@@ -49,6 +67,11 @@ function workspaceIdFromRepo(repo) {
   }
   if (/^wks_[A-Za-z0-9]+$/.test(trimmed)) return trimmed;
   return null;
+}
+
+/** Live scopes as plan refs (id, kind, workspace id, domain pointer for grouping). */
+function liveScopeRefs(liveScopes) {
+  return (liveScopes ?? []).map((s) => ({ id: s.id, kind: s.kind, workspaceId: s.workspaceId, ...(typeof s.domain === 'string' && s.domain ? { domain: s.domain } : {}) }));
 }
 
 /** True for an existing directory (follows symlinks); injectable for tests. */
@@ -93,9 +116,41 @@ function normalizeSubject(raw, entry) {
   return subject;
 }
 
-/** Normalizes a repository list entry: "owner/repo", a URL, { repo, parentDir?, checkout?, name?, subject?, hub? }, { local: <path>, name?, subject?, hub? } or "local/<folder>", { workspace: <id>, hub? } or "workspace:<id>" (bare "wks_..." ids too). A hub entry plans a hub-kind scope (S5b). */
+/**
+ * Validates a per-entry main workspace override (`--main` / repos-file `"main"`).
+ * Only a workspace reference (`workspace:<id>`, `worktree:<id>`, bare `wks_...`).
+ * Returns the workspace id or null when absent.
+ */
+function normalizeMainRef(raw, entry) {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== 'string') throw new Error(`Entry "main" must be a workspace id string: ${JSON.stringify(entry)}`);
+  const id = workspaceIdFromRepo(raw);
+  if (!id) throw new Error(`Not a workspace reference in "main": ${JSON.stringify(raw)} (expected "workspace:<id>")`);
+  return id;
+}
+
+/**
+ * Validates a per-entry domain pointer (`--domain` / repos-file `"domain"`).
+ * Undefined/null means "not requested" (no change); "" clears the pointer;
+ * otherwise a scope id (owner/repo forms keep their "/", only ":" and control
+ * characters are rejected). Returns undefined, "" or the trimmed id.
+ */
+function normalizeDomain(raw, entry) {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== 'string') throw new Error(`Entry "domain" must be a string: ${JSON.stringify(entry)}`);
+  const id = raw.trim();
+  if (!id) return '';
+  if (id.length > 200) throw new Error(`Entry "domain" is too long (max 200 characters): ${JSON.stringify(entry)}`);
+  if (id.includes(':') || /[\0-\x1f\x7f]/.test(id)) {
+    throw new Error(`Entry "domain" must not contain ":" or control characters: ${JSON.stringify(entry)}`);
+  }
+  return id;
+}
+
+/** Normalizes a repository list entry: "owner/repo", a URL, { repo, parentDir?, checkout?, main?, domain?, name?, subject?, hub? }, { local: <path>, domain?, name?, subject?, hub? } or "local/<folder>", { workspace: <id>, domain?, hub? } or "workspace:<id>" (bare "wks_..." ids too). A hub entry plans a hub-kind scope (S5b). `"main"` (github only) adopts that worktree workspace as the scope's main workspace. `"domain"` sets the domain pointer ("" clears it); hubs carry no domain. */
 export function normalizeEntry(entry, config) {
   if (typeof entry === 'object' && entry !== null && typeof entry.local === 'string') {
+    if (entry.main !== undefined) throw new Error(`Entry "main" (--main) is only supported for github entries: ${JSON.stringify(entry)}`);
     const raw = entry.local.trim();
     if (!raw) throw new Error(`Repository entry needs a non-empty "local" path: ${JSON.stringify(entry)}`);
     const local = resolve(raw);
@@ -104,15 +159,20 @@ export function normalizeEntry(entry, config) {
     const name = normalizeScopeName(entry.name, entry);
     const subject = normalizeSubject(entry.subject, entry);
     if (entry.hub !== undefined && typeof entry.hub !== 'boolean') throw new Error(`Entry "hub" must be a boolean: ${JSON.stringify(entry)}`);
-    return { repo: `local/${base}`, local, parentDir: resolve(entry.parentDir ?? config.checkoutRoot), checkout: entry.checkout ? resolve(entry.checkout) : null, ...(name !== null ? { name } : {}), ...(subject !== null ? { subject } : {}), ...(entry.hub === true ? { hub: true } : {}) };
+    const domain = normalizeDomain(entry.domain, entry);
+    if (domain !== undefined && entry.hub === true) throw new Error(`Entry must not combine "hub" with "domain" (hubs carry no domain): ${JSON.stringify(entry)}`);
+    return { repo: `local/${base}`, local, parentDir: resolve(entry.parentDir ?? config.checkoutRoot), checkout: entry.checkout ? resolve(entry.checkout) : null, ...(name !== null ? { name } : {}), ...(subject !== null ? { subject } : {}), ...(entry.hub === true ? { hub: true } : {}), ...(domain !== undefined ? { domain } : {}) };
   }
   if (typeof entry === 'object' && entry !== null && (typeof entry.workspace === 'string' || typeof entry.workspaceId === 'string')) {
+    if (entry.main !== undefined) throw new Error(`Entry "main" (--main) is only supported for github entries: ${JSON.stringify(entry)}`);
     const raw = (entry.workspace ?? entry.workspaceId).trim();
     if (!raw) throw new Error(`Repository entry needs a non-empty "workspace" id: ${JSON.stringify(entry)}`);
     const name = normalizeScopeName(entry.name, entry);
     const subject = normalizeSubject(entry.subject, entry);
     if (entry.hub !== undefined && typeof entry.hub !== 'boolean') throw new Error(`Entry "hub" must be a boolean: ${JSON.stringify(entry)}`);
-    return { repo: `workspace:${raw}`, workspaceId: raw, parentDir: resolve(entry.parentDir ?? config.checkoutRoot), checkout: entry.checkout ? resolve(entry.checkout) : null, ...(name !== null ? { name } : {}), ...(subject !== null ? { subject } : {}), ...(entry.hub === true ? { hub: true } : {}) };
+    const domain = normalizeDomain(entry.domain, entry);
+    if (domain !== undefined && entry.hub === true) throw new Error(`Entry must not combine "hub" with "domain" (hubs carry no domain): ${JSON.stringify(entry)}`);
+    return { repo: `workspace:${raw}`, workspaceId: raw, parentDir: resolve(entry.parentDir ?? config.checkoutRoot), checkout: entry.checkout ? resolve(entry.checkout) : null, ...(name !== null ? { name } : {}), ...(subject !== null ? { subject } : {}), ...(entry.hub === true ? { hub: true } : {}), ...(domain !== undefined ? { domain } : {}) };
   }
   const value = typeof entry === 'string' ? { repo: entry } : { ...entry };
   if (typeof value.repo !== 'string') throw new Error(`Repository entry needs "repo", "local" or "workspace": ${JSON.stringify(entry)}`);
@@ -120,15 +180,21 @@ export function normalizeEntry(entry, config) {
   const subject = normalizeSubject(value.subject, entry);
   if (value.hub !== undefined && typeof value.hub !== 'boolean') throw new Error(`Entry "hub" must be a boolean: ${JSON.stringify(entry)}`);
   const withName = { ...(name !== null ? { name } : {}), ...(subject !== null ? { subject } : {}), ...(value.hub === true ? { hub: true } : {}) };
+  const mainWorkspaceId = normalizeMainRef(value.main, entry);
+  if (mainWorkspaceId && value.checkout) throw new Error(`Entry must not combine "main" with "checkout": ${JSON.stringify(entry)}`);
+  const domain = normalizeDomain(value.domain, entry);
+  if (domain !== undefined && value.hub === true) throw new Error(`Entry must not combine "hub" with "domain" (hubs carry no domain): ${JSON.stringify(entry)}`);
   const workspaceId = workspaceIdFromRepo(value.repo);
   if (workspaceId) {
-    return { repo: `workspace:${workspaceId}`, workspaceId, parentDir: resolve(value.parentDir ?? config.checkoutRoot), checkout: value.checkout ? resolve(value.checkout) : null, ...withName };
+    if (mainWorkspaceId) throw new Error(`Entry "main" (--main) is only supported for github entries: ${JSON.stringify(entry)}`);
+    return { repo: `workspace:${workspaceId}`, workspaceId, parentDir: resolve(value.parentDir ?? config.checkoutRoot), checkout: value.checkout ? resolve(value.checkout) : null, ...withName, ...(domain !== undefined ? { domain } : {}) };
   }
   const localName = localNameFromRepo(value.repo);
   if (localName) {
-    return { repo: `local/${localName}`, localName, parentDir: resolve(value.parentDir ?? config.checkoutRoot), checkout: value.checkout ? resolve(value.checkout) : null, ...withName };
+    if (mainWorkspaceId) throw new Error(`Entry "main" (--main) is only supported for github entries: ${JSON.stringify(entry)}`);
+    return { repo: `local/${localName}`, localName, parentDir: resolve(value.parentDir ?? config.checkoutRoot), checkout: value.checkout ? resolve(value.checkout) : null, ...withName, ...(domain !== undefined ? { domain } : {}) };
   }
-  return { repo: value.repo, parentDir: resolve(value.parentDir ?? config.checkoutRoot), checkout: value.checkout ? resolve(value.checkout) : null, ...withName };
+  return { repo: value.repo, parentDir: resolve(value.parentDir ?? config.checkoutRoot), checkout: value.checkout ? resolve(value.checkout) : null, ...withName, ...(mainWorkspaceId ? { mainWorkspaceId } : {}), ...(domain !== undefined ? { domain } : {}) };
 }
 
 function worktreesAt(paseo, wantedReal, realpath) {
@@ -150,6 +216,77 @@ function allWorkers(paseo, steerIds, scopeId) {
   return [...parentLinked, ...labelledWorkers(paseo, scopeId).filter((w) => !seen.has(w.id))];
 }
 
+/**
+ * Unlabelled live agents of one workspace titled like a steer with a digit
+ * ("Steer 3"): never auto-assigned to a slot, only reported so the user can
+ * adopt one explicitly (`--adopt <slot>=<id>`).
+ */
+function digitSteerCandidates(agents, workspaceId) {
+  if (!workspaceId) return [];
+  return (agents ?? []).filter((a) => a.workspaceId === workspaceId && !a.archivedAt && !a.labels?.[LABEL.role] && STEER_DIGIT_TITLE.test((a.title ?? '').trim()));
+}
+
+/**
+ * Worker hint for a candidate whose parent is a labelled steer of another
+ * scope: such agents are workers, never steer candidates. Returns
+ * { scope, slot, hint } ("Worker von <scope> Steer <slot>") or null.
+ * Same-scope parents (any repo/scope label in matchKeys) stay candidates
+ * (existing --detach flow); parents without scope/slot labels cannot be
+ * attributed and stay candidates too.
+ */
+function foreignWorkerHint(agent, matchKeys, agentsById) {
+  const parentId = parentOf(agent);
+  if (!parentId) return null;
+  const parent = agentsById.get(parentId);
+  if (!parent || parent.labels?.[LABEL.role] !== 'steer') return null;
+  const scope = parent.labels?.[LABEL.scope] ?? parent.labels?.[LABEL.repo] ?? null;
+  const slot = parent.labels?.[LABEL.slot] ?? null;
+  if (typeof scope !== 'string' || !scope || typeof slot !== 'string' || !slot) return null;
+  for (const label of [parent.labels?.[LABEL.scope], parent.labels?.[LABEL.repo]]) {
+    if (typeof label === 'string' && label && matchKeys.has(label.toLowerCase())) return null;
+  }
+  return { scope, slot, hint: `Worker von ${scope} Steer ${slot}` };
+}
+
+/**
+ * Splits steer candidates into true candidates and workers of other scopes'
+ * steers. The workers keep their agent record plus the hint for plan notes;
+ * they are never adoptable as steers of this scope.
+ */
+function splitCandidates(candidates, matchKeys, agentsById) {
+  const kept = [];
+  const foreignWorkers = [];
+  for (const agent of candidates ?? []) {
+    const info = foreignWorkerHint(agent, matchKeys, agentsById);
+    if (info) foreignWorkers.push({ agent, ...info });
+    else kept.push(agent);
+  }
+  return { kept, foreignWorkers };
+}
+
+/**
+ * Half-labelled steers: live agents in the main workspace with role=steer but
+ * without a scope identity — typically legacy ari.wsf.role/slot only
+ * (normalized to wsf.role/slot, no wsf.scope/wsf.repo). Labelled steers (repo
+ * present) and foreign-labelled agents (a scope label outside matchKeys) are
+ * not half-labelled. Archived agents are ignored; closed ones stay visible
+ * when they carry a scope assignment (a daemon restart closes real steers
+ * too) and are ignored only without one.
+ */
+function halfLabelledSteers(paseo, mainWorkspace, matchKeys) {
+  if (!mainWorkspace) return [];
+  return (paseo.agents ?? []).filter((a) => {
+    if (a.workspaceId !== mainWorkspace.id || a.archivedAt) return false;
+    if (a.labels?.[LABEL.role] !== 'steer') return false;
+    const repo = a.labels?.[LABEL.repo];
+    if (typeof repo === 'string' && repo) return false;
+    const scope = a.labels?.[LABEL.scope];
+    if (typeof scope === 'string' && scope && !matchKeys.has(scope.toLowerCase())) return false;
+    if (a.status === 'closed' && !(typeof scope === 'string' && scope)) return false;
+    return true;
+  });
+}
+
 /** Current branch of a worktree directory; null when unreadable or detached (HEAD). Never throws. */
 function worktreeBranch(git, dirReal) {
   if (typeof git !== 'function' || !dirReal) return null;
@@ -164,8 +301,9 @@ function worktreeBranch(git, dirReal) {
 
 /**
  * Parent scope of a worktree from its owning project checkout: a github scope
- * when the origin parses to owner/repo (the live scope id wins on case, so the
- * link stays resolvable), else a dir scope for the project folder, else none.
+ * when the origin parses to owner/repo (matched case-insensitively; the live
+ * scope id wins as the canonical form, else the spelling from the remote URL),
+ * else a dir scope for the project folder, else none.
  * Local git data only, no network. Never throws.
  */
 function worktreeParent({ projectRootPath, dirReal, checkouts, realpath, liveScopes }) {
@@ -174,9 +312,14 @@ function worktreeParent({ projectRootPath, dirReal, checkouts, realpath, liveSco
     const rootReal = real(projectRootPath, realpath);
     if (!rootReal || rootReal === dirReal) return null;
     const atRoot = checkouts.find((c) => real(c.path, realpath) === rootReal) ?? null;
-    const parsed = atRoot?.remotes?.origin ? remoteToFullName(atRoot.remotes.origin) : null;
+    let parsed = null;
+    try {
+      parsed = atRoot?.remotes?.origin ? parseRepoInput(atRoot.remotes.origin).fullName : null;
+    } catch {
+      parsed = null;
+    }
     if (parsed) {
-      const live = (liveScopes ?? []).find((s) => s.kind === 'github' && s.id.toLowerCase() === parsed);
+      const live = (liveScopes ?? []).find((s) => s.kind === 'github' && typeof s.id === 'string' && s.id.toLowerCase() === parsed.toLowerCase());
       return { id: live?.id ?? parsed, kind: 'github' };
     }
     const folder = basename(projectRootPath);
@@ -223,6 +366,13 @@ function buildWorktreeDiscovery(matched, { normalized, parentDir, checkouts, pas
     const id = requestedName ?? (parent && branch ? `${parent.id}@${branch}` : folder);
     scope = { id, kind: 'workspace', locator: first.id, ...(parent ? { parent } : {}) };
   }
+  // Domain pointer: an explicit --domain wins ("" clears, so the planned scope
+  // carries none); otherwise the stored pointer is kept. Hubs carry no domain.
+  const requestedDomain = normalized.domain;
+  if (!wantHub && scope && requestedDomain !== '') {
+    const domain = requestedDomain ?? stored?.domain ?? null;
+    if (typeof domain === 'string' && domain) scope = { ...scope, domain };
+  }
   const forkName = scope?.id ?? normalized.repo;
   const input = normalized.local ?? normalized.repo;
   const repoKey = forkName.toLowerCase();
@@ -247,9 +397,16 @@ function buildWorktreeDiscovery(matched, { normalized, parentDir, checkouts, pas
   const mainCandidates = matched;
 
   const labelled = paseo.agents.filter((a) => a.labels?.[LABEL.role] === 'steer' && matchKeys.has(a.labels?.[LABEL.repo]?.toLowerCase()));
-  const legacy = mainWorkspace
+  const agentsById = new Map((paseo.agents ?? []).map((a) => [a.id, a]));
+  const legacyAll = mainWorkspace
     ? paseo.agents.filter((a) => a.workspaceId === mainWorkspace.id && !a.archivedAt && !a.labels?.[LABEL.role] && STEER_TITLE.test((a.title ?? '').trim()))
     : [];
+  const splitLegacy = splitCandidates(legacyAll, matchKeys, agentsById);
+  const splitDigit = splitCandidates(digitSteerCandidates(paseo.agents, mainWorkspace?.id), matchKeys, agentsById);
+  const legacy = splitLegacy.kept;
+  const digitCandidates = splitDigit.kept;
+  const foreignWorkers = [...splitLegacy.foreignWorkers, ...splitDigit.foreignWorkers];
+  const halfLabelled = halfLabelledSteers(paseo, mainWorkspace, matchKeys);
   const steerIds = new Set([...labelled, ...legacy].map((a) => a.id));
   const projectWorkspaceIds = new Set(paseo.workspaces.filter((w) => projectIds.has(w.projectId)).map((w) => w.id));
   const workers = allWorkers(paseo, steerIds, forkName);
@@ -267,7 +424,8 @@ function buildWorktreeDiscovery(matched, { normalized, parentDir, checkouts, pas
     scope,
     requestedName,
     requestedSubject,
-    liveScopes: (liveScopes ?? []).map((s) => ({ id: s.id, kind: s.kind, workspaceId: s.workspaceId })),
+    requestedDomain,
+    liveScopes: liveScopeRefs(liveScopes),
     expectedPath: dirReal,
     cloneTarget: null,
     checkout,
@@ -278,7 +436,7 @@ function buildWorktreeDiscovery(matched, { normalized, parentDir, checkouts, pas
     mainCandidates,
     otherLocalWorkspaces: [],
     mainWorkspace,
-    steers: { labelled, legacy },
+    steers: { labelled, legacy, digitCandidates, foreignWorkers, halfLabelled },
     workers,
     agents: paseo.agents,
     worktreeAgents,
@@ -309,9 +467,10 @@ function discoverWorktreeById(normalized, { checkouts, paseo, realpath, git, liv
 }
 
 function discoverLocal(normalized, { config, checkouts, paseo, realpath, existsDir, git, liveScopes }) {
-  const live = (liveScopes ?? []).map((s) => ({ id: s.id, kind: s.kind, workspaceId: s.workspaceId }));
+  const live = liveScopeRefs(liveScopes);
   const requestedName = normalized.name ?? null;
   const requestedSubject = normalized.subject ?? null;
+  const requestedDomain = normalized.domain;
   // An explicit local path that is a worktree directory adopts that worktree
   // workspace instead of planning a duplicate project/workspace.
   if (normalized.local) {
@@ -436,20 +595,33 @@ function discoverLocal(normalized, { config, checkouts, paseo, realpath, existsD
     ? mainWorkspace.metadata[METADATA_KEY].scope
     : null;
   const wantHub = normalized.hub === true;
-  const scope = wantHub
+  let scope = wantHub
     ? { id: requestedName ?? stored?.id ?? 'hub', kind: 'hub', locator: localPath }
     : stored
       ? { id: stored.id, kind: stored.kind, locator: stored.locator ?? localPath, ...(stored.parent !== undefined ? { parent: stored.parent } : {}) }
       : { id: requestedName ?? folder, kind: 'dir', locator: localPath };
+  // Domain pointer: an explicit --domain wins ("" clears); otherwise the stored
+  // pointer is kept. Hubs carry no domain.
+  if (!wantHub && requestedDomain !== '') {
+    const domain = requestedDomain ?? stored?.domain ?? null;
+    if (typeof domain === 'string' && domain) scope = { ...scope, domain };
+  }
   const forkName = scope.id;
   const repoKey = forkName.toLowerCase();
   const legacyKey = `local/${folder}`.toLowerCase();
   const matchKeys = new Set([repoKey, legacyKey]);
   if (stored && stored.id.toLowerCase() !== repoKey) matchKeys.add(stored.id.toLowerCase());
   const labelled = paseo.agents.filter((a) => a.labels?.[LABEL.role] === 'steer' && matchKeys.has(a.labels?.[LABEL.repo]?.toLowerCase()));
-  const legacy = mainWorkspace
+  const agentsById = new Map((paseo.agents ?? []).map((a) => [a.id, a]));
+  const legacyAll = mainWorkspace
     ? paseo.agents.filter((a) => a.workspaceId === mainWorkspace.id && !a.archivedAt && !a.labels?.[LABEL.role] && STEER_TITLE.test((a.title ?? '').trim()))
     : [];
+  const splitLegacy = splitCandidates(legacyAll, matchKeys, agentsById);
+  const splitDigit = splitCandidates(digitSteerCandidates(paseo.agents, mainWorkspace?.id), matchKeys, agentsById);
+  const legacy = splitLegacy.kept;
+  const digitCandidates = splitDigit.kept;
+  const foreignWorkers = [...splitLegacy.foreignWorkers, ...splitDigit.foreignWorkers];
+  const halfLabelled = halfLabelledSteers(paseo, mainWorkspace, matchKeys);
   const steerIds = new Set([...labelled, ...legacy].map((a) => a.id));
   const projectWorkspaceIds = new Set(paseo.workspaces.filter((w) => projectIds.has(w.projectId)).map((w) => w.id));
   const workers = allWorkers(paseo, steerIds, forkName);
@@ -464,6 +636,7 @@ function discoverLocal(normalized, { config, checkouts, paseo, realpath, existsD
     scope,
     requestedName,
     requestedSubject,
+    requestedDomain,
     liveScopes: live,
     expectedPath,
     cloneTarget: null,
@@ -475,7 +648,7 @@ function discoverLocal(normalized, { config, checkouts, paseo, realpath, existsD
     mainCandidates: mainMatches,
     otherLocalWorkspaces: mainCandidates.filter((w) => !mainMatches.includes(w)),
     mainWorkspace,
-    steers: { labelled, legacy },
+    steers: { labelled, legacy, digitCandidates, foreignWorkers, halfLabelled },
     workers,
     agents: paseo.agents,
     projectWorkspaceIds: [...projectWorkspaceIds],
@@ -502,20 +675,77 @@ export function discoverRepository(entry, { config, gh, git, checkouts, paseo, r
   const { exact, related } = classifyCheckouts(checkouts, { fork: forkName, upstream: github.upstream?.fullName, source: github.source?.fullName });
 
   const isMain = (w) => w.metadata?.[METADATA_KEY]?.main === true || MAIN_TITLE.test((w.title ?? w.name ?? '').trim());
-  let checkout = null;
+  // --main workspace:<id>: that worktree workspace becomes this github scope's
+  // main workspace (same existence/worktree validation as worktree adoption).
+  // The scope id stays the resolved fork; no new project or workspace is used.
+  const requestedMainId = normalized.mainWorkspaceId ?? null;
+  let mainOverride = null;
   const checkoutIssues = [];
-  if (explicitCheckout) {
+  if (requestedMainId) {
+    const found = paseo.workspaces.find((w) => w.id === requestedMainId) ?? null;
+    if (!found) {
+      checkoutIssues.push(`Workspace ${requestedMainId} not found; pass an existing worktree workspace id (see "workspace:<id>" in docs/configuration.md)`);
+    } else if (!isWorktreeWorkspace(found)) {
+      checkoutIssues.push(`Workspace ${requestedMainId} ("${found.title ?? found.name}") is not a worktree workspace; --main needs a worktree of ${forkName ?? input}`);
+    } else {
+      mainOverride = found;
+    }
+  }
+  if (!mainOverride && !requestedMainId && !explicitCheckout && forkName) {
+    // Re-plan/status after a --main adoption: the github scope already lives on
+    // a worktree workspace, which the checkout-path lookup below cannot see.
+    // The live scope (same id, worktree main with factory metadata) wins over
+    // a fresh workspace at the checkout path — never a duplicate.
+    const live = (liveScopes ?? []).find((s) => typeof s.id === 'string' && s.id.toLowerCase() === forkName.toLowerCase());
+    const ws = live ? paseo.workspaces.find((w) => w.id === live.workspaceId) ?? null : null;
+    if (ws && isWorktreeWorkspace(ws) && ws.metadata?.[METADATA_KEY]?.main === true) {
+      mainOverride = ws;
+    }
+  }
+  let checkout = null;
+  if (mainOverride) {
+    // The worktree directory is the checkout (linked worktrees never appear in
+    // classifyCheckouts' exact list, so it is matched by path instead). A
+    // scanned origin for another repository is refused; without a scanned
+    // checkout the worktree is still adopted, like buildWorktreeDiscovery.
+    const dirReal = real(mainOverride.workspaceDirectory, realpath);
+    const atDir = dirReal ? checkouts.find((c) => real(c.path, realpath) === dirReal) ?? null : null;
+    if (atDir) {
+      let origin = atDir.repos?.origin ?? null;
+      if (!origin && atDir.remotes?.origin) {
+        try {
+          origin = parseRepoInput(atDir.remotes.origin).fullName.toLowerCase();
+        } catch {
+          origin = null;
+        }
+      }
+      if (origin && forkName && origin !== forkName.toLowerCase()) {
+        checkoutIssues.push(`Workspace ${requestedMainId} ("${mainOverride.title ?? mainOverride.name}") is a worktree of ${origin}, not of ${forkName}; --main needs a worktree of this repository`);
+      } else {
+        checkout = { ...atDir, worktree: true };
+      }
+    } else if (dirReal) {
+      checkout = { path: dirReal, linkedWorktree: true, remotes: {}, repos: {}, worktree: true };
+    } else {
+      checkoutIssues.push(`Workspace ${requestedMainId} has no readable directory; pass an existing worktree workspace id`);
+    }
+  } else if (requestedMainId) {
+    // The validation issue above is the conflict; no fallback to normal selection.
+  } else if (explicitCheckout) {
     const wanted = real(explicitCheckout, realpath);
     checkout = exact.find((c) => c.path === wanted) ?? null;
     if (!checkout) checkoutIssues.push(`Requested checkout ${explicitCheckout} is not a checkout with origin ${forkName}`);
   } else if (exact.length === 1) checkout = exact[0];
   else if (exact.length > 1) {
-    // Several clones of the fork: only unambiguous signals decide, otherwise ask.
+    // Several clones of the fork: only unambiguous signals decide, otherwise
+    // ask. A main workspace wins first, then the Paseo project checkout, then
+    // the expected path.
     const atExpected = exact.filter((c) => c.path === real(expectedPath, realpath));
     const withMain = exact.filter((c) => workspaceAt(c.path).some(isMain));
-    const pick = withMain.length === 1 ? withMain : atExpected;
+    const atProject = exact.filter((c) => paseo.projects.some((p) => real(p.projectRootPath, realpath) === c.path));
+    const pick = withMain.length === 1 ? withMain : atProject.length === 1 ? atProject : atExpected;
     if (pick.length === 1) checkout = pick[0];
-    else checkoutIssues.push(`Several checkouts have origin ${forkName}: ${exact.map((c) => c.path).join(', ')}; name one with {"repo": ..., "checkout": <path>}`);
+    else checkoutIssues.push(`Several checkouts have origin ${forkName}: ${exact.map((c) => c.path).join(', ')}; name one with --checkout <path> or {"repo": ..., "checkout": <path>}`);
   }
   const cloneTarget = expectedPath && !checkout && !checkoutIssues.length ? inspectTarget(config.checkoutRoot, parentDir, expectedPath) : null;
 
@@ -531,31 +761,57 @@ export function discoverRepository(entry, { config, gh, git, checkouts, paseo, r
   }
 
   const path = checkout?.path ?? null;
-  const mainCandidates = path ? workspaceAt(path) : [];
-  const projectIds = new Set(mainCandidates.map((w) => w.projectId).filter(Boolean));
-  for (const project of paseo.projects) if (path && real(project.projectRootPath, realpath) === path) projectIds.add(project.projectId);
+  // With --main the named worktree is the main workspace whatever its title;
+  // its owning project is attached and no new project is registered.
+  const mainCandidates = mainOverride ? [mainOverride] : (path ? workspaceAt(path) : []);
+  const projectIds = mainOverride
+    ? new Set([mainOverride.projectId].filter(Boolean))
+    : new Set(mainCandidates.map((w) => w.projectId).filter(Boolean));
+  if (!mainOverride) {
+    for (const project of paseo.projects) if (path && real(project.projectRootPath, realpath) === path) projectIds.add(project.projectId);
+  }
   const projects = paseo.projects.filter((p) => projectIds.has(p.projectId));
 
   // Several local workspaces may share one checkout (one per task); only a marked or
   // Main-titled one is the main workspace. Marked wins over title.
   const marked = mainCandidates.filter((w) => w.metadata?.[METADATA_KEY]?.main === true);
   const titled = mainCandidates.filter(isMain);
-  const mainMatches = marked.length ? marked : titled;
-  const mainWorkspace = mainMatches.length === 1 ? mainMatches[0] : null;
+  const mainMatches = mainOverride ? [mainOverride] : (marked.length ? marked : titled);
+  const mainWorkspace = mainOverride ?? (mainMatches.length === 1 ? mainMatches[0] : null);
 
   // Steers are identified by labels; an unlabelled top-level "Steer X" in the main
   // workspace is a legacy steer that can be adopted.
   const repoKey = forkName?.toLowerCase();
   const labelled = paseo.agents.filter((a) => a.labels?.[LABEL.role] === 'steer' && a.labels?.[LABEL.repo]?.toLowerCase() === repoKey);
-  const legacy = mainWorkspace
+  const matchKeys = new Set(repoKey ? [repoKey] : []);
+  const agentsById = new Map((paseo.agents ?? []).map((a) => [a.id, a]));
+  const legacyAll = mainWorkspace
     ? paseo.agents.filter((a) => a.workspaceId === mainWorkspace.id && !a.archivedAt && !a.labels?.[LABEL.role] && STEER_TITLE.test((a.title ?? '').trim()))
     : [];
+  const splitLegacy = splitCandidates(legacyAll, matchKeys, agentsById);
+  const splitDigit = splitCandidates(digitSteerCandidates(paseo.agents, mainWorkspace?.id), matchKeys, agentsById);
+  const legacy = splitLegacy.kept;
+  const digitCandidates = splitDigit.kept;
+  const foreignWorkers = [...splitLegacy.foreignWorkers, ...splitDigit.foreignWorkers];
+  const halfLabelled = halfLabelledSteers(paseo, mainWorkspace, matchKeys);
   const steerIds = new Set([...labelled, ...legacy].map((a) => a.id));
   const projectWorkspaceIds = new Set(paseo.workspaces.filter((w) => projectIds.has(w.projectId)).map((w) => w.id));
   const workers = allWorkers(paseo, steerIds, forkName);
   // The github scope id is the resolved fork; the network-verified identity
   // always wins over a stored field (a mismatch is a planner conflict).
-  const scope = forkName ? { id: forkName, kind: 'github', locator: forkName } : null;
+  // --main keeps that identity: the worktree is only the main workspace, never
+  // a `<parent>@<branch>` scope of its own. The domain pointer rides along:
+  // an explicit --domain wins ("" clears), otherwise the stored one is kept.
+  const requestedDomain = normalized.domain;
+  let scope = forkName ? { id: forkName, kind: 'github', locator: forkName } : null;
+  if (scope && requestedDomain !== '') {
+    const storedScope = mainWorkspace && validScope(mainWorkspace.metadata?.[METADATA_KEY]?.scope)
+      ? mainWorkspace.metadata[METADATA_KEY].scope
+      : null;
+    const domain = requestedDomain ?? storedScope?.domain ?? null;
+    if (typeof domain === 'string' && domain) scope = { ...scope, domain };
+  }
+  const untouchedExact = mainOverride && checkout ? exact.filter((c) => c.path !== checkout.path) : [];
 
   return {
     input,
@@ -566,23 +822,26 @@ export function discoverRepository(entry, { config, gh, git, checkouts, paseo, r
     requestedName: normalized.name ?? null,
     requestedSubject: normalized.subject ?? null,
     requestedHub: normalized.hub === true,
-    liveScopes: (liveScopes ?? []).map((s) => ({ id: s.id, kind: s.kind, workspaceId: s.workspaceId })),
+    requestedMain: requestedMainId,
+    requestedDomain,
+    liveScopes: liveScopeRefs(liveScopes),
     expectedPath,
     cloneTarget,
     checkout,
     checkoutIssues,
-    relatedCheckouts: related.map((c) => ({ path: c.path, remotes: c.remotes })),
+    relatedCheckouts: [...related, ...untouchedExact].map((c) => ({ path: c.path, remotes: c.remotes })),
     upstreamRemote,
     projects,
     mainCandidates: mainMatches,
     otherLocalWorkspaces: mainCandidates.filter((w) => !mainMatches.includes(w)),
     mainWorkspace,
-    steers: { labelled, legacy },
+    steers: { labelled, legacy, digitCandidates, foreignWorkers, halfLabelled },
     workers,
     agents: paseo.agents,
+    ...(mainOverride ? { worktree: { workspaceId: mainOverride.id, workspaceIds: [mainOverride.id], projectId: mainOverride.projectId ?? null, directory: mainOverride.workspaceDirectory } } : {}),
     projectWorkspaceIds: [...projectWorkspaceIds],
     providers: paseo.providers,
   };
 }
 
-export { STEER_TITLE };
+export { STEER_TITLE, STEER_DIGIT_TITLE };

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { execFileSync } from 'node:child_process';
 import { normalizeEntry } from '../src/discovery.mjs';
-import { renderWorkspaceTitle } from '../src/planner.mjs';
+import { renderWorkspaceTitle, isFactoryHandleTitle } from '../src/planner.mjs';
 import { createRunner } from '../src/factory.mjs';
 import { applyPlans, createExecutors, createAuthorization } from '../src/apply.mjs';
 import { LABEL, METADATA_KEY } from '../src/paseo.mjs';
@@ -161,6 +161,17 @@ test('renderWorkspaceTitle substitutes {name} and {subject}; errors fail closed'
   assert.match(renderWorkspaceTitle('{Name} · Main', 'demo', null).error, /unknown placeholder/);
 });
 
+test('renderWorkspaceTitle substitutes {repo} without owner and @branch; errors name the field', () => {
+  assert.deepEqual(renderWorkspaceTitle('{repo} · Main', 'demo', null), { title: 'demo · Main' });
+  assert.deepEqual(renderWorkspaceTitle('{repo} · Main', 'Example/demo', null), { title: 'demo · Main' });
+  assert.deepEqual(renderWorkspaceTitle('{repo} · Main', 'Example/demo@feat', null), { title: 'demo · Main' });
+  assert.deepEqual(renderWorkspaceTitle('{repo} · Main', 'notes@feat', null), { title: 'notes · Main' });
+  assert.deepEqual(renderWorkspaceTitle('{repo} · {subject}', 'Example/demo', 'USB pass'), { title: 'demo · USB pass' });
+  assert.match(renderWorkspaceTitle('{repo} · {subject}', 'demo', null).error, /workspaceTitle template needs/);
+  assert.match(renderWorkspaceTitle('{repo} · {subject}', 'demo', null, 'workspaceTitleMultiRepo').error, /workspaceTitleMultiRepo template needs/);
+  assert.match(renderWorkspaceTitle('{bogus}', 'demo', null).error, /supported: \{name\}, \{repo\}, \{subject\}/);
+});
+
 test('normalizeEntry keeps subject; titles allow spaces and slashes', () => {
   assert.equal(normalizeEntry({ local: '/p/demo', subject: 'USB pass / tab' }, CONFIG).subject, 'USB pass / tab');
   assert.equal('subject' in normalizeEntry({ local: '/p/demo' }, CONFIG), false);
@@ -186,6 +197,44 @@ test('template errors are conflicts and block the plan', async () => {
   assert.ok(!keys(missing).includes('workspace.main'));
   const [unknown] = await runnerFor(world, withTitle('{bogus}')).runPlans([{ local: '/p/demo' }]);
   assert.match(unknown.conflicts.find((c) => c.key === 'workspace.title').reason, /unknown placeholder/);
+});
+
+// ------------------------------------------------------- multi-repo titles
+
+const withMulti = (workspaceTitleMultiRepo) => ({ ...structuredClone(CONFIG), workspaceTitleMultiRepo });
+
+function sharedProjectWorld(title = 'Main') {
+  const world = makeWorld();
+  world.checkouts['/p/demo'] = { remotes: {} };
+  world.checkouts['/p/other'] = { remotes: {} };
+  const wsA = addMain(world, { path: '/p/demo', title });
+  addSteer(world, wsA);
+  const wsB = addMain(world, { path: '/p/other', title, scope: { id: 'other', kind: 'dir', locator: '/p/other' } });
+  wsB.projectId = wsA.projectId; // both scopes live in one Paseo project
+  return world;
+}
+
+test('workspaceTitleMultiRepo wins only when several repos share the project', async () => {
+  const config = withMulti('{repo} · {subject}');
+  // Non-handle titles prove the template selection by the rendered value
+  // (the "Main" handle itself is exempt from retitling, see below).
+  const [multi] = await runnerFor(sharedProjectWorld('Old Title'), config).runPlans([{ local: '/p/demo', subject: 'USB pass' }], { retitle: true });
+  assert.equal(multi.ops.find((o) => o.key === 'workspace.retitle').params.title, 'demo · USB pass');
+  const solo = makeWorld();
+  solo.checkouts['/p/demo'] = { remotes: {} };
+  const soloMain = addMain(solo, { path: '/p/demo', title: 'Old Title' });
+  addSteer(solo, soloMain);
+  const [single] = await runnerFor(solo, config).runPlans([{ local: '/p/demo', subject: 'USB pass' }], { retitle: true });
+  assert.equal(single.ops.find((o) => o.key === 'workspace.retitle').params.title, 'Main', 'single repo keeps workspaceTitle');
+  const [unset] = await runnerFor(sharedProjectWorld('Old Title'), CONFIG).runPlans([{ local: '/p/demo', subject: 'USB pass' }], { retitle: true });
+  assert.equal(unset.ops.find((o) => o.key === 'workspace.retitle').params.title, 'Main', 'unset multi template keeps workspaceTitle');
+});
+
+test('multi template errors name workspaceTitleMultiRepo and block the title', async () => {
+  const [missing] = await runnerFor(sharedProjectWorld('Old Title'), withMulti('{repo} · {subject}')).runPlans([{ local: '/p/demo' }], { retitle: true });
+  assert.equal(missing.status, 'conflict');
+  assert.match(missing.conflicts.find((c) => c.key === 'workspace.title').reason, /workspaceTitleMultiRepo template needs \{subject\}/);
+  assert.ok(!keys(missing).includes('workspace.retitle'));
 });
 
 // ---------------------------------------------------------------- retitle
@@ -239,6 +288,74 @@ test('retitle executor refuses missing workspaces and already-correct titles', a
   await assert.rejects(run({ workspaceId: 'wks_missing', title: 'x' }), /missing/);
   await assert.rejects(run({ workspaceId: ws.id, title: 'demo · Main' }), /already titled/);
   await assert.rejects(run({ workspaceId: ws.id, title: '  ' }), /needs a title/);
+});
+
+// ----------------------------------------------- #6 "Main" is the factory handle
+
+test('isFactoryHandleTitle accepts Main and the own repo-prefixed handle only', () => {
+  assert.equal(isFactoryHandleTitle('Main', 'demo'), true);
+  assert.equal(isFactoryHandleTitle('demo · Main', 'demo'), true);
+  assert.equal(isFactoryHandleTitle('demo · Main', 'Example/demo'), true);
+  assert.equal(isFactoryHandleTitle('demo · Main', 'Example/demo@feat'), true);
+  assert.equal(isFactoryHandleTitle('demo@feat · Main', 'Example/demo@feat'), true);
+  assert.equal(isFactoryHandleTitle('garbage · Main', 'demo'), false);
+  assert.equal(isFactoryHandleTitle('Main · x', 'demo'), false);
+  assert.equal(isFactoryHandleTitle('main', 'demo'), false);
+  assert.equal(isFactoryHandleTitle('', 'demo'), false);
+  assert.equal(isFactoryHandleTitle(null, 'demo'), false);
+});
+
+test('MAIN_TITLE recognition covers Main and <Repo> · Main without metadata', async () => {
+  for (const title of ['Main', 'demo · Main']) {
+    const world = makeWorld();
+    world.checkouts['/p/demo'] = { remotes: {} };
+    const project = addProject(world, '/p/demo');
+    const ws = {
+      id: `wks_${String(++world.seq).padStart(16, '0')}`, projectId: project.projectId,
+      workspaceDirectory: '/p/demo', workspaceKind: 'local_checkout', title, name: title, metadata: {},
+    };
+    world.workspaces.push(ws);
+    const [d] = await runnerFor(world).discoverAll([{ local: '/p/demo' }]);
+    assert.equal(d.mainWorkspace?.id, ws.id, title);
+  }
+});
+
+test('handle titles are exempt from the title template: no conflict, note or op', async () => {
+  for (const title of ['Main', 'demo · Main']) {
+    const world = makeWorld();
+    world.checkouts['/p/demo'] = { remotes: {} };
+    const ws = addMain(world, { title });
+    addSteer(world, ws);
+    // Template needs {subject} and none is given — an exempt main needs no rendering.
+    const [p] = await runnerFor(world, withTitle('{name} · {subject}')).runPlans([{ local: '/p/demo' }], { retitle: true });
+    assert.equal(p.status, 'complete', `${title}: ${JSON.stringify(p.conflicts)}`);
+    assert.ok(!keys(p).includes('workspace.retitle'), title);
+    assert.ok(!p.notes.join('\n').includes('template expects'), title);
+    // Even a renderable mismatch is left alone, under either template.
+    const [mismatch] = await runnerFor(world, withTitle('{name} · {subject}')).runPlans([{ local: '/p/demo', subject: 'USB pass' }], { retitle: true });
+    assert.equal(mismatch.status, 'complete', title);
+    assert.ok(!keys(mismatch).includes('workspace.retitle'), title);
+    const [multi] = await runnerFor(sharedProjectWorld(title), withMulti('{repo} · {subject}')).runPlans([{ local: '/p/demo', subject: 'USB pass' }], { retitle: true });
+    assert.ok(!keys(multi).includes('workspace.retitle'), `${title} under workspaceTitleMultiRepo`);
+  }
+  // A wrongly prefixed handle is still reported and fixed toward the template.
+  const world = makeWorld();
+  world.checkouts['/p/demo'] = { remotes: {} };
+  const ws = addMain(world, { title: 'garbage · Main' });
+  addSteer(world, ws);
+  const runner = runnerFor(world, withTitle('{name} · Main'));
+  const [reported] = await runner.runPlans([{ local: '/p/demo' }]);
+  assert.match(reported.notes.join('\n'), /template expects "demo · Main"/);
+  const [planned] = await runner.runPlans([{ local: '/p/demo' }], { retitle: true });
+  assert.equal(planned.ops.find((o) => o.key === 'workspace.retitle').params.title, 'demo · Main');
+});
+
+test('renderWorkspaceTitle never renders a double repo prefix', () => {
+  assert.deepEqual(renderWorkspaceTitle('{repo} · {subject}', 'Example/demo', 'demo · USB pass'), { title: 'demo · USB pass' });
+  assert.deepEqual(renderWorkspaceTitle('{name} · {subject}', 'demo', 'demo · USB pass'), { title: 'demo · USB pass' });
+  assert.deepEqual(renderWorkspaceTitle('{repo} · {subject}', 'Example/demo', 'USB pass'), { title: 'demo · USB pass' });
+  assert.deepEqual(renderWorkspaceTitle('{repo} · {subject}', 'Example/demo', 'demo'), { title: 'demo · demo' });
+  assert.deepEqual(renderWorkspaceTitle('{subject}', 'demo', 'demo · USB pass'), { title: 'demo · USB pass' });
 });
 
 // ---------------------------------------------------------- rename-project

@@ -44,6 +44,25 @@ test('parseCheckpointBlock still takes the last block and requires a task', () =
   assert.equal(parseCheckpointBlock('```text\nCHECKPOINT\n- tests: x\n```'), null);
 });
 
+test('parseCheckpointBlock reads the optional status line and stays compatible', () => {
+  for (const status of ['done', 'partial', 'blocked']) {
+    assert.equal(
+      parseCheckpointBlock(`\`\`\`text\nCHECKPOINT\n- task: Ship it\n- status: ${status}\n\`\`\``).status,
+      status,
+    );
+    assert.equal(
+      parseCheckpointBlock(`CHECKPOINT\ntask: Ship it\nstatus: ${status.toUpperCase()}\n`).status,
+      status,
+    );
+  }
+  assert.equal(parseCheckpointBlock('```text\nCHECKPOINT\n- task: Ship it\n- status: finished\n```').status, undefined);
+  assert.equal(parseCheckpointBlock('```text\nCHECKPOINT\n- task: Ship it\n```').status, undefined);
+  assert.deepEqual(
+    parseCheckpointBlock('```text\nCHECKPOINT\n- task: Ship it\n- tests: none\n- blockers: none\n- next: confirm\n```'),
+    { task: 'Ship it', tests: [], blockers: [], next: 'confirm' },
+  );
+});
+
 // ------------------------------------------------------------------ builders
 
 test('formatCheckpointBlock renders the fixed fenced form', () => {
@@ -156,4 +175,14 @@ test('instruction docs require and show the fenced block', () => {
   const required = instructions.match(/fenced CHECKPOINT block/g) ?? [];
   assert.ok(required.length >= 3, `steer, worker and answer-format sections require it (${required.length})`);
   assert.match(readDoc('AGENTS.md'), /fenced CHECKPOINT block/, 'repo instructions require it');
+});
+
+test('instruction docs document the status line and worker completion', () => {
+  const instructions = readDoc('docs/steer-instructions.md');
+  assert.ok(instructions.includes('- status: done|partial|blocked'), 'optional status line documented');
+  assert.match(instructions, /worker without a CHECKPOINT block/i, 'unfinished without CHECKPOINT');
+  assert.match(instructions, /interrupted/, 'interrupted counts as unfinished');
+  assert.match(instructions, /paseo send/, 'resume via paseo send');
+  assert.match(instructions, /resume brief/i, 'resume brief is carried');
+  assert.match(instructions, /verify .* against the assignment/i, 'result checked against the task');
 });

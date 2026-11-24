@@ -643,9 +643,19 @@ test('profiles are validated against the live provider catalog per slot', async 
   const world = makeWorld();
   world.providers.find((e) => e.provider === 'muse').modes = [{ id: 'onRequest' }];
   const [p] = await plan(world);
-  assert.deepEqual(p.conflicts.map((c) => c.key), ['steer.B']);
-  assert.match(p.conflicts[0].reason, /mode "allowAll" is not available/);
+  assert.deepEqual(p.conflicts.map((c) => c.key), [], 'slot B falls back to the next startable profile instead of conflicting');
+  assert.ok(p.notes.some((n) => /Steer B: profile "muse" is not startable.*mode "allowAll" is not available.*using fallback "agy"/.test(n)), `fallback note names the reason and the fallback: ${JSON.stringify(p.notes)}`);
+  assert.equal(p.ops.find((o) => o.key === 'steer.B').params.config.provider, 'antigravity/gemini-3.8-flash-high');
   assert.ok(keys(p).includes('steer.A') && keys(p).includes('steer.C'));
+});
+
+test('steer slots conflict with the tried reasons only when no fallback is startable', async () => {
+  const world = makeWorld();
+  for (const e of world.providers) e.modes = [];
+  const [p] = await plan(world);
+  assert.equal(p.status, 'conflict');
+  assert.deepEqual(p.conflicts.map((c) => c.key).sort(), ['steer.A', 'steer.B', 'steer.C']);
+  assert.match(p.conflicts.find((c) => c.key === 'steer.B').reason, /Profile "muse" for Steer B is not startable.*no fallback available; tried/);
 });
 
 test('role is independent of provider: a different slot assignment only changes the profile', async () => {
@@ -1351,12 +1361,14 @@ test('knownLimits extends the built-in exceptions: exact model and pattern, only
   assert.equal(problems.flat, undefined, 'rule does not fire when the profile leaves the field unset');
 });
 
-test('knownLimits mismatch is a plan conflict with the reason, not an apply failure', async () => {
+test('knownLimits mismatch falls back with the reason instead of failing at apply', async () => {
   const config = structuredClone(CONFIG);
   config.knownLimits = [{ provider: 'codex', modelPattern: '^gpt-', field: 'thinking', reason: 'Test limit: codex rejects thinking here' }];
   const [p] = await plan(makeWorld(), [FIRMWARE], { config });
-  assert.equal(p.status, 'conflict');
-  assert.match(p.conflicts.find((c) => c.key === 'steer.A').reason, /Profile "sol" for Steer A is not startable: Test limit/);
+  assert.equal(p.status, 'pending');
+  assert.deepEqual(p.conflicts.map((c) => c.key), [], 'slot A falls back while another profile is startable');
+  assert.ok(p.notes.some((n) => /Steer A: profile "sol" is not startable.*Test limit: codex rejects thinking here.*using fallback "muse"/.test(n)), `fallback note names the reason and the fallback: ${JSON.stringify(p.notes)}`);
+  assert.equal(p.ops.find((o) => o.key === 'steer.A').params.config.provider, 'muse/muse-spark-1.3-contributor');
   assert.ok(keys(p).includes('steer.B') && keys(p).includes('steer.C'), 'unaffected slots are still planned');
 });
 

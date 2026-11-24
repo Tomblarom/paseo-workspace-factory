@@ -3,25 +3,30 @@
 import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { loadConfig, defaultConfigPath } from './config.mjs';
+import { loadConfig, defaultConfigPath, workerPriority, isAdvisorProfile, isAdvisorSlot, isSensitiveProfile, isSensitiveSlot, slotOrder } from './config.mjs';
 import { configureRuntime, runtime } from './runtime.mjs';
 import { createGh } from './github.mjs';
 import { createGit } from './local.mjs';
-import { LABEL, connect, createPaseoCli, lookupCreationReceipt, readPaseoState } from './paseo.mjs';
+import { LABEL, METADATA_KEY, connect, createPaseoCli, daemonStartedAt, lookupCreationReceipt, readPaseoState, restartMessage } from './paseo.mjs';
 import { createRunner } from './factory.mjs';
 import { planHash } from './planner.mjs';
 import { applyPlans, createExecutors, createAuthorization, storeAuthorization, fileProgress, withApplyLock } from './apply.mjs';
-import { steerStatus, switchSteer, freshSteer, writeCheckpoint, parseCheckpointBlock, lastAssistantText, resolveTargetEntry, buildResumeBrief, readGitBrief } from './steer.mjs';
+import { CHECKPOINT_KEY, restartInterruptions, steerStatus, switchSteer, freshSteer, writeCheckpoint, parseCheckpointBlock, lastAssistantText, resolveTargetEntry, buildResumeBrief, readGitBrief } from './steer.mjs';
 import { AGENTS_KEY } from './agent-state.mjs';
+import { listScopes } from './scope.mjs';
+import { DRAIN_DEFAULT_TIMEOUT_MS, drain, parseTimeout } from './drain.mjs';
 import { assessWorker, readGitState } from './workers.mjs';
+import { formatWorkersText, readWorkers, workersReport } from './supervision.mjs';
 import { assignScope } from './assign.mjs';
-import { flagValue, formatCatalog, parseProviderModel, planSlotRemove, planSlotSet, planWorkerDefault, previewConfig, writeConfigAtomic } from './models.mjs';
-import { scopeRows, scopeCandidates, formatScopeRows, formatScopeCandidates } from './scopes-view.mjs';
+import { flagValue, formatCatalog, formatWorkerModel, parseProviderModel, paseoRunFlags, planAdvisorTag, planSensitiveTag, planSlotRemove, planSlotSet, planSteerRemove, planSteerSet, planWorkerDefault, planWorkerRemove, planWorkerSet, previewConfig, resolveProfile, steerFallbackList, writeConfigAtomic } from './models.mjs';
+import { scopeRows, scopeCandidates, formatScopeRows, formatScopeCandidates, formatStatus } from './scopes-view.mjs';
+import { validateProfilesAgainstCatalog } from './config.mjs';
+import { recordProfileFailure } from './quota.mjs';
 import { attachProjectArchivedAgents, collectCleanupCandidates, formatCandidate, formatLoss, planCleanupOps, selectApplyRunPlans } from './cleanup.mjs';
 import { relocateScope } from './relocate.mjs';
 
 const USAGE = `Usage: paseo-factory <command> [options]
-  plan   <repo...> [--repos-file f.json] [--local <path>]... [--name <id>] [--subject <text>] [--hub <path|workspace:id>] [--allow-fork] [--adopt <scope-id>:A=<agent-id>] [--adopt-worker <agent-id>[@A]] [--detach] [--slots A,B] [--retitle] [--rename-project <name>] [--json] [--out f.json]
+  plan   <repo...> [--repos-file f.json] [--local <path>]... [--name <id>] [--subject <text>] [--checkout <path>] [--main workspace:<id>] [--domain <id>] [--hub <path|workspace:id>] [--allow-fork] [--adopt <scope-id>:A=<agent-id>] [--adopt-worker <agent-id>[@A]] [--detach] [--slots A,B] [--retitle] [--rename-project <name>] [--json] [--out f.json]
   apply  --confirm <hash>             run the stored dry-run plan; resumes after a failure
   status <repo> [--json]
   checkpoint <repo> --task <text> [--test <text>]... [--blocker <text>]... [--next <text>]
@@ -31,29 +36,42 @@ const USAGE = `Usage: paseo-factory <command> [options]
   relocate <scope> --to <path|project> [--apply]
   assign <scope> --task <text> [--test <text>]... [--blocker <text>]... [--next <text>] [--apply] [--no-send]
   resume [scope] [--agent <id>] [--json]   cold-start brief: task, next step, git, workers
-  workers <repo>                     preview only
+  workers [scope] [--json]           print the worker register (task, state, resumes)
   retire <agent-id>                  preview only; archiving is disabled
   cleanup [--json]                   read-only cleanup report over the whole instance
   cleanup --plan [--allow-destructive] [--allow-ignored] [--only <id,...>] [--json]
   models [--json]                    list the live provider catalog
-  slot set <A-Z> <provider/model> [--thinking X] [--mode Y] [--profile name] [--dry-run]
-  slot rm <A-Z> [--dry-run]
-  worker-default <profile|provider/model> [--thinking X] [--mode Y] [--profile name] [--dry-run]
+  worker list [--json]                 worker priority with availability and the current pick
+  worker set <n> <profile|provider/model> [--thinking X] [--mode Y] [--profile name] [--dry-run]
+  worker rm <n> [--dry-run]
+  worker pick [scope] [--json]         chosen worker profile plus paseo run flags
+  steer list [--json]                  slots in priority order with tags, availability, fallbacks
+  steer set <n|slot> <profile|provider/model> [--thinking X] [--mode Y] [--profile name] [--dry-run]
+  steer rm <n|slot> [--dry-run]
+  model advisor <profile|provider/model> on|off [--dry-run]
+  model sensitive <profile|provider/model> on|off [--dry-run]
+  slot set <A-Z> ... (deprecated, use steer set) | slot rm <A-Z> (deprecated, use steer rm)
+  worker-default ... (deprecated, use worker set 1 ...)
   scopes [--json] [--candidates]   one line per live scope; --candidates lists unadopted workspaces
+  drain [--timeout 10m] [--json]   wait until no factory agent runs; marks leftovers planned-restart (exit 2), never restarts itself
 --adopt SLOT=<agent-id> needs exactly one repository; with several entries use --adopt <scope-id>:SLOT=<agent-id> per entry.
+--checkout <path> names the checkout of one entry (same as per-entry "checkout" in --repos-file); use it when several checkouts share one origin.
 --local is repeatable and plans existing directories without GitHub (no fork, clone or upstream remote); dir/workspace entries may carry "name" for the scope id (or --name with one entry).
 local/<folder> stays an input alias only; scopes are addressed by id (owner/repo, folder/--name, <parent>@<branch>).
 A --local worktree directory (or {"workspace": <id>}, "workspace:<id>") adopts that Paseo worktree workspace as the main workspace without a new project; status/checkpoint/switch/fresh/workers accept its scope id, local/<folder> alias or workspace id.
+--main workspace:<id> adopts that worktree workspace as the main workspace of a github scope (one entry; the scope id stays owner/repo, no duplicate workspace or project).
+--domain <id> sets the scope's domain pointer (Hub → Domain → Kind, logical only; --domain "" clears it); blockers prefixed domain: go to the domain steer, hub: further to the hub.
 Main titles follow the workspaceTitle template ({name}, {subject}); a deviating title is only reported unless --retitle plans a rename. --rename-project renames the scope project (one entry).
 --hub plans a hub-kind scope (at most one live; an existing dir scope converts, steers/epoch/checkpoint untouched).
 --adopt-worker labels an agent as scope worker (stays in its workspace); --detach plans a native detach for parented steer candidates.
+Model lists are ordered by priority, highest first. worker set <n> inserts at position n (later entries move down, an existing copy of the same model moves); worker rm <n> removes and closes the gap. Steer slots never shift: steer set <n|slot> replaces the slot's profile (2 is B). Unavailable models are stored with a warning and skipped by the fallback.
 Options: --config <path> (default: $PASEO_FACTORY_CONFIG or ~/.config/paseo-workspace-factory/config.json); --dry-run previews config writes`;
 
 /**
  * Default scope for bare `resume`: the calling agent's own scope label first
  * (it also covers workers in foreign workspaces), else the calling workspace.
  */
-async function defaultResumeEntry(client) {
+async function defaultResumeEntry(client, command = 'resume') {
   const agentId = process.env.PASEO_AGENT_ID;
   const workspaceId = process.env.PASEO_WORKSPACE_ID;
   if (agentId || workspaceId) {
@@ -62,7 +80,112 @@ async function defaultResumeEntry(client) {
     if (typeof scopeId === 'string' && scopeId) return scopeId;
     if (workspaceId) return `workspace:${workspaceId}`;
   }
-  throw new Error('resume needs a scope (or run it inside a factory agent or workspace)');
+  throw new Error(`${command} needs a scope (or run it inside a factory agent or workspace)`);
+}
+
+/**
+ * `Worker model:` line for briefs and handoffs: the resolved worker profile
+ * for this scope (priority, catalog availability, advisor and sensitive rules;
+ * sensitive profiles only run on provably public repos) or a none-startable
+ * note with the reasons. Pure over the discovery, no extra catalog call.
+ */
+function workerModelLine(config, discovery) {
+  const repoPublic = discovery?.github?.fork?.repo?.private === false;
+  const profileHealth = discovery?.mainWorkspace?.metadata?.[METADATA_KEY]?.profileHealth ?? null;
+  const { profile, skipped } = resolveProfile(config, discovery?.providers ?? [], workerPriority(config), { role: 'worker', repoPublic, profileHealth });
+  if (!profile) {
+    const tried = skipped.length ? skipped.map((s) => `"${s.name}" (${s.reason})`).join('; ') : 'no worker profiles configured';
+    return `Worker model: none startable (${tried})`;
+  }
+  return formatWorkerModel(config, profile);
+}
+
+/**
+ * Last-turn CHECKPOINT presence per agent (P2 heuristic): true when the last
+ * answer carries a CHECKPOINT block, false when it has an answer without one,
+ * missing when unreadable (fails closed, never marks). Only the given ids are
+ * read; failures per agent are swallowed.
+ */
+async function fetchLastTurnCheckpoints(client, agentIds) {
+  const out = {};
+  for (const id of agentIds) {
+    try {
+      const text = lastAssistantText(await client.agents.ref(id).timeline.refetch({ direction: 'tail', limit: 20 }));
+      if (typeof text !== 'string' || !text) continue;
+      out[id] = parseCheckpointBlock(text) !== null;
+    } catch {
+      continue;
+    }
+  }
+  return out;
+}
+
+/**
+ * Heuristic inputs for one scope (P2): daemon start plus last-turn flags for
+ * idle candidates whose checkpoint predates the restart and that carry no
+ * plugin restart mark. Returns null when the heuristic cannot apply (no
+ * daemon time, no checkpoint, checkpoint newer than the daemon), so callers
+ * skip timeline reads and show plugin marks only.
+ */
+async function heuristicInputsForDiscovery(client, discovery) {
+  let started = null;
+  try {
+    started = daemonStartedAt(createPaseoCli());
+  } catch {
+    started = null;
+  }
+  if (!started) return null;
+  const checkpoint = discovery.mainWorkspace?.metadata?.[CHECKPOINT_KEY] ?? null;
+  const checkpointAt = checkpoint?.capturedAt ?? checkpoint?.updatedAt ?? null;
+  if (typeof checkpointAt !== 'string' || !checkpointAt) return null;
+  if (!Number.isFinite(Date.parse(checkpointAt)) || Date.parse(started) <= Date.parse(checkpointAt)) return null;
+  const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;
+  const markedIds = new Set(restartInterruptions({ checkpoint, agentState }).map((m) => m.agentId));
+  const candidates = [...(discovery.steers.labelled ?? []), ...(discovery.workers ?? [])]
+    .filter((a) => a && !a.archivedAt && a.status === 'idle' && !markedIds.has(a.id))
+    .map((a) => a.id);
+  if (!candidates.length) return { daemonStartedAt: started, lastTurnCheckpoints: {} };
+  return { daemonStartedAt: started, lastTurnCheckpoints: await fetchLastTurnCheckpoints(client, candidates) };
+}
+
+/**
+ * Heuristic inputs across all live scopes (P2): same rule as the single-scope
+ * helper, applied per scope. Returns null when no scope can match, so callers
+ * skip timeline reads.
+ */
+async function heuristicInputsForScopes(client, paseoState) {
+  let started = null;
+  try {
+    started = daemonStartedAt(createPaseoCli());
+  } catch {
+    started = null;
+  }
+  if (!started || !Number.isFinite(Date.parse(started))) return null;
+  const scopes = listScopes(paseoState);
+  const candidates = [];
+  for (const scope of scopes) {
+    const checkpoint = scope.workspace.metadata?.[CHECKPOINT_KEY] ?? null;
+    const checkpointAt = checkpoint?.capturedAt ?? checkpoint?.updatedAt ?? null;
+    if (typeof checkpointAt !== 'string' || !checkpointAt) continue;
+    if (!Number.isFinite(Date.parse(checkpointAt)) || Date.parse(started) <= Date.parse(checkpointAt)) continue;
+    const agentState = scope.workspace.metadata?.[AGENTS_KEY] ?? null;
+    const markedIds = new Set(restartInterruptions({ checkpoint, agentState }).map((m) => m.agentId));
+    for (const a of paseoState.agents ?? []) {
+      if (!a || a.archivedAt || a.status !== 'idle' || markedIds.has(a.id)) continue;
+      if (a.labels?.[LABEL.scope] !== scope.id) continue;
+      const role = a.labels?.[LABEL.role];
+      if (role !== 'steer' && role !== 'worker') continue;
+      candidates.push(a.id);
+    }
+  }
+  if (!candidates.length) {
+    const anyOld = scopes.some((s) => {
+      const at = s.workspace.metadata?.[CHECKPOINT_KEY]?.capturedAt ?? s.workspace.metadata?.[CHECKPOINT_KEY]?.updatedAt ?? null;
+      return typeof at === 'string' && Number.isFinite(Date.parse(at)) && Date.parse(started) > Date.parse(at);
+    });
+    return anyOld ? { daemonStartedAt: started, lastTurnCheckpoints: {} } : null;
+  }
+  return { daemonStartedAt: started, lastTurnCheckpoints: await fetchLastTurnCheckpoints(client, [...new Set(candidates)]) };
 }
 
 function printPlans(plans, hash) {
@@ -101,13 +224,17 @@ async function main() {
       next: { type: 'string' }, 'from-agent': { type: 'string' }, wait: { type: 'boolean' }, 'expect-epoch': { type: 'string' },
       'notify-previous': { type: 'boolean' }, language: { type: 'string' }, local: { type: 'string', multiple: true }, name: { type: 'string' },
       retitle: { type: 'boolean' }, 'rename-project': { type: 'string' }, subject: { type: 'string' }, hub: { type: 'string', multiple: true },
-      'adopt-worker': { type: 'string', multiple: true }, detach: { type: 'boolean' }, agent: { type: 'string' },
+      'adopt-worker': { type: 'string', multiple: true }, detach: { type: 'boolean' }, agent: { type: 'string' }, checkout: { type: 'string' },
+      main: { type: 'string' }, domain: { type: 'string' },
       thinking: { type: 'string' }, mode: { type: 'string' }, profile: { type: 'string' }, 'dry-run': { type: 'boolean' },
       candidates: { type: 'boolean' }, plan: { type: 'boolean' }, 'allow-destructive': { type: 'boolean' }, 'allow-ignored': { type: 'boolean' }, only: { type: 'string' },
+      timeout: { type: 'string' },
+      failed: { type: 'string' }, reason: { type: 'string' },
     },
   });
   const [command, ...args] = positionals;
   if (!command || values.help) return console.log(USAGE);
+  if (values.timeout !== undefined && command !== 'drain') throw new Error('--timeout is only accepted with drain');
   const configPath = values.config ?? defaultConfigPath();
   const config = await loadConfig(configPath);
   const { planDir: PLAN_DIR, journalDir: JOURNAL_DIR } = configureRuntime(config);
@@ -141,10 +268,10 @@ async function main() {
     return { local: abs, hub: true };
   });
   let entries = [...args, ...(values['repos-file'] ? JSON.parse(readFileSync(values['repos-file'], 'utf8')) : []), ...localFlags.map((p) => ({ local: resolve(p) })), ...hubEntries];
-  if (localFlags.length && (command === 'models' || command === 'slot' || command === 'worker-default' || command === 'retire')) {
+  if (localFlags.length && (command === 'models' || command === 'model' || command === 'slot' || command === 'steer' || command === 'worker' || command === 'worker-default' || command === 'retire')) {
     throw new Error(`--local is not accepted with ${command}`);
   }
-  if (hubFlags.length && (command === 'models' || command === 'slot' || command === 'worker-default' || command === 'retire')) {
+  if (hubFlags.length && (command === 'models' || command === 'model' || command === 'slot' || command === 'steer' || command === 'worker' || command === 'worker-default' || command === 'retire')) {
     throw new Error(`--hub is not accepted with ${command}`);
   }
   if (values.name !== undefined) {
@@ -169,15 +296,53 @@ async function main() {
       entries = [{ repo: only, subject: values.subject }];
     }
   }
+  if (values.checkout !== undefined) {
+    if (command !== 'plan') throw new Error('--checkout is only accepted with plan');
+    if (entries.length !== 1) throw new Error('--checkout needs exactly one repository entry (or use per-entry "checkout" in --repos-file)');
+    if (!values.checkout?.trim()) throw new Error('--checkout needs a checkout path');
+    const only = entries[0];
+    if (only && typeof only === 'object' && !Array.isArray(only)) {
+      if (only.checkout !== undefined) throw new Error('--checkout conflicts with the entry "checkout"; use one of them');
+      if (only.main !== undefined) throw new Error('--checkout conflicts with the entry "main"; use one of them');
+      entries = [{ ...only, checkout: values.checkout }];
+    } else {
+      entries = [{ repo: only, checkout: values.checkout }];
+    }
+  }
+  if (values.main !== undefined) {
+    if (command !== 'plan') throw new Error('--main is only accepted with plan');
+    if (entries.length !== 1) throw new Error('--main needs exactly one repository entry (or use per-entry "main" in --repos-file)');
+    if (!values.main?.trim()) throw new Error('--main needs a workspace id (workspace:<id>)');
+    const only = entries[0];
+    if (only && typeof only === 'object' && !Array.isArray(only)) {
+      if (only.main !== undefined) throw new Error('--main conflicts with the entry "main"; use one of them');
+      if (only.checkout !== undefined) throw new Error('--main conflicts with the entry "checkout"; use one of them');
+      entries = [{ ...only, main: values.main }];
+    } else {
+      entries = [{ repo: only, main: values.main }];
+    }
+  }
+  if (values.domain !== undefined) {
+    if (command !== 'plan') throw new Error('--domain is only accepted with plan');
+    if (entries.length !== 1) throw new Error('--domain needs exactly one repository entry (or use per-entry "domain" in --repos-file)');
+    const only = entries[0];
+    if (only && typeof only === 'object' && !Array.isArray(only)) {
+      if (only.domain !== undefined) throw new Error('--domain conflicts with the entry "domain"; use one of them');
+      entries = [{ ...only, domain: values.domain }];
+    } else {
+      entries = [{ repo: only, domain: values.domain }];
+    }
+  }
   if (values.retitle && command !== 'plan') throw new Error('--retitle is only accepted with plan');
   if (values['rename-project'] !== undefined && command !== 'plan') throw new Error('--rename-project is only accepted with plan');
   if (values['rename-project'] !== undefined && entries.length !== 1) throw new Error('--rename-project needs exactly one repository entry');
   const gh = createGh();
   const git = createGit();
   const client = await connect();
+  const runner = createRunner({ config, client, gh, git });
   try {
-    if (command === 'models' || command === 'slot' || command === 'worker-default') {
-      return await runModelCommand({ command, args, values, config, configPath, client });
+    if (command === 'models' || command === 'model' || command === 'slot' || command === 'steer' || command === 'worker' || command === 'worker-default') {
+      return await runModelCommand({ command, args, values, config, configPath, client, runner });
     }
     if (command === 'scopes') {
       if (entries.length) throw new Error('scopes takes no repository; use paseo-factory scopes [--json] [--candidates]');
@@ -186,10 +351,22 @@ async function main() {
         const rows = scopeCandidates(paseo);
         return console.log(values.json ? JSON.stringify(rows, null, 2) : formatScopeCandidates(rows));
       }
-      const rows = scopeRows(paseo);
+      const heuristic = await heuristicInputsForScopes(client, paseo).catch(() => null);
+      const rows = scopeRows(paseo, { ...(heuristic ?? {}), config });
       return console.log(values.json ? JSON.stringify(rows, null, 2) : formatScopeRows(rows));
     }
-    const runner = createRunner({ config, client, gh, git });
+    if (command === 'drain') {
+      if (entries.length) throw new Error('drain takes no repository; use paseo-factory drain [--timeout 10m] [--json]');
+      const timeoutMs = values.timeout === undefined ? DRAIN_DEFAULT_TIMEOUT_MS : parseTimeout(values.timeout);
+      const result = await drain({ client, timeoutMs, git, log: values.json ? null : (msg) => console.log(msg) });
+      if (values.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(formatDrain(result));
+      }
+      if (!result.clean) process.exitCode = 2;
+      return;
+    }
     const allowFork = Boolean(values['allow-fork']);
     const adoptPairs = (values.adopt ?? []).flatMap((v) => v.split(',')).filter(Boolean);
     const legacyAdopts = [];
@@ -270,7 +447,7 @@ async function main() {
     }
 
     if (['status', 'switch', 'fresh', 'workers', 'checkpoint', 'assign', 'resume'].includes(command)) {
-      if (command === 'resume' && !entries.length) entries.push(await defaultResumeEntry(client));
+      if ((command === 'resume' || command === 'workers') && !entries.length) entries.push(await defaultResumeEntry(client, command));
       if (entries.length !== 1) throw new Error(`${command} needs exactly one repository`);
       const raw = entries[0];
       const { entry: target, scope, deprecatedAlias } = resolveTargetEntry(raw, await readPaseoState(client));
@@ -281,15 +458,17 @@ async function main() {
       const [discovery] = await runner.discoverAll([target]);
       if (command === 'status') {
         const warnContextTokens = config.usage?.warnContextTokens;
-        const status = steerStatus(discovery, { warnContextTokens });
+        const heuristic = await heuristicInputsForDiscovery(client, discovery).catch(() => null);
+        const status = steerStatus(discovery, { warnContextTokens, ...(heuristic ?? {}), config });
         return console.log(values.json ? JSON.stringify(status, null, 2) : formatStatus(status, warnContextTokens));
       }
       if (command === 'fresh') {
         const result = await freshSteer({
           client, discovery, config, apply: Boolean(values.apply), git,
           lookupReceipt: lookupCreationReceipt, language: runtime().handoffLanguage,
+          workerModel: workerModelLine(config, discovery),
         });
-        console.log(`${result.applied ? 'Refreshed' : 'Dry-run'}: Steer ${result.slot} ${result.from} → ${result.to ?? '(new agent)'} (epoch ${result.epoch}) · profile "${result.profile}" (${result.provider}/${result.model}) · handoff ${result.packetChars} characters, built without a model call${result.checkpoint ? '' : ' · NO task checkpoint'}${result.reused ? ' · agent reused after receipt' : ''}${result.delivered ? ' · delivered' : ''}${result.previousNotified ? ' · previous steer notified' : ''}${result.deliveryError ? ` · delivery failed: ${result.deliveryError}` : ''}\nNote: the retired steer ${result.from} keeps its chat and labels${result.applied ? ' (a short notice was sent)' : ' (a short notice will be sent on apply)'}; archive it in Paseo — until then the slot stays ambiguous for switch/plan.\n---\n${result.packet}`);
+        console.log(`${result.applied ? 'Refreshed' : 'Dry-run'}: Steer ${result.slot} ${result.from} → ${result.to ?? '(new agent)'} (epoch ${result.epoch}) · profile "${result.profile}" (${result.provider}/${result.model})${result.fallbackFrom ? ` (fallback for "${result.fallbackFrom}")` : ''} · handoff ${result.packetChars} characters, built without a model call${result.checkpoint ? '' : ' · NO task checkpoint'}${result.reused ? ' · agent reused after receipt' : ''}${result.delivered ? ' · delivered' : ''}${result.previousNotified ? ' · previous steer notified' : ''}${result.deliveryError ? ` · delivery failed: ${result.deliveryError}` : ''}${(result.warnings ?? []).map((w) => `\nWarning: ${w}`).join('')}\nNote: the retired steer ${result.from} keeps its chat and labels${result.applied ? ' (a short notice was sent)' : ' (a short notice will be sent on apply)'}; archive it in Paseo — until then the slot stays ambiguous for switch/plan.\n---\n${result.packet}`);
         return;
       }
       if (command === 'switch') {
@@ -298,6 +477,7 @@ async function main() {
         const result = await switchSteer({
           client, discovery, toSlot: values.to, apply: Boolean(values.apply), send: !values['no-send'], git,
           wait: Boolean(values.wait), notifyPrevious: Boolean(values['notify-previous']), language: values.language ?? runtime().handoffLanguage,
+          config, workerModel: workerModelLine(config, discovery),
         });
         console.log(`${result.applied ? 'Switched' : 'Dry-run'}: Steer ${result.from} → ${result.to} (epoch ${result.epoch}) · handoff ${result.packetChars} characters, built without a model call${result.checkpoint ? '' : ' · NO task checkpoint'}${result.delivered ? ' · delivered' : ''}${result.previousNotified ? ' · previous steer notified' : ''}${result.deliveryError ? ` · delivery failed: ${result.deliveryError}` : ''}\n---\n${result.packet}`);
         if (result.reply !== null) console.log(`--- reply of Steer ${result.to}\n${result.reply ?? '(no answer text)'}`);
@@ -330,35 +510,45 @@ async function main() {
           client, discovery, task: values.task, tests: values.test ?? [], blockers: values.blocker ?? [],
           next: values.next ?? null, apply: Boolean(values.apply), send: !values['no-send'],
           assignedBy: process.env.PASEO_AGENT_ID ?? null,
+          workerModel: workerModelLine(config, discovery),
           ...(expectEpoch !== undefined ? { expectEpoch } : {}),
         });
         if (values.json) return console.log(JSON.stringify(result, null, 2));
-        console.log(`${result.applied ? 'Assigned' : 'Dry-run'}: ${result.scope} epoch ${result.epoch} · Steer ${result.slot} ${result.steerId}${result.previous ? '' : ' · NO previous checkpoint'}${result.delivered ? ' · delivered' : ''}${result.deliveryError ? ` · delivery failed: ${result.deliveryError}` : ''}`);
+        console.log(`${result.applied ? 'Assigned' : 'Dry-run'}: ${result.scope} epoch ${result.epoch} · Steer ${result.slot} ${result.steerId}${result.domain ? ` · domain ${result.domain}` : ''}${(result.domainChildren ?? []).length ? ` · domain of ${result.domainChildren.length} (${result.domainChildren.join(', ')})` : ''}${result.previous ? '' : ' · NO previous checkpoint'}${result.delivered ? ' · delivered' : ''}${result.deliveryError ? ` · delivery failed: ${result.deliveryError}` : ''}`);
         if (result.previous) console.log(`Replaces task: ${result.previous}`);
         console.log(`---\n${result.packet}`);
         if (!result.applied) console.log(`---\nNothing written. Apply: paseo-factory assign ${JSON.stringify(entries[0])} --task ${JSON.stringify(values.task)} --apply`);
         return;
       }
       if (command === 'resume') {
-        const status = steerStatus(discovery, {});
+        const heuristic = await heuristicInputsForDiscovery(client, discovery).catch(() => null);
+        const status = steerStatus(discovery, { ...(heuristic ?? {}), config });
+        const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;
         const brief = buildResumeBrief(status, {
           agentId: values.agent ?? process.env.PASEO_AGENT_ID ?? null,
-          agentState: discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null,
+          agentState,
           git: status.workspace ? readGitBrief(git, status.workspace.directory) : null,
           scope: discovery.scope ?? null,
+          ...(heuristic ?? {}),
+          config, workerModel: workerModelLine(config, discovery),
         });
         if (values.json) {
-          return console.log(JSON.stringify({ scope: discovery.scope?.id ?? discovery.forkName, kind: discovery.scope?.kind ?? null, epoch: status.state?.epoch ?? null, agentId: values.agent ?? process.env.PASEO_AGENT_ID ?? null, brief }, null, 2));
+          const restartInterrupted = status.restartInterrupted ?? restartInterruptions({ checkpoint: status.checkpoint, agentState });
+          return console.log(JSON.stringify({
+            scope: discovery.scope?.id ?? discovery.forkName, kind: discovery.scope?.kind ?? null, epoch: status.state?.epoch ?? null,
+            agentId: values.agent ?? process.env.PASEO_AGENT_ID ?? null, brief,
+            openWorkers: status.openWorkers ?? [],
+            interrupted: status.checkpoint?.interrupted ?? null,
+            ...(restartInterrupted.length ? { restartInterrupted } : {}),
+          }, null, 2));
         }
         return console.log(brief);
       }
-      const paseo = await readPaseoState(client);
-      const rows = discovery.workers.map((worker) => {
-        const ws = paseo.workspaces.find((w) => w.id === worker.workspaceId);
-        return { id: worker.id, title: worker.title, ...assessWorker(worker, { ...paseo, gitState: ws ? readGitState(git, ws.workspaceDirectory) : null }) };
-      });
-      console.log('Preview only. Background work and terminals are checked per agent by `retire <id>`.');
-      return console.log(JSON.stringify(rows, null, 2));
+      const scopeId = discovery.scope?.id ?? discovery.forkName;
+      const epoch = discovery.mainWorkspace?.metadata?.[METADATA_KEY]?.epoch ?? null;
+      const report = workersReport(readWorkers(discovery.mainWorkspace?.metadata ?? null));
+      if (values.json) return console.log(JSON.stringify({ scope: scopeId, epoch, workers: report }, null, 2));
+      return console.log(formatWorkersText(scopeId, epoch, report));
     }
 
     if (command === 'relocate') {
@@ -374,8 +564,9 @@ async function main() {
       const result = await relocateScope({
         client, discovery, config, to: values.to, apply: Boolean(values.apply), git,
         lookupReceipt: lookupCreationReceipt, language: runtime().handoffLanguage,
+        workerModel: workerModelLine(config, discovery),
       });
-      console.log(`${result.applied ? 'Relocated' : 'Dry-run'}: ${result.scope} ${result.fromWorkspace} → ${result.toDir} (${result.toWorkspace ?? 'new workspace'}) · ${result.steers.length} steer(s) · epoch 1 · movedTo ${result.movedTo}${result.checkpoint ? '' : ' · NO task checkpoint'}${result.delivered.length ? ` · handoffs delivered to ${result.delivered.length}` : ''}${result.previousNotified.length ? ` · ${result.previousNotified.length} previous steer(s) notified` : ''}${result.deliveryErrors.map((d) => ` · delivery failed: ${d.error}`).join('')}${result.notifyErrors.map((d) => ` · notify failed: ${d.error}`).join('')}\nNote: the retired scope ${result.fromWorkspace} keeps its agents; archive it via \`cleanup --plan\` (never automatic). Until then, address the new scope by workspace id or path.`);
+      console.log(`${result.applied ? 'Relocated' : 'Dry-run'}: ${result.scope} ${result.fromWorkspace} → ${result.toDir} (${result.toWorkspace ?? 'new workspace'}) · ${result.steers.length} steer(s) · epoch 1 · movedTo ${result.movedTo}${result.checkpoint ? '' : ' · NO task checkpoint'}${result.delivered.length ? ` · handoffs delivered to ${result.delivered.length}` : ''}${result.previousNotified.length ? ` · ${result.previousNotified.length} previous steer(s) notified` : ''}${result.deliveryErrors.map((d) => ` · delivery failed: ${d.error}`).join('')}${result.notifyErrors.map((d) => ` · notify failed: ${d.error}`).join('')}${(result.notes ?? []).map((n) => `\nNote: ${n}`).join('')}\nNote: the retired scope ${result.fromWorkspace} keeps its agents; archive it via \`cleanup --plan\` (never automatic). Until then, address the new scope by workspace id or path.`);
       for (const packet of result.packets) console.log(`--- Steer ${packet.slot} → ${packet.to ?? '(new agent)'}\n${packet.packet}`);
       return;
     }
@@ -421,72 +612,201 @@ async function main() {
   }
 }
 
-async function runModelCommand({ command, args, values, config, configPath, client }) {
+async function writePlanned({ planned, configPath, dryRun, hint = null }) {
+  const lines = [
+    dryRun ? `Dry-run: ${planned.summary} (not written)` : planned.summary,
+    ...(planned.notes ?? []).map((n) => `Note: ${n}`),
+    ...(planned.warnings ?? []).map((w) => `Warning: ${w}`),
+    ...(hint ? [hint] : []),
+  ];
+  if (dryRun) return console.log(`${lines.join('\n')}\n${previewConfig(planned.config)}`);
+  await writeConfigAtomic(configPath, planned.config);
+  return console.log(`${lines.join('\n')}\nWrote ${configPath}`);
+}
+
+async function runModelCommand({ command, args, values, config, configPath, client, runner }) {
   const dryRun = Boolean(values['dry-run']);
+  const catalog = async () => (await client.providers.snapshot())?.entries ?? [];
   if (command === 'models') {
     if (args.length) throw new Error('models takes no repository; use paseo-factory models [--json]');
-    const snapshot = await client.providers.snapshot();
-    return console.log(formatCatalog(snapshot?.entries ?? [], { json: Boolean(values.json) }));
+    return console.log(formatCatalog(await catalog(), { json: Boolean(values.json) }));
+  }
+  if (command === 'model') {
+    const [flag, specArg, onOff, ...rest] = args;
+    if ((flag !== 'advisor' && flag !== 'sensitive') || !specArg || !onOff || rest.length) {
+      throw new Error('model needs advisor|sensitive <profile|provider/model> on|off');
+    }
+    if (onOff !== 'on' && onOff !== 'off') throw new Error(`model ${flag} needs on|off, got ${JSON.stringify(onOff)}`);
+    const plan = flag === 'advisor' ? planAdvisorTag : planSensitiveTag;
+    const planned = plan(config, await catalog(), { spec: specArg, on: onOff === 'on' });
+    return writePlanned({ planned, configPath, dryRun });
+  }
+  if (command === 'worker') {
+    const [sub, ...rest] = args;
+    if (sub === 'list') {
+      if (rest.length) throw new Error('worker list takes no arguments');
+      const entries = await catalog();
+      const priority = workerPriority(config);
+      const problems = validateProfilesAgainstCatalog(config, entries, priority);
+      const { profile } = resolveProfile(config, entries, priority, { role: 'worker', repoPublic: null });
+      const rows = priority.map((name, index) => ({
+        position: index + 1, profile: name,
+        provider: config.profiles[name]?.provider ?? '?', model: config.profiles[name]?.model ?? '?',
+        advisor: isAdvisorProfile(config, name), sensitive: isSensitiveProfile(config, name),
+        startable: !problems[name], issues: problems[name] ?? [], chosen: profile?.name === name,
+      }));
+      if (values.json) return console.log(JSON.stringify({ defaultProfile: config.workers?.defaultProfile ?? null, priority, chosen: profile?.name ?? null, entries: rows }, null, 2));
+      const lines = [`Worker priority (default "${config.workers?.defaultProfile ?? '-'}", → currently picked):`];
+      for (const row of rows) {
+        const tags = `${row.advisor ? ' [advisor]' : ''}${row.sensitive ? ' [sensitive]' : ''}`;
+        lines.push(`${row.chosen ? '→' : ' '} ${row.position}. ${row.profile}${tags} ${row.startable ? '✓' : '✗'} ${row.provider}/${row.model}${row.startable ? '' : ` (${row.issues.join('; ')})`}`);
+      }
+      if (!rows.length) lines.push('(no worker profiles configured)');
+      return console.log(lines.join('\n'));
+    }
+    if (sub === 'set') {
+      const [nArg, specArg, ...extra] = rest;
+      if (!nArg || !specArg || extra.length) throw new Error('worker set needs <n> <profile|provider/model>');
+      const planned = planWorkerSet(config, await catalog(), {
+        n: nArg, spec: specArg,
+        thinking: flagValue(values.thinking), mode: flagValue(values.mode), profile: values.profile,
+      });
+      return writePlanned({ planned, configPath, dryRun });
+    }
+    if (sub === 'rm') {
+      const [nArg, ...extra] = rest;
+      if (!nArg || extra.length) throw new Error('worker rm needs <n>');
+      const planned = planWorkerRemove(config, nArg);
+      return writePlanned({ planned, configPath, dryRun });
+    }
+    if (sub === 'pick') {
+      const [scopeArg, ...extra] = rest;
+      if (extra.length) throw new Error('worker pick takes at most one scope');
+      if (values.failed !== undefined && !values.reason) throw new Error('worker pick --failed needs --reason <text>');
+      if (values.reason !== undefined && values.failed === undefined) throw new Error('worker pick --reason needs --failed <profile>');
+      let entries;
+      let repoPublic = null;
+      let discovery = null;
+      if (scopeArg) {
+        const { entry: target } = resolveTargetEntry(scopeArg, await readPaseoState(client));
+        [discovery] = await runner.discoverAll([target]);
+        entries = discovery.providers ?? [];
+        const priv = discovery.github?.fork?.repo?.private;
+        repoPublic = priv === false ? true : priv === true ? false : null;
+      } else {
+        if (values.failed !== undefined) throw new Error('worker pick --failed needs a scope so the failure can be recorded');
+        entries = await catalog();
+      }
+      let profileHealth = discovery?.mainWorkspace?.metadata?.[METADATA_KEY]?.profileHealth ?? null;
+      if (values.failed !== undefined) {
+        const failed = config.profiles?.[values.failed];
+        if (!failed) throw new Error(`Unknown profile "${values.failed}"`);
+        const record = recordProfileFailure({ ...failed, name: values.failed }, values.reason);
+        const metadata = discovery.mainWorkspace?.metadata?.[METADATA_KEY] ?? {};
+        profileHealth = { ...(metadata.profileHealth ?? {}), [values.failed]: record };
+        await client.workspaces.ref(discovery.mainWorkspace.id).setMetadata({ [METADATA_KEY]: { ...metadata, profileHealth } });
+      }
+      const { profile, skipped } = resolveProfile(config, entries, workerPriority(config), { role: 'worker', repoPublic, profileHealth });
+      if (!profile) {
+        const tried = skipped.length ? skipped.map((s) => `"${s.name}" (${s.reason})`).join('; ') : 'no worker profiles configured';
+        throw new Error(`No startable worker profile (tried ${tried})`);
+      }
+      if (values.json) {
+        return console.log(JSON.stringify({ profile: profile.name, provider: profile.provider, model: profile.model, thinking: profile.thinking ?? null, mode: profile.mode ?? null, sensitive: isSensitiveProfile(config, profile.name), flags: paseoRunFlags(profile), skipped, repoPublic }, null, 2));
+      }
+      const lines = [
+        `Worker pick: "${profile.name}" (${profile.provider}/${profile.model})${isSensitiveProfile(config, profile.name) ? ' [sensitive: give only sanitized technical tasks]' : ''}`,
+        `paseo run ${paseoRunFlags(profile)}`,
+        ...skipped.map((s) => `skipped "${s.name}": ${s.reason}`),
+      ];
+      return console.log(lines.join('\n'));
+    }
+    throw new Error(`Unknown worker command ${sub ?? '(none)'}\n${USAGE}`);
+  }
+  if (command === 'steer') {
+    const [sub, ...rest] = args;
+    if (sub === 'list') {
+      if (rest.length) throw new Error('steer list takes no arguments');
+      const entries = await catalog();
+      const rows = slotOrder(config).map((slot, index) => {
+        const name = config.steers.slots[slot];
+        const problems = validateProfilesAgainstCatalog(config, entries, [name]);
+        const { profile } = resolveProfile(config, entries, steerFallbackList(config, slot), { role: 'steer', advisorSlot: isAdvisorSlot(config, slot) });
+        return {
+          position: index + 1, slot, profile: name,
+          provider: config.profiles[name]?.provider ?? '?', model: config.profiles[name]?.model ?? '?',
+          advisor: isAdvisorSlot(config, slot), sensitive: isSensitiveSlot(config, slot),
+          startable: !problems[name], issues: problems[name] ?? [],
+          fallback: profile && profile.name !== name ? profile.name : null,
+        };
+      });
+      if (values.json) return console.log(JSON.stringify({ slots: rows }, null, 2));
+      const lines = ['Steer slots (priority order, no scope: duplicates cannot be excluded):'];
+      for (const row of rows) {
+        const tags = `${row.advisor ? ' [advisor]' : ''}${row.sensitive ? ' [sensitive]' : ''}`;
+        lines.push(`${row.position}. ${row.slot} → "${row.profile}"${tags} ${row.startable ? '✓' : '✗'} ${row.provider}/${row.model}${row.startable ? '' : ` (${row.issues.join('; ')})`}${row.fallback ? ` → fallback "${row.fallback}"` : ''}`);
+      }
+      return console.log(lines.join('\n'));
+    }
+    if (sub === 'set') {
+      const [targetArg, specArg, ...extra] = rest;
+      if (!targetArg || !specArg || extra.length) throw new Error('steer set needs <n|slot> <profile|provider/model>');
+      const planned = planSteerSet(config, await catalog(), {
+        target: targetArg, spec: specArg,
+        thinking: flagValue(values.thinking), mode: flagValue(values.mode), profile: values.profile,
+      });
+      return writePlanned({ planned, configPath, dryRun, hint: planned.hint });
+    }
+    if (sub === 'rm') {
+      const [targetArg, ...extra] = rest;
+      if (!targetArg || extra.length) throw new Error('steer rm needs <n|slot>');
+      const planned = planSteerRemove(config, targetArg);
+      return writePlanned({ planned, configPath, dryRun });
+    }
+    throw new Error(`Unknown steer command ${sub ?? '(none)'}\n${USAGE}`);
   }
   if (command === 'slot') {
     const [sub, slotArg, specArg, ...rest] = args;
     if (sub === 'set') {
       if (!slotArg || !specArg || rest.length) throw new Error('slot set needs <A-Z> <provider/model>');
+      console.error('Note: "slot set" is deprecated, use "steer set".');
       const { provider, model } = parseProviderModel(specArg);
-      const snapshot = await client.providers.snapshot();
-      const planned = planSlotSet(config, snapshot?.entries ?? [], {
+      const planned = planSlotSet(config, await catalog(), {
         slot: slotArg.toUpperCase(), provider, model,
         thinking: flagValue(values.thinking), mode: flagValue(values.mode), profile: values.profile,
       });
-      if (dryRun) return console.log(`Dry-run: ${planned.summary} (not written)\n${previewConfig(planned.config)}`);
-      await writeConfigAtomic(configPath, planned.config);
-      return console.log(`${planned.summary}\n${planned.hint}\nWrote ${configPath}`);
+      return writePlanned({ planned, configPath, dryRun, hint: planned.hint });
     }
     if (sub === 'rm') {
       if (!slotArg || specArg || rest.length) throw new Error('slot rm needs <A-Z>');
+      console.error('Note: "slot rm" is deprecated, use "steer rm".');
       const planned = planSlotRemove(config, slotArg.toUpperCase());
-      if (dryRun) return console.log(`Dry-run: ${planned.summary} (not written)\n${previewConfig(planned.config)}`);
-      await writeConfigAtomic(configPath, planned.config);
-      return console.log(`${planned.summary}\nWrote ${configPath}`);
+      return writePlanned({ planned, configPath, dryRun });
     }
     throw new Error(`Unknown slot command ${sub ?? '(none)'}\n${USAGE}`);
   }
   const [specArg, ...rest] = args;
   if (!specArg || rest.length) throw new Error('worker-default needs <profile|provider/model>');
-  const snapshot = await client.providers.snapshot();
-  const planned = planWorkerDefault(config, snapshot?.entries ?? [], {
+  console.error('Note: "worker-default" is deprecated, use "worker set 1".');
+  const planned = planWorkerDefault(config, await catalog(), {
     spec: specArg, thinking: flagValue(values.thinking), mode: flagValue(values.mode), profile: values.profile,
   });
-  if (dryRun) return console.log(`Dry-run: ${planned.summary} (not written)\n${previewConfig(planned.config)}`);
-  await writeConfigAtomic(configPath, planned.config);
-  return console.log(`${planned.summary}\nWrote ${configPath}`);
+  return writePlanned({ planned, configPath, dryRun });
 }
 
-function formatUsage(usage) {
-  if (!usage) return 'ctx n/a';
-  const pct = usage.maxTokens > 0 ? ` (${Math.round((usage.usedTokens / usage.maxTokens) * 100)}%)` : '';
-  return `ctx ${usage.usedTokens}/${usage.maxTokens}${pct}`;
-}
-
-function formatStatus(status, warnContextTokens) {
-  const retired = status.state?.retired === true ? ` · RETIRED${status.state.movedTo ? ` → ${status.state.movedTo}` : ''}` : '';
-  const lines = [`${status.repo} · workspace ${status.workspace?.id ?? '(none)'}${status.worktree ? ' (worktree)' : ''} · active Steer ${status.state?.activeSteer ?? '-'} (epoch ${status.state?.epoch ?? '-'})${retired}`];
-  const cp = status.checkpoint;
-  if (cp?.task) {
-    const stale = cp.epoch !== status.state?.epoch ? ` · from epoch ${cp.epoch}, older than the current one` : '';
-    lines.push(`  checkpoint ${cp.updatedAt}${stale}`, `    task: ${cp.task}`);
-    if (cp.next) lines.push(`    next: ${cp.next}`);
-    if (cp.interrupted) lines.push(typeof cp.interrupted === 'object' ? `    ! interrupted: ${cp.interrupted.agentId ?? 'unknown agent'} at ${cp.interrupted.at ?? 'unknown time'} — run resume for the last answer tail` : '    ! interrupted — run resume for details');
-  } else {
-    lines.push('  checkpoint: none');
+function formatDrain(result) {
+  const waited = `${Math.round((result.waitedMs ?? 0) / 1000)}s`;
+  const timeout = `${Math.round((result.timeoutMs ?? 0) / 1000)}s`;
+  const initial = result.initial ?? [];
+  if (result.clean && !initial.length) return 'Drain: no running factory agents — safe to restart.';
+  if (result.clean) return `Drain: ${initial.length} factory agent(s) idle after ${waited} — safe to restart.`;
+  const markedIds = new Set((result.marked ?? []).map((m) => m.agentId));
+  const lines = [`Drain: timeout after ${waited} (limit ${timeout}), ${result.running.length} still running — marked planned-restart, exit 2:`];
+  for (const a of result.running) {
+    const what = a.role === 'steer' && a.slot ? `steer ${a.slot}` : a.role;
+    lines.push(`  - ${a.id} ${what} in ${a.scopeId} ${a.status}${markedIds.has(a.id) ? ' — marked planned-restart' : ' — NOT marked (scope gone)'}`);
   }
-  for (const s of status.steers) lines.push(`  Steer ${s.slot}  ${s.id}  ${s.provider}/${s.model}  ${s.status}  ${formatUsage(s.usage)}${s.retired ? '  RETIRED — archive it in Paseo' : ''}${s.parent ? `  PARENT ${s.parent}` : ''}`);
-  for (const w of status.workers) lines.push(`  worker ${w.id} "${w.title}" ${w.provider}/${w.model} ${w.status}  ${formatUsage(w.usage)} ← Steer ${w.parentSlot ?? w.owner ?? '?'}${w.workspaceId && status.workspace && w.workspaceId !== status.workspace.id ? ` · workspace ${w.workspaceId}` : ''}`);
-  for (const warn of status.usageWarnings ?? []) {
-    lines.push(warn.kind === 'steer'
-      ? `  ! Steer ${warn.slot} context ${warn.usedTokens}/${warn.maxTokens} tokens exceeds usage.warnContextTokens=${warnContextTokens}; consider checkpoint + switch/fresh (docs/saving-context.md)`
-      : `  ! worker ${warn.id} context ${warn.usedTokens}/${warn.maxTokens} tokens exceeds usage.warnContextTokens=${warnContextTokens}; consider retiring and recreating it`);
-  }
+  lines.push('Restart would interrupt them; run status/resume for the last answer tails.');
   return lines.join('\n');
 }
 

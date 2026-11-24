@@ -385,6 +385,12 @@ export function createExecutors({ client, gh, git, paseoCli, sleep = (ms) => new
       const handle = client.workspaces.ref(op.params.workspaceId);
       const before = await handle.refresh();
       if (before?.metadata?.[METADATA_KEY]) throw new Error(`Workspace ${op.params.workspaceId} already carries factory metadata`);
+      if (op.params.expectWorktree) {
+        if (!isWorktreeWorkspace(before)) throw new Error(`Workspace ${op.params.workspaceId} is no longer a worktree workspace; run a new dry-run`);
+        if (resolve(before.workspaceDirectory ?? '') !== resolve(op.params.expectWorktree.directory ?? '')) {
+          throw new Error(`Workspace ${op.params.workspaceId} moved from ${op.params.expectWorktree.directory} to ${before.workspaceDirectory}; run a new dry-run`);
+        }
+      }
       await handle.setMetadata(op.params.metadata);
       const after = await handle.refresh();
       if (after?.metadata?.[METADATA_KEY]?.main !== true) throw new Error('Workspace metadata not verifiable');
@@ -480,6 +486,30 @@ export function createExecutors({ client, gh, git, paseoCli, sleep = (ms) => new
         if (key !== 'scope' && !isDeepStrictEqual(after[key], value)) throw new Error(`Workspace ${workspaceId} metadata field ${key} changed by the conversion`);
       }
       return { workspaceId, scope: scope.id, convertedFrom: base.scope?.id ?? null };
+    },
+
+    async 'scope.domain'(op) {
+      const { workspaceId, domain, epoch } = op.params;
+      if (!workspaceId || !Number.isInteger(epoch) || (domain !== null && (typeof domain !== 'string' || !domain))) {
+        throw new Error('scope.domain needs workspaceId, domain (or null to clear) and the planned epoch');
+      }
+      return withLock(workspaceLockName(workspaceId), async (held) => {
+        const handle = client.workspaces.ref(workspaceId);
+        const meta = (await handle.refresh())?.metadata?.[METADATA_KEY];
+        if (!meta || typeof meta !== 'object') throw new Error(`Workspace ${workspaceId} has no factory state; refusing to set the domain`);
+        if (meta.epoch !== epoch) throw new Error(`Scope state changed (expected epoch ${epoch}, found ${meta.epoch}); replan`);
+        if (meta.retired === true) throw new Error(`Workspace ${workspaceId} scope is retired; refusing to set the domain`);
+        if (!validScope(meta.scope)) throw new Error(`Workspace ${workspaceId} has no scope; plan the scope supplement first`);
+        const have = typeof meta.scope.domain === 'string' && meta.scope.domain ? meta.scope.domain : null;
+        const norm = (v) => (v ? v.toLowerCase() : null);
+        if (norm(domain) === norm(have)) return { workspaceId, domain: have, already: true };
+        const next = domain ? { ...meta.scope, domain } : (({ domain: _drop, ...rest }) => rest)(meta.scope);
+        held.verify();
+        await handle.setMetadata({ [METADATA_KEY]: { ...meta, scope: next } });
+        const written = (await handle.refresh())?.metadata?.[METADATA_KEY]?.scope;
+        if (!isDeepStrictEqual(written, next)) throw new Error(`Workspace ${workspaceId} domain not verifiable after write`);
+        return { workspaceId, domain };
+      });
     },
 
     async 'paseo.agent.create'(op) {

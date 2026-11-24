@@ -4,6 +4,7 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
+import { profilePool } from './quota.mjs';
 
 /** --config > PASEO_FACTORY_CONFIG > $XDG_CONFIG_HOME/paseo-workspace-factory/config.json */
 export function defaultConfigPath() {
@@ -49,6 +50,64 @@ function configKnownLimits(config) {
 export const SLOT_PATTERN = /^[A-Z]$/;
 const OWNER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 
+/**
+ * Worker priority, highest first. A missing `workers.priority` reads as
+ * `[defaultProfile]` (read migration); writes set `defaultProfile` to
+ * `priority[0]` for older readers.
+ */
+export function workerPriority(config) {
+  const priority = config?.workers?.priority;
+  if (Array.isArray(priority)) return [...priority];
+  const fallback = config?.workers?.defaultProfile;
+  return typeof fallback === 'string' && fallback ? [fallback] : [];
+}
+
+/** True when the profile carries `"advisor": true` (default false). */
+export function isAdvisorProfile(config, name) {
+  return config?.profiles?.[name]?.advisor === true;
+}
+
+/** True when the slot's profile is advisor-tagged (resolved live, no label). */
+export function isAdvisorSlot(config, slot) {
+  const name = config?.steers?.slots?.[slot];
+  return typeof name === 'string' && isAdvisorProfile(config, name);
+}
+
+/**
+ * True when workers of this profile must only get sanitized technical tasks.
+ * An explicit boolean wins; otherwise `muse` providers default to sensitive
+ * (read migration, backwards compatible).
+ */
+export function isSensitiveProfile(config, name) {
+  const profile = config?.profiles?.[name];
+  if (!profile || typeof profile !== 'object') return false;
+  if (typeof profile.sensitive === 'boolean') return profile.sensitive;
+  return profile.provider === 'muse';
+}
+
+/** True when the slot's profile is sensitive (displayed, never blocked). */
+export function isSensitiveSlot(config, slot) {
+  const name = config?.steers?.slots?.[slot];
+  return typeof name === 'string' && isSensitiveProfile(config, name);
+}
+
+/**
+ * Provider-level sensitivity for the adoption privacy rule: sensitive when any
+ * same-provider profile is sensitive. Without any such profile, `muse` stays
+ * sensitive (migration default) and other providers stay open — the previous
+ * hard-coded behavior, now config-driven.
+ */
+export function providerIsSensitive(config, provider) {
+  const matches = Object.entries(config?.profiles ?? {}).filter(([, p]) => p?.provider === provider);
+  if (!matches.length) return provider === 'muse';
+  return matches.some(([name]) => isSensitiveProfile(config, name));
+}
+
+/** Slot letters in priority order (A first, then B, C, …). */
+export function slotOrder(config) {
+  return Object.keys(config?.steers?.slots ?? {}).sort();
+}
+
 export async function loadConfig(path = defaultConfigPath()) {
   let text;
   try {
@@ -60,6 +119,12 @@ export async function loadConfig(path = defaultConfigPath()) {
   const config = JSON.parse(text);
   const errors = validateConfig(config);
   if (errors.length) throw new Error(`Invalid factory config ${path}:\n- ${errors.join('\n- ')}`);
+  if (!Array.isArray(config.workers?.priority)) {
+    const fallback = config.workers?.defaultProfile;
+    if (typeof fallback === 'string' && fallback) {
+      config.workers = { ...config.workers, priority: [fallback] };
+    }
+  }
   return config;
 }
 
@@ -72,6 +137,10 @@ export function validateConfig(config) {
   if (!/^[A-Za-z0-9._-]+$/.test(config.github?.upstreamRemote ?? '')) errors.push('github.upstreamRemote must be a plain remote name');
   if (typeof config.checkoutRoot !== 'string' || !isAbsolute(config.checkoutRoot)) errors.push('checkoutRoot must be an absolute path');
   if (typeof config.workspaceTitle !== 'string' || !config.workspaceTitle.trim()) errors.push('workspaceTitle must be a non-empty string');
+  if (config.workspaceTitleMultiRepo !== undefined && config.workspaceTitleMultiRepo !== null
+    && (typeof config.workspaceTitleMultiRepo !== 'string' || !config.workspaceTitleMultiRepo.trim())) {
+    errors.push('workspaceTitleMultiRepo must be a non-empty string when set (unset disables it)');
+  }
 
   const profiles = config.profiles ?? {};
   if (typeof profiles !== 'object' || !Object.keys(profiles).length) errors.push('profiles must define at least one profile');
@@ -82,6 +151,14 @@ export function validateConfig(config) {
     for (const key of ['thinking', 'mode']) {
       if (profile?.[key] !== null && profile?.[key] !== undefined && typeof profile[key] !== 'string') {
         errors.push(`profiles.${name}.${key} must be a string or null`);
+      }
+    }
+    for (const key of ['advisor', 'sensitive']) {
+      if (profile?.[key] !== undefined && typeof profile[key] !== 'boolean') {
+        errors.push(`profiles.${name}.${key} must be a boolean`);
+      }
+      if (profile?.pool !== undefined && (typeof profile.pool !== 'string' || !profile.pool.trim())) {
+        errors.push(`profiles.${name}.pool must be a non-empty string when set`);
       }
     }
   }
@@ -123,6 +200,14 @@ export function validateConfig(config) {
   for (const slot of prepare) if (!slots[slot]) errors.push(`steers.prepare references unknown slot "${slot}"`);
   if (new Set(prepare).size !== prepare.length) errors.push('steers.prepare contains duplicates');
   if (!prepare.includes(config.steers?.initialActive)) errors.push('steers.initialActive must be one of steers.prepare');
+  const slotEntries = Object.entries(slots);
+  if (slotEntries.length && slotEntries.every(([, profile]) => profiles[profile]?.advisor === true)) {
+    errors.push('steers.slots needs at least one non-advisor slot (advisors never coordinate)');
+  }
+  const initialProfile = slots[config.steers?.initialActive];
+  if (initialProfile && profiles[initialProfile]?.advisor === true) {
+    errors.push(`steers.initialActive must not be advisor slot "${config.steers.initialActive}" (profile "${initialProfile}")`);
+  }
   if (config.handoffLanguage !== undefined && !['en', 'de'].includes(config.handoffLanguage)) errors.push('handoffLanguage must be "en" or "de"');
   const runtime = config.runtime ?? {};
   if (typeof runtime !== 'object') errors.push('runtime must be an object');
@@ -132,8 +217,25 @@ export function validateConfig(config) {
   for (const key of ['url', 'bin', 'passwordFile']) {
     if (runtime.paseo?.[key] !== undefined && runtime.paseo[key] !== null && typeof runtime.paseo[key] !== 'string') errors.push(`runtime.paseo.${key} must be a string`);
   }
+  if (config.workers !== undefined && (typeof config.workers !== 'object' || config.workers === null || Array.isArray(config.workers))) {
+    errors.push('workers must be an object');
+  }
   if (config.workers?.defaultProfile && !profiles[config.workers.defaultProfile]) {
     errors.push(`workers.defaultProfile references unknown profile "${config.workers.defaultProfile}"`);
+  }
+  if (config.workers?.priority !== undefined) {
+    const priority = config.workers.priority;
+    if (!Array.isArray(priority) || !priority.length) {
+      errors.push('workers.priority must be a non-empty array of profile names');
+    } else {
+      const seen = new Set();
+      for (const name of priority) {
+        if (typeof name !== 'string' || !name) errors.push('workers.priority must list profile names');
+        else if (!profiles[name]) errors.push(`workers.priority references unknown profile "${name}"`);
+        else if (seen.has(name)) errors.push(`workers.priority lists "${name}" twice`);
+        else seen.add(name);
+      }
+    }
   }
   if (config.advisors !== undefined) {
     if (typeof config.advisors !== 'object' || config.advisors === null || Array.isArray(config.advisors)) errors.push('advisors must be an object');
@@ -151,8 +253,54 @@ export function validateConfig(config) {
     else if (config.usage.warnContextTokens !== undefined && (!Number.isInteger(config.usage.warnContextTokens) || config.usage.warnContextTokens <= 0)) {
       errors.push('usage.warnContextTokens must be a positive integer');
     }
+    if (config.quota !== undefined) {
+      if (typeof config.quota !== 'object' || config.quota === null || Array.isArray(config.quota)) errors.push('quota must be an object');
+      else for (const key of ['warnPct', 'exhaustedPct']) {
+        if (config.quota[key] !== undefined && (!Number.isFinite(config.quota[key]) || config.quota[key] < 0 || config.quota[key] > 100)) {
+          errors.push(`quota.${key} must be a number from 0 to 100`);
+        }
+      }
+    }
   }
   return errors;
+}
+
+/**
+ * Non-blocking config warnings (never thrown by loadConfig): advisor purposes
+ * pointing at untagged profiles, advisor-tagged worker entries (never picked),
+ * and advisor profiles that are also sensitive.
+ */
+export function configWarnings(config) {
+  const warnings = [];
+  if (!config || typeof config !== 'object') return warnings;
+  const profiles = config.profiles ?? {};
+  const advisorProfiles = config.advisors?.profiles;
+  if (advisorProfiles && typeof advisorProfiles === 'object' && !Array.isArray(advisorProfiles)) {
+    for (const [purpose, name] of Object.entries(advisorProfiles)) {
+      if (profiles[name] && profiles[name].advisor !== true) {
+        warnings.push(`advisors.profiles.${purpose} uses profile "${name}" without the advisor tag`);
+      }
+    }
+  }
+  for (const name of workerPriority(config)) {
+    if (profiles[name]?.advisor === true) {
+      warnings.push(`workers.priority lists advisor profile "${name}" (never picked for workers)`);
+    }
+  }
+  for (const [name, profile] of Object.entries(profiles)) {
+    if (profile?.advisor === true && isSensitiveProfile(config, name)) {
+      warnings.push(`profile "${name}" is both advisor and sensitive (advisors get sanitized context only)`);
+    }
+  }
+  const pools = new Set(Object.entries(config.steers?.slots ?? {})
+    .filter(([, name]) => profiles[name]?.advisor !== true)
+    .map(([, name]) => profilePool(profiles[name]))
+    .filter(Boolean));
+  const nonAdvisor = Object.entries(config.steers?.slots ?? {}).filter(([, name]) => profiles[name]?.advisor !== true);
+  if (nonAdvisor.length > 1 && pools.size === 1) {
+    warnings.push(`all non-advisor steer slots use quota pool "${[...pools][0]}"`);
+  }
+  return warnings;
 }
 
 /** Profile used by a steer slot, resolved to concrete provider settings. */

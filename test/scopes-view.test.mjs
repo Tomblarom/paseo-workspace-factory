@@ -85,12 +85,32 @@ test('dir scopes show the deprecated local alias and workspaces without metadata
   assert.match(formatScopeRows([dir]), /alias local\/notes \(deprecated\)/);
 });
 
-test('legacy-prefix records are hinted', () => {
+test('legacy-prefix hint fires only while migration is pending', () => {
+  const pending = githubState();
+  pending.workspaces[0].legacyPrefix = true;
+  pending.workspaces[0].legacyPending = ['ari.wsf'];
+  const [crow] = scopeRows(pending, { now: () => NOW });
+  assert.deepEqual(crow.hints, ['legacy-prefix']);
+  assert.match(formatScopeRows([crow]), /legacy-prefix/);
+
+  const agentPending = githubState();
+  agentPending.agents[0].legacyPrefix = true;
+  agentPending.agents[0].legacyPending = ['ari.wsf.role'];
+  const [arow] = scopeRows(agentPending, { now: () => NOW });
+  assert.deepEqual(arow.hints, ['legacy-prefix']);
+  assert.match(formatScopeRows([arow]), /legacy-prefix/);
+});
+
+test('migrated legacy keys (counterpart present) stay hint-free, JSON-only info', () => {
   const state = githubState();
   state.workspaces[0].legacyPrefix = true;
+  state.agents[0].legacyPrefix = true;
   const [row] = scopeRows(state, { now: () => NOW });
-  assert.deepEqual(row.hints, ['legacy-prefix']);
-  assert.match(formatScopeRows([row]), /legacy-prefix/);
+  assert.equal(row.hints, undefined);
+  assert.equal(row.legacyKeysMigrated, true);
+  assert.ok(!formatScopeRows([row]).includes('legacy-prefix'));
+  const clean = scopeRows(githubState(), { now: () => NOW })[0];
+  assert.equal(clean.legacyKeysMigrated, undefined);
 });
 
 test('one text line per scope carries all hub fields', () => {
@@ -125,8 +145,8 @@ test('candidates list unadopted workspaces with agents and a plan suggestion', (
   assert.equal(plain.projectKind, 'git');
   assert.equal(plain.worktree, false);
   assert.deepEqual(plain.agents, [
-    { id: 'agent-1', title: 'Explore', provider: 'codex', model: 'gpt-6.2-sol', parent: false },
-    { id: 'agent-2', title: 'Child', provider: 'codex', model: 'gpt-6.2-sol', parent: true },
+    { id: 'agent-1', title: 'Explore', provider: 'codex', model: 'gpt-6.2-sol', status: 'idle', parentId: null },
+    { id: 'agent-2', title: 'Child', provider: 'codex', model: 'gpt-6.2-sol', status: 'idle', parentId: 'agent-1' },
   ]);
   assert.equal(plain.suggestedPlan, 'paseo-factory plan --local /tmp/scratch');
   const wt = rows.find((r) => r.workspaceId === 'wks_wt');
@@ -135,5 +155,7 @@ test('candidates list unadopted workspaces with agents and a plan suggestion', (
   const text = formatScopeCandidates(rows);
   assert.match(text, /wks_plain "Scratch" \/tmp\/scratch/);
   assert.match(text, /plan: paseo-factory plan workspace:wks_wt/);
+  assert.match(text, /agent-1 "Explore" \(codex\/gpt-6\.2-sol, idle\)/);
+  assert.match(text, /agent-2 "Child" \(codex\/gpt-6\.2-sol, idle\) parent agent-1/);
   assert.equal(formatScopeCandidates([]), '(no adoption candidates)');
 });
