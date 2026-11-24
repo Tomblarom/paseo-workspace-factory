@@ -17,13 +17,15 @@ import {
   syncCheckpointDisplayFromSettings,
 } from "./client/checkpoint-display.js";
 import { FactoryPanel } from "./client/factory-panel.js";
-import { FactorySidebarItem, SETTINGS_SCREEN_ID } from "./client/factory-sidebar-item.js";
+import { FactorySidebarItem } from "./client/factory-sidebar-item.js";
 import { submitFactoryCommand } from "./client/factory-submit.js";
 import { dismissFactoryResultPill, showFactoryResultPill } from "./client/result-pill.js";
 import { FactorySettings } from "./client/settings-factory.js";
 import { assertSteerContext } from "./shared/agent-guard.js";
 import { factoryCold } from "./shared/factory.js";
 import { coldHintText, resumeReminderText } from "./shared/idle-cleanup.js";
+
+const SETTINGS_SCREEN_ID = "factory-settings";
 
 function guardAgent(agent: PluginAgentCommandContext["agent"], what: string): void {
   assertSteerContext(agent, what);
@@ -190,14 +192,9 @@ export default function contribute(client: PluginClientContext) {
     onSelect: openFactory,
   });
   client.addSettingsScreen({
-    id: "factory-settings",
-    title: "Workspace Factory",
-    icon: "Factory",
-    Component: FactorySettings,
-  });
-  client.addScreen({
     id: SETTINGS_SCREEN_ID,
     title: "Workspace Factory",
+    icon: "Factory",
     Component: FactorySettings,
   });
   // Synchronous and unconditional: Paseo lists the entry in its own
@@ -205,7 +202,9 @@ export default function contribute(client: PluginClientContext) {
   client.addSidebarHeaderItem({
     id: "factory",
     title: "Workspace Factory",
-    Component: FactorySidebarItem,
+    Component: (props) => (
+      <FactorySidebarItem {...props} openSettings={() => client.openSettings(SETTINGS_SCREEN_ID)} />
+    ),
   });
   client.addTimelineRenderer({
     kind: "factory-checkpoint",

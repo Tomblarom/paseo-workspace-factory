@@ -27,12 +27,10 @@ function quotaWarningText(quota: {
   return worst ? `Quota ${worst.pool} ${worst.pct}%` : null;
 }
 
-// Screen that hosts the settings page. The sidebar props offer no openSettings
-// (only command contexts do), so the same component is registered as a
-// screen, and the row opens that.
-export const SETTINGS_SCREEN_ID = "factory-settings-screen";
-
-export function FactorySidebarItem({ openScreen, theme }: PluginSidebarItemProps) {
+export function FactorySidebarItem({
+  openSettings,
+  theme,
+}: PluginSidebarItemProps & { openSettings: () => void }) {
   const [resumeCount, setResumeCount] = useState(0);
   const onEvent = useCallback((event: any) => {
     setResumeCount(countActiveResumeRows(attentionRowsOf(event)));
@@ -67,7 +65,7 @@ export function FactorySidebarItem({ openScreen, theme }: PluginSidebarItemProps
     <SidebarRow
       icon="Factory"
       label="Workspace Factory"
-      onPress={() => openScreen({ screenId: SETTINGS_SCREEN_ID })}
+      onPress={openSettings}
       trailing={
         trailing ? (
           <Text style={{ color: theme.colors.statusWarning, fontSize: 13 }}>{trailing}</Text>
