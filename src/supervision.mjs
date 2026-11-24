@@ -306,7 +306,9 @@ export function isStaleWake(wakeEpoch, currentEpoch) {
  * an advisor on domain or hub level is skipped like any advisor id. With
  * `zerosub` (normalized ZeroSub state), candidates on the exhausted failing
  * account are dropped and the rest prefer the account with the most room;
- * without it the order is unchanged.
+ * without it the order is unchanged. Continuation tabs count as the same
+ * slot: a slot appears once (its first entry in the final order), so no
+ * duplicate candidate is asked twice.
  */
 export function failoverChain({ steers = [], activeSlot = null, retiredIds = [], interruptedIds = [], advisorIds = [], domainSteer = null, hubSteer = null, failingPool = null, zerosub = null, failingAccountId = null, exhaustedPct = 90, now = Date.now() } = {}) {
   const retired = new Set(retiredIds ?? []);
@@ -342,7 +344,14 @@ export function failoverChain({ steers = [], activeSlot = null, retiredIds = [],
       .map(([candidate]) => candidate);
     ordered.splice(0, ordered.length, ...kept);
   }
-  const chain = ordered.map((s) => ({ kind: 'steer', slot: s.slot, steerId: s.id }));
+  const chain = [];
+  const seenSlots = new Set();
+  for (const s of ordered) {
+    const key = s.slot ?? s.id;
+    if (seenSlots.has(key)) continue;
+    seenSlots.add(key);
+    chain.push({ kind: 'steer', slot: s.slot, steerId: s.id });
+  }
   if (domainSteer?.steerId && !advisors.has(domainSteer.steerId)) chain.push({ kind: 'domain', steerId: domainSteer.steerId, scopeId: domainSteer.scopeId ?? null });
   if (hubSteer?.steerId && !advisors.has(hubSteer.steerId)) chain.push({ kind: 'hub', steerId: hubSteer.steerId, scopeId: hubSteer.scopeId ?? null });
   return chain;
