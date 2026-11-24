@@ -200,6 +200,7 @@ export function validateConfig(config) {
   for (const slot of prepare) if (!slots[slot]) errors.push(`steers.prepare references unknown slot "${slot}"`);
   if (new Set(prepare).size !== prepare.length) errors.push('steers.prepare contains duplicates');
   if (!prepare.includes(config.steers?.initialActive)) errors.push('steers.initialActive must be one of steers.prepare');
+  if (config.steers?.activeMarker !== undefined && typeof config.steers.activeMarker !== 'string') errors.push('steers.activeMarker must be a string (empty disables the active-steer tab marker)');
   const slotEntries = Object.entries(slots);
   if (slotEntries.length && slotEntries.every(([, profile]) => profiles[profile]?.advisor === true)) {
     errors.push('steers.slots needs at least one non-advisor slot (advisors never coordinate)');

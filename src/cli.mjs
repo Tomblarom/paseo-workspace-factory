@@ -15,6 +15,7 @@ import { applyPlans, createExecutors, createAuthorization, storeAuthorization, f
 import { CHECKPOINT_KEY, restartInterruptions, steerStatus, switchSteer, freshSteer, writeCheckpoint, parseCheckpointBlock, lastAssistantText, resolveTargetEntry, buildResumeBrief, readGitBrief } from './steer.mjs';
 import { AGENTS_KEY } from './agent-state.mjs';
 import { listScopes, resolveScope, domainFirstPlanOrder } from './scope.mjs';
+import { planLabelFixes, formatLabelFixes } from './labels.mjs';
 import { DRAIN_DEFAULT_TIMEOUT_MS, drain, parseTimeout } from './drain.mjs';
 import { assessWorker, readGitState } from './workers.mjs';
 import { formatWorkersText, readWorkers, workersReport } from './supervision.mjs';
@@ -54,6 +55,7 @@ const USAGE = `Usage: paseo-factory <command> [options]
   slot set <A-Z> ... (deprecated, use steer set) | slot rm <A-Z> (deprecated, use steer rm)
   worker-default ... (deprecated, use worker set 1 ...)
   scopes [--json] [--candidates]   one line per live scope; --candidates lists unadopted workspaces
+  labels [scope|agent-id] [--apply] [--json]   list missing/wrong factory agent labels (dry-run); --apply sets them
   drain [--timeout 10m] [--json]   wait until no factory agent runs; marks leftovers planned-restart (exit 2), never restarts itself
 --adopt SLOT=<agent-id> needs exactly one repository; with several entries use --adopt <scope-id>:SLOT=<agent-id> per entry.
 --checkout <path> names the checkout of one entry (same as per-entry "checkout" in --repos-file); use it when several checkouts share one origin.
@@ -381,6 +383,34 @@ async function main() {
       const rows = scopeRows(paseo, { ...(heuristic ?? {}), config });
       return console.log(values.json ? JSON.stringify(rows, null, 2) : formatScopeRows(rows));
     }
+    if (command === 'labels') {
+      if (entries.length > 1) throw new Error('labels takes at most one scope or agent id; use paseo-factory labels [scope|agent-id] [--apply] [--json]');
+      const paseo = await readPaseoState(client);
+      const rows = planLabelFixes(paseo, entries.length ? { address: entries[0] } : {});
+      if (!values.apply) {
+        return console.log(values.json ? JSON.stringify(rows, null, 2) : formatLabelFixes(rows));
+      }
+      const fixable = rows.filter((row) => Object.keys(row.labels).length);
+      const execute = createExecutors({ client, gh, git, paseoCli: createPaseoCli() });
+      const applied = [];
+      for (const row of fixable) {
+        try {
+          await execute({ key: `labels.${row.agentId}`, kind: 'labels.set', summary: `Set ${Object.keys(row.labels).join(', ')} on agent ${row.agentId}`, params: { agentId: row.agentId, labels: row.labels } }, config);
+          applied.push({ agentId: row.agentId, ok: true });
+        } catch (error) {
+          applied.push({ agentId: row.agentId, ok: false, error: error.message });
+        }
+      }
+      if (values.json) return console.log(JSON.stringify({ rows, applied }, null, 2));
+      for (const result of applied) {
+        console.log(result.ok ? `${result.agentId}: labels set` : `${result.agentId}: FAILED: ${result.error}`);
+      }
+      const skipped = rows.length - fixable.length;
+      const failed = applied.filter((r) => !r.ok).length;
+      console.log(`Labels: ${applied.length - failed} agent(s) fixed${skipped ? `, ${skipped} reported without a fix` : ''}${failed ? `, ${failed} failed` : ''}.`);
+      if (failed) process.exitCode = 1;
+      return;
+    }
     if (command === 'drain') {
       if (entries.length) throw new Error('drain takes no repository; use paseo-factory drain [--timeout 10m] [--json]');
       const timeoutMs = values.timeout === undefined ? DRAIN_DEFAULT_TIMEOUT_MS : parseTimeout(values.timeout);
@@ -499,9 +529,9 @@ async function main() {
         const result = await freshSteer({
           client, discovery, config, apply: Boolean(values.apply), git,
           lookupReceipt: lookupCreationReceipt, language: runtime().handoffLanguage,
-          workerModel: workerModelLine(config, discovery),
+          workerModel: workerModelLine(config, discovery), paseoCli: createPaseoCli(),
         });
-        console.log(`${result.applied ? 'Refreshed' : 'Dry-run'}: Steer ${result.slot} ${result.from} → ${result.to ?? '(new agent)'} (epoch ${result.epoch}) · profile "${result.profile}" (${result.provider}/${result.model})${result.fallbackFrom ? ` (fallback for "${result.fallbackFrom}")` : ''} · handoff ${result.packetChars} characters, built without a model call${result.checkpoint ? '' : ' · NO task checkpoint'}${result.reused ? ' · agent reused after receipt' : ''}${result.delivered ? ' · delivered' : ''}${result.previousNotified ? ' · previous steer notified' : ''}${result.deliveryError ? ` · delivery failed: ${result.deliveryError}` : ''}${(result.warnings ?? []).map((w) => `\nWarning: ${w}`).join('')}\nNote: the retired steer ${result.from} keeps its chat and labels${result.applied ? ' (a short notice was sent)' : ' (a short notice will be sent on apply)'}; archive it in Paseo — until then the slot stays ambiguous for switch/plan.\n---\n${result.packet}`);
+        console.log(`${result.applied ? 'Refreshed' : 'Dry-run'}: Steer ${result.slot} ${result.from} → ${result.to ?? '(new agent)'} (epoch ${result.epoch}) · profile "${result.profile}" (${result.provider}/${result.model})${result.fallbackFrom ? ` (fallback for "${result.fallbackFrom}")` : ''} · handoff ${result.packetChars} characters, built without a model call${result.checkpoint ? '' : ' · NO task checkpoint'}${result.reused ? ' · agent reused after receipt' : ''}${result.delivered ? ' · delivered' : ''}${result.previousNotified ? ' · previous steer notified' : ''}${result.deliveryError ? ` · delivery failed: ${result.deliveryError}` : ''}${result.renameError ? ` · title rename failed: ${result.renameError}` : ''}${(result.warnings ?? []).map((w) => `\nWarning: ${w}`).join('')}\nNote: the retired steer ${result.from} keeps its chat and labels${result.applied ? ' (a short notice was sent)' : ' (a short notice will be sent on apply)'}; archive it in Paseo — until then the slot stays ambiguous for switch/plan.\n---\n${result.packet}`);
         return;
       }
       if (command === 'switch') {
@@ -510,9 +540,9 @@ async function main() {
         const result = await switchSteer({
           client, discovery, toSlot: values.to, apply: Boolean(values.apply), send: !values['no-send'], git,
           wait: Boolean(values.wait), notifyPrevious: Boolean(values['notify-previous']), language: values.language ?? runtime().handoffLanguage,
-          config, workerModel: workerModelLine(config, discovery),
+          config, workerModel: workerModelLine(config, discovery), paseoCli: createPaseoCli(),
         });
-        console.log(`${result.applied ? 'Switched' : 'Dry-run'}: Steer ${result.from} → ${result.to} (epoch ${result.epoch}) · handoff ${result.packetChars} characters, built without a model call${result.checkpoint ? '' : ' · NO task checkpoint'}${result.delivered ? ' · delivered' : ''}${result.previousNotified ? ' · previous steer notified' : ''}${result.deliveryError ? ` · delivery failed: ${result.deliveryError}` : ''}\n---\n${result.packet}`);
+        console.log(`${result.applied ? 'Switched' : 'Dry-run'}: Steer ${result.from} → ${result.to} (epoch ${result.epoch}) · handoff ${result.packetChars} characters, built without a model call${result.checkpoint ? '' : ' · NO task checkpoint'}${result.delivered ? ' · delivered' : ''}${result.previousNotified ? ' · previous steer notified' : ''}${result.deliveryError ? ` · delivery failed: ${result.deliveryError}` : ''}${result.renameError ? ` · title rename failed: ${result.renameError}` : ''}\n---\n${result.packet}`);
         if (result.reply !== null) console.log(`--- reply of Steer ${result.to}\n${result.reply ?? '(no answer text)'}`);
         return;
       }

@@ -18,7 +18,7 @@ import { resolveProfile, steerFallbackList, usedProfilesByLiveSteers } from './m
 import { idempotencyKey, requestDigest } from './planner.mjs';
 import { createExecutors } from './apply.mjs';
 import { resolveScope, scopeToEntry, sameScopeId, domainOfScope } from './scope.mjs';
-import { STEER_TITLE } from './discovery.mjs';
+import { STEER_TITLE, activeMarker, markSteerTitle, stripActiveMarker } from './discovery.mjs';
 import { AGENTS_KEY } from './agent-state.mjs';
 import { openWorkers as openRegisterWorkers, readWorkers } from './supervision.mjs';
 import { formatQuotaLine, profilePool } from './quota.mjs';
@@ -507,6 +507,33 @@ export function lastAssistantText(timelinePayload) {
   return null;
 }
 
+/**
+ * Moves the active-steer tab marker ("● Steer E"): marks one agent, unmarks
+ * another. Best-effort and cosmetic only — never throws. Returns null on
+ * success (or when there is nothing to do: no paseoCli, disabled marker, or
+ * titles already correct), else the error message for `result.renameError`.
+ */
+export function applyActiveMarker({ paseoCli, marker, mark, unmark }) {
+  if (!paseoCli || !marker) return null;
+  const jobs = [];
+  if (mark?.id) {
+    const current = (mark.title ?? '').trim();
+    const want = markSteerTitle(mark.title ?? `Steer ${mark.slot}`, marker);
+    if (current !== want) jobs.push([mark.id, want]);
+  }
+  if (unmark?.id && unmark.id !== mark?.id) {
+    const current = (unmark.title ?? '').trim();
+    const want = stripActiveMarker(unmark.title ?? `Steer ${unmark.slot}`, marker);
+    if (current !== want) jobs.push([unmark.id, want]);
+  }
+  try {
+    for (const [id, title] of jobs) paseoCli(['agent', 'update', id, '--name', title]);
+    return null;
+  } catch (error) {
+    return error.message;
+  }
+}
+
 /** Retired scopes never coordinate here again; revival needs an explicit un-retire. */
 function refuseIfRetired(status) {
   if (status.state?.retired === true) {
@@ -519,7 +546,7 @@ function refuseIfRetired(status) {
  * re-read, check the expected epoch and active steer, write, read back, release;
  * the handoff is delivered after the lock is released.
  */
-export async function switchSteer({ client, discovery, toSlot, apply = false, send = true, wait = false, waitTimeoutMs = 600_000, notifyPrevious = false, language = runtime().handoffLanguage, git, lock = withLock, now = () => new Date(), config = null, workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, callerId = process.env.PASEO_AGENT_ID }) {
+export async function switchSteer({ client, discovery, toSlot, apply = false, send = true, wait = false, waitTimeoutMs = 600_000, notifyPrevious = false, language = runtime().handoffLanguage, git, lock = withLock, now = () => new Date(), config = null, workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, callerId = process.env.PASEO_AGENT_ID, paseoCli = null }) {
   const status = steerStatus(discovery);
   if (!status.workspace || !status.state) throw new SwitchRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
@@ -553,7 +580,7 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
   const packet = handoffWithBrief(status, { from: fromInfo, to, epoch: expected.epoch, git: gitSnapshot, lastMessage, language }, { discovery, git, language, workerModel, quotaSnapshot, quotaWarnPct });
   const result = {
     repo: status.repo, from: fromInfo.slot, to: toSlot, epoch: expected.epoch + 1, packet,
-    packetChars: packet.length, checkpoint: Boolean(status.checkpoint?.task), applied: false, delivered: false, deliveryError: null, reply: null, previousNotified: false, selfTakeover,
+    packetChars: packet.length, checkpoint: Boolean(status.checkpoint?.task), applied: false, delivered: false, deliveryError: null, reply: null, previousNotified: false, selfTakeover, renameError: null,
   };
   if (!apply) return result;
 
@@ -570,6 +597,11 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
     if (written?.epoch !== next.epoch || written?.activeSteer !== toSlot) throw new Error('Steer switch not verifiable after write');
   });
   result.applied = true;
+  result.renameError = applyActiveMarker({
+    paseoCli, marker: activeMarker(config),
+    mark: { id: to.id, title: to.title ?? null, slot: toSlot },
+    unmark: from ? { id: from.id, title: from.title ?? null, slot: from.slot } : null,
+  });
   if (send && !selfTakeover) { // never message oneself; the brief is only returned
     try {
       await client.agents.ref(to.id).send(packet);
@@ -606,7 +638,7 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
  * refuse it as ambiguous. The packet preview names a placeholder id; the applied
  * packet carries the real one.
  */
-export async function freshSteer({ client, discovery, config, apply = false, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, now = () => new Date(), workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 90 }) {
+export async function freshSteer({ client, discovery, config, apply = false, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, now = () => new Date(), workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 90, paseoCli = null }) {
   const status = steerStatus(discovery);
   if (!status.workspace || !status.state) throw new SwitchRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
@@ -635,7 +667,7 @@ export async function freshSteer({ client, discovery, config, apply = false, lan
   const scopeId = discovery.scope?.id ?? status.repo;
   const labels = { [LABEL.repo]: status.repo, [LABEL.role]: 'steer', [LABEL.slot]: slot, [LABEL.scope]: scopeId };
   const request = {
-    workspaceId: status.workspace.id, title: `Steer ${slot}`, labels,
+    workspaceId: status.workspace.id, title: markSteerTitle(`Steer ${slot}`, activeMarker(config)), labels,
     config: { provider: `${profile.provider}/${profile.model}`, ...(profile.mode ? { modeId: profile.mode } : {}), ...(profile.thinking ? { thinkingOptionId: profile.thinking } : {}) },
   };
   const key = idempotencyKey(status.repo, 'steer', slot, `fresh-e${expected.epoch}`, requestDigest(request));
@@ -645,7 +677,7 @@ export async function freshSteer({ client, discovery, config, apply = false, lan
   const result = {
     repo: status.repo, slot, from: single?.id ?? null, to: null, epoch: expected.epoch + 1, profile: profile.name,
     provider: profile.provider, model: profile.model, idempotencyKey: key, packet: '', packetChars: 0,
-    checkpoint: Boolean(status.checkpoint?.task), applied: false, delivered: false, deliveryError: null, previousNotified: false, reused: false,
+    checkpoint: Boolean(status.checkpoint?.task), applied: false, delivered: false, deliveryError: null, previousNotified: false, reused: false, renameError: null,
     warnings, fallbackFrom: profile.name !== profileName ? profileName : null,
   };
   if (!apply) {
@@ -711,6 +743,10 @@ export async function freshSteer({ client, discovery, config, apply = false, lan
   result.from = from.id;
   result.applied = true;
   result.to = freshId;
+  result.renameError = applyActiveMarker({ // the new agent is created marked; only the retired one loses the marker
+    paseoCli, marker: activeMarker(config),
+    mark: null, unmark: { id: from.id, title: from.title ?? null, slot },
+  });
   result.packet = handoffWithBrief(status, { from, to: { slot, id: freshId }, epoch: expected.epoch, git: gitSnapshot, lastMessage: await hintOf(client, from.id), language }, { discovery, git, language, workerModel, quotaSnapshot, quotaWarnPct });
   result.packetChars = result.packet.length;
   try {

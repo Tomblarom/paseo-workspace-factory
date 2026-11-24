@@ -355,6 +355,7 @@ async function takeoverIfNonActive(
     git: createGit(),
     config,
     callerId: agentId,
+    paseoCli: createPaseoCli(),
   };
   const switched: any = await switchSteer(switchOptions);
   return { from: switched.from, to: switched.to, epoch: switched.epoch };
@@ -419,6 +420,7 @@ export async function applyFresh(
     git,
     lookupReceipt: lookupCreationReceipt,
     execute: createExecutors(executeOptions),
+    paseoCli: createPaseoCli(),
   };
   const applied: any = await freshSteer(applyOptions);
   return applied;
@@ -569,7 +571,7 @@ export async function applySwitch(
   { paseo }: PluginHandlerContext,
   loader: ConfigLoader,
 ): Promise<any> {
-  const { discovery } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
+  const { config, discovery } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
   const to = checkedSlot(input.to, "--to");
   const git = createGit();
   const dryOptions: any = { client: paseo, discovery, toSlot: to, apply: false, git };
@@ -580,7 +582,7 @@ export async function applySwitch(
       "Something changed since the switch preview (for example another switch or checkpoint). Run /factory switch again and confirm the new preview.",
     );
   }
-  const applyOptions: any = { client: paseo, discovery, toSlot: to, apply: true, send: true, git };
+  const applyOptions: any = { client: paseo, discovery, config, toSlot: to, apply: true, send: true, git, paseoCli: createPaseoCli() };
   const applied: any = await switchSteer(applyOptions);
   return applied;
 }

@@ -546,6 +546,27 @@ export function createExecutors({ client, gh, git, paseoCli, sleep = (ms) => new
       throw new Error(`labels.migrate needs target workspace or agent, got ${target}`);
     },
 
+    async 'labels.set'(op) {
+      const { agentId, labels } = op.params ?? {};
+      if (!agentId || !labels || typeof labels !== 'object' || !Object.keys(labels).length) {
+        throw new Error('labels.set needs agentId and at least one label');
+      }
+      const known = new Set(Object.values(LABEL));
+      for (const [key, value] of Object.entries(labels)) {
+        if (!known.has(key)) throw new Error(`labels.set refuses unknown label ${JSON.stringify(key)} (only wsf.* factory labels)`);
+        if (typeof value !== 'string' || !value) throw new Error(`labels.set needs a non-empty string for ${key}`);
+      }
+      const handle = client.agents.ref(agentId);
+      const before = (await handle.refresh())?.agent;
+      if (!before || before.archivedAt) throw new Error(`Agent ${agentId} is missing or archived`);
+      paseoCli(['agent', 'update', before.id, '--label', Object.entries(labels).map(([k, v]) => `${k}=${v}`).join(',')]);
+      const after = (await handle.refresh())?.agent;
+      for (const [key, value] of Object.entries(labels)) {
+        if (after?.labels?.[key] !== value) throw new Error(`Agent ${before.id} label ${key} is ${after?.labels?.[key]}, expected ${value}`);
+      }
+      return { agentId: before.id, labels: { ...labels } };
+    },
+
     async 'workspace.archive'(op) {
       const { workspaceId, agents: plannedAgents } = op.params;
       if (!workspaceId || !Array.isArray(plannedAgents)) throw new Error('workspace.archive needs workspaceId and the planned agent list');

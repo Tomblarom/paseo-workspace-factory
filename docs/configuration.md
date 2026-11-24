@@ -21,6 +21,7 @@ The config is looked up in this order: `--config <path>`, `$PASEO_FACTORY_CONFIG
 | `steers.slots` | Slot letter (A–Z) → profile name, in priority order: A first, then B, C, … (priority = slot order, 1=A, 2=B). Changing a slot's profile does not change an existing steer; the plan only reports the difference. Default is a single steer `A`; add `B`, `C`, … with their profiles as needed. Steer slots never shift: `steer set` replaces the slot's profile, a number addresses an existing position (2 is B), and only a free letter within reach creates a slot — no new gaps (existing configs still load). |
 | `steers.prepare` | Slots created for every repository (default `["A"]`). Overridden per run with `plan --slots` (must be a subset of defined slots). Advisor slots are only planned when they are in `prepare`. |
 | `steers.initialActive` | Active steer after provisioning (must be in `prepare` and must not be an advisor slot; with `--slots` it falls back to the first slot when needed). At least one non-advisor slot is required. |
+| `steers.activeMarker` | Tab-title prefix on the active steer (`● Steer E`; default `"●"`). `switch --apply`, `fresh` and resume-takeover move it to the new active steer and strip it from the old one (best-effort renames via `paseo agent update --name`); empty disables the marker. Title matching tolerates the prefix. |
 | `workers.priority` | Ordered profile-name list for workers, highest priority first. A missing `priority` reads as `[defaultProfile]`; writing sets `defaultProfile` to `priority[0]` for older readers. |
 | `workers.defaultProfile` | First entry of `workers.priority`, kept for backwards compatibility. Prefer `workers.priority`. |
 | `advisors.profiles` | Optional purpose → profile name mapping for second opinions (see below). A validation warning is shown when a mapped profile is not advisor-tagged. |
@@ -45,6 +46,8 @@ Existing agents can become steers. Unlabelled agents in the main workspace whose
 ## Label and metadata prefix
 
 Factory labels and metadata keys use the neutral `wsf.*` prefix (see [concepts](concepts.md)). Records created by the pilot still carry `ari.wsf.*`: they are read transparently and a normal `plan` proposes `labels.migrate` ops to rewrite them. No configuration is needed. `scopes` shows the hint `legacy-prefix` only while an old key still lacks its `wsf.*` counterpart. Paseo cannot remove agent labels, so after the migration the old labels stay next to their new counterparts; that counts as done: no hint, and `scopes --json` marks the row `legacyKeysMigrated: true`.
+
+`labels [scope|agent-id] [--json]` audits the agent labels of every scope (or one scope/agent): steers should carry `wsf.repo`/`wsf.scope`/`wsf.role`/`wsf.slot`, workers `wsf.scope`/`wsf.role`/`wsf.owner`, and pending `ari.wsf.*` keys are migrated along. Dry-run is the default (one line per agent with its fix); `--apply` sets/overwrites the labels via `agent update` (verified after the write). Archived agents and agents of unrelated scopes are never touched; agents whose role, slot or owner cannot be derived are reported without a fix.
 
 ## Scopes
 

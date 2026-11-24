@@ -10,14 +10,43 @@ import { LABEL, METADATA_KEY, parentOf } from './paseo.js';
 import { validScope } from './scope.js';
 
 /**
+ * Marker prefix on the active steer's tab title ("● Steer E"); the single
+ * constant for it. Configurable per repository via `steers.activeMarker`
+ * (empty disables the marker); see activeMarker().
+ */
+const ACTIVE_STEER_MARKER = '●';
+
+/** Effective active-steer marker for a config: the default "●" unless `steers.activeMarker` overrides it (empty disables). */
+function activeMarker(config) {
+  const value = config?.steers?.activeMarker;
+  return value === undefined || value === null ? ACTIVE_STEER_MARKER : value;
+}
+
+/** Removes the leading "<marker> " prefix from a tab title (trims; idempotent). */
+function stripActiveMarker(title, marker = ACTIVE_STEER_MARKER) {
+  const trimmed = typeof title === 'string' ? title.trim() : '';
+  if (marker && trimmed.startsWith(marker)) return trimmed.slice(marker.length).replace(/^\s+/, '');
+  return trimmed;
+}
+
+/** Adds the "<marker> " prefix to a tab title unless already present (idempotent; empty marker strips instead). */
+function markSteerTitle(title, marker = ACTIVE_STEER_MARKER) {
+  const base = stripActiveMarker(title, marker);
+  return marker ? `${marker} ${base}` : base;
+}
+
+/**
  * Legacy steer titles: "Steer A" plus an optional suffix — bracketed
  * ("Steer A [kn]", "Steer A (kn)") or after a separator ("Steer A · fp") —
  * matched case-insensitively ("steer a"). Group 1 is always the UPPERCASE slot
  * letter, so planner.mjs:300 (`match(STEER_TITLE)[1] === slot`) works unchanged.
  * A digit ("Steer 3") never matches here: it is only a digit candidate, never
- * auto-assigned (see STEER_DIGIT_TITLE).
+ * auto-assigned (see STEER_DIGIT_TITLE). An optional leading run of symbol
+ * characters (the active-steer marker, e.g. "● Steer E") is tolerated and
+ * ignored; word characters never match there, so "My Steer A" still rejects.
  */
-const STEER_TITLE_PATTERN = String.raw`^steer\s+([a-z])(?:\s*(?:\([^()]*\)|\[[^\]]*\])|\s*[·\-–—:|]\s*\S.*)?$`;
+const MARKER_PREFIX_PATTERN = String.raw`(?:[^\w\s]+\s+)?`;
+const STEER_TITLE_PATTERN = String.raw`^${MARKER_PREFIX_PATTERN}steer\s+([a-z])(?:\s*(?:\([^()]*\)|\[[^\]]*\])|\s*[·\-–—:|]\s*\S.*)?$`;
 class SteerTitleRegExp extends RegExp {
   exec(value) {
     const match = super.exec(value);
@@ -26,8 +55,8 @@ class SteerTitleRegExp extends RegExp {
   }
 }
 const STEER_TITLE = new SteerTitleRegExp(STEER_TITLE_PATTERN, 'i');
-/** Digit steer titles ("Steer 3", same suffix rules): candidates for explicit --adopt only. */
-const STEER_DIGIT_TITLE = /^steer\s+(\d+)(?:\s*(?:\([^()]*\)|\[[^\]]*\])|\s*[·\-–—:|]\s*\S.*)?$/i;
+/** Digit steer titles ("Steer 3", same suffix and marker-prefix rules): candidates for explicit --adopt only. */
+const STEER_DIGIT_TITLE = new RegExp(String.raw`^${MARKER_PREFIX_PATTERN}steer\s+(\d+)(?:\s*(?:\([^()]*\)|\[[^\]]*\])|\s*[·\-–—:|]\s*\S.*)?$`, 'i');
 const MAIN_TITLE = /(^|· )Main$/;
 
 function real(path, realpath = realpathSync) {
@@ -846,4 +875,4 @@ export function discoverRepository(entry, { config, gh, git, checkouts, paseo, r
   };
 }
 
-export { STEER_TITLE, STEER_DIGIT_TITLE };
+export { STEER_TITLE, STEER_DIGIT_TITLE, ACTIVE_STEER_MARKER, activeMarker, stripActiveMarker, markSteerTitle };

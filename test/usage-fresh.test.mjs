@@ -220,7 +220,7 @@ test('fresh apply: new agent of the same profile, epoch bump, both deliveries; t
   assert.match(result.packet, /Task: Ship it/);
 
   const created = world.agents.find((a) => a.id === result.to);
-  assert.equal(created.title, 'Steer A');
+  assert.equal(created.title, '● Steer A');
   assert.equal(created.provider, 'codex');
   assert.equal(created.model, 'gpt-6.2-sol');
   assert.deepEqual(created.labels, { [LABEL.repo]: REPO, [LABEL.role]: 'steer', [LABEL.slot]: 'A', [LABEL.scope]: REPO });
