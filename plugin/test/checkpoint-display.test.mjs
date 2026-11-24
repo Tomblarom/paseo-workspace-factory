@@ -101,12 +101,10 @@ test("shortenCheckpoint falls back from next=none to status, then task", () => {
   );
 });
 
-test("shortenCheckpoint clips a long summary to about 60 chars", () => {
+test("shortenCheckpoint keeps the full title even when it exceeds 60 characters", () => {
   const next = "Rewrite the entire authentication flow to support passkeys and hardware tokens";
   const { summary } = shortenCheckpoint(["CHECKPOINT", "task: t", `next: ${next}`].join("\n"));
-  assert.ok(!summary.includes("\n"));
-  assert.ok(summary.length <= 61);
-  assert.ok(summary.endsWith("…"));
+  assert.equal(summary, next);
 });
 
 beforeEach(() => {

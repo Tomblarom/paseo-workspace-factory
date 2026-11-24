@@ -10,14 +10,8 @@ const FENCE = /^\s*(`{3,})([^`]*)$/;
 const NONE = /^(keine?|none|n\/a|-)\.?$/i;
 const STATUS = /^(done|partial|blocked)$/i;
 
-const SUMMARY_MAX = 60;
-
 function oneLine(value: string): string {
   return value.replace(/\s+/g, " ").trim();
-}
-
-function clip(value: string, max: number): string {
-  return value.length > max ? `${value.slice(0, max).trimEnd()}…` : value;
 }
 
 /**
@@ -80,7 +74,7 @@ export function shortenCheckpoint(text: string): { before: string; summary: stri
   const next = fields.next && !NONE.test(fields.next) ? fields.next : null;
   const status =
     fields.status && STATUS.test(fields.status.trim()) ? fields.status.trim().toLowerCase() : null;
-  const summary = clip(oneLine(next ?? status ?? fields.task), SUMMARY_MAX);
+  const summary = oneLine(next ?? status ?? fields.task);
   return {
     before: lines.slice(0, fenced ? open : start).join("\n"),
     summary,
