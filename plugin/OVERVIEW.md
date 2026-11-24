@@ -4,7 +4,7 @@ Workspace Factory provisions and steers standardized Paseo workspaces from GitHu
 
 The plugin speaks to the daemon through RPCs. Reads show status and dry run plans. Writes stay two stage: a plan or preview first, then a confirm step that quotes the stored plan hash or the preview fingerprint. The server recomputes the fingerprint from fresh state and refuses stale previews, so a write never runs without the preview shown in the panel.
 
-The `/factory` slash command offers status, scopes, cleanup, plan, apply, checkpoint, switch, and resume. Without a scope address, commands use the scope of the current workspace; in workers the command refuses with a hint. The Factory panel shows results with confirm buttons. Command Center items open the same panel. An optional sidebar entry shows a compact steer status.
+The `/factory` slash command offers status, scopes, cleanup, plan, apply, checkpoint, switch, and resume. Without a scope address, commands use the scope of the current workspace; in workers the command refuses with a hint. The Factory panel shows results with confirm buttons. Command Center items open the same panel. A sidebar entry shows a compact steer status; it is shown or hidden in Paseo's own sidebar settings.
 
 ## Cold context
 
@@ -16,7 +16,7 @@ The optional idle cleanup shrinks cold agents automatically: mode `compact-warm`
 
 The plugin needs the factory config file on the daemon host, the same file the factory CLI reads. It also needs Paseo 0.16.2 or later on both the daemon and the app. The daemon host needs git, the gh CLI, the paseo CLI, flock, and Node 22 or later.
 
-Settings live under Settings, Plugins, Factory. The host section edits steer slots, the prepare list, the start steer, the worker default profile, and the profiles they use, with provider, model, thinking, and mode taken from the live provider catalog. The idle cleanup section holds the automation mode (default off), thresholds, providers, roles, and the clear acknowledgement. The sidebar section holds one device switch for the sidebar entry. It defaults to off.
+Settings live under Settings, Plugins, Factory. The host section edits steer slots, the prepare list, the start steer, the worker default profile, and the profiles they use, with provider, model, thinking, and mode taken from the live provider catalog. The idle cleanup section holds the automation mode (default off), thresholds, providers, roles, and the clear acknowledgement. The chat display section holds one host-wide switch for CHECKPOINT blocks in chat: on (default) shows the full block, off shortens it to one summary line (display only, no token savings). The sidebar section notes that the entry is shown or hidden in Paseo's own sidebar settings.
 
 ## Capabilities and limits
 

@@ -22,7 +22,7 @@ Sources checked (Paseo 0.16.2: local `paseo plugin init` scaffold plus the deplo
 | (a) `/factory status\|checkpoint\|switch\|plan` slash commands, two-stage with plan hash | Feasible via `addSlashCommand` (client-side) + RPC + panel/modal for preview and confirm |
 | (b) Execution via plugin RPC; factory core from `src/` reused | Feasible; core must be vendored under `server/` (or shipped as an npm dependency) — imports from outside the package do not exist |
 | (c) Command Center entries | Feasible via `addCommandCenterItem` (`global`/`workspace`/`agent`) |
-| (d) Settings screen for steer slots / worker default profile, catalog-backed, sidebar entry default off | Feasible via `addSettingsScreen` + `defineSettings` (`host` scope; `device` scope for the sidebar toggle); provider catalog via `paseo.providers` |
+| (d) Settings screen for steer slots / worker default profile, catalog-backed, sidebar entry | Feasible via `addSettingsScreen` + `defineSettings` (`host` scope, including the chat-display toggle); provider catalog via `paseo.providers`. The sidebar entry is registered synchronously and shown/hidden in Paseo's own sidebar settings |
 | (e) Agent tab order (Steers A..Z, then workers by number) | No native interface; Paseo owns tabs. Convention + read-only panel only; never edit state files |
 | (f) `pluginsEnabled` prerequisite | Describe only (done below). Not enabled by this task; nothing installed |
 
@@ -90,7 +90,7 @@ Design:
 
 - `host`-scope documents for the factory configuration: `factory-config` (steer slots `A`–`Z` → profile name, `prepare` list, `initialActive`, worker `priority` list, profiles with advisor/sensitive flags, quota), plus `factory-cleanup`, `factory-resume` and `factory-supervision` for idle cleanup, resume and supervision. Schema defaults must make `{}` parse into a complete document (define a single-steer-`A` default mirroring `config.example.json`).
 - Catalog-backed selects via the handler/client `paseo.providers` API ([SDK](https://paseo.sh/docs/sdk/reference.md#clientproviders)): `snapshot()` (the factory already consumes `result.entries` in `readPaseoState`), `listModels`, `listModes`, `listFeatures`, `waitForReady`; reuse the `validateProfilesAgainstCatalog` logic for the same "not startable" conflicts the CLI reports.
-- Sidebar entry default off: `addSidebarHeaderItem`/`addSidebarFooterItem` take only `{ id, title, Component }` — there is no static default-hidden flag, and Settings → Sidebar reorder/hide is user-owned. The native way to default off is runtime registration: both add-functions "work after the entry returns" and return a remover, "the item appears and disappears without a reload" ([reference](https://paseo.sh/docs/plugins/reference.md#add-and-remove-items-at-runtime)). Drive that from a `device`-scope `sidebarVisible` setting defaulting to `false`, toggled from the settings screen. The settings stay reachable via the plugin row cog either way.
+- Sidebar entry: registered synchronously in `contribute()` via `addSidebarHeaderItem`; Settings → Sidebar reorder/hide is user-owned. (A `device`-scope visibility toggle with runtime add/remove was tried and dropped: async registration never landed in Paseo's native sidebar list. The old `factory-sidebar` stored value is ignored.)
 - Optional follow-up (not in the first cut): a workspace row badge (`addWorkspaceRowBadgeItem`) showing the active steer per Main workspace row. Note these start visible with a Show-menu toggle.
 
 ## (e) Agent tab order: no native interface
@@ -121,7 +121,7 @@ A plugin is its own package (`paseo-plugin.json` + `package.json` with a `files`
 ```text
 plugin/
   paseo-plugin.json          # id, requirements.paseo >= <tested daemon>
-  index.client.tsx           # screens, sidebar item (runtime), slash command,
+  index.client.tsx           # screens, sidebar item, slash command,
                              # Command Center items, panel
   index.server.ts            # server.handle(...) per RPC + registerSettings
   shared/factory.ts          # defineRpc contracts + defineSettings documents
@@ -141,7 +141,7 @@ Small, each independently verifiable (`npm run typecheck`, install/reload on a t
 1. Scaffold + ping: `paseo plugin init`, one `factory.ping` RPC, no factory logic. Proves the boundary, toolchain, and daemon Node version.
 2. Read-only core: vendor planner/discovery/steer read paths under `server/factory/`; add `factory.status` + `factory.plan` RPCs, the `factory` slash command (status/plan), and the preview panel showing the plan hash.
 3. Command Center items for the same reads (workspace context).
-4. Settings screens: host-scope slots/profile document with catalog-backed selects; device-scope sidebar toggle defaulting to off; runtime sidebar add/remove.
+4. Settings screens: host-scope slots/profile document with catalog-backed selects; host-scope chat-display toggle defaulting to on; synchronous sidebar registration.
 5. Writes: `factory.apply {hash}`, `factory.checkpoint`, `factory.switch`, each requiring the stage-one artifact; confirm buttons in the panel plus `/factory apply <hash>` / `/factory switch --to B --apply`.
 6. Docs and packaging: `OVERVIEW.md`, manifest requirements, install instructions for a directory/Git source; re-verify the receipt pin on the target daemon.
 
@@ -156,7 +156,7 @@ Small, each independently verifiable (`npm run typecheck`, install/reload on a t
 - Core reuse: dev-time sync, no hand duplication. `npm run plugin:sync` (`scripts/plugin-sync.mjs`) copies `src/*.mjs` except the CLI entry to `plugin/server/factory/*.ts`, rewrites `.mjs` imports to `.js` for the TypeScript bundler resolution, and adds an `@ts-nocheck` banner. `src/` stays the single source of truth; re-run after `src/` changes. Rationale: the plugin compiler only bundles in-package files, and the scaffold typechecks `**/*.ts(x)` only, so `.ts` is the only documented shape; a daemon-side build copy from `../src` fails for Git `:plugin` installs where only the subdir is staged; an npm dependency needs a publish, a shrinkwrap, and npm on the daemon `PATH`; shelling out couples the plugin to an out-of-band binary install.
 - Config layering: the file stays the source of truth for `github`, `checkoutRoot`, `runtime`, and `knownLimits`; the host-scope settings document replaces slots, prepare, start steer, and the worker priority list and overlays profiles per name. The server re-validates the merged config with the CLI validator. Settings edits never touch live steers; the panel shows profile drift per steer.
 - Writes: `factory.apply` quotes the stored plan hash (stored authorization, same checks as the CLI); `factory.switch` and `factory.checkpoint` quote a preview fingerprint that the server recomputes from fresh state and refuses when stale. `/factory switch --apply` and `/factory checkpoint` only preview; the panel button confirms. RPC names stay lowercase with dots (`factory.switch.preview`).
-- Sidebar: device-scope `visible` defaulting to off, runtime add/remove; the entry ("Workspace Factory", with a resume counter for the active steer) opens the plugin settings page. Limit: sidebar props offer `openScreen` only — `openSettings(id)` exists solely on command contexts — so a dedicated screen hosts the same settings component. Startup sync reads the device document and stays hidden when unreadable.
+- Sidebar: registered synchronously; the entry ("Workspace Factory", with a resume counter for the active steer) opens the plugin settings page. Limit: sidebar props offer `openScreen` only — `openSettings(id)` exists solely on command contexts — so a dedicated screen hosts the same settings component. Chat display: a host-scope `checkpointInChat` toggle (default on) drives a timeline transformer that collapses CHECKPOINT blocks to one line when off.
 - Tab order: read-only recommendation only (steers A-Z, then workers); no layout manipulation, no state file edits.
 - Tests: pure logic (`shared/factory-args.ts`, `shared/preview.ts`, `shared/settings-validate.ts`) runs under `node --test` with type stripping; the root script passes `--experimental-strip-types` so Node 22.6+ works too.
 - Optional scope address: every `/factory` subcommand resolves the scope of the current workspace when no address is given (server-side, same resolution as the CLI). A workspace without a scope gets a clear error plus the adopting `plan` call. `scopes`/`cleanup` report on the whole instance and take no address.

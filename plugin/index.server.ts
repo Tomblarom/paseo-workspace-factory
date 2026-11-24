@@ -94,6 +94,7 @@ import {
 import {
   factoryCleanupSettings,
   factoryConfigSettings,
+  factoryDisplaySettings,
   factoryResumeSettings,
   factorySupervisionSettings,
 } from "./shared/settings.js";
@@ -103,7 +104,7 @@ export default function contribute(server: PluginServerContext) {
   const cleanupSettings = server.registerSettings(factoryCleanupSettings);
   const supervisionSettings = server.registerSettings(factorySupervisionSettings);
   const resumeSettings = server.registerSettings(factoryResumeSettings);
-  // factorySidebarSettings has scope "device": it belongs to the client (useSettings), the daemon must not register it.
+  server.registerSettings(factoryDisplaySettings);
   const loader = createConfigLoader(hostSettings);
   const readSettings = () => readCleanupSettings(cleanupSettings);
   const readSupervision = () => readSupervisionSettings(supervisionSettings);

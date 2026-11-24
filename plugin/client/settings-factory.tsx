@@ -16,7 +16,7 @@ import { CleanupSettingsSection } from "./settings-cleanup.js";
 import { ResumeSettingsSection } from "./settings-resume.js";
 import { factoryModelsList } from "../shared/factory.js";
 import { formatModelList, profileBadges } from "../shared/models-format.js";
-import { factoryConfigSettings, factorySidebarSettings } from "../shared/settings.js";
+import { factoryConfigSettings, factoryDisplaySettings } from "../shared/settings.js";
 import {
   validateFactorySettings,
   validateHostSettings,
@@ -25,7 +25,7 @@ import {
   type FactorySettingsValues,
   type ProviderEntry,
 } from "../shared/settings-validate.js";
-import { setSidebarVisible } from "./sidebar-visibility.js";
+import { setCheckpointInChat } from "./checkpoint-display.js";
 
 const STEERS_INFO =
   "A steer is an agent that coordinates one project. You can keep several (A, B, C \u2026), each on its own provider or model; one is in charge at a time and hands over with /factory switch when it hits a limit or its chat gets too long.";
@@ -93,7 +93,7 @@ type CatalogState =
 export function FactorySettings({ theme, layout }: PluginSurfaceProps) {
   const paseo = usePaseo();
   const configState = useSettings(factoryConfigSettings);
-  const sidebarState = useSettings(factorySidebarSettings);
+  const displayState = useSettings(factoryDisplaySettings);
   const [draft, setDraft] = useState<FactorySettingsValues | null>(null);
   const [baseRevision, setBaseRevision] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -226,10 +226,10 @@ export function FactorySettings({ theme, layout }: PluginSurfaceProps) {
     }
   }
 
-  async function toggleSidebar(next: boolean): Promise<void> {
-    if (sidebarState.status !== "ready") return;
-    const ok = await sidebarState.save({ visible: next }, sidebarState.revision);
-    if (ok) setSidebarVisible(next);
+  async function toggleDisplay(next: boolean): Promise<void> {
+    if (displayState.status !== "ready") return;
+    const ok = await displayState.save({ checkpointInChat: next }, displayState.revision);
+    if (ok) setCheckpointInChat(next);
   }
 
   if (configState.status === "loading") {
@@ -735,30 +735,41 @@ export function FactorySettings({ theme, layout }: PluginSurfaceProps) {
         </SettingsCard>
       </SettingsSection>
 
-      <SettingsSection title="Sidebar">
+      <SettingsSection title="Chat display">
         <SettingsCard>
-          {sidebarState.status === "ready" ? (
+          {displayState.status === "ready" ? (
             <SettingsSwitch
-              label="Show in Sidebar"
-              hint="Adds a Workspace Factory row to the sidebar that opens these settings, on this device only. Off by default."
-              value={sidebarState.values.visible}
-              disabled={sidebarState.saving}
-              onValueChange={(next) => void toggleSidebar(next)}
+              label="Show CHECKPOINT blocks in chat"
+              hint="The model still writes the full CHECKPOINT block; only the chat display is shortened to one line. This saves no model tokens. Shortened answers render as plain text."
+              value={displayState.values.checkpointInChat}
+              disabled={displayState.saving}
+              onValueChange={(next) => void toggleDisplay(next)}
             />
-          ) : sidebarState.status === "invalid" ? (
+          ) : displayState.status === "invalid" ? (
             <SettingsAction
-              label="Sidebar entry"
-              hint={sidebarState.error}
-              actionLabel="Reset to hidden"
-              onPress={() => void sidebarState.reset()}
+              label="Chat display"
+              hint={displayState.error}
+              actionLabel="Reset to full blocks"
+              onPress={() => void displayState.reset().then((ok) => {
+                if (ok) setCheckpointInChat(true);
+              })}
             />
           ) : (
-            <SettingsRow label="Show Factory entry">
+            <SettingsRow label="Show CHECKPOINT blocks">
               <Text style={styles.muted}>
-                {sidebarState.status === "loading" ? "Loading…" : "Unavailable."}
+                {displayState.status === "loading" ? "Loading…" : "Unavailable."}
               </Text>
             </SettingsRow>
           )}
+        </SettingsCard>
+      </SettingsSection>
+
+      <SettingsSection title="Sidebar">
+        <SettingsCard>
+          <SettingsRow
+            label="Sidebar entry"
+            hint="The Workspace Factory row is shown or hidden in Paseo's own sidebar settings."
+          />
         </SettingsCard>
       </SettingsSection>
     </View>

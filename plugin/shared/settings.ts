@@ -76,13 +76,18 @@ export const factoryConfigSettings = defineSettings({
   }),
 });
 
-// Layout preference: the sidebar entry stays hidden until the user opts in.
-export const factorySidebarSettings = defineSettings({
-  id: "factory-sidebar",
-  scope: "device",
+// Removed: factory-sidebar (device). The sidebar entry is registered
+// unconditionally and shown/hidden in Paseo's own sidebar settings; any
+// stored factory-sidebar value is ignored.
+
+// Chat display preference: full CHECKPOINT blocks or one summary line.
+// The client entry reads this host setting before any settings screen opens.
+export const factoryDisplaySettings = defineSettings({
+  id: "factory-display",
+  scope: "host",
   version: 1,
   schema: z.object({
-    visible: z.boolean().default(false),
+    checkpointInChat: z.boolean().default(true),
   }),
 });
 

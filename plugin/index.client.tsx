@@ -11,12 +11,16 @@ import {
   resumeReasonLabel,
   resumeReasonOf,
 } from "./client/cold-panel.js";
+import { CheckpointShort, checkpointShortSchema } from "./client/checkpoint-short.js";
+import {
+  initCheckpointDisplay,
+  syncCheckpointDisplayFromSettings,
+} from "./client/checkpoint-display.js";
 import { FactoryPanel } from "./client/factory-panel.js";
 import { FactorySidebarItem, SETTINGS_SCREEN_ID } from "./client/factory-sidebar-item.js";
 import { submitFactoryCommand } from "./client/factory-submit.js";
 import { dismissFactoryResultPill, showFactoryResultPill } from "./client/result-pill.js";
 import { FactorySettings } from "./client/settings-factory.js";
-import { initSidebarController, syncSidebarFromSettings } from "./client/sidebar-visibility.js";
 import { assertSteerContext } from "./shared/agent-guard.js";
 import { factoryCold } from "./shared/factory.js";
 import { coldHintText, resumeReminderText } from "./shared/idle-cleanup.js";
@@ -196,9 +200,23 @@ export default function contribute(client: PluginClientContext) {
     title: "Workspace Factory",
     Component: FactorySettings,
   });
-  initSidebarController(client, FactorySidebarItem);
-  void syncSidebarFromSettings();
+  // Synchronous and unconditional: Paseo lists the entry in its own
+  // sidebar settings, where the user shows or hides it.
+  client.addSidebarHeaderItem({
+    id: "factory",
+    title: "Workspace Factory",
+    Component: FactorySidebarItem,
+  });
+  client.addTimelineRenderer({
+    kind: "factory-checkpoint",
+    version: 1,
+    schema: checkpointShortSchema,
+    Component: CheckpointShort,
+  });
+  const stopCheckpointDisplay = initCheckpointDisplay(client);
+  void syncCheckpointDisplayFromSettings();
   return () => {
+    stopCheckpointDisplay();
     void attentionFeed.release().catch(() => {});
     for (const pill of attentionPills.values()) {
       try {
