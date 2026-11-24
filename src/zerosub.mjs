@@ -107,8 +107,16 @@ async function defaultCreateClient({ url, cliPath }) {
  */
 export const CONTINUED_FROM_LABEL = 'zerosub.continued-from';
 
-/** Timeline row ZeroSub writes on the switched agent (`reason`, `outcome`, `resetsAt`, `continuedIn`, `continued`). */
-export const SWITCH_ROW_TYPE = 'zerosub-switch';
+/**
+ * Timeline row ZeroSub writes on the switched agent (server/service.ts
+ * appendRow): { type: 'plugin', kind: 'zerosub-switch', version: 1, data }.
+ * Contract (kapybara-org/zerosub#119, stable since 1.0.0): family, from, to,
+ * toFamily, at, reason, outcome, resetsAt, continuedIn ({ agentId, title }),
+ * continued. `detail` is never parsed; unknown reason/family values and
+ * missing optional fields are tolerated.
+ */
+export const SWITCH_ROW_KIND = 'zerosub-switch';
+export const SWITCH_ROW_TYPE = SWITCH_ROW_KIND;
 
 /** Creation metadata that pins a fresh agent to a ZeroSub account (Paseo 0.16+). */
 export const ACCOUNT_METADATA_KEY = 'zerosub.account';
@@ -125,25 +133,67 @@ export function continuedFromId(agent) {
   return id ? id : null;
 }
 
+function text(value) {
+  if (typeof value !== 'string') return null;
+  const v = value.trim();
+  return v ? v : null;
+}
+
+/** continuedIn is { agentId, title }; a bare string id is tolerated. */
+function continuedAgentId(value) {
+  if (typeof value === 'string') return text(value);
+  if (value && typeof value === 'object' && !Array.isArray(value)) return text(value.agentId);
+  return null;
+}
+
+/** Normalizes a zerosub-switch row's `data`; missing fields become null, `detail` is ignored. */
+export function parseSwitchData(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  return {
+    family: text(data.family),
+    from: text(data.from),
+    to: text(data.to),
+    toFamily: text(data.toFamily),
+    at: text(data.at),
+    reason: text(data.reason),
+    outcome: text(data.outcome),
+    resetsAt: text(data.resetsAt),
+    continued: data.continued === true,
+    continuedIn: continuedAgentId(data.continuedIn),
+  };
+}
+
+function switchRowData(entry) {
+  const item = entry?.item ?? entry;
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+  if (item.type !== 'plugin' || item.kind !== SWITCH_ROW_KIND) return null;
+  if (item.pluginId !== undefined && item.pluginId !== 'zerosub') return null;
+  return item.data ?? null;
+}
+
+/** All parsed zerosub-switch rows of a timeline payload, oldest first. */
+export function switchRowsFromTimeline(timelinePayload) {
+  const entries = timelinePayload?.entries;
+  if (!Array.isArray(entries)) return [];
+  return entries.map((entry) => parseSwitchData(switchRowData(entry))).filter(Boolean);
+}
+
+/** The latest zerosub-switch row, or null. */
+export function latestSwitchRow(timelinePayload) {
+  const rows = switchRowsFromTimeline(timelinePayload);
+  return rows.length ? rows[rows.length - 1] : null;
+}
+
 /**
  * Continuation pairs from one agent's timeline payload: the last
- * `zerosub-switch` row carrying a `continuedIn` agent id (at most one pair).
- * Rows are read tolerantly (`entries[].item` or the entry itself); rows of
- * other types, empty targets and self references are ignored. Pure; the
- * caller reads the timeline (origin agent id from context) and passes the
- * pairs into resolveContinuations.
+ * zerosub-switch row carrying a continuedIn agent id (at most one pair; also
+ * set when outcome is 'stayed'). Self references and other rows are ignored.
  */
 export function switchesFromTimeline(agentId, timelinePayload) {
   if (typeof agentId !== 'string' || !agentId) return [];
-  const entries = timelinePayload?.entries;
-  if (!Array.isArray(entries)) return [];
   let found = null;
-  for (const entry of entries) {
-    const row = entry?.item ?? entry;
-    if (!row || typeof row !== 'object') continue;
-    if (row.type !== SWITCH_ROW_TYPE) continue;
-    const target = typeof row.continuedIn === 'string' ? row.continuedIn.trim() : '';
-    if (target && target !== agentId) found = { agentId, continuedIn: target };
+  for (const row of switchRowsFromTimeline(timelinePayload)) {
+    if (row.continuedIn && row.continuedIn !== agentId) found = { agentId, continuedIn: row.continuedIn };
   }
   return found ? [found] : [];
 }

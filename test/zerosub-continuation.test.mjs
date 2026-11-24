@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import {
   ACCOUNT_METADATA_KEY, ACCOUNT_PIN_METHOD, ACCOUNT_PIN_PLUGIN_ID, CONTINUED_FROM_LABEL,
   continuedFromId, inheritContinuationLabels, normalizeZerosubState,
-  resolveContinuations, suggestAccountPin, switchesFromTimeline,
+  resolveContinuations, suggestAccountPin, switchesFromTimeline, latestSwitchRow, parseSwitchData,
 } from '../src/zerosub.mjs';
 import { applyContinuations, discoverRepository, remapWorkerParents } from '../src/discovery.mjs';
 import { planLabelFixes } from '../src/labels.mjs';
@@ -33,25 +33,28 @@ test('continuedFromId reads the stable source id', () => {
   assert.equal(continuedFromId(null), null);
 });
 
-test('switchesFromTimeline extracts the last continuedIn row', () => {
-  const row = (continuedIn, extra = {}) => ({ item: { type: 'zerosub-switch', reason: 'exhausted', outcome: 'continued', continuedIn, continued: true, ...extra } });
+test('switchesFromTimeline reads the real zerosub-switch plugin row', () => {
+  const row = (continuedIn, extra = {}) => ({ item: { type: 'plugin', kind: 'zerosub-switch', version: 1, data: { reason: 'exhausted', outcome: 'continued', continued: true, continuedIn, ...extra } } });
+  const ref = (agentId) => ({ agentId, title: 'T' });
   assert.deepEqual(
-    switchesFromTimeline('o', { entries: [{ item: { type: 'assistant_message', text: 'hi' } }, row('c1')] }),
+    switchesFromTimeline('o', { entries: [{ item: { type: 'assistant_message', text: 'hi' } }, row(ref('c1'))] }),
     [{ agentId: 'o', continuedIn: 'c1' }],
   );
-  // Entry-level fields (no item wrapper) and last-row-wins.
+  // Last row wins; continuedIn also counts with outcome 'stayed'.
   assert.deepEqual(
-    switchesFromTimeline('o', { entries: [{ type: 'zerosub-switch', continuedIn: 'c1' }, { type: 'zerosub-switch', continuedIn: 'c2' }] }),
+    switchesFromTimeline('o', { entries: [row(ref('c1')), row(ref('c2'), { outcome: 'stayed' })] }),
     [{ agentId: 'o', continuedIn: 'c2' }],
   );
-  // Other types, empty targets and self references are ignored.
-  assert.deepEqual(switchesFromTimeline('o', { entries: [{ item: { type: 'assistant_message', text: 'x' } }] }), []);
-  assert.deepEqual(switchesFromTimeline('o', { entries: [row(''), row('  ')] }), []);
-  assert.deepEqual(switchesFromTimeline('o', { entries: [row('o')] }), []);
+  // Old flat shape, other kinds, empty targets and self references are ignored.
+  assert.deepEqual(switchesFromTimeline('o', { entries: [{ item: { type: 'zerosub-switch', continuedIn: 'c1' } }] }), []);
+  assert.deepEqual(switchesFromTimeline('o', { entries: [{ item: { type: 'plugin', kind: 'other', data: { continuedIn: ref('c1') } } }] }), []);
+  assert.deepEqual(switchesFromTimeline('o', { entries: [row(null), row(ref('  ')), row(ref('o'))] }), []);
   assert.deepEqual(switchesFromTimeline('o', null), []);
-  assert.deepEqual(switchesFromTimeline('o', {}), []);
   assert.deepEqual(switchesFromTimeline('o', { entries: 'nope' }), []);
-  assert.deepEqual(switchesFromTimeline('', { entries: [row('c1')] }), []);
+  assert.deepEqual(switchesFromTimeline('', { entries: [row(ref('c1'))] }), []);
+  assert.equal(latestSwitchRow({ entries: [row(ref('c1'), { detail: 'x', family: 'claude', futureField: 1 })] }).continuedIn, 'c1');
+  assert.equal(parseSwitchData({ reason: 'new-reason', detail: 'ignored' }).continued, false);
+  assert.equal('detail' in parseSwitchData({ detail: 'x' }), false);
 });
 
 test('resolveContinuations follows label chains, skips archived/dangling/cyclic edges', () => {
