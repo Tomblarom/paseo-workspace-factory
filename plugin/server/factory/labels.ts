@@ -10,6 +10,7 @@
 import { LABEL, parentOf, newKeyForLegacyKey, pendingLegacyKeys } from './paseo.js';
 import { listScopes, resolveScope, sameScopeId } from './scope.js';
 import { STEER_TITLE } from './discovery.js';
+import { continuedFromId, resolveContinuations } from './zerosub.js';
 
 const LETTER = /^[A-Za-z]$/;
 
@@ -37,9 +38,15 @@ function noteRow(agent, scopeId, kind, note) {
  * steer parent of a live scope). Unattributed agents return no row (random
  * agents are never claimed); clean agents return no row either.
  */
-function classifyAgent(agent, { scopes, byId, byWorkspace, liveScopeOf }) {
+function classifyAgent(agent, { scopes, byId, byWorkspace, liveScopeOf, superseded }) {
   const labels = agent.labels ?? {};
   const role = labels[LABEL.role] ?? null;
+  // ZeroSub continuation tabs are the live agent of their origin's slot or
+  // worker (see zerosub.mjs); neither they nor the superseded origin are
+  // ever flagged, so the audit proposes no duplicate slot or worker labels.
+  const continuedOrigin = continuedFromId(agent);
+  if (continuedOrigin && byId.has(continuedOrigin)) return { attributed: true, row: null };
+  if (superseded?.has(agent.id)) return { attributed: true, row: null };
   const wsScope = byWorkspace.get(agent.workspaceId) ?? null;
   const labelScope = liveScopeOf(labels[LABEL.scope]) ?? liveScopeOf(labels[LABEL.repo]) ?? null;
   const parent = byId.get(parentOf(agent)) ?? null;
@@ -170,7 +177,7 @@ function compareRows(a, b) {
  * Unknown addresses and unattributed agents throw; clean agents simply
  * produce no row.
  */
-export function planLabelFixes(paseoState, { address } = {}) {
+export function planLabelFixes(paseoState, { address, switches = [] } = {}) {
   const scopes = listScopes(paseoState ?? {});
   const agents = paseoState?.agents ?? [];
   const byId = new Map(agents.map((a) => [a.id, a]));
@@ -179,7 +186,8 @@ export function planLabelFixes(paseoState, { address } = {}) {
     if (typeof value !== 'string' || !value) return null;
     return scopes.find((s) => sameScopeId(s.id, value)) ?? null;
   };
-  const ctx = { scopes, byId, byWorkspace, liveScopeOf };
+  const superseded = new Set(resolveContinuations(agents, switches).superseded);
+  const ctx = { scopes, byId, byWorkspace, liveScopeOf, superseded };
 
   let onlyScope = null;
   let onlyAgent = null;

@@ -4,6 +4,7 @@
 import { chmod, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { SLOT_PATTERN, isAdvisorProfile, isAdvisorSlot, isSensitiveProfile, slotOrder, validateConfig, validateProfilesAgainstCatalog, workerPriority } from './config.mjs';
 import { profileIsUnhealthy, quotaExhausted, profilePool, profileFamily, familyAccounts, familyExhausted, bestFamilyAccount, earliestFamilyReset } from './quota.mjs';
+import { suggestAccountPin } from './zerosub.mjs';
 
 /** Split "<provider>/<model>" (model may itself contain "/"). */
 export function parseProviderModel(spec) {
@@ -85,10 +86,12 @@ export function usedProfilesByLiveSteers(config, steers) {
  * entries (past the first) already used by a live steer are skipped, so no
  * two steers share a model by accident. Returns
  * `{ profile: { name, ...settings } | null, skipped: [{ name, reason }],
- * zerosubAccount: <id|null> }`. With `zerosub` (normalized ZeroSub state), a
- * profile whose family has accounts is judged by those accounts instead of the
- * usage snapshot: all accounts exhausted skips it (reason names the earliest
- * reset when known), otherwise the roomiest account id is reported.
+ * zerosubAccount: <id|null>, zerosubPin: <pin|null> }`. With `zerosub`
+ * (normalized ZeroSub state), a profile whose family has accounts is judged
+ * by those accounts instead of the usage snapshot: all accounts exhausted
+ * skips it (reason names the earliest reset when known), otherwise the
+ * roomiest account id is reported plus a `zerosubPin` suggestion
+ * ({ pluginId, method, accountId, metadata }) for creation.
  */
 export function resolveProfile(config, providerEntries, list, { role = 'worker', advisorSlot = false, usedProfiles = [], repoPublic = null, quotaSnapshot = null, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 90, profileHealth = null, now = Date.now(), zerosub = null } = {}) {
   const skipped = [];
@@ -146,9 +149,10 @@ export function resolveProfile(config, providerEntries, list, { role = 'worker',
       continue;
     }
     const account = zerosub ? bestFamilyAccount(zerosub, family, { exhaustedPct: quotaExhaustedPct, now }) : null;
-    return { profile: { name, ...config.profiles[name] }, skipped, zerosubAccount: account ? account.id : null };
+    const pin = suggestAccountPin(zerosub, family, { exhaustedPct: quotaExhaustedPct, now });
+    return { profile: { name, ...config.profiles[name] }, skipped, zerosubAccount: account ? account.id : null, zerosubPin: pin };
   }
-  return { profile: null, skipped, zerosubAccount: null };
+  return { profile: null, skipped, zerosubAccount: null, zerosubPin: null };
 }
 
 /** `paseo run` flags for a resolved profile. */

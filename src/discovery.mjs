@@ -4,8 +4,9 @@ import { basename, join, resolve } from 'node:path';
 import { realpathSync, statSync } from 'node:fs';
 import { resolveGitHub, parseRepoInput } from './github.mjs';
 import { classifyCheckouts, inspectCloneTarget } from './local.mjs';
-import { LABEL, METADATA_KEY, parentOf } from './paseo.mjs';
+import { LABEL, METADATA_KEY, PARENT_LABEL, parentOf } from './paseo.mjs';
 import { validScope } from './scope.mjs';
+import { continuedFromId, inheritContinuationLabels, resolveContinuations } from './zerosub.mjs';
 
 /**
  * Marker prefix on the active steer's tab title ("● Steer E"); the single
@@ -246,6 +247,89 @@ function allWorkers(paseo, steerIds, scopeId) {
 }
 
 /**
+ * ZeroSub continuation tabs stand in for their origin (see zerosub.mjs):
+ * every superseded origin in `list` is replaced by its live continuation,
+ * which inherits the origin's factory labels (missing keys only) so slot
+ * attribution and status display follow the live tab. Copies carry
+ * `continuedFrom: <originId>`; an archived origin stays archived through
+ * the copy, so it never resurfaces as a live steer. Results dedupe by id;
+ * agents without a resolvable continuation pass through untouched.
+ * `switches` carries timeline-derived { agentId, continuedIn } pairs.
+ */
+export function applyContinuations(list, agents, switches = []) {
+  const resolution = resolveContinuations(agents ?? list ?? [], switches);
+  const byId = new Map((agents ?? list ?? []).map((agent) => [agent?.id, agent]));
+  const seen = new Set();
+  const out = [];
+  for (const agent of list ?? []) {
+    if (!agent || typeof agent.id !== 'string' || !agent.id) {
+      out.push(agent);
+      continue;
+    }
+    const liveId = resolution.liveFor[agent.id];
+    if (liveId && liveId !== agent.id && byId.get(liveId)) {
+      const live = byId.get(liveId);
+      const copy = {
+        ...live,
+        labels: inheritContinuationLabels(live, agent),
+        continuedFrom: agent.id,
+        ...(agent.archivedAt && !live.archivedAt ? { archivedAt: agent.archivedAt } : {}),
+      };
+      if (!seen.has(copy.id)) {
+        seen.add(copy.id);
+        out.push(copy);
+      }
+      continue;
+    }
+    const origin = continuedFromId(agent);
+    if (origin && byId.has(origin) && !seen.has(agent.id)) {
+      seen.add(agent.id);
+      out.push({ ...agent, continuedFrom: origin });
+      continue;
+    }
+    if (!seen.has(agent.id)) {
+      seen.add(agent.id);
+      out.push(agent);
+    }
+  }
+  return out;
+}
+
+/**
+ * Steer ids that match parent-linked workers: mapped steer ids plus the
+ * superseded origins they stand in for (workers still point at the origin).
+ */
+function continuationMatchIds(mapped, agents, switches = []) {
+  const ids = new Set((mapped ?? []).map((agent) => agent?.id).filter((id) => typeof id === 'string' && id));
+  const resolution = resolveContinuations(agents ?? [], switches);
+  for (const [origin, live] of Object.entries(resolution.liveFor)) {
+    if (ids.has(live)) ids.add(origin);
+  }
+  return ids;
+}
+
+/**
+ * Rewrites worker parent links that point at a superseded origin to the live
+ * continuation, so parentSlot attribution follows the live steer. Copies
+ * carry `parentContinuedFrom: <originId>`; workers without a superseded
+ * parent pass through untouched.
+ */
+export function remapWorkerParents(workers, agents, switches = []) {
+  const resolution = resolveContinuations(agents ?? [], switches);
+  if (!Object.keys(resolution.liveFor).length) return [...(workers ?? [])];
+  return (workers ?? []).map((worker) => {
+    const parent = parentOf(worker);
+    const live = parent ? resolution.liveFor[parent] : null;
+    if (!live || live === parent) return worker;
+    return {
+      ...worker,
+      labels: { ...(worker.labels ?? {}), [PARENT_LABEL]: live },
+      parentContinuedFrom: parent,
+    };
+  });
+}
+
+/**
  * Unlabelled live agents of one workspace titled like a steer with a digit
  * ("Steer 3"): never auto-assigned to a slot, only reported so the user can
  * adopt one explicitly (`--adopt <slot>=<id>`).
@@ -369,7 +453,7 @@ function worktreeParent({ projectRootPath, dirReal, checkouts, realpath, liveSco
  * discovery the title does not matter; ambiguity is reported, never resolved
  * silently.
  */
-function buildWorktreeDiscovery(matched, { normalized, parentDir, checkouts, paseo, realpath, checkoutIssues, git, liveScopes }) {
+function buildWorktreeDiscovery(matched, { normalized, parentDir, checkouts, paseo, realpath, checkoutIssues, git, liveScopes, zerosubSwitches = [] }) {
   const first = matched[0] ?? null;
   const dirReal = first ? real(first.workspaceDirectory, realpath) : null;
   const base = first ? basename(first.workspaceDirectory ?? '') : null;
@@ -425,7 +509,7 @@ function buildWorktreeDiscovery(matched, { normalized, parentDir, checkouts, pas
   const projects = paseo.projects.filter((p) => projectIds.has(p.projectId));
   const mainCandidates = matched;
 
-  const labelled = paseo.agents.filter((a) => a.labels?.[LABEL.role] === 'steer' && matchKeys.has(a.labels?.[LABEL.repo]?.toLowerCase()));
+  const labelledFound = paseo.agents.filter((a) => a.labels?.[LABEL.role] === 'steer' && matchKeys.has(a.labels?.[LABEL.repo]?.toLowerCase()));
   const agentsById = new Map((paseo.agents ?? []).map((a) => [a.id, a]));
   const legacyAll = mainWorkspace
     ? paseo.agents.filter((a) => a.workspaceId === mainWorkspace.id && !a.archivedAt && !a.labels?.[LABEL.role] && STEER_TITLE.test((a.title ?? '').trim()))
@@ -436,9 +520,10 @@ function buildWorktreeDiscovery(matched, { normalized, parentDir, checkouts, pas
   const digitCandidates = splitDigit.kept;
   const foreignWorkers = [...splitLegacy.foreignWorkers, ...splitDigit.foreignWorkers];
   const halfLabelled = halfLabelledSteers(paseo, mainWorkspace, matchKeys);
-  const steerIds = new Set([...labelled, ...legacy].map((a) => a.id));
+  const labelled = applyContinuations(labelledFound, paseo.agents, zerosubSwitches);
+  const steerIds = continuationMatchIds([...labelled, ...legacy], paseo.agents, zerosubSwitches);
   const projectWorkspaceIds = new Set(paseo.workspaces.filter((w) => projectIds.has(w.projectId)).map((w) => w.id));
-  const workers = allWorkers(paseo, steerIds, forkName);
+  const workers = remapWorkerParents(applyContinuations(allWorkers(paseo, steerIds, forkName), paseo.agents, zerosubSwitches), paseo.agents, zerosubSwitches);
   const worktreeAgents = mainWorkspace
     ? paseo.agents.filter((a) => a.workspaceId === mainWorkspace.id && !a.archivedAt && !steerIds.has(a.id) && a.labels?.[LABEL.role] !== 'steer')
     : [];
@@ -476,26 +561,26 @@ function buildWorktreeDiscovery(matched, { normalized, parentDir, checkouts, pas
 }
 
 /** Worktree adoption by workspace id ("workspace:<id>" or bare "wks_..."). */
-function discoverWorktreeById(normalized, { checkouts, paseo, realpath, git, liveScopes }) {
+function discoverWorktreeById(normalized, { checkouts, paseo, realpath, git, liveScopes, zerosubSwitches = [] }) {
   const id = normalized.workspaceId;
   const parentDir = normalized.parentDir;
   const found = paseo.workspaces.find((w) => w.id === id) ?? null;
   if (!found) {
     return buildWorktreeDiscovery([], {
-      normalized, parentDir, checkouts, paseo, realpath, git, liveScopes,
+      normalized, parentDir, checkouts, paseo, realpath, git, liveScopes, zerosubSwitches,
       checkoutIssues: [`Workspace ${id} not found; pass an existing worktree workspace id (see "workspace:<id>" in docs/configuration.md)`],
     });
   }
   if (!isWorktreeWorkspace(found)) {
     return buildWorktreeDiscovery([], {
-      normalized, parentDir, checkouts, paseo, realpath, git, liveScopes,
+      normalized, parentDir, checkouts, paseo, realpath, git, liveScopes, zerosubSwitches,
       checkoutIssues: [`Workspace ${id} ("${found.title ?? found.name}") is not a worktree workspace; adopt plain directories with {"local": <path>}`],
     });
   }
-  return buildWorktreeDiscovery([found], { normalized, parentDir, checkouts, paseo, realpath, git, liveScopes, checkoutIssues: [] });
+  return buildWorktreeDiscovery([found], { normalized, parentDir, checkouts, paseo, realpath, git, liveScopes, zerosubSwitches, checkoutIssues: [] });
 }
 
-function discoverLocal(normalized, { config, checkouts, paseo, realpath, existsDir, git, liveScopes }) {
+function discoverLocal(normalized, { config, checkouts, paseo, realpath, existsDir, git, liveScopes, zerosubSwitches = [] }) {
   const live = liveScopeRefs(liveScopes);
   const requestedName = normalized.name ?? null;
   const requestedSubject = normalized.subject ?? null;
@@ -505,11 +590,11 @@ function discoverLocal(normalized, { config, checkouts, paseo, realpath, existsD
   if (normalized.local) {
     const matched = worktreesAt(paseo, real(normalized.local, realpath), realpath);
     if (matched.length === 1) {
-      return buildWorktreeDiscovery(matched, { normalized, parentDir: normalized.parentDir, checkouts, paseo, realpath, git, liveScopes, checkoutIssues: [] });
+      return buildWorktreeDiscovery(matched, { normalized, parentDir: normalized.parentDir, checkouts, paseo, realpath, git, liveScopes, zerosubSwitches, checkoutIssues: [] });
     }
     if (matched.length > 1) {
       return buildWorktreeDiscovery(matched, {
-        normalized, parentDir: normalized.parentDir, checkouts, paseo, realpath, git, liveScopes,
+        normalized, parentDir: normalized.parentDir, checkouts, paseo, realpath, git, liveScopes, zerosubSwitches,
         checkoutIssues: [`Several worktree workspaces use ${normalized.local}: ${matched.map((w) => `${w.id} "${w.title ?? w.name}"`).join(', ')}; name one with {"workspace": <id>}`],
       });
     }
@@ -564,11 +649,11 @@ function discoverLocal(normalized, { config, checkouts, paseo, realpath, existsD
       } else {
         const only = [...worktreeDirs.values()][0];
         if (only.length === 1 && candidates.size === 1) {
-          return buildWorktreeDiscovery(only, { normalized, parentDir, checkouts, paseo, realpath, git, liveScopes, checkoutIssues: [] });
+          return buildWorktreeDiscovery(only, { normalized, parentDir, checkouts, paseo, realpath, git, liveScopes, zerosubSwitches, checkoutIssues: [] });
         }
         if (only.length > 1) {
           return buildWorktreeDiscovery(only, {
-            normalized, parentDir, checkouts, paseo, realpath, git, liveScopes,
+            normalized, parentDir, checkouts, paseo, realpath, git, liveScopes, zerosubSwitches,
             checkoutIssues: [`Several worktree workspaces share the folder "${wanted}": ${only.map((w) => `${w.id} "${w.title ?? w.name}"`).join(', ')}; name one with {"workspace": <id>}`],
           });
         }
@@ -640,7 +725,7 @@ function discoverLocal(normalized, { config, checkouts, paseo, realpath, existsD
   const legacyKey = `local/${folder}`.toLowerCase();
   const matchKeys = new Set([repoKey, legacyKey]);
   if (stored && stored.id.toLowerCase() !== repoKey) matchKeys.add(stored.id.toLowerCase());
-  const labelled = paseo.agents.filter((a) => a.labels?.[LABEL.role] === 'steer' && matchKeys.has(a.labels?.[LABEL.repo]?.toLowerCase()));
+  const labelledFound = paseo.agents.filter((a) => a.labels?.[LABEL.role] === 'steer' && matchKeys.has(a.labels?.[LABEL.repo]?.toLowerCase()));
   const agentsById = new Map((paseo.agents ?? []).map((a) => [a.id, a]));
   const legacyAll = mainWorkspace
     ? paseo.agents.filter((a) => a.workspaceId === mainWorkspace.id && !a.archivedAt && !a.labels?.[LABEL.role] && STEER_TITLE.test((a.title ?? '').trim()))
@@ -651,9 +736,10 @@ function discoverLocal(normalized, { config, checkouts, paseo, realpath, existsD
   const digitCandidates = splitDigit.kept;
   const foreignWorkers = [...splitLegacy.foreignWorkers, ...splitDigit.foreignWorkers];
   const halfLabelled = halfLabelledSteers(paseo, mainWorkspace, matchKeys);
-  const steerIds = new Set([...labelled, ...legacy].map((a) => a.id));
+  const labelled = applyContinuations(labelledFound, paseo.agents, zerosubSwitches);
+  const steerIds = continuationMatchIds([...labelled, ...legacy], paseo.agents, zerosubSwitches);
   const projectWorkspaceIds = new Set(paseo.workspaces.filter((w) => projectIds.has(w.projectId)).map((w) => w.id));
-  const workers = allWorkers(paseo, steerIds, forkName);
+  const workers = remapWorkerParents(applyContinuations(allWorkers(paseo, steerIds, forkName), paseo.agents, zerosubSwitches), paseo.agents, zerosubSwitches);
 
   return {
     input,
@@ -685,13 +771,13 @@ function discoverLocal(normalized, { config, checkouts, paseo, realpath, existsD
   };
 }
 
-export function discoverRepository(entry, { config, gh, git, checkouts, paseo, realpath = realpathSync, inspectTarget = inspectCloneTarget, existsDir = defaultExistsDir, liveScopes = null }) {
+export function discoverRepository(entry, { config, gh, git, checkouts, paseo, realpath = realpathSync, inspectTarget = inspectCloneTarget, existsDir = defaultExistsDir, liveScopes = null, zerosubSwitches = [] }) {
   const normalized = normalizeEntry(entry, config);
   if (normalized.workspaceId) {
-    return discoverWorktreeById(normalized, { checkouts, paseo, realpath, git, liveScopes });
+    return discoverWorktreeById(normalized, { checkouts, paseo, realpath, git, liveScopes, zerosubSwitches });
   }
   if (normalized.local || normalized.localName) {
-    return discoverLocal(normalized, { config, checkouts, paseo, realpath, existsDir, git, liveScopes });
+    return discoverLocal(normalized, { config, checkouts, paseo, realpath, existsDir, git, liveScopes, zerosubSwitches });
   }
   const { repo: input, parentDir, checkout: explicitCheckout } = normalized;
   const github = resolveGitHub(gh, input, config.github.owner);
@@ -811,7 +897,7 @@ export function discoverRepository(entry, { config, gh, git, checkouts, paseo, r
   // Steers are identified by labels; an unlabelled top-level "Steer X" in the main
   // workspace is a legacy steer that can be adopted.
   const repoKey = forkName?.toLowerCase();
-  const labelled = paseo.agents.filter((a) => a.labels?.[LABEL.role] === 'steer' && a.labels?.[LABEL.repo]?.toLowerCase() === repoKey);
+  const labelledFound = paseo.agents.filter((a) => a.labels?.[LABEL.role] === 'steer' && a.labels?.[LABEL.repo]?.toLowerCase() === repoKey);
   const matchKeys = new Set(repoKey ? [repoKey] : []);
   const agentsById = new Map((paseo.agents ?? []).map((a) => [a.id, a]));
   const legacyAll = mainWorkspace
@@ -823,9 +909,10 @@ export function discoverRepository(entry, { config, gh, git, checkouts, paseo, r
   const digitCandidates = splitDigit.kept;
   const foreignWorkers = [...splitLegacy.foreignWorkers, ...splitDigit.foreignWorkers];
   const halfLabelled = halfLabelledSteers(paseo, mainWorkspace, matchKeys);
-  const steerIds = new Set([...labelled, ...legacy].map((a) => a.id));
+  const labelled = applyContinuations(labelledFound, paseo.agents, zerosubSwitches);
+  const steerIds = continuationMatchIds([...labelled, ...legacy], paseo.agents, zerosubSwitches);
   const projectWorkspaceIds = new Set(paseo.workspaces.filter((w) => projectIds.has(w.projectId)).map((w) => w.id));
-  const workers = allWorkers(paseo, steerIds, forkName);
+  const workers = remapWorkerParents(applyContinuations(allWorkers(paseo, steerIds, forkName), paseo.agents, zerosubSwitches), paseo.agents, zerosubSwitches);
   // The github scope id is the resolved fork; the network-verified identity
   // always wins over a stored field (a mismatch is a planner conflict).
   // --main keeps that identity: the worktree is only the main workspace, never

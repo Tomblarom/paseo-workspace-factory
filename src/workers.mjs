@@ -5,6 +5,7 @@
 // on a detached HEAD become unreachable. The factory therefore only previews
 // retirement; archiving is disabled until these checks are proven on real data.
 import { LABEL, parentOf } from './paseo.mjs';
+import { continuedFromId, inheritContinuationLabels, resolveContinuations } from './zerosub.mjs';
 
 export const LIFECYCLE_LABEL = 'wsf.lifecycle'; // "reusable" keeps a worker
 export const RETIREMENT_ENABLED = false;
@@ -14,21 +15,36 @@ const BUSY = new Set(['running', 'initializing']);
 /**
  * @param gitState { dirty, untracked, ignored, detached, ahead } from readGitState, or null if unknown
  * @param terminals live terminals of the worker's workspace (unknown = null)
+ * @param zerosubSwitches timeline-derived { agentId, continuedIn } pairs (see zerosub.mjs)
  */
-export function assessWorker(worker, { agents, workspaces, gitState, backgroundWork = null, terminals = null }) {
+export function assessWorker(worker, { agents, workspaces, gitState, backgroundWork = null, terminals = null, zerosubSwitches = [] }) {
   const reasons = [];
   if (!worker) return { archiveAgent: false, archiveWorkspace: false, reasons: ['agent not found'], workspaceReasons: [], workspaceId: null };
-  if (worker.archivedAt) reasons.push('already archived');
-  if (worker.labels?.[LABEL.role] === 'steer') reasons.push('is a steer, not a worker');
-  if (!parentOf(worker)) reasons.push('has no parent; not a delegated worker');
-  if (BUSY.has(worker.status)) reasons.push(`status is ${worker.status}`);
-  if (worker.activeTurn) reasons.push('has an active turn');
-  if (worker.pendingPermissions?.length) reasons.push('has pending permission requests');
-  if (worker.requiresAttention) reasons.push('requires attention');
-  if (worker.labels?.[LIFECYCLE_LABEL] === 'reusable') reasons.push('marked reusable');
+  const resolution = resolveContinuations(agents ?? [], zerosubSwitches);
+  const supersededBy = resolution.liveFor[worker.id];
+  if (supersededBy && supersededBy !== worker.id) {
+    return { archiveAgent: false, archiveWorkspace: false, reasons: [`superseded by continuation ${supersededBy}; retire it instead`], workspaceReasons: [], workspaceId: null };
+  }
+  // A continuation tab is the same worker as its origin (ZeroSub copies no
+  // labels): it is assessed with the origin's worker identity (parent, role,
+  // lifecycle) while its own status and workspace decide the outcome.
+  const originId = continuedFromId(worker);
+  const origin = originId ? (agents ?? []).find((a) => a?.id === originId) : null;
+  const effective = origin ? { ...worker, labels: inheritContinuationLabels(worker, origin) } : worker;
+  if (effective.archivedAt) reasons.push('already archived');
+  if (effective.labels?.[LABEL.role] === 'steer') reasons.push('is a steer, not a worker');
+  if (!parentOf(effective)) reasons.push('has no parent; not a delegated worker');
+  if (BUSY.has(effective.status)) reasons.push(`status is ${effective.status}`);
+  if (effective.activeTurn) reasons.push('has an active turn');
+  if (effective.pendingPermissions?.length) reasons.push('has pending permission requests');
+  if (effective.requiresAttention) reasons.push('requires attention');
+  if (effective.labels?.[LIFECYCLE_LABEL] === 'reusable') reasons.push('marked reusable');
   if (backgroundWork === null) reasons.push('background work unknown');
   else if (backgroundWork.length) reasons.push(`${backgroundWork.length} background task(s) still listed`);
-  const children = agents.filter((a) => !a.archivedAt && parentOf(a) === worker.id);
+  // Subagents parented to a superseded origin still belong to the live worker.
+  const family = new Set([worker.id]);
+  for (const [o, live] of Object.entries(resolution.liveFor)) if (live === worker.id) family.add(o);
+  const children = (agents ?? []).filter((a) => !a.archivedAt && a.id !== worker.id && family.has(parentOf(a)));
   if (children.length) reasons.push(`has ${children.length} live subagent(s)`);
   const archiveAgent = reasons.length === 0;
 
