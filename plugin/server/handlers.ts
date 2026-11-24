@@ -208,7 +208,9 @@ export async function getResume(
   let address = input.repo?.trim() || "";
   if (!address && agentId) {
     const found: any = (await readPaseoState(paseo)).agents.find((a: any) => a.id === agentId);
-    const scopeId = found?.labels?.[LABEL.scope] ?? found?.labels?.[`${LEGACY_PREFIX}.scope`];
+    const scopeId =
+    found?.labels?.[LABEL.scope] ?? found?.labels?.[`${LEGACY_PREFIX}.scope`] ??
+    found?.labels?.[LABEL.repo] ?? found?.labels?.[`${LEGACY_PREFIX}.repo`];
     if (typeof scopeId === "string" && scopeId) address = scopeId;
   }
   const config = await loader.loadEffectiveConfig();
@@ -250,7 +252,9 @@ export async function getResume(
 export function createResumeBriefBuilder(loader: ConfigLoader) {
   return async (paseo: any, workspaceId: string, agentId: string): Promise<string> => {
     const found: any = (await readPaseoState(paseo)).agents.find((a: any) => a.id === agentId);
-    const scopeId = found?.labels?.[LABEL.scope] ?? found?.labels?.[`${LEGACY_PREFIX}.scope`];
+    const scopeId =
+    found?.labels?.[LABEL.scope] ?? found?.labels?.[`${LEGACY_PREFIX}.scope`] ??
+    found?.labels?.[LABEL.repo] ?? found?.labels?.[`${LEGACY_PREFIX}.repo`];
     const address =
       typeof scopeId === "string" && scopeId ? scopeId : `workspace:${workspaceId}`;
     const config = await loader.loadEffectiveConfig();
@@ -327,7 +331,9 @@ async function takeoverIfNonActive(
   agentId: string,
 ): Promise<{ from: string; to: string; epoch: number } | null> {
   const found: any = (await readPaseoState(paseo)).agents.find((a: any) => a.id === agentId);
-  const scopeId = found?.labels?.[LABEL.scope] ?? found?.labels?.[`${LEGACY_PREFIX}.scope`];
+  const scopeId =
+    found?.labels?.[LABEL.scope] ?? found?.labels?.[`${LEGACY_PREFIX}.scope`] ??
+    found?.labels?.[LABEL.repo] ?? found?.labels?.[`${LEGACY_PREFIX}.repo`];
   const slot = found?.labels?.[LABEL.slot] ?? found?.labels?.[`${LEGACY_PREFIX}.slot`];
   if (typeof scopeId !== "string" || !scopeId) throw new Error("agent has no factory scope label");
   if (typeof slot !== "string" || !/^[A-Z]$/.test(slot)) throw new Error("agent has no steer slot label");
@@ -427,7 +433,8 @@ export async function openHistory(
   const agent: any = state.agents.find((a: any) => a.id === agentId);
   if (!agent) throw new Error(`Unknown agent ${JSON.stringify(agentId)}`);
   const scopeId =
-    agent.labels?.[LABEL.scope] ?? agent.labels?.[`${LEGACY_PREFIX}.scope`] ?? null;
+    agent.labels?.[LABEL.scope] ?? agent.labels?.[`${LEGACY_PREFIX}.scope`] ??
+    agent.labels?.[LABEL.repo] ?? agent.labels?.[`${LEGACY_PREFIX}.repo`] ?? null;
   const scope: any = typeof scopeId === "string" && scopeId
     ? (listScopes(state) as any[]).find((s: any) => s.id === scopeId) ?? null
     : null;
