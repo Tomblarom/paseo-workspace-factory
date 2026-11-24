@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {
+import { register } from "node:module";
+
+register("./ts-resolve-hooks.mjs", import.meta.url);
+
+const {
   CLEANUP_DEFAULTS,
   CLEAR_COMMAND,
   COMPACT_COMMAND,
@@ -15,10 +19,11 @@ import {
   pushPreviousSession,
   scanCleanupEvidence,
   sendCleanupCommand,
-} from "../shared/idle-cleanup.ts";
+} = await import("../shared/idle-cleanup.ts");
 
 const NOW = Date.parse("2026-11-23T12:00:00.000Z");
 const HOUR = 3_600_000;
+const MIN = 60_000;
 const at = (ms) => new Date(ms).toISOString();
 const LABELS = { "wsf.scope": "s", "wsf.role": "steer", "wsf.slot": "A" };
 
@@ -27,14 +32,17 @@ function input(overrides = {}) {
     agentId: "agent-1",
     labels: { ...LABELS },
     provider: "claude",
+    model: null,
+    quotaAvailable: null,
+    openWorkers: 1,
     status: "idle",
     archivedAt: null,
     pendingPermissionCount: 0,
-    lastTurnEndedAt: at(NOW - 2 * HOUR),
+    lastTurnEndedAt: at(NOW - 55 * MIN),
     contextTokens: 120_000,
     activeSteer: "A",
-    checkpoint: { task: "Ship it", capturedAt: at(NOW - HOUR), interrupted: null },
-    entry: { lastTurnEndedAt: at(NOW - 2 * HOUR) },
+    checkpoint: { task: "Ship it", capturedAt: at(NOW - 30 * MIN), interrupted: null },
+    entry: { lastTurnEndedAt: at(NOW - 55 * MIN) },
     settings: { ...CLEANUP_DEFAULTS, mode: "compact-warm" },
     actionsToday: 0,
     effectBlocked: false,
@@ -72,7 +80,7 @@ test("hasKeepContext honors the current and legacy keys", () => {
   assert.equal(hasKeepContext(null), false);
 });
 
-test("compact-warm acts on a cold active steer with a fresh checkpoint", () => {
+test("compact-warm acts on a cooling active steer with a fresh checkpoint", () => {
   const d = decideCleanupAction(input({}));
   assert.equal(d.action, "compact-warm");
   assert.equal(d.command, COMPACT_COMMAND);
@@ -89,7 +97,10 @@ test("clear needs the mode plus the acknowledgement", () => {
   assert.equal(gated.action, null);
   assert.match(gated.reason, /clearAcknowledged/);
   const go = decideCleanupAction(
-    input({ settings: { ...CLEANUP_DEFAULTS, mode: "clear", clearAcknowledged: true } }),
+    input({
+      settings: { ...CLEANUP_DEFAULTS, mode: "clear", clearAcknowledged: true },
+      lastTurnEndedAt: at(NOW - 2 * HOUR),
+    }),
   );
   assert.equal(go.action, "clear");
   assert.equal(go.command, CLEAR_COMMAND);
@@ -175,7 +186,7 @@ test("active steers need a fresh, unflagged task checkpoint", () => {
   assert.match(
     decideCleanupAction(
       input({
-        checkpoint: { task: "t", capturedAt: at(NOW - HOUR), interrupted: { agentId: "a", at: at(NOW) } },
+        checkpoint: { task: "t", capturedAt: at(NOW - 30 * MIN), interrupted: { agentId: "a", at: at(NOW) } },
       }),
     ).reason,
     /flagged interrupted/,
@@ -198,13 +209,13 @@ test("other agents need a note from the last turn", () => {
   assert.match(decideCleanupAction(worker({ noteAt: at(NOW - 3 * HOUR) })).reason, /no note/);
   assert.match(decideCleanupAction(worker({ interrupted: { at: at(NOW) } })).reason, /interrupted/);
   const fresh = decideCleanupAction(
-    worker({ note: "task: x", noteAt: at(NOW - HOUR), lastTurnEndedAt: at(NOW - 2 * HOUR) }),
+    worker({ note: "task: x", noteAt: at(NOW - 30 * MIN), lastTurnEndedAt: at(NOW - 55 * MIN) }),
   );
-  assert.equal(fresh.action, "compact-warm");
+  assert.equal(fresh.action, "fresh-recommended");
   const otherSteer = decideCleanupAction(
     input({
       labels: { "wsf.scope": "s", "wsf.role": "steer", "wsf.slot": "B" },
-      entry: { note: "task: x", noteAt: at(NOW - HOUR) },
+      entry: { note: "task: x", noteAt: at(NOW - 30 * MIN) },
     }),
   );
   assert.equal(otherSteer.action, "compact-warm");
@@ -212,7 +223,7 @@ test("other agents need a note from the last turn", () => {
 
 test("already cleaned and opted-out agents are skipped", () => {
   assert.match(
-    decideCleanupAction(input({ entry: { cleared: { at: at(NOW - HOUR), mode: "clear" } } })).reason,
+    decideCleanupAction(input({ entry: { cleared: { at: at(NOW - 30 * MIN), mode: "clear" } } })).reason,
     /already cleaned/,
   );
   assert.ok(
@@ -283,6 +294,7 @@ test("cleanupInputOf maps snapshots, entries, and checkpoints", () => {
     id: "agent-1",
     labels: { ...LABELS },
     provider: "claude",
+    model: "claude-sonnet-5-5",
     status: "idle",
     archivedAt: null,
     pendingPermissions: [{ id: "p1" }, { id: "p2" }],
@@ -297,6 +309,8 @@ test("cleanupInputOf maps snapshots, entries, and checkpoints", () => {
     actionsToday: 3,
     effectBlocked: true,
     nowMs: NOW,
+    quotaAvailable: false,
+    openWorkers: 2,
   });
   assert.equal(mapped.agentId, "agent-1");
   assert.equal(mapped.pendingPermissionCount, 2);
@@ -304,6 +318,9 @@ test("cleanupInputOf maps snapshots, entries, and checkpoints", () => {
   assert.equal(mapped.lastTurnEndedAt, at(NOW - HOUR));
   assert.equal(mapped.actionsToday, 3);
   assert.equal(mapped.effectBlocked, true);
+  assert.equal(mapped.model, "claude-sonnet-5-5");
+  assert.equal(mapped.quotaAvailable, false);
+  assert.equal(mapped.openWorkers, 2);
   const legacy = cleanupInputOf({
     agent: { ...agent, lastUsage: null, LastUsage: { ContextWindowUsedTokens: 42 } },
     entry: { lastTurnEndedAt: 7 },
@@ -330,6 +347,9 @@ test("cleanupInputOf maps snapshots, entries, and checkpoints", () => {
   assert.equal(missing.contextTokens, null);
   assert.equal(missing.pendingPermissionCount, 0);
   assert.equal(missing.lastTurnEndedAt, null);
+  assert.equal(missing.model, null);
+  assert.equal(missing.quotaAvailable, null);
+  assert.equal(missing.openWorkers, null);
 });
 
 test("C5 skips supervised workers the steer has not seen yet", () => {
@@ -345,7 +365,7 @@ test("C5 skips supervised workers the steer has not seen yet", () => {
     const denied = decideCleanupAction(
       input({
         labels: { "wsf.scope": "s", "wsf.role": "worker" },
-        entry: { note: "task: x", noteAt: at(NOW - HOUR) },
+        entry: { note: "task: x", noteAt: at(NOW - 30 * MIN) },
         workerState,
       }),
     );
@@ -356,11 +376,11 @@ test("C5 skips supervised workers the steer has not seen yet", () => {
     const worker = decideCleanupAction(
       input({
         labels: { "wsf.scope": "s", "wsf.role": "worker" },
-        entry: { note: "task: x", noteAt: at(NOW - HOUR), lastTurnEndedAt: at(NOW - 2 * HOUR) },
+        entry: { note: "task: x", noteAt: at(NOW - 30 * MIN), lastTurnEndedAt: at(NOW - 55 * MIN) },
         workerState,
       }),
     );
-    assert.equal(worker.action, "compact-warm", String(workerState));
+    assert.equal(worker.action, "fresh-recommended", String(workerState));
   }
 });
 
@@ -399,4 +419,239 @@ test("sendCleanupCommand sends through the SDK without options", async () => {
   assert.equal(calls[0].id, "agent-9");
   assert.deepEqual(calls[0].args, ["/clear"]);
   assert.equal(calls[0].args.length, 1, "no options: any sourceAgentId would void the command");
+});
+
+test("compact thresholds follow the profile and the model group", () => {
+  const codex = {
+    provider: "codex",
+    model: "gpt-6.2-sol",
+    checkpoint: { task: "Ship it", capturedAt: at(NOW - 5 * MIN), interrupted: null },
+    settings: { ...CLEANUP_DEFAULTS, mode: "compact-warm", providers: ["claude", "codex"] },
+  };
+  assert.match(
+    decideCleanupAction(input({ ...codex, lastTurnEndedAt: at(NOW - 20 * MIN) })).reason,
+    /below 25m/,
+  );
+  assert.equal(
+    decideCleanupAction(input({ ...codex, lastTurnEndedAt: at(NOW - 26 * MIN) })).action,
+    "compact-warm",
+  );
+  const old = { ...codex, model: "gpt-5.5" };
+  assert.match(
+    decideCleanupAction(input({ ...old, lastTurnEndedAt: at(NOW - 7 * MIN) })).reason,
+    /below 8m/,
+  );
+});
+
+test("already cold contexts get fresh-recommended, never a compact", () => {
+  const cold = decideCleanupAction(input({ lastTurnEndedAt: at(NOW - 61 * MIN) }));
+  assert.equal(cold.action, "fresh-recommended");
+  assert.equal(cold.command, null);
+  assert.match(cold.reason, /already passed the 60m claude cache/);
+  assert.equal(
+    decideCleanupAction(input({ lastTurnEndedAt: at(NOW - 59 * MIN) })).action,
+    "compact-warm",
+  );
+  const codex = {
+    provider: "codex",
+    model: "gpt-6.2-sol",
+    settings: { ...CLEANUP_DEFAULTS, mode: "compact-warm", providers: ["claude", "codex"] },
+  };
+  const coldCodex = decideCleanupAction(input({ ...codex, lastTurnEndedAt: at(NOW - 31 * MIN) }));
+  assert.equal(coldCodex.action, "fresh-recommended");
+  assert.match(coldCodex.reason, /already passed the 30m openai-new cache/);
+  // Clear is free, so it still clears long-cold contexts.
+  const cleared = decideCleanupAction(
+    input({
+      settings: { ...CLEANUP_DEFAULTS, mode: "clear", clearAcknowledged: true },
+      lastTurnEndedAt: at(NOW - 5 * HOUR),
+    }),
+  );
+  assert.equal(cleared.action, "clear");
+});
+
+test("mode clear maps Codex to compact, never /clear", () => {
+  const codexClear = {
+    provider: "codex",
+    model: "gpt-6.2-sol",
+    checkpoint: { task: "Ship it", capturedAt: at(NOW - 5 * MIN), interrupted: null },
+    settings: { ...CLEANUP_DEFAULTS, mode: "clear", providers: ["claude", "codex"] },
+    lastTurnEndedAt: at(NOW - 26 * MIN),
+  };
+  const mapped = decideCleanupAction(input(codexClear));
+  assert.equal(mapped.action, "compact-warm");
+  assert.equal(mapped.command, COMPACT_COMMAND);
+  assert.match(mapped.reason, /maps to compact/);
+  // No acknowledgement needed: nothing is cleared.
+  assert.equal(mapped.command === CLEAR_COMMAND, false);
+  const coldCodex = decideCleanupAction(
+    input({ ...codexClear, lastTurnEndedAt: at(NOW - 45 * MIN) }),
+  );
+  assert.equal(coldCodex.action, "fresh-recommended");
+  assert.match(coldCodex.reason, /already passed the 30m/);
+});
+
+test("quota gates the compact; unknown quota fails open, clear stays free", () => {
+  assert.match(
+    decideCleanupAction(input({ quotaAvailable: false })).reason,
+    /quota is exhausted/,
+  );
+  assert.equal(decideCleanupAction(input({ quotaAvailable: true })).action, "compact-warm");
+  assert.equal(decideCleanupAction(input({ quotaAvailable: null })).action, "compact-warm");
+  assert.equal(decideCleanupAction(input({ quotaAvailable: undefined })).action, "compact-warm");
+  assert.match(
+    decideCleanupAction(
+      input({ entry: { needsResume: { reason: "limit", at: at(NOW - MIN) } } }),
+    ).reason,
+    /limit is flagged/,
+  );
+  const clearAtLimit = decideCleanupAction(
+    input({
+      settings: { ...CLEANUP_DEFAULTS, mode: "clear", clearAcknowledged: true },
+      lastTurnEndedAt: at(NOW - 2 * HOUR),
+      quotaAvailable: false,
+      entry: { needsResume: { reason: "limit", at: at(NOW - MIN) } },
+    }),
+  );
+  assert.equal(clearAtLimit.action, "clear");
+});
+
+test("efficiency compacts small contexts early, comfort compacts late", () => {
+  const small = { contextTokens: 15_000, lastTurnEndedAt: at(NOW - 55 * MIN) };
+  assert.equal(
+    decideCleanupAction(
+      input({ ...small, settings: { ...CLEANUP_DEFAULTS, mode: "compact-warm", profile: "efficiency" } }),
+    ).action,
+    "compact-warm",
+  );
+  assert.match(decideCleanupAction(input(small)).reason, /below 60000/);
+  assert.match(
+    decideCleanupAction(
+      input({
+        lastTurnEndedAt: at(NOW - 55 * MIN),
+        settings: { ...CLEANUP_DEFAULTS, mode: "compact-warm", profile: "comfort" },
+      }),
+    ).reason,
+    /below 58m/,
+  );
+  assert.equal(
+    decideCleanupAction(
+      input({
+        lastTurnEndedAt: at(NOW - 59 * MIN),
+        settings: { ...CLEANUP_DEFAULTS, mode: "compact-warm", profile: "comfort" },
+      }),
+    ).action,
+    "compact-warm",
+  );
+});
+
+test("package boundaries recommend fresh: idle workers and steers without open workers", () => {
+  const worker = decideCleanupAction(
+    input({
+      labels: { "wsf.scope": "s", "wsf.role": "worker" },
+      provider: "codex",
+      model: "gpt-6.2-sol",
+      lastTurnEndedAt: at(NOW - 26 * MIN),
+      entry: { note: "task: x", noteAt: at(NOW - 10 * MIN) },
+      settings: { ...CLEANUP_DEFAULTS, mode: "compact-warm", providers: ["claude", "codex"] },
+    }),
+  );
+  assert.equal(worker.action, "fresh-recommended");
+  assert.equal(worker.command, null);
+  assert.match(worker.reason, /worker package done/);
+  const boundary = decideCleanupAction(input({ openWorkers: 0 }));
+  assert.equal(boundary.action, "fresh-recommended");
+  assert.match(boundary.reason, /package boundary: valid checkpoint, no open workers/);
+  assert.equal(decideCleanupAction(input({ openWorkers: 2 })).action, "compact-warm");
+  // Unknown counts as mid-package, like before the hybrid rule.
+  assert.equal(decideCleanupAction(input({ openWorkers: null })).action, "compact-warm");
+  assert.equal(decideCleanupAction(input({ openWorkers: undefined })).action, "compact-warm");
+  const workerCold = decideCleanupAction(
+    input({
+      labels: { "wsf.scope": "s", "wsf.role": "worker" },
+      provider: "codex",
+      model: "gpt-6.2-sol",
+      lastTurnEndedAt: at(NOW - 60 * MIN),
+      entry: { note: "task: x", noteAt: at(NOW - 59 * MIN) },
+      settings: { ...CLEANUP_DEFAULTS, mode: "compact-warm", providers: ["claude", "codex"] },
+    }),
+  );
+  assert.equal(workerCold.action, "fresh-recommended");
+  assert.match(workerCold.reason, /already passed the 30m/);
+});
+
+test("after 2 compactions or a big post-compact base, fresh is recommended", () => {
+  const twice = decideCleanupAction(input({ entry: { compactions: 2 } }));
+  assert.equal(twice.action, "fresh-recommended");
+  assert.match(twice.reason, /already compacted 2 times/);
+  assert.equal(decideCleanupAction(input({ entry: { compactions: 1 } })).action, "compact-warm");
+  const bigBase = decideCleanupAction(input({ entry: { lastCompactBaseTokens: 60001 } }));
+  assert.equal(bigBase.action, "fresh-recommended");
+  assert.match(bigBase.reason, /post-compact base 60001 tokens is above 60000/);
+  assert.equal(
+    decideCleanupAction(input({ entry: { lastCompactBaseTokens: 60000 } })).action,
+    "compact-warm",
+  );
+  // Cold wins over the other fresh reasons.
+  const coldAndTwice = decideCleanupAction(
+    input({ lastTurnEndedAt: at(NOW - 61 * MIN), entry: { compactions: 5 } }),
+  );
+  assert.equal(coldAndTwice.action, "fresh-recommended");
+  assert.match(coldAndTwice.reason, /already passed the 60m/);
+});
+
+test("fresh is recommended once per idle period, without quota or cap gates", () => {
+  const hinted = decideCleanupAction(
+    input({
+      openWorkers: 0,
+      entry: { freshHint: { at: at(NOW - 10 * MIN), reason: "boundary" } },
+    }),
+  );
+  assert.equal(hinted.action, null);
+  assert.match(hinted.reason, /fresh already recommended after the last turn/);
+  // A hint from before the last turn does not block a new one.
+  const stale = decideCleanupAction(
+    input({
+      openWorkers: 0,
+      entry: { freshHint: { at: at(NOW - 2 * HOUR), reason: "boundary" } },
+    }),
+  );
+  assert.equal(stale.action, "fresh-recommended");
+  // Hints are free: quota and daily cap do not block them.
+  const noQuota = decideCleanupAction(input({ openWorkers: 0, quotaAvailable: false }));
+  assert.equal(noQuota.action, "fresh-recommended");
+  const capped = decideCleanupAction(
+    input({
+      openWorkers: 0,
+      actionsToday: 20,
+      settings: { ...CLEANUP_DEFAULTS, mode: "compact-warm", dailyCap: 20 },
+    }),
+  );
+  assert.equal(capped.action, "fresh-recommended");
+  // ... but a stale hint never blocks a mid-package compact.
+  const reopened = decideCleanupAction(
+    input({
+      openWorkers: 3,
+      entry: { freshHint: { at: at(NOW - 10 * MIN), reason: "boundary" } },
+    }),
+  );
+  assert.equal(reopened.action, "compact-warm");
+});
+
+test("agents without a valid package state cool untouched", () => {
+  assert.match(decideCleanupAction(input({ checkpoint: null })).reason, /no task checkpoint/);
+  assert.match(
+    decideCleanupAction(input({ openWorkers: 0, checkpoint: null })).reason,
+    /no task checkpoint/,
+  );
+  assert.match(
+    decideCleanupAction(
+      input({
+        labels: { "wsf.scope": "s", "wsf.role": "worker" },
+        checkpoint: null,
+        entry: {},
+      }),
+    ).reason,
+    /no note/,
+  );
 });

@@ -25,8 +25,8 @@ function clone(values: CleanupSettingsValues): CleanupSettingsValues {
 // shared/settings.ts (the draft stays loose so invalid input can be shown).
 type CleanupDoc = {
   mode: "off" | "clear" | "compact-warm";
+  profile: "efficiency" | "balanced" | "comfort";
   idleMinutes: number;
-  compactAtMinutes: number;
   minContextTokens: number;
   providers: string[];
   roles: ("steer" | "worker")[];
@@ -174,7 +174,7 @@ export function CleanupSettingsSection({
     setDraft(next);
     setNotice(null);
   };
-  const numberInput = (key: "idleMinutes" | "compactAtMinutes" | "minContextTokens" | "dailyCap") =>
+  const numberInput = (key: "idleMinutes" | "minContextTokens" | "dailyCap") =>
     String(draft[key] ?? "");
 
   return (
@@ -191,14 +191,16 @@ export function CleanupSettingsSection({
           ]}
           onValueChange={(value) => update({ ...draft, mode: value })}
         />
-        <SettingsInput
-          key={`compact-${formKey}`}
-          label="Compact after (minutes idle)"
-          hint="Used by Compact. Default 50: just before the 1-hour cache of subscription plans expires. With a 5-minute cache (API keys) compacting rarely pays off."
-          initialValue={numberInput("compactAtMinutes")}
-          onChangeText={(value) =>
-            update({ ...draft, compactAtMinutes: Number.parseInt(value.trim(), 10) })
-          }
+        <SettingsSelect
+          label="Cost profile (when to compact)"
+          hint="Used by Compact. Balanced compacts shortly before the provider cache expires (Claude 50, current OpenAI 25 minutes idle). Efficiency compacts earlier, even small chats. Comfort compacts rarely and late, and uses more quota; it is a side product, provided as-is."
+          value={draft.profile}
+          options={[
+            { label: "Maximum efficiency – compact early, even small chats", value: "efficiency" },
+            { label: "Balanced (default) – compact before the cache cools", value: "balanced" },
+            { label: "Comfort – compact rarely and late", value: "comfort" },
+          ]}
+          onValueChange={(value) => update({ ...draft, profile: value })}
         />
         <SettingsInput
           key={`idle-${formKey}`}
@@ -221,7 +223,7 @@ export function CleanupSettingsSection({
         <SettingsInput
           key={`providers-${formKey}`}
           label="Providers"
-          hint="Comma-separated provider ids. Default claude, the provider whose cache expires; others are not touched."
+          hint="Comma-separated provider ids. Default claude. Codex agents are compacted, never cleared (no native /clear)."
           initialValue={draft.providers.join(",")}
           onChangeText={(value) => update({ ...draft, providers: asList(value) })}
         />

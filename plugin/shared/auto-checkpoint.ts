@@ -6,6 +6,14 @@
 export const MAX_EXCERPT = 1500;
 export const MAX_ERROR = 300;
 export const MAX_NOTE = 1500;
+/** Stored fresh-hint reason cap (same bound as errors). */
+export const MAX_FRESH_REASON = 300;
+/** Warm compactions before the C5 decision recommends fresh instead. */
+export const MAX_WARM_COMPACTIONS = 2;
+/** Post-compact base above this recommends fresh instead of compacting again. */
+export const FRESH_BASE_TOKENS = 60_000;
+/** Stored compaction counter cap (metadata stays bounded). */
+export const COMPACTIONS_STORED_MAX = 99;
 
 // Label keys mirror LABEL in core paseo.mjs (shared/ must not import server/).
 const SCOPE_KEY = "wsf.scope";
@@ -202,12 +210,27 @@ export function decideTurnUpdate(input: TurnDecisionInput): TurnDecision {
         log: `cleanup turn completed without effect; pending ${kind} → lastActionFailed`,
       };
     }
+    const compacted = kind === "compact";
+    const prior =
+      typeof input.previous?.compactions === "number" && Number.isFinite(input.previous.compactions)
+        ? Math.max(0, input.previous.compactions)
+        : 0;
     return {
       entryUpdate: {
         ...base,
         lastActionFailed: null,
         cleared: { at, mode: pending.kind ?? command, checkpointAt },
         ...(verdict === "verified" ? { actionVerified: true } : {}),
+        // Hybrid compact/fresh rule: a compact spends one of the warm
+        // compactions and arms the post-compact base reading; a clear wipes
+        // the compaction debt. Either way a recorded fresh hint is stale.
+        freshHint: null,
+        ...(compacted
+          ? {
+              compactions: Math.min(prior + 1, COMPACTIONS_STORED_MAX),
+              compactionPendingBase: true,
+            }
+          : { compactions: 0, lastCompactBaseTokens: null, compactionPendingBase: null }),
       },
       resolvePending: true,
       log:
@@ -217,11 +240,24 @@ export function decideTurnUpdate(input: TurnDecisionInput): TurnDecision {
     };
   }
 
+  // The first completed turn after our compact settles the post-compact base
+  // reading (when usage is known); every real turn clears a recorded fresh
+  // hint, because the package moved on.
+  const settleBase =
+    input.previous?.compactionPendingBase === true
+      ? {
+          compactionPendingBase: null,
+          ...(typeof input.contextTokens === "number" && Number.isFinite(input.contextTokens)
+            ? { lastCompactBaseTokens: input.contextTokens }
+            : {}),
+        }
+      : {};
+
   if (input.outcome === "completed") {
     const isActive = input.role === "steer" && typeof input.slot === "string" && input.slot === input.activeSteer;
     if (input.block && isActive) {
       return {
-        entryUpdate: { ...base, interrupted: null, lastActionFailed: null },
+        entryUpdate: { ...base, freshHint: null, ...settleBase, interrupted: null, lastActionFailed: null },
         checkpoint: {
           task: input.block.task,
           tests: input.block.tests,
@@ -242,6 +278,8 @@ export function decideTurnUpdate(input: TurnDecisionInput): TurnDecision {
       return {
         entryUpdate: {
           ...base,
+          freshHint: null,
+          ...settleBase,
           interrupted: null,
           lastActionFailed: null,
           note: serializeNote(input.block),
@@ -253,7 +291,7 @@ export function decideTurnUpdate(input: TurnDecisionInput): TurnDecision {
     // A completed turn without a CHECKPOINT block is a real turn (it lifts
     // the retry block) but never clears interrupted: recovery needs a block.
     return {
-      entryUpdate: { ...base, lastActionFailed: null },
+      entryUpdate: { ...base, freshHint: null, ...settleBase, lastActionFailed: null },
       log: "turn recorded; no block",
     };
   }

@@ -38,10 +38,14 @@ wsf.agents      { <agentId>: {
                     noteAt,
                     interrupted: { at, outcome, error, excerpt, git } | null,
                     cleared: { at, mode, checkpointAt } | null,
-                    pendingAction: { kind: clear|compact, at } | null } }
+                    pendingAction: { kind: clear|compact, at } | null,
+                    compactions,                 // verified warm compactions, capped at 99
+                    compactionPendingBase,       // true until the first post-compact turn settles the base
+                    lastCompactBaseTokens,       // context size after the last compact, if known
+                    freshHint: { at, reason } | null } }
 ```
 
-Bounds: `excerpt` ≤ 1500 chars (tail of the last answer), `error` ≤ 300 chars, `note` ≤ 1500 chars; entries of archived agents are dropped on write.
+Bounds: `excerpt` ≤ 1500 chars (tail of the last answer), `error` ≤ 300 chars, `note` ≤ 1500 chars, `freshHint.reason` ≤ 300 chars; entries of archived agents are dropped on write.
 
 ## C2 Auto-checkpoint (plugin, `agent.turn.after`)
 
@@ -56,6 +60,8 @@ Only for factory agents (label `wsf.scope`; roles `steer`, `worker`).
 | our own `/clear` or `/compact` turn | any | resolve `pendingAction` → `cleared`; nothing else |
 
 Reuse the CHECKPOINT parser of `checkpoint --from-agent`. Never call a model, never throw out of the hook (log and continue).
+
+Hybrid tracking: a resolved compact spends one warm compaction (counter, capped at 99), arms `compactionPendingBase`, and clears `freshHint`; a resolved clear wipes the compaction debt (counter, base, flag) and the hint. The first completed turn after a compact stores `lastCompactBaseTokens` from usage when known; every real (non-cleanup) turn clears `freshHint`, because the package moved on.
 
 ## C3 Resume brief (core, CLI, RPC, slash)
 
@@ -87,20 +93,41 @@ Verify in C1 that a cleared Claude session still loads the project instructions 
 
 Plugin server interval every 5 minutes (cleared in cleanup). All conditions must hold, checked again right before sending:
 
-- provider in `providers` (default `["claude"]`), role in `roles`,
+- provider in `providers` (default `["claude"]`), role in `roles` (steers and workers),
 - status idle, no pending permission, no `pendingAction`,
-- `now - lastTurnEndedAt ≥ idleMinutes` (default 60),
-- `contextTokens ≥ minContextTokens` (default 60000; unknown → skip),
+- clear mode: `now - lastTurnEndedAt ≥ idleMinutes` (default 60); compact mode: idle past the profile-derived threshold below while the group cache is still warm,
+- `contextTokens ≥ minContextTokens` (default 60000; unknown → skip; efficiency compacts from 10000),
 - valid state: active steer → scope checkpoint `capturedAt ≥ lastTurnEndedAt`, not interrupted; others → `noteAt ≥ lastTurnEndedAt`,
 - not cleared since the last turn, no label `wsf.keepContext=true`.
 
 | Mode | Action | Cost |
 |---|---|---|
 | `off` | nothing; C6 hint only | 0 |
-| `clear` (default) | send `/clear`; optional `seedAfterClear` sends a one-line "context was cleared, run resume before the next task" | 0 (seed: one small turn) |
-| `compact-warm` | at `compactAtMinutes` (default 50, before a 1 h TTL expires) send `/compact Keep: task, decisions, open ids, next step.` | one turn on cached context, also when nobody returns |
+| `clear` (default) | send `/clear`; optional `seedAfterClear` sends a one-line "context was cleared, run resume before the next task". Codex agents are compacted instead (no native `/clear`), without needing the acknowledgement | 0 (seed: one small turn; Codex compact: one turn) |
+| `compact-warm` | compact mid-package agents while the cache is still warm (profile threshold ≤ idle < group TTL), only with provider quota available; cold, over-compacted, or boundary agents get `fresh-recommended` (recorded hint, no send) | one turn on cached context, also when nobody returns |
 
-Automatic `fresh` (new agent) is not offered: creating agents stays behind plan → confirm. Safety: per-agent cooldown (one action per idle period), daily cap per host, every action logged (`paseo plugin logs`) and recorded in `wsf.agents`. Settings (host scope): `mode`, `idleMinutes`, `compactAtMinutes`, `minContextTokens`, `providers`, `roles`, `seedAfterClear`.
+Automatic `fresh` (new agent) is not offered: creating agents stays behind plan → confirm. Safety: per-agent cooldown (one action per idle period), daily cap per host, every action logged (`paseo plugin logs`) and recorded in `wsf.agents`. Settings (host scope): `mode`, `profile`, `idleMinutes`, `minContextTokens`, `providers`, `roles`, `seedAfterClear`.
+
+### Cache reference and cost profiles
+
+The factory keeps a simplified prompt-cache reference per model group (constants in `plugin/shared/cache-profiles.ts`, pinned by tests; keep both in sync):
+
+| Group | Cache TTL | Cached input | Notes |
+|---|---|---|---|
+| Claude | 60 min (5 min on some billing paths) | ~0.1× | native `/clear` and `/compact` |
+| OpenAI GPT-5.6+ (gpt-6.x Sol/Terra/Astra) | 30 min (docs say 30 or more; measured <30min ~96%, 30–180min ~82%, >3h ≤30%) | 0.05× (Sol) | auto-compact around 360–420k; `/clear` is not native |
+| OpenAI ≤5.5 | 10 min (upper bound of the 5–10 min in_memory window; the ~30 min 24h variant behaves like GPT-5.6+) | model-dependent | |
+| Others (Muse, Copilot, …) | 30 min (conservative, like GPT-5.6+) | unknown | a Claude model on another provider follows the Claude row |
+
+The `profile` setting (default `balanced`) derives the per-group compact threshold — the idle time after which a still-warm agent is compacted:
+
+| Profile | Compact when idle past | Small contexts |
+|---|---|---|
+| Maximum efficiency | half the TTL (Claude 30, GPT-5.6+ 15, ≤5.5 5 min) | from 10k tokens |
+| Balanced (default) | shortly before the TTL (Claude 50, GPT-5.6+ 25, ≤5.5 8 min) | configured floor (60k) |
+| Comfort (side product, as-is) | just before the TTL (Claude 58, GPT-5.6+ 28, ≤5.5 8 min) | configured floor (60k) |
+
+Hybrid compact/fresh rule (from the Codex compact-vs-fresh measurements): mid-package agents compact while warm, because the working detail survives; at package boundaries a fresh agent plus the brief is cheaper than another compact. In order: an already-cold context is never compacted (always `fresh-recommended`); after 2 warm compactions or with a post-compact base above ~60k tokens the decision is `fresh-recommended`; at a package boundary — a valid checkpoint/note with no open workers (running/blocked/interrupted) for steers, an idle worker with a fresh note — the decision is `fresh-recommended`. The hint is recorded on the entry (once per idle period) and never auto-creates an agent. Otherwise the compact needs provider quota: the sweep reuses the core quota reader (`quotaExhausted` on the sampled `paseo usage` snapshot) and blocks the compact on proven exhaustion, as does a flagged `needsResume: limit`; the hint itself is free and ignores both. Unknown quota fails open on purpose: sampling is best-effort, and blocking on unknown would silently disable the cleanup; a compact that hits a real limit is flagged by the turn hook as a limit, which blocks later compacts. Agents without a valid package state (no task checkpoint or note) are left to cool untouched: cooling costs nothing, and resume creates a fresh agent when needed. Guiding rule: no agent with a large context should go cold; a small, compacted context may go cold, because that is cheaper than keeping it warm forever.
 
 ## C6 Cold hint (manual)
 
@@ -183,7 +210,7 @@ Order: C1 → C3 and C2 in parallel → C4 → C5/C6 → C7 → choose the defau
 - One core lock helper (exported from `src/lock.mjs`) names and takes workspace locks; plugin and core must not duplicate the lock name.
 - Pruning of archived agents through `dropIds` is enough for now.
 - C5 modes are `off | clear | compact-warm` only; `fresh` stays manual (C6), because creating agents needs plan → confirm.
-- Native first (C1): Claude Code `SessionStart` hooks with source `clear`/`compact` can inject the resume brief automatically. Offer it as documented optional setup (C4b); the instruction rule stays as fallback for other providers. Cache TTL is 1 h on subscription plans, 5 min otherwise, so `idleMinutes` 60 / `compactAtMinutes` 50 fit plan usage; document the 5 min case.
+- Native first (C1): Claude Code `SessionStart` hooks with source `clear`/`compact` can inject the resume brief automatically. Offer it as documented optional setup (C4b); the instruction rule stays as fallback for other providers. Cache TTL is 1 h on subscription plans, 5 min otherwise, so `idleMinutes` 60 and the balanced profile (Claude 50) fit plan usage; the cache reference table above documents the 5 min case and the other groups.
 - Tabs must survive (user requirement). Paseo 0.16.2 code: a new Claude session id is adopted by the same agent (id and tab stay, a "switched to a new session" notice is appended) and becomes the persisted session; the timeline store is in memory and is rebuilt from the transcript of the current session id after a daemon restart or reload. So `/clear` keeps the old timeline only until the next restart; `/compact` keeps the session id and its transcript. Consequences: `compact-warm` is the default candidate once a live check confirms it; `clear` records the previous session id in `wsf.agents[id].previousSessions` before sending, offers "open old history" via `paseo agent import <session-id>` as an extra tab, and stays disabled until the live check and the user accept this limit; `fresh` only adds a tab.
 - Restoring after `/clear` (code check): Paseo persists only the session handle per agent and rebuilds the timeline from the current session's transcript; no CLI/SDK/plugin API resets an agent's session id. Same-tab restore therefore needs a Paseo change (proposal: keep `previousSessionIds` in the Claude persistence and replay their transcripts before the current one). `paseo agent import <old-session-id>` restores the full old history as a new tab. `/compact` writes a `compact_boundary` into the same transcript; the replay reads the file linearly, shows a `compaction` item and hides the summary, so the full history stays in the same tab after a restart.
 - Live check C1 (scratch agent): `/clear` and `/compact` only act when the message has no source agent; a message sent by an agent arrives as "[Message received] …" text, has no effect and still costs a turn. Code: the server wraps only messages with `sourceAgentId`; the SDK sets it only when passed explicitly; the CLI fills it from `PASEO_AGENT_ID`. Rule: C5 sends through the plugin SDK without `sourceAgentId`, never through a CLI subprocess; factory CLI paths that send these commands drop `PASEO_AGENT_ID`. The first action per agent verifies its effect (compaction marker or session-change notice), otherwise the mode switches off with a hint. Confirmed live: `/clear` keeps agent id and tab but only the new session survives a reload; `paseo agent import <old-session-id> --provider claude` restores the old history as a new tab; `/compact` keeps the full history after a reload.

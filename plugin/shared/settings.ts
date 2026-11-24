@@ -86,6 +86,19 @@ export const factorySidebarSettings = defineSettings({
   }),
 });
 
+/**
+ * factory-cleanup v1 -> v2: the cost profile replaces the global
+ * compactAtMinutes (per-group thresholds now come from
+ * shared/cache-profiles.ts); stored compactAtMinutes values are dropped and
+ * the profile defaults to balanced.
+ */
+export function migrateFactoryCleanup(values: unknown, fromVersion: number): unknown {
+  if (fromVersion >= 2 || !values || typeof values !== "object") return values;
+  const next = { ...(values as Record<string, unknown>) };
+  delete next.compactAtMinutes;
+  return next;
+}
+
 // Idle cleanup (C5): how the plugin server shrinks cold factory agents.
 // Defaults mirror CLEANUP_DEFAULTS in shared/idle-cleanup.ts; {} parses into
 // a complete document. `fresh` is deliberately not a mode: creating agents
@@ -93,11 +106,12 @@ export const factorySidebarSettings = defineSettings({
 export const factoryCleanupSettings = defineSettings({
   id: "factory-cleanup",
   scope: "host",
-  version: 1,
+  version: 2,
+  migrate: (values, fromVersion) => migrateFactoryCleanup(values, fromVersion),
   schema: z.object({
     mode: z.enum(["off", "clear", "compact-warm"]).default("clear"),
+    profile: z.enum(["efficiency", "balanced", "comfort"]).default("balanced"),
     idleMinutes: z.number().int().min(5).default(60),
-    compactAtMinutes: z.number().int().min(5).default(50),
     minContextTokens: z.number().int().min(1000).default(60000),
     providers: z.array(z.string().min(1)).min(1).default(["claude"]),
     roles: z.array(z.enum(["steer", "worker"])).min(1).default(["steer", "worker"]),

@@ -1,8 +1,10 @@
 import { AGENTS_KEY, updateAgentEntry } from "./factory/agent-state.js";
 import { isAdvisorSlot } from "./factory/config.js";
 import { LEGACY_PREFIX, METADATA_KEY, readPaseoState } from "./factory/paseo.js";
+import { quotaExhausted } from "./factory/quota.js";
 import { listScopes } from "./factory/scope.js";
 import { WORKERS_KEY } from "./factory/supervision.js";
+import { getQuotaSnapshot } from "./quota.js";
 import {
   CLEAR_COMMAND,
   COMPACT_COMMAND,
@@ -12,11 +14,13 @@ import {
   decideCleanupAction,
   isCold,
   isNeedsResumeReason,
+  isSupervisionProtectedState,
   pushPreviousSession,
   sendCleanupCommand,
   type CleanupSettings,
   type NeedsResumeReason,
 } from "../shared/idle-cleanup.js";
+import { MAX_FRESH_REASON } from "../shared/auto-checkpoint.js";
 
 const CHECKPOINT_KEY = `${METADATA_KEY}.checkpoint`;
 const LEGACY_CHECKPOINT_KEY = `${LEGACY_PREFIX}.checkpoint`;
@@ -144,6 +148,19 @@ function workerStateOf(workers: Record<string, unknown>, agentId: string): strin
   return typeof state === "string" ? state : null;
 }
 
+/**
+ * Scope workers with unfinished state (running/blocked/interrupted). A steer
+ * with none is at a package boundary (fresh hint); any open worker means the
+ * package is still in flight (compact while warm).
+ */
+function openWorkerCount(workers: Record<string, unknown>): number {
+  let count = 0;
+  for (const value of Object.values(workers)) {
+    if (isSupervisionProtectedState(asRecord(value)?.state)) count += 1;
+  }
+  return count;
+}
+
 export interface SweepResult {
   agentId: string;
   action: string;
@@ -156,6 +173,26 @@ export interface SweepDeps {
   settings: CleanupSettings;
   nowMs?: number;
   log?: (message: string) => void;
+  /** Quota snapshot override; tests only (defaults to the sampled one). */
+  quotaSnapshot?: Record<string, any> | null;
+  /** Lock for the entry write; tests only (defaults to the real one). */
+  lock?: (name: string, fn: (held: { verify: () => void }) => Promise<any>) => Promise<any>;
+}
+
+/**
+ * Provider quota for the compact gate. False only when the snapshot proves
+ * exhaustion for the agent's pool (profile pools default to the provider id,
+ * and quotaExhausted reuses the core quota reader). Unknown (no snapshot
+ * yet) fails open: sampling is best-effort, and blocking on unknown would
+ * silently disable the cleanup; a compact that hits a real limit is flagged
+ * by the turn hook as needsResume=limit, which blocks later compacts.
+ */
+export function quotaAvailableForCleanup(
+  provider: string,
+  snapshot: Record<string, any> | null | undefined,
+): boolean | null {
+  if (!snapshot) return null;
+  return !quotaExhausted(snapshot, provider);
 }
 
 /**
@@ -163,12 +200,15 @@ export interface SweepDeps {
  * decision, re-checks candidates against fresh snapshots right before
  * sending, sends through the plugin SDK only, and records pendingAction
  * (plus the previous session id for clear) under the workspace lock.
+ * `fresh-recommended` decisions are recorded as hints without sending.
  */
 export async function sweepOnce({
   paseo,
   settings,
   nowMs = Date.now(),
   log = console.log,
+  quotaSnapshot,
+  lock,
 }: SweepDeps): Promise<SweepResult[]> {
   // A mode change re-probes after an effect failure.
   if (lastMode !== null && lastMode !== settings.mode) effectBlock = null;
@@ -190,9 +230,10 @@ export async function sweepOnce({
   };
   for (const scope of lookup.scopes) lookup.byId.set(scope.id, scope);
   const liveIds = (state.agents ?? []).map((agent: any) => agent.id);
+  const quota = quotaSnapshot !== undefined ? quotaSnapshot : getQuotaSnapshot();
   for (const agent of state.agents ?? []) {
     try {
-      const result = await sweepAgent(paseo, agent, state, lookup, liveIds, settings, nowMs, log);
+      const result = await sweepAgent(paseo, agent, state, lookup, liveIds, settings, nowMs, log, quota, lock);
       if (result) results.push(result);
     } catch (error) {
       log(
@@ -212,6 +253,8 @@ async function sweepAgent(
   settings: CleanupSettings,
   nowMs: number,
   log: (message: string) => void,
+  quota: Record<string, any> | null,
+  lock?: (name: string, fn: (held: { verify: () => void }) => Promise<any>) => Promise<any>,
 ): Promise<SweepResult | null> {
   const scope = scopeForAgent(agent, lookup);
   const reads = scope ? scopeReads(scope) : null;
@@ -228,9 +271,35 @@ async function sweepAgent(
       effectBlocked: isEffectBlocked(),
       nowMs,
       workerState: workerStateOf(reads.workers, agent.id),
+      quotaAvailable: quotaAvailableForCleanup(agent?.provider, quota),
+      openWorkers: openWorkerCount(reads.workers),
     }),
   );
-  if (!first.action || !first.command) return null;
+  if (!first.action) return null;
+  if (first.action === "fresh-recommended") {
+    // Hint only: record it (once per idle period, via the decision's
+    // cooldown) without sending, capping, or re-checking — the write is
+    // idempotent and the next real turn clears it.
+    try {
+      await updateEntry({
+        client: paseo,
+        workspaceId: reads.mainId,
+        agentId: agent.id,
+        patch: {
+          freshHint: { at: new Date().toISOString(), reason: first.reason.slice(0, MAX_FRESH_REASON) },
+        },
+        liveIds,
+        ...(lock ? { lock } : {}),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      log(`[factory] idle cleanup: fresh hint for ${agent.id} not recorded (${message})`);
+      return { agentId: agent.id, action: first.action, sent: false, reason: message };
+    }
+    log(`[factory] idle cleanup: fresh recommended for ${agent.id} (${first.reason})`);
+    return { agentId: agent.id, action: first.action, sent: false, reason: first.reason };
+  }
+  if (!first.command) return null;
   // Re-check against a fresh snapshot and fresh metadata right before sending.
   const freshSnap: any = await paseo.agents.ref(agent.id).refresh().catch(() => null);
   const freshAgent: any = freshSnap?.agent ?? null;
@@ -252,6 +321,8 @@ async function sweepAgent(
       effectBlocked: isEffectBlocked(),
       nowMs: Date.now(),
       workerState: workerStateOf(freshWorkers, agent.id),
+      quotaAvailable: quotaAvailableForCleanup(freshAgent?.provider, quota),
+      openWorkers: openWorkerCount(freshWorkers),
     }),
   );
   if (!recheck.action || !recheck.command) return null;
@@ -266,6 +337,7 @@ async function sweepAgent(
       liveIds,
       sessionId,
       previousSessions: freshEntry?.previousSessions,
+      ...(lock ? { lock } : {}),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

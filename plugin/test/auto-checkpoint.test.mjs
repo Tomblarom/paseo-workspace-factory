@@ -99,6 +99,7 @@ test("completed block of the active steer writes the scope checkpoint", () => {
     contextTokens: 12000,
     openTurnId: null,
     turnStartedAt: null,
+    freshHint: null,
     interrupted: null,
     lastActionFailed: null,
   });
@@ -356,4 +357,105 @@ test("race check compares epoch and active steer", () => {
 test("dropEntries removes archived ids", () => {
   assert.deepEqual(dropEntries({ a: 1, b: 2 }, ["a"]), { b: 2 });
   assert.deepEqual(dropEntries({ a: 1 }, []), { a: 1 });
+});
+
+test("a resolved compact spends one warm compaction and arms the base reading", () => {
+  const first = decideTurnUpdate(
+    input({
+      turnUserText: "/compact Keep: task.",
+      effect: COMPACT_SEEN,
+      previous: { pendingAction: { kind: "compact", at: "then" } },
+    }),
+  );
+  assert.equal(first.entryUpdate.compactions, 1);
+  assert.equal(first.entryUpdate.compactionPendingBase, true);
+  assert.equal(first.entryUpdate.freshHint, null);
+  const second = decideTurnUpdate(
+    input({
+      turnUserText: "/compact Keep: task.",
+      effect: COMPACT_SEEN,
+      previous: {
+        pendingAction: { kind: "compact", at: "then" },
+        compactions: 1,
+        lastCompactBaseTokens: 45000,
+      },
+    }),
+  );
+  assert.equal(second.entryUpdate.compactions, 2);
+  assert.equal(second.entryUpdate.compactionPendingBase, true);
+  // The counter stays bounded no matter how often the hint is ignored.
+  const capped = decideTurnUpdate(
+    input({
+      turnUserText: "/compact Keep: task.",
+      effect: COMPACT_SEEN,
+      previous: { pendingAction: { kind: "compact", at: "then" }, compactions: 99 },
+    }),
+  );
+  assert.equal(capped.entryUpdate.compactions, 99);
+  const weird = decideTurnUpdate(
+    input({
+      turnUserText: "/compact Keep: task.",
+      effect: COMPACT_SEEN,
+      previous: { pendingAction: { kind: "compact", at: "then" }, compactions: "many" },
+    }),
+  );
+  assert.equal(weird.entryUpdate.compactions, 1);
+});
+
+test("a resolved clear wipes the compaction debt and the fresh hint", () => {
+  const d = decideTurnUpdate(
+    input({
+      turnUserText: "/clear",
+      effect: CLEAR_SEEN,
+      previous: {
+        pendingAction: { kind: "clear", at: "then" },
+        compactions: 2,
+        lastCompactBaseTokens: 70000,
+        compactionPendingBase: true,
+        freshHint: { at: NOW, reason: "old" },
+      },
+    }),
+  );
+  assert.equal(d.entryUpdate.compactions, 0);
+  assert.equal(d.entryUpdate.lastCompactBaseTokens, null);
+  assert.equal(d.entryUpdate.compactionPendingBase, null);
+  assert.equal(d.entryUpdate.freshHint, null);
+});
+
+test("the first completed turn after a compact settles the base reading", () => {
+  const settled = decideTurnUpdate(
+    input({ block: BLOCK, previous: { compactionPendingBase: true }, contextTokens: 64000 }),
+  );
+  assert.equal(settled.entryUpdate.lastCompactBaseTokens, 64000);
+  assert.equal(settled.entryUpdate.compactionPendingBase, null);
+  const unknown = decideTurnUpdate(
+    input({ block: BLOCK, previous: { compactionPendingBase: true }, contextTokens: null }),
+  );
+  assert.ok(!("lastCompactBaseTokens" in unknown.entryUpdate));
+  assert.equal(unknown.entryUpdate.compactionPendingBase, null);
+  const plain = decideTurnUpdate(input({ block: BLOCK }));
+  assert.ok(!("lastCompactBaseTokens" in plain.entryUpdate));
+  assert.ok(!("compactionPendingBase" in plain.entryUpdate));
+  // Failed turns leave the armed reading alone.
+  const failed = decideTurnUpdate(
+    input({ outcome: "failed", error: "x", previous: { compactionPendingBase: true } }),
+  );
+  assert.ok(!("compactionPendingBase" in failed.entryUpdate));
+});
+
+test("every real turn clears a recorded fresh hint", () => {
+  const hinted = { freshHint: { at: NOW, reason: "boundary" } };
+  assert.equal(decideTurnUpdate(input({ block: BLOCK, previous: hinted })).entryUpdate.freshHint, null);
+  assert.equal(decideTurnUpdate(input({ previous: hinted })).entryUpdate.freshHint, null);
+  // A failed cleanup turn keeps the hint: the package did not move.
+  const failedCleanup = decideTurnUpdate(
+    input({
+      outcome: "failed",
+      error: "x",
+      turnUserText: "/compact Keep: task.",
+      effect: COMPACT_SEEN,
+      previous: { pendingAction: { kind: "compact", at: "then" }, ...hinted },
+    }),
+  );
+  assert.ok(!("freshHint" in failedCleanup.entryUpdate));
 });

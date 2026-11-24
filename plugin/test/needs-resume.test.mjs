@@ -13,7 +13,7 @@ register("./ts-resolve-hooks.mjs", import.meta.url);
 const bootCheck = await import("../server/boot-check.ts");
 const sweep = await import("../server/cold-sweep.ts");
 const supervise = await import("../server/supervise.ts");
-import {
+const {
   CLEANUP_DEFAULTS,
   RESUME_LIMIT_PATTERNS,
   bootResumeReason,
@@ -22,7 +22,7 @@ import {
   needsResumeForFailedTurn,
   countActiveResumeRows,
   resumeReminderText,
-} from "../shared/idle-cleanup.ts";
+} = await import("../shared/idle-cleanup.ts");
 import { factoryResumeSettings } from "../shared/settings.ts";
 import { LABEL, METADATA_KEY } from "../../src/paseo.mjs";
 import { AGENTS_KEY } from "../../src/agent-state.mjs";
@@ -609,4 +609,130 @@ test("client stub is replaced by the shared contracts", () => {
     assert.ok(!source.includes("resume-contract"), `${file} no longer imports the stub`);
     assert.ok(source.includes("factoryResumeApply"), `${file} uses the shared contract`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Sweep quota gate and Codex mapping (fake world, no live agents).
+// ---------------------------------------------------------------------------
+
+test("quotaAvailableForCleanup fails closed only on proven exhaustion", () => {
+  assert.equal(sweep.quotaAvailableForCleanup("claude", null), null);
+  assert.equal(sweep.quotaAvailableForCleanup("claude", undefined), null);
+  assert.equal(sweep.quotaAvailableForCleanup("claude", {}), true);
+  assert.equal(sweep.quotaAvailableForCleanup("claude", { claude: { sessionPct: 40 } }), true);
+  assert.equal(sweep.quotaAvailableForCleanup("claude", { claude: { sessionPct: 95 } }), false);
+  assert.equal(
+    sweep.quotaAvailableForCleanup("codex", { codex: { sessionPct: 10, limitUntil: new Date(Date.now() + HOUR).toISOString() } }),
+    false,
+  );
+});
+
+function sweepWorld({ provider = "claude", model = "m", idleMs = 55 * MIN, usage = 120_000, workers = {} } = {}) {
+  const nowMs = Date.now();
+  const stamp = (ms) => new Date(ms).toISOString();
+  const world = makeWorld();
+  const ws = addWorkspace(world, {
+    metadata: scopeMeta({
+      checkpoint: { task: "t", tests: [], blockers: [], next: null, capturedAt: stamp(nowMs - 5 * MIN) },
+      workers,
+    }),
+  });
+  const agent = addAgent(world, {
+    title: "Steer A",
+    workspaceId: ws.id,
+    provider,
+    model,
+    lastUsage: { contextWindowUsedTokens: usage },
+    labels: { [LABEL.repo]: REPO, [LABEL.role]: "steer", [LABEL.slot]: "A", [LABEL.scope]: REPO },
+  });
+  world.workspaces[0].metadata[AGENTS_KEY] = {
+    [agent.id]: { lastTurnEndedAt: stamp(nowMs - idleMs) },
+  };
+  return { world, ws, agent, nowMs };
+}
+
+test("sweepOnce compacts an eligible agent when quota is unknown (fail open)", async () => {
+  const { world, agent, nowMs } = sweepWorld({ workers: { "worker-1": { state: "running" } } });
+  const results = await sweep.sweepOnce({
+    paseo: fakeClient(world),
+    settings: { ...CLEANUP_DEFAULTS, mode: "compact-warm" },
+    nowMs,
+    quotaSnapshot: null,
+    lock: noLock,
+    log: () => {},
+  });
+  assert.equal(results.length, 1);
+  assert.equal(results[0].agentId, agent.id);
+  assert.equal(results[0].sent, true);
+  const sends = sendsTo(world, agent.id);
+  assert.equal(sends.length, 1);
+  assert.match(sends[0], /^\/compact /);
+});
+
+test("sweepOnce skips the compact when the provider quota is exhausted", async () => {
+  const { world, agent, nowMs } = sweepWorld({ workers: { "worker-1": { state: "running" } } });
+  const results = await sweep.sweepOnce({
+    paseo: fakeClient(world),
+    settings: { ...CLEANUP_DEFAULTS, mode: "compact-warm" },
+    nowMs,
+    quotaSnapshot: { claude: { sessionPct: 95 } },
+    lock: noLock,
+    log: () => {},
+  });
+  assert.deepEqual(results, []);
+  assert.deepEqual(sendsTo(world, agent.id), []);
+});
+
+test("sweepOnce records fresh-recommended once per idle period, without sending", async () => {
+  const { world, agent, nowMs } = sweepWorld();
+  const settings = { ...CLEANUP_DEFAULTS, mode: "compact-warm" };
+  const first = await sweep.sweepOnce({
+    paseo: fakeClient(world),
+    settings,
+    nowMs,
+    quotaSnapshot: null,
+    lock: noLock,
+    log: () => {},
+  });
+  assert.equal(first.length, 1);
+  assert.equal(first[0].action, "fresh-recommended");
+  assert.equal(first[0].sent, false);
+  assert.match(first[0].reason, /package boundary/);
+  assert.deepEqual(sendsTo(world, agent.id), []);
+  const hint = world.workspaces[0].metadata[AGENTS_KEY][agent.id].freshHint;
+  assert.ok(hint?.at);
+  assert.match(hint.reason, /package boundary/);
+  // The cooldown keeps the next sweep quiet.
+  const second = await sweep.sweepOnce({
+    paseo: fakeClient(world),
+    settings,
+    nowMs,
+    quotaSnapshot: null,
+    lock: noLock,
+    log: () => {},
+  });
+  assert.deepEqual(second, []);
+});
+
+test("sweepOnce maps mode clear to /compact for Codex, never /clear", async () => {
+  const { world, agent, nowMs } = sweepWorld({
+    provider: "codex",
+    model: "gpt-6.2-sol",
+    idleMs: 26 * MIN,
+    workers: { "worker-1": { state: "running" } },
+  });
+  const results = await sweep.sweepOnce({
+    paseo: fakeClient(world),
+    settings: { ...CLEANUP_DEFAULTS, mode: "clear", providers: ["claude", "codex"] },
+    nowMs,
+    quotaSnapshot: null,
+    lock: noLock,
+    log: () => {},
+  });
+  assert.equal(results.length, 1);
+  assert.equal(results[0].action, "compact-warm");
+  const sends = sendsTo(world, agent.id);
+  assert.equal(sends.length, 1);
+  assert.match(sends[0], /^\/compact /);
+  assert.ok(!sends.some((text) => text.startsWith("/clear")), "no /clear is sent to Codex");
 });

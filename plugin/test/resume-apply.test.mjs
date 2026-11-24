@@ -10,7 +10,7 @@ register("./ts-resolve-hooks.mjs", import.meta.url);
 
 const resumeApply = await import("../server/resume-apply.ts");
 const sweep = await import("../server/cold-sweep.ts");
-import {
+const {
   CLEAR_COMMAND,
   COMPACT_COMMAND,
   RESUME_CLEAR_DEFAULTS,
@@ -18,7 +18,7 @@ import {
   SWEEP_PENDING_REASON,
   formatResumeMessage,
   mayResumeClear,
-} from "../shared/idle-cleanup.ts";
+} = await import("../shared/idle-cleanup.ts");
 import { resumeFingerprint } from "../shared/preview.ts";
 import { factoryResumeSettings } from "../shared/settings.ts";
 import { factoryAttention, factoryCold, factoryResumeApply } from "../shared/factory.ts";

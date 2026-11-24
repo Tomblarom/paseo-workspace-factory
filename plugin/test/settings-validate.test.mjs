@@ -1,12 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { register } from "node:module";
 import {
   validateCleanupSettings,
   validateFactorySettings,
   mergeFactoryConfig,
   validateProfilesAgainstCatalogLocal,
 } from "../shared/settings-validate.ts";
-import { CLEANUP_DEFAULTS } from "../shared/idle-cleanup.ts";
+
+register("./ts-resolve-hooks.mjs", import.meta.url);
+
+const { CLEANUP_DEFAULTS } = await import("../shared/idle-cleanup.ts");
 
 function validSettings() {
   return {
@@ -209,8 +213,8 @@ test("validateCleanupSettings accepts the defaults and reports each bad field", 
   const bad = {
     ...CLEANUP_DEFAULTS,
     mode: "fresh",
+    profile: "turbo",
     idleMinutes: 2,
-    compactAtMinutes: 0,
     minContextTokens: 10,
     providers: [],
     roles: ["advisor"],
@@ -220,12 +224,26 @@ test("validateCleanupSettings accepts the defaults and reports each bad field", 
   };
   const errors = validateCleanupSettings(bad);
   assert.match(JSON.stringify(errors), /mode must be off, clear, or compact-warm/);
+  assert.match(JSON.stringify(errors), /profile must be efficiency, balanced, or comfort/);
   assert.match(JSON.stringify(errors), /idleMinutes must be an integer of at least 5/);
-  assert.match(JSON.stringify(errors), /compactAtMinutes must be an integer of at least 5/);
   assert.match(JSON.stringify(errors), /minContextTokens must be an integer of at least 1000/);
   assert.match(JSON.stringify(errors), /at least one provider/);
   assert.match(JSON.stringify(errors), /steer or worker/);
   assert.match(JSON.stringify(errors), /seedAfterClear must be a boolean/);
   assert.match(JSON.stringify(errors), /clearAcknowledged must be a boolean/);
   assert.match(JSON.stringify(errors), /dailyCap must be an integer of at least 1/);
+});
+
+test("factory-cleanup v1 -> v2 drops compactAtMinutes and defaults the profile", async () => {
+  const { factoryCleanupSettings, migrateFactoryCleanup } = await import("../shared/settings.ts");
+  assert.equal(factoryCleanupSettings.version, 2);
+  const v1 = { ...CLEANUP_DEFAULTS, compactAtMinutes: 50 };
+  delete v1.profile;
+  const migrated = migrateFactoryCleanup(v1, 1);
+  assert.equal("compactAtMinutes" in migrated, false);
+  assert.equal(migrated.mode, v1.mode);
+  const parsed = factoryCleanupSettings.schema.parse(migrated);
+  assert.equal(parsed.profile, "balanced");
+  assert.deepEqual(factoryCleanupSettings.schema.parse({}), { ...CLEANUP_DEFAULTS });
+  assert.equal(migrateFactoryCleanup({ a: 1 }, 2).a, 1);
 });

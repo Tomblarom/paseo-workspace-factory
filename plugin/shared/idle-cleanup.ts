@@ -1,8 +1,20 @@
 // Idle cleanup (C5) decisions and the cold hint (C6) predicate. Pure module:
-// no imports, so plain node:test can use it. The server sweep
-// (server/cold-sweep.ts) applies the returned decision; the client renders
-// isCold/coldHintText results. Timeline fetching, locks, metadata writes,
-// and the timer live server-side.
+// it imports only the sibling cache reference, so plain node:test can use it
+// (tests register test/ts-resolve-hooks.mjs for the .js specifier). The
+// server sweep (server/cold-sweep.ts) applies the returned decision; the
+// client renders isCold/coldHintText results. Timeline fetching, locks,
+// metadata writes, and the timer live server-side.
+import {
+  CACHE_GROUPS,
+  compactAtMinutes,
+  effectiveMinContextTokens,
+  groupForProviderModel,
+  isCleanupProfile,
+  isCompactOnlyGroup,
+  type CacheGroup,
+  type CleanupProfile,
+} from "./cache-profiles.js";
+import { FRESH_BASE_TOKENS, MAX_WARM_COMPACTIONS } from "./auto-checkpoint.js";
 
 export const CLEAR_COMMAND = "/clear";
 export const COMPACT_COMMAND = "/compact Keep: task, decisions, open ids, next step.";
@@ -180,8 +192,9 @@ const LEGACY_KEEP_KEY = "ari.wsf.keepContext";
 
 export interface CleanupSettings {
   mode: "off" | "clear" | "compact-warm";
+  /** Cost profile: derives the per-group compact threshold (balanced default). */
+  profile: CleanupProfile;
   idleMinutes: number;
-  compactAtMinutes: number;
   minContextTokens: number;
   providers: string[];
   roles: string[];
@@ -193,8 +206,8 @@ export interface CleanupSettings {
 /** Mirrors the defaults of the host-scope cleanup settings document. */
 export const CLEANUP_DEFAULTS: CleanupSettings = {
   mode: "clear",
+  profile: "balanced",
   idleMinutes: 60,
-  compactAtMinutes: 50,
   minContextTokens: 60000,
   providers: ["claude"],
   roles: ["steer", "worker"],
@@ -234,6 +247,22 @@ export interface CleanupInput {
   agentId: string;
   labels: Record<string, string> | null;
   provider: string;
+  /** Model id for the cache-group classifier; null falls back to the provider. */
+  model: string | null;
+  /**
+   * Provider quota for the compact gate: false blocks the compact, true or
+   * unknown (null/undefined) allows it. Unknown fails open on purpose: quota
+   * sampling is best-effort, and a compact that hits a real limit is flagged
+   * by the turn hook as needsResume=limit, which blocks later compacts.
+   */
+  quotaAvailable?: boolean | null;
+  /**
+   * Scope workers with unfinished state (running/blocked/interrupted).
+   * A steer with none is at a package boundary (fresh hint); unknown
+   * (null/undefined) counts as mid-package, like before. Workers ignore it:
+   * an idle worker with a fresh note is always at its package boundary.
+   */
+  openWorkers?: number | null;
   status: string;
   archivedAt: string | null;
   pendingPermissionCount: number;
@@ -266,8 +295,9 @@ export function isSupervisionProtectedState(state: unknown): boolean {
 }
 
 export interface CleanupDecision {
-  action: "clear" | "compact-warm" | null;
-  /** The exact text to send; null when no action is taken. */
+  /** `fresh-recommended` is a recorded hint; the sweep sends nothing for it. */
+  action: "clear" | "compact-warm" | "fresh-recommended" | null;
+  /** The exact text to send; null when nothing is sent. */
   command: string | null;
   /** Why the action is (not) taken; the sweep logs it. */
   reason: string;
@@ -284,6 +314,7 @@ export interface CleanupSnapshot {
   id: string;
   labels: Record<string, string> | null;
   provider: string;
+  model?: string | null;
   status: string;
   archivedAt: string | null;
   pendingPermissions?: readonly unknown[] | null;
@@ -318,12 +349,19 @@ export function cleanupInputOf(args: {
   nowMs: number;
   /** The agent's wsf.workers register state, if any. */
   workerState?: string | null;
+  /** Provider quota for the compact gate (null/undefined = unknown, allowed). */
+  quotaAvailable?: boolean | null;
+  /** Scope workers with unfinished state (null/undefined = unknown). */
+  openWorkers?: number | null;
 }): CleanupInput {
   const lastTurnEndedAt = args.entry?.lastTurnEndedAt;
   return {
     agentId: args.agent.id,
     labels: args.agent.labels ?? null,
     provider: args.agent.provider,
+    model: typeof args.agent.model === "string" ? args.agent.model : null,
+    quotaAvailable: args.quotaAvailable ?? null,
+    openWorkers: args.openWorkers ?? null,
     status: args.agent.status,
     archivedAt: args.agent.archivedAt ?? null,
     pendingPermissionCount: Array.isArray(args.agent.pendingPermissions)
@@ -345,16 +383,25 @@ export function cleanupInputOf(args: {
 /**
  * One C5 evaluation per agent. Every condition is checked on its own and the
  * first failure wins with a reason, so each rule is testable in isolation.
- * Unknown timestamps or context sizes fail closed (no action).
+ * Unknown timestamps or context sizes fail closed (no action); unknown quota
+ * fails open (the turn hook flags a real limit, which then blocks compacts).
+ * Compact-only groups (Codex) map mode clear to a compact, never a /clear.
+ * Hybrid compact/fresh rule: mid-package agents compact while warm; cold,
+ * over-compacted, or boundary agents get `fresh-recommended` (a recorded
+ * hint, no send); agents without a valid package state cool untouched.
  */
 export function decideCleanupAction(input: CleanupInput): CleanupDecision {
   const { settings } = input;
   const deny = (reason: string): CleanupDecision => ({ action: null, command: null, reason });
+  const group: CacheGroup = groupForProviderModel(input.provider, input.model ?? null);
+  const compactOnly = isCompactOnlyGroup(group);
+  const compacting = settings.mode === "compact-warm" || (settings.mode === "clear" && compactOnly);
+  const profile: CleanupProfile = isCleanupProfile(settings.profile) ? settings.profile : "balanced";
   if (input.effectBlocked) {
     return deny("automatic cleanup is disabled after a command without effect");
   }
   if (settings.mode === "off") return deny("mode is off");
-  if (settings.mode === "clear" && !settings.clearAcknowledged) {
+  if (settings.mode === "clear" && !compactOnly && !settings.clearAcknowledged) {
     return deny("mode clear needs the clearAcknowledged setting (the old timeline is only kept via import)");
   }
   const identity = cleanupIdentity(input.labels);
@@ -375,7 +422,7 @@ export function decideCleanupAction(input: CleanupInput): CleanupDecision {
   if (input.entry?.lastActionFailed) {
     return deny("the last cleanup action failed; a new real turn is required first");
   }
-  const thresholdMinutes = settings.mode === "clear" ? settings.idleMinutes : settings.compactAtMinutes;
+  const thresholdMinutes = compacting ? compactAtMinutes(profile, group) : settings.idleMinutes;
   const lastEnd = stampMs(input.lastTurnEndedAt);
   if (lastEnd === null) return deny("the last turn end is unknown");
   const idleMs = input.nowMs - lastEnd;
@@ -385,8 +432,11 @@ export function decideCleanupAction(input: CleanupInput): CleanupDecision {
   if (input.contextTokens === null || input.contextTokens === undefined) {
     return deny("context size is unknown");
   }
-  if (input.contextTokens < settings.minContextTokens) {
-    return deny(`context ${input.contextTokens} is below ${settings.minContextTokens}`);
+  const minTokens = compacting
+    ? effectiveMinContextTokens(profile, settings.minContextTokens)
+    : settings.minContextTokens;
+  if (input.contextTokens < minTokens) {
+    return deny(`context ${input.contextTokens} is below ${minTokens}`);
   }
   if (input.entry?.interrupted) return deny("the agent state is interrupted");
   const isActive =
@@ -408,9 +458,57 @@ export function decideCleanupAction(input: CleanupInput): CleanupDecision {
     return deny("already cleaned after the last turn");
   }
   if (hasKeepContext(input.labels)) return deny("wsf.keepContext is set");
+  // Hybrid rule: cold, over-compacted, or boundary agents get a fresh hint
+  // instead of a compact. Unknown counts fail open toward compacting.
+  const freshHintReason = (): string | null => {
+    const ttlMinutes = CACHE_GROUPS[group].ttlMinutes;
+    if (idleMs >= ttlMinutes * 60_000) {
+      return `idle ${Math.max(0, Math.floor(idleMs / 60_000))}m already passed the ${ttlMinutes}m ${group} cache`;
+    }
+    const compactions = input.entry?.compactions;
+    if (typeof compactions === "number" && compactions >= MAX_WARM_COMPACTIONS) {
+      return `already compacted ${Math.floor(compactions)} times`;
+    }
+    const baseTokens = input.entry?.lastCompactBaseTokens;
+    if (typeof baseTokens === "number" && baseTokens > FRESH_BASE_TOKENS) {
+      return `post-compact base ${Math.floor(baseTokens)} tokens is above ${FRESH_BASE_TOKENS}`;
+    }
+    if (identity.role === "worker") {
+      return "worker package done; start a new worker for the next task";
+    }
+    if (input.openWorkers === 0) {
+      return "package boundary: valid checkpoint, no open workers";
+    }
+    return null;
+  };
+  if (compacting) {
+    const fresh = freshHintReason();
+    if (fresh) {
+      const hintedAt = stampMs((input.entry?.freshHint as Record<string, unknown> | null)?.at);
+      if (hintedAt !== null && hintedAt >= lastEnd) {
+        return deny("fresh already recommended after the last turn");
+      }
+      return {
+        action: "fresh-recommended",
+        command: null,
+        reason: `fresh-recommended ${input.agentId} (${fresh})`,
+      };
+    }
+    if (input.quotaAvailable === false) return deny("provider quota is exhausted");
+    const flagged = (input.entry?.needsResume ?? null) as { reason?: unknown } | null;
+    if (flagged?.reason === "limit") return deny("a provider limit is flagged for this agent");
+  }
   if (input.actionsToday >= settings.dailyCap) return deny("the daily cap is reached");
-  const command = settings.mode === "clear" ? CLEAR_COMMAND : COMPACT_COMMAND;
-  return { action: settings.mode, command, reason: `${settings.mode} ${input.agentId}` };
+  if (compacting) {
+    const mapped =
+      settings.mode === "clear" ? ` (mode clear maps to compact: no native /clear for ${group})` : "";
+    return {
+      action: "compact-warm",
+      command: COMPACT_COMMAND,
+      reason: `compact-warm ${input.agentId}${mapped}`,
+    };
+  }
+  return { action: "clear", command: CLEAR_COMMAND, reason: `clear ${input.agentId}` };
 }
 
 export interface ColdInput {

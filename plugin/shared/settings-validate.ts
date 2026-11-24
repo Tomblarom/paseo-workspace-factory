@@ -106,8 +106,8 @@ export const KNOWN_UNSUPPORTED: {
 
 export interface CleanupSettingsValues {
   mode: string;
+  profile: string;
   idleMinutes: number;
-  compactAtMinutes: number;
   minContextTokens: number;
   providers: string[];
   roles: string[];
@@ -221,11 +221,11 @@ export function validateCleanupSettings(values: CleanupSettingsValues): string[]
   if (!["off", "clear", "compact-warm"].includes(values.mode)) {
     errors.push(`mode must be off, clear, or compact-warm, got ${JSON.stringify(values.mode)}`);
   }
-  for (const key of ["idleMinutes", "compactAtMinutes"] as const) {
-    const value = values[key];
-    if (!Number.isInteger(value) || value < 5) {
-      errors.push(`${key} must be an integer of at least 5 minutes`);
-    }
+  if (!["efficiency", "balanced", "comfort"].includes(values.profile)) {
+    errors.push(`profile must be efficiency, balanced, or comfort, got ${JSON.stringify(values.profile)}`);
+  }
+  if (!Number.isInteger(values.idleMinutes) || values.idleMinutes < 5) {
+    errors.push("idleMinutes must be an integer of at least 5 minutes");
   }
   if (!Number.isInteger(values.minContextTokens) || values.minContextTokens < 1000) {
     errors.push("minContextTokens must be an integer of at least 1000");
