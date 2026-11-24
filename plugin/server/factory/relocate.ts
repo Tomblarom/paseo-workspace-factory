@@ -15,6 +15,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { LABEL, METADATA_KEY, readPaseoState } from './paseo.js';
 import { withLock, workspaceLockName } from './lock.js';
 import { runtime } from './runtime.js';
+import { validScope, domainOfScope } from './scope.js';
 import { isAdvisorSlot } from './config.js';
 import { resolveProfile, steerFallbackList, usedProfilesByLiveSteers } from './models.js';
 import { idempotencyKey, requestDigest } from './planner.js';
@@ -82,7 +83,9 @@ function checkedReceipt(lookupReceipt, kind, key, idOf) {
  * Old agents keep everything except a short notice each. A retry resumes:
  * creations are idempotent, an already-retired old scope refuses with its
  * movedTo. Idempotency keys bind the target directory (not the workspace
- * id), so preview and apply show the same keys.
+ * id), so preview and apply show the same keys. The stored scope field —
+ * including the domain pointer — is carried over verbatim and shown in the
+ * preview as `domain <id>` (result `domain`, null when the scope has none).
  */
 export async function relocateScope({ client, discovery, config, to, apply = false, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, readState = readPaseoState, existsDir = defaultExistsDir, workerModel = null }) {
   const status = steerStatus(discovery);
@@ -145,7 +148,13 @@ export async function relocateScope({ client, discovery, config, to, apply = fal
     return { mode: 'adopt-ours', workspace: candidate };
   };
   const newTitle = status.workspace.title ?? config.workspaceTitle;
-  const newState = { main: true, activeSteer: expected.activeSteer, epoch: 1 };
+  // The new scope keeps the stored scope field verbatim — including the domain
+  // pointer (scope.domain), so scopes/status/assign see it without a new plan.
+  // The locator may point at the old directory or workspace id; live fields
+  // win over it (scopeToEntry), and it stays preview/apply-stable for the keys.
+  const carriedScope = validScope(expected.scope) ? structuredClone(expected.scope) : null;
+  const carriedDomain = domainOfScope(carriedScope);
+  const newState = { main: true, activeSteer: expected.activeSteer, epoch: 1, ...(carriedScope ? { scope: carriedScope } : {}) };
   const checkpointCopy = status.checkpoint?.task
     ? { task: status.checkpoint.task, tests: status.checkpoint.tests ?? [], blockers: status.checkpoint.blockers ?? [], next: status.checkpoint.next ?? null, epoch: 1, updatedAt: status.checkpoint.updatedAt ?? null }
     : null;
@@ -172,6 +181,7 @@ export async function relocateScope({ client, discovery, config, to, apply = fal
     scope: status.repo, fromWorkspace: status.workspace.id, toWorkspace: previewTarget.workspace?.id ?? null,
     adoptedWorkspace: previewTarget.mode !== 'create', notes,
     toDir: target.dir, epoch: 1, movedTo: target.dir, checkpoint: Boolean(status.checkpoint?.task), applied: false,
+    domain: carriedDomain,
     workspaceKey, steers: previews.map((p) => ({ ...p, to: null, reused: false })),
     packets: [], delivered: [], deliveryErrors: [], previousNotified: [], notifyErrors: [],
   };

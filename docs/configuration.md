@@ -114,11 +114,10 @@ Optional `workspaceTitleMultiRepo` (e.g. `"{repo} · {subject}"`, unset by defau
 A domain groups several scopes under one coordinating scope, for example one product made of several repositories: Hub → Domain → Child. It is a role, not a scope kind: any live scope except a hub can be the domain of others.
 
 - `plan <child> --domain <domain-scope-id>` (one entry, or per-entry `"domain"`) stores the pointer in the child's scope field (`scope.domain` op, epoch-checked at apply). A new scope gets it with its main workspace. `--domain ""` clears it.
-- The domain must already be a live scope and cannot be the child itself; hubs carry no domain.
+- The domain must be a live scope or planned in the same run (one run creates the domain first, then its children) and cannot be the child itself; hubs carry no domain.
 - The relation is logical only: no Paseo parent, steers stay top-level, and creating, archiving or deleting scopes stays with the hub.
 - Escalation: a child steer prefixes blockers with `domain:` for its domain steer and with `hub:` for the hub. The domain steer hands work down with `assign <child>`, the same epoch-checked preview and apply as from the hub.
 - `scopes` groups the rows (hub first, then each domain with its children, then the rest) and lists each domain's open `domain:` items. `status`, the `assign` preview and the resume brief name the domain and its children.
-- Known limits: create the domain scope before its children (the pointer must name a live scope), and `relocate` does not carry `scope.domain` over to the new main workspace — set it again with `plan <scope> --domain <id>` after relocating.
 
 ## Worker adoption
 
@@ -170,6 +169,8 @@ A profile with `"advisor": true` marks its model as a second-opinion candidate f
 ## Quota pools
 
 Profiles belong to a quota pool named by `profiles.<name>.pool`, or by their provider when `pool` is omitted. A pool at `quota.exhaustedPct` is skipped by profile resolution. Briefs show a preferred different pool at `quota.warnPct`; configure at least two non-advisor steer pools to make that failover useful.
+
+The plugin samples quota in the background and shows it with `/factory quota` (Factory panel and result pill; the sidebar warns when a non-advisor steer's pool reaches the warn level). Thresholds live in Settings → Plugins → Factory → Quota: `warnPct` (default 75), `exhaustedPct` (default 90), and the sample cadence `quotaSampleMinutes` (whole minutes, at least 10).
 
 ## Managing models from the CLI
 
@@ -239,7 +240,7 @@ Idempotency keys use the `wsf:` namespace (`wsf-it:` and `wsf-crash:` in the liv
 
 `relocate <scope> --to <path|project> [--apply]` moves a scope: a new main workspace at the target (created, or adopted when bare), fresh steers of every live slot with the checkpoint handoff, and the old scope retired with `movedTo` (the target directory). The filesystem move itself is the operator's job — the target directory must already exist. Preview is the default; `--apply` executes under the old workspace lock with receipt recovery, so a retry resumes instead of duplicating. Archival of the old scope goes through `cleanup --plan`, never automatically; until then the slot is held twice (switch/plan refuse the ambiguity) and the scope id resolves ambiguously, so address the new scope by workspace id or path. Retired scopes refuse coordination (`switch`, `fresh`, `assign`) and steer planning; `status` shows `RETIRED → movedTo`. Opt-in live check on scratch resources only: `WSF_LIVE_CLEANUP_PLAN=approved node test/integration-cleanup-plan.mjs`.
 
-A domain pointer (`scope.domain`) is not carried over; set it again with `plan <scope> --domain <id>` after relocating (see [domains](#domains)).
+The scope field — including a domain pointer (`scope.domain`) — is carried over to the new main workspace verbatim and shown in the preview as `domain <id>` (see [domains](#domains)).
 
 ## Planned restarts
 

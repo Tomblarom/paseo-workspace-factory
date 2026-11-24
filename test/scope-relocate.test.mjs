@@ -392,6 +392,45 @@ test('interrupted apply resumes through receipts without duplicates', async () =
   assert.equal(world.workspaces[0].metadata[METADATA_KEY].epoch, 4);
 });
 
+test('relocate carries the scope field with its domain pointer to the new scope', async () => {
+  const world = makeWorld();
+  const { ws } = provisioned(world);
+  ws.metadata[METADATA_KEY].scope = { id: 'demo', kind: 'dir', locator: '/p/demo', domain: 'team-a' };
+  const preview = await relocate(world);
+  assert.equal(preview.applied, false);
+  assert.equal(preview.domain, 'team-a');
+  const result = await relocate(world, { apply: true });
+  assert.equal(result.applied, true);
+  assert.equal(result.domain, 'team-a');
+  const fresh = world.workspaces.find((w) => w.id === result.toWorkspace);
+  assert.deepEqual(fresh.metadata[METADATA_KEY].scope, { id: 'demo', kind: 'dir', locator: '/p/demo', domain: 'team-a' });
+  assert.equal(world.workspaces.find((w) => w.id === ws.id).metadata[METADATA_KEY].scope.domain, 'team-a', 'the retired scope keeps its pointer next to movedTo');
+});
+
+test('relocate without a stored scope carries nothing (domain null)', async () => {
+  const world = makeWorld();
+  provisioned(world);
+  assert.equal((await relocate(world)).domain, null);
+  const result = await relocate(world, { apply: true });
+  assert.equal(result.domain, null);
+  assert.ok(!('scope' in world.workspaces.find((w) => w.id === result.toWorkspace).metadata[METADATA_KEY]));
+});
+
+test('relocate carry works when adopting a bare workspace at the target', async () => {
+  const world = makeWorld();
+  const { ws } = provisioned(world);
+  ws.metadata[METADATA_KEY].scope = { id: 'demo', kind: 'dir', locator: '/p/demo', domain: 'team-a' };
+  const bare = addWorkspace(world, { path: '/p/moved' });
+  const preview = await relocate(world);
+  assert.equal(preview.toWorkspace, bare.id);
+  assert.equal(preview.domain, 'team-a');
+  const result = await relocate(world, { apply: true });
+  assert.equal(result.toWorkspace, bare.id);
+  assert.deepEqual(world.workspaces.find((w) => w.id === bare.id).metadata[METADATA_KEY].scope,
+    { id: 'demo', kind: 'dir', locator: '/p/demo', domain: 'team-a' });
+  assert.equal(ws.metadata[METADATA_KEY].movedTo, '/p/moved');
+});
+
 test('project targets resolve to their root path', async () => {
   const world = makeWorld();
   provisioned(world);

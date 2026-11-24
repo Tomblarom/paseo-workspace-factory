@@ -245,6 +245,30 @@ export function planRepository(discovery, config, { allowFork = false, adopt = {
       conflict('scope.hub', 'Several entries in this run plan a hub scope; at most one hub per host');
     }
   }
+  // Domain pointer resolution (used by initial.scope below and 3c-domain): an
+  // explicit --domain wins ("" clears), otherwise the planned pointer (stored
+  // kept). The pointer may name a live scope or a scope planned by another
+  // entry of this run; the domain-creating plan is ordered first
+  // (domainFirstPlanOrder in scope.mjs), so apply finds it live. Canonical
+  // spelling is the live id, else the sibling's planned id.
+  const domainWant = plannedScope && discovery.requestedDomain !== undefined
+    ? (discovery.requestedDomain === '' ? null : discovery.requestedDomain)
+    : undefined;
+  const domainLive = typeof domainWant === 'string'
+    ? (discovery.liveScopes ?? []).find((s) => sameScopeId(s.id, domainWant)) ?? null
+    : null;
+  const domainPlanned = typeof domainWant === 'string' && !domainLive
+    ? siblings.find((s) => sameScopeId(s.id, domainWant)) ?? null
+    : null;
+  const domainCanonical = domainLive?.id ?? domainPlanned?.id ?? null;
+  const domainConflictReason = !plannedScope || domainWant === undefined ? null
+    : (plannedScope.kind === 'hub' || stored?.kind === 'hub')
+      ? '--domain is not supported for hub scopes (hubs carry no domain)'
+      : (domainWant && sameScopeId(domainWant, plannedScope.id))
+        ? `Domain scope ${JSON.stringify(domainWant)} is the scope itself`
+        : (domainWant && !domainLive && !domainPlanned)
+          ? `Domain scope ${JSON.stringify(domainWant)} is not a live scope (nor planned in this run); plan its entry in the same run or clear with --domain ""`
+          : null;
   // Labels and metadata use the stored id when one exists, else the planned one;
   // a hub conversion already labels new steers with the planned hub id.
   const effScopeId = convertingToHub ? plannedScope.id : (stored?.id ?? plannedScope?.id ?? forkName);
@@ -263,8 +287,9 @@ export function planRepository(discovery, config, { allowFork = false, adopt = {
   const expectedTitle = titleExempt ? (main.title ?? main.name) : (rendered.title ?? null);
 
   // 3. Main workspace
+  const initialDomain = domainWant === undefined ? plannedScope?.domain : (domainCanonical ?? domainWant);
   const initial = plannedScope
-    ? { main: true, activeSteer: effectiveInitialActive, epoch: 1, scope: { id: plannedScope.id, kind: plannedScope.kind, locator: plannedScope.locator, ...(plannedScope.parent !== undefined ? { parent: plannedScope.parent } : {}), ...(plannedScope.domain ? { domain: plannedScope.domain } : {}) } }
+    ? { main: true, activeSteer: effectiveInitialActive, epoch: 1, scope: { id: plannedScope.id, kind: plannedScope.kind, locator: plannedScope.locator, ...(plannedScope.parent !== undefined ? { parent: plannedScope.parent } : {}), ...(initialDomain ? { domain: initialDomain } : {}) } }
     : { main: true, activeSteer: effectiveInitialActive, epoch: 1 };
   if (discovery.mainCandidates.length > 1 && !main) {
     conflict('workspace.main', `Several main workspaces use ${checkoutPath}: ${discovery.mainCandidates.map((w) => `${w.id} "${w.title ?? w.name}"`).join(', ')}`);
@@ -345,29 +370,25 @@ export function planRepository(discovery, config, { allowFork = false, adopt = {
   // 3c-domain. --domain sets the domain pointer (Hub → Domain → Kind, logical
   // only, never a parent); --domain "" clears it. The op carries the planned
   // epoch and is epoch-checked at apply like assign. Fresh mains and scope
-  // supplements inherit a valid pointer through initial.scope above.
+  // supplements inherit a valid pointer through initial.scope above. The
+  // pointer may name a live scope or a scope planned in the same run (one
+  // run creates the domain first, then its children).
   if (discovery.requestedDomain !== undefined && plannedScope) {
-    const want = discovery.requestedDomain === '' ? null : discovery.requestedDomain;
-    const live = want ? (discovery.liveScopes ?? []).find((s) => sameScopeId(s.id, want)) ?? null : null;
-    const domainConflict = (plannedScope.kind === 'hub' || stored?.kind === 'hub')
-      ? '--domain is not supported for hub scopes (hubs carry no domain)'
-      : (want && sameScopeId(want, plannedScope.id))
-        ? `Domain scope ${JSON.stringify(want)} is the scope itself`
-        : (want && !live)
-          ? `Domain scope ${JSON.stringify(want)} is not a live scope; create it first (or clear with --domain "")`
-          : null;
-    if (domainConflict) {
-      conflict('scope.domain', domainConflict);
+    if (domainConflictReason) {
+      conflict('scope.domain', domainConflictReason);
     } else if (main && stateNow && validScope(stateNow.scope)) {
       const have = typeof stored?.domain === 'string' && stored.domain ? stored.domain : null;
-      const canonical = want ? live.id : null;
+      const canonical = domainWant ? domainCanonical : null;
       const norm = (v) => (v ? v.toLowerCase() : null);
       if (norm(canonical) !== norm(have)) {
-        add('scope.domain', 'scope.domain', want
+        add('scope.domain', 'scope.domain', domainWant
           ? `Set domain of scope ${JSON.stringify(plannedScope.id)} to ${JSON.stringify(canonical)} (Hub → Domain → Kind; epoch-checked)`
           : `Clear domain of scope ${JSON.stringify(plannedScope.id)} (was ${JSON.stringify(have)})`,
         { workspaceId: main.id, domain: canonical, epoch: stateNow.epoch });
       }
+    }
+    if (!domainConflictReason && domainPlanned) {
+      notes.push(`Domain scope ${JSON.stringify(domainCanonical)} is planned in this run; its entry is applied first`);
     }
   }
 

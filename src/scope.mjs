@@ -28,6 +28,55 @@ export function domainOfScope(value) {
   return value && typeof value.domain === 'string' && value.domain.trim() ? value.domain : null;
 }
 
+/** Planned scope id of one plan: the first scope-bearing op, else the plan repo (forkName, the scope id for every kind). */
+function planScopeId(plan) {
+  for (const op of plan?.ops ?? []) {
+    const scope = op.params?.metadata?.[METADATA_KEY]?.scope ?? op.params?.scope ?? null;
+    if (scope && typeof scope.id === 'string' && scope.id) return scope.id;
+  }
+  return typeof plan?.repo === 'string' && plan.repo ? plan.repo : null;
+}
+
+/** Domain pointer one plan sets: the scope.domain op first, else an embedded pointer (fresh main, adopt, supplement). */
+function planDomainOf(plan) {
+  for (const op of plan?.ops ?? []) {
+    if (op.key === 'scope.domain' && typeof op.params?.domain === 'string' && op.params.domain) return op.params.domain;
+  }
+  for (const op of plan?.ops ?? []) {
+    const domain = op.params?.metadata?.[METADATA_KEY]?.scope?.domain ?? op.params?.scope?.domain ?? null;
+    if (typeof domain === 'string' && domain) return domain;
+  }
+  return null;
+}
+
+/**
+ * Orders plans so a domain scope's plan precedes its children's: apply runs
+ * plans in order and replans each entry alone, so the domain must be live
+ * before a child pointing at it is applied. Plans without a same-run domain
+ * edge keep their relative order; cycles keep theirs too and fail closed at
+ * apply. Returns the ordered index list (identity when nothing points
+ * sideways). Reorder entries and plans together — apply pairs them by index.
+ */
+export function domainFirstPlanOrder(plans) {
+  const ids = plans.map(planScopeId);
+  const domains = plans.map(planDomainOf);
+  const order = plans.map((_, index) => index);
+  for (let guard = order.length * order.length + 1; guard > 0; guard--) {
+    let inversions = false;
+    for (let a = 0; a < order.length; a++) {
+      for (let b = a + 1; b < order.length; b++) {
+        if (domains[order[a]] && sameScopeId(domains[order[a]], ids[order[b]])) {
+          const [take] = order.splice(b, 1);
+          order.splice(a, 0, take);
+          inversions = true;
+        }
+      }
+    }
+    if (!inversions) return order;
+  }
+  return order;
+}
+
 /** Ambiguous address (or duplicate scope id); candidates carry id, kind, workspace id and path. */
 export class ScopeConflict extends Error {
   constructor(message, candidates = [], code = 'ambiguous') {

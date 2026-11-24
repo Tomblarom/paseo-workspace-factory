@@ -35,6 +35,7 @@
 - Priority model lists: `worker list/set/rm/pick` and `steer list/set/rm` manage ordered profiles with availability fallback (`slot set/rm`, `worker-default` deprecated); `model advisor/sensitive` flip the flags; advisor profiles never coordinate, sensitive profiles only get sanitized tasks on provably public repositories.
 - Quota pools and profile health: profiles share a quota pool (`pool`, `quota.warnPct/exhaustedPct`); exhausted pools are skipped with failover to another pool; `worker pick <scope> --failed <profile> --reason <text>` marks a profile unhealthy for 10 minutes.
 - Full `/factory` slash coverage: every CLI function is a `/factory` subcommand (`scopes`, `workers`, `models`, `drain`, `retire`, `worker|steer|model` …) with inline results and panel previews; plugin settings for model lists, cleanup, resume and supervision.
+- Domain follow-ups: `relocate` carries the scope's domain pointer (shown in the preview), and `plan` can create a domain scope and its child in the same run (domain first).
 
 ## 0.0.0 – initial import
 

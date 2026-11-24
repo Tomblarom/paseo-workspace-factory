@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { normalizeEntry } from '../src/discovery.mjs';
-import { listScopes, sameScopeId, domainOfScope } from '../src/scope.mjs';
+import { listScopes, sameScopeId, domainOfScope, domainFirstPlanOrder } from '../src/scope.mjs';
 import { createRunner } from '../src/factory.mjs';
 import { applyPlans, createExecutors, createAuthorization } from '../src/apply.mjs';
 import { assignScope, buildAssignment } from '../src/assign.mjs';
@@ -374,6 +374,101 @@ test('status and resume brief show the domain and open domain items', async () =
   assert.match(brief, /Open domain items \(escalated to the domain steer team-a\):\n- domain:needs-api/);
   const plain = buildResumeBrief(steerStatus(domainDiscovery), { scope: domainDiscovery.scope });
   assert.ok(!plain.includes('domain'), 'briefs without a domain stay unchanged');
+});
+
+test('same run creates the domain scope and its child, child entry first', async () => {
+  const world = makeWorld();
+  world.checkouts['/p/team-a'] = { remotes: {} };
+  world.checkouts['/p/web'] = { remotes: {} };
+  const runner = runnerFor(world);
+  const entries = [{ local: '/p/web', domain: 'team-a' }, { local: '/p/team-a' }];
+  const plans = await runner.runPlans(entries);
+  assert.equal(plans[0].conflicts.length, 0, JSON.stringify(plans[0].conflicts));
+  assert.equal(plans[1].conflicts.length, 0, JSON.stringify(plans[1].conflicts));
+  assert.match(plans[0].notes.join('\n'), /Domain scope "team-a" is planned in this run; its entry is applied first/);
+  assert.equal(plans[0].ops.find((o) => o.key === 'workspace.main').params.metadata[METADATA_KEY].scope.domain, 'team-a');
+  // The plan layer orders domain first; entries travel with their plans.
+  const order = domainFirstPlanOrder(plans);
+  assert.deepEqual(order, [1, 0]);
+  const orderedEntries = order.map((i) => entries[i]);
+  const orderedPlans = order.map((i) => plans[i]);
+  const authorization = createAuthorization(orderedPlans, CONFIG, { entries: orderedEntries, allowFork: false, adopt: {} });
+  const execute = createExecutors({ client: fakeClient(world), gh: strictGh(world), git: fakeGit(world), paseoCli: fakePaseoCli(world), sleep: async () => {} });
+  const result = await applyPlans({ authorization, config: CONFIG, confirm: authorization.hash, lookupReceipt: fakeLookup(world), runPlans: (list, options) => runner.runPlans(list, options), execute });
+  assert.deepEqual(result.report.map((r) => r.status), ['complete', 'complete'], JSON.stringify(result.report));
+  const scopes = listScopes({ workspaces: world.workspaces, agents: world.agents, projects: [] });
+  assert.equal(scopes.find((s) => s.id === 'team-a').kind, 'dir');
+  assert.equal(scopes.find((s) => s.id === 'web').domain, 'team-a');
+  const state = { workspaces: world.workspaces, agents: world.agents, projects: world.projects };
+  assert.deepEqual(scopeRows(state).find((r) => r.id === 'team-a').children, ['web']);
+  assert.match(formatScopeRows(scopeRows(state)), /web \[dir\][^\n]*domain team-a/);
+  const [childDiscovery] = await runner.discoverAll([{ local: '/p/web' }]);
+  assert.equal(steerStatus(childDiscovery).domain, 'team-a');
+});
+
+test('existing child may point at a domain planned in the same run (sibling spelling wins)', async () => {
+  const world = makeWorld();
+  world.checkouts['/p/team-a'] = { remotes: {} };
+  provisionDir(world, { path: '/p/web', id: 'web', epoch: 4 });
+  const entries = [{ local: '/p/web', domain: 'TEAM-A' }, { local: '/p/team-a', name: 'Team-A' }];
+  const plans = await runnerFor(world).runPlans(entries);
+  assert.equal(plans[0].conflicts.length, 0, JSON.stringify(plans[0].conflicts));
+  assert.equal(plans[1].conflicts.length, 0, JSON.stringify(plans[1].conflicts));
+  assert.deepEqual(keys(plans[0]), ['scope.domain']);
+  assert.equal(plans[0].ops.find((o) => o.key === 'scope.domain').params.domain, 'Team-A');
+  assert.deepEqual(domainFirstPlanOrder(plans), [1, 0]);
+});
+
+test('unknown domains still conflict and name the same-run option', async () => {
+  const world = makeWorld();
+  provisionDir(world, { path: '/p/web', id: 'web' });
+  const [p] = await runnerFor(world).runPlans([{ local: '/p/web', domain: 'nope' }]);
+  assert.match(p.conflicts.find((c) => c.key === 'scope.domain').reason, /nor planned in this run/);
+});
+
+test('domainFirstPlanOrder: identity without edges, domain first, cycles terminate', () => {
+  const main = (id, domain) => ({
+    key: 'workspace.main',
+    params: { metadata: { [METADATA_KEY]: { scope: { id, kind: 'dir', ...(domain ? { domain } : {}) } } } },
+  });
+  const plan = (repo, ops) => ({ repo, ops });
+  assert.deepEqual(domainFirstPlanOrder([plan('a', []), plan('b', [])]), [0, 1]);
+  const child = plan('web', [main('web', 'team-a')]);
+  const domain = plan('team-a', [main('team-a')]);
+  const other = plan('other', [main('other')]);
+  assert.deepEqual(domainFirstPlanOrder([child, domain]), [1, 0]);
+  assert.deepEqual(domainFirstPlanOrder([domain, child]), [0, 1]);
+  assert.deepEqual(domainFirstPlanOrder([child, other, domain]), [2, 0, 1], 'unrelated plans keep relative order around the move');
+  const viaOp = plan('web', [{ key: 'scope.domain', params: { workspaceId: 'wks_x', domain: 'team-a', epoch: 1 } }]);
+  assert.deepEqual(domainFirstPlanOrder([viaOp, domain]), [1, 0], 'scope.domain op edges count too');
+  const clearing = plan('web', [{ key: 'scope.domain', params: { workspaceId: 'wks_x', domain: null, epoch: 1 } }]);
+  assert.deepEqual(domainFirstPlanOrder([clearing, domain]), [0, 1], 'clearing is no edge');
+  const live = plan('web', [main('web', 'team-a')]);
+  assert.deepEqual(domainFirstPlanOrder([live]), [0], 'live domains (no same-run plan) order nothing');
+  const a = plan('a', [main('a', 'b')]);
+  const b = plan('b', [main('b', 'a')]);
+  assert.deepEqual(domainFirstPlanOrder([a, b]).sort(), [0, 1], 'cycles terminate with every plan kept');
+});
+
+test('scopes and status show the domain for the retired scope and its relocated successor', async () => {
+  const world = makeWorld();
+  provisionDir(world, { path: '/p/team-a', id: 'team-a' });
+  const old = provisionDir(world, { path: '/p/demo', id: 'web', domain: 'team-a', epoch: 4 });
+  old.metadata[METADATA_KEY].retired = true;
+  old.metadata[METADATA_KEY].movedTo = '/p/moved';
+  old.metadata[METADATA_KEY].activeSteer = null;
+  provisionDir(world, { path: '/p/moved', id: 'web', domain: 'team-a', epoch: 1 });
+  const state = { workspaces: world.workspaces, agents: world.agents, projects: world.projects };
+  const rows = scopeRows(state);
+  assert.equal(rows.filter((r) => r.id === 'web').length, 2);
+  const lines = formatScopeRows(rows).split('\n').filter((l) => l.startsWith('web '));
+  assert.equal(lines.length, 2, 'both the retired and the relocated row print');
+  assert.ok(lines.every((l) => l.includes('domain team-a')), lines.join('\n'));
+  const runner = runnerFor(world);
+  const [fresh] = await runner.discoverAll([{ local: '/p/moved' }]);
+  assert.equal(steerStatus(fresh).domain, 'team-a');
+  const [stale] = await runner.discoverAll([{ local: '/p/demo' }]);
+  assert.equal(steerStatus(stale).domain, 'team-a');
 });
 
 test('CLI --domain validation and usage', (t) => {

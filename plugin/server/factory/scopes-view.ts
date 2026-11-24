@@ -129,11 +129,14 @@ export function formatScopeRows(rows) {
   // levels: Hub → Domain → Kind), then the rest. Rows without a domain keep
   // their exact previous shape.
   const byId = new Map(rows.map((r) => [r.id.toLowerCase(), r]));
+  // Emission is keyed by workspace: after a relocate the retired scope and
+  // its successor share the scope id (the domain pointer is carried over),
+  // and both rows — old and new — must print.
   const emitted = new Set();
   const ordered = [];
   const push = (row) => {
-    if (row && !emitted.has(row.id)) {
-      emitted.add(row.id);
+    if (row && !emitted.has(row.workspaceId)) {
+      emitted.add(row.workspaceId);
       ordered.push(row);
     }
   };

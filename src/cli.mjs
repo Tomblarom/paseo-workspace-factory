@@ -14,7 +14,7 @@ import { planHash } from './planner.mjs';
 import { applyPlans, createExecutors, createAuthorization, storeAuthorization, fileProgress, withApplyLock } from './apply.mjs';
 import { CHECKPOINT_KEY, restartInterruptions, steerStatus, switchSteer, freshSteer, writeCheckpoint, parseCheckpointBlock, lastAssistantText, resolveTargetEntry, buildResumeBrief, readGitBrief } from './steer.mjs';
 import { AGENTS_KEY } from './agent-state.mjs';
-import { listScopes, resolveScope } from './scope.mjs';
+import { listScopes, resolveScope, domainFirstPlanOrder } from './scope.mjs';
 import { DRAIN_DEFAULT_TIMEOUT_MS, drain, parseTimeout } from './drain.mjs';
 import { assessWorker, readGitState } from './workers.mjs';
 import { formatWorkersText, readWorkers, workersReport } from './supervision.mjs';
@@ -434,10 +434,17 @@ async function main() {
       const renameProject = values['rename-project']?.trim() || null;
       if (values['rename-project'] !== undefined && renameProject === null) throw new Error('--rename-project needs a project name');
       const planOptions = { allowFork, adopt, adoptWorker, detach: Boolean(values.detach), retitle, renameProject, ...(slotsOverride ? { slots: slotsOverride } : {}) };
-      const plans = await runner.runPlans(entries, planOptions);
+      const unordered = await runner.runPlans(entries, planOptions);
+      // Domain scopes first: a child may point at a domain planned in the
+      // same run, and apply runs entries in order (replanning each alone),
+      // so the domain must be live before its children are applied. Entries
+      // travel with their plans — apply pairs them by index.
+      const order = domainFirstPlanOrder(unordered);
+      const plans = order.map((i) => unordered[i]);
+      const orderedEntries = order.map((i) => entries[i]);
       const hash = planHash(plans, config);
       if (plans.some((p) => p.ops.length)) {
-        const stored = storeAuthorization(PLAN_DIR, createAuthorization(plans, config, { entries, ...planOptions }), config);
+        const stored = storeAuthorization(PLAN_DIR, createAuthorization(plans, config, { entries: orderedEntries, ...planOptions }), config);
         if (stored.status === 'kept' && !values.json) console.log(`Existing authorization kept (created ${stored.authorization.createdAt}).`);
       }
       if (values.out) writeFileSync(values.out, `${JSON.stringify({ generatedAt: new Date().toISOString(), hash, plans }, null, 2)}\n`);
@@ -592,7 +599,7 @@ async function main() {
         lookupReceipt: lookupCreationReceipt, language: runtime().handoffLanguage,
         workerModel: workerModelLine(config, discovery),
       });
-      console.log(`${result.applied ? 'Relocated' : 'Dry-run'}: ${result.scope} ${result.fromWorkspace} → ${result.toDir} (${result.toWorkspace ?? 'new workspace'}) · ${result.steers.length} steer(s) · epoch 1 · movedTo ${result.movedTo}${result.checkpoint ? '' : ' · NO task checkpoint'}${result.delivered.length ? ` · handoffs delivered to ${result.delivered.length}` : ''}${result.previousNotified.length ? ` · ${result.previousNotified.length} previous steer(s) notified` : ''}${result.deliveryErrors.map((d) => ` · delivery failed: ${d.error}`).join('')}${result.notifyErrors.map((d) => ` · notify failed: ${d.error}`).join('')}${(result.notes ?? []).map((n) => `\nNote: ${n}`).join('')}\nNote: the retired scope ${result.fromWorkspace} keeps its agents; archive it via \`cleanup --plan\` (never automatic). Until then, address the new scope by workspace id or path.`);
+      console.log(`${result.applied ? 'Relocated' : 'Dry-run'}: ${result.scope} ${result.fromWorkspace} → ${result.toDir} (${result.toWorkspace ?? 'new workspace'}) · ${result.steers.length} steer(s) · epoch 1 · movedTo ${result.movedTo}${result.domain ? ` · domain ${result.domain}` : ''}${result.checkpoint ? '' : ' · NO task checkpoint'}${result.delivered.length ? ` · handoffs delivered to ${result.delivered.length}` : ''}${result.previousNotified.length ? ` · ${result.previousNotified.length} previous steer(s) notified` : ''}${result.deliveryErrors.map((d) => ` · delivery failed: ${d.error}`).join('')}${result.notifyErrors.map((d) => ` · notify failed: ${d.error}`).join('')}${(result.notes ?? []).map((n) => `\nNote: ${n}`).join('')}\nNote: the retired scope ${result.fromWorkspace} keeps its agents; archive it via \`cleanup --plan\` (never automatic). Until then, address the new scope by workspace id or path.`);
       for (const packet of result.packets) console.log(`--- Steer ${packet.slot} → ${packet.to ?? '(new agent)'}\n${packet.packet}`);
       return;
     }
