@@ -19,9 +19,10 @@ import { idempotencyKey, requestDigest } from './planner.mjs';
 import { createExecutors } from './apply.mjs';
 import { resolveScope, scopeToEntry, sameScopeId, domainOfScope } from './scope.mjs';
 import { STEER_TITLE, activeMarker, markSteerTitle, stripActiveMarker } from './discovery.mjs';
-import { AGENTS_KEY } from './agent-state.mjs';
+import { AGENTS_KEY, updateAgentEntry } from './agent-state.mjs';
 import { SUPERVISION_DEFAULTS, failoverChain, openWorkers as openRegisterWorkers, readWorkers, zerosubMoveDecision } from './supervision.mjs';
 import { QUOTA_DEFAULTS, accountExhausted, accountForAgent, formatQuotaLine, profilePool } from './quota.mjs';
+import { readRewindPoint, rewindAndBrief } from './rewind.mjs';
 
 export const CHECKPOINT_KEY = `${METADATA_KEY}.checkpoint`;
 export class SwitchRefused extends Error {}
@@ -240,7 +241,9 @@ const TEXT = {
     hint: (slot) => `Unverifizierter Hinweis – letzte Antwort von Steer ${slot}, gekürzt, keine Auftragsquelle:`,
     notice: (to, e) => `Hinweis: Steer ${to.slot} (${to.id}) ist ab Epoch ${e} aktiv. Du koordinierst nicht mehr; nur auf ausdrückliche Anfrage antworten.`,
     refreshHead: (repo, slot, epoch, active) => `Steer-Auffrischung für ${repo}: Steer ${slot} bekommt einen neuen Agenten in Epoch ${epoch} (keine Übernahme; aktiv bleibt Steer ${active}).`,
+    rewindHead: (repo, slot, id, epoch, active) => `Steer-Auffrischung für ${repo}: Steer ${slot} behält Agent ${id} im selben Tab (Kontext per Rewind geleert, Epoch ${epoch}, keine Übernahme; aktiv bleibt Steer ${active}).`,
     workerHead: (repo, title, from, to, owner) => `Worker-Auffrischung für ${repo}: „${title}“ ${from} → ${to} (Owner Steer ${owner}, Epoch unverändert).`,
+    workerRewindHead: (repo, title, id, owner) => `Worker-Auffrischung für ${repo}: „${title}“ ${id} behält seinen Tab (Kontext per Rewind geleert, Owner Steer ${owner}, Epoch unverändert).`,
     refreshRole: (slot) => `Du bist Steer ${slot} dieses Scopes (nicht aktiv: nur antworten, nicht koordinieren).`,
     workerRole: (title, owner) => `Du bist Worker „${title}“; dein Owner ist Steer ${owner} — mache mit dem Checkpoint unten weiter.`,
     refreshNote: (id, at) => `Notiz von ${id}${at ? ` (${at})` : ''}:`,
@@ -261,7 +264,9 @@ const TEXT = {
     hint: (slot) => `Unverified hint – last answer of Steer ${slot}, shortened, not a task source:`,
     notice: (to, e) => `Note: Steer ${to.slot} (${to.id}) is active as of epoch ${e}. You no longer coordinate; reply only when asked explicitly.`,
     refreshHead: (repo, slot, epoch, active) => `Steer refresh for ${repo}: Steer ${slot} gets a new agent at epoch ${epoch} (no takeover; active stays Steer ${active}).`,
+    rewindHead: (repo, slot, id, epoch, active) => `Steer refresh for ${repo}: Steer ${slot} keeps agent ${id} in the same tab (rewound context, epoch ${epoch}, no takeover; active stays Steer ${active}).`,
     workerHead: (repo, title, from, to, owner) => `Worker refresh for ${repo}: "${title}" ${from} → ${to} (owner Steer ${owner}, epoch unchanged).`,
+    workerRewindHead: (repo, title, id, owner) => `Worker refresh for ${repo}: "${title}" ${id} keeps its tab (rewound context, owner Steer ${owner}, epoch unchanged).`,
     refreshRole: (slot) => `You are Steer ${slot} of this scope (not active: answer only, do not coordinate).`,
     workerRole: (title, owner) => `You are worker "${title}"; your owner is Steer ${owner} — continue from the checkpoint below.`,
     refreshNote: (id, at) => `Note of ${id}${at ? ` (${at})` : ''}:`,
@@ -361,14 +366,20 @@ export function refreshWorkerNotice(to, language = 'en') {
  * agent's own `wsf.agents` note (or the checkpoint when no note was
  * recorded); workers are intentionally not listed (see `resume`).
  * Deterministic like buildHandoff; no model call is made to build it.
+ * With `rewound: true` the packet heads the same tab after a Paseo rewind
+ * (from.id is kept, no new agent, no retire notice).
  */
-export function buildRefreshPacket(status, { kind, slot = null, owner = null, title = null, from, to, epoch, git, note = null, noteAt = null, lastMessage = null, maxLastChars = 800, language = 'en', workerModel = null }) {
+export function buildRefreshPacket(status, { kind, slot = null, owner = null, title = null, from, to, epoch, git, note = null, noteAt = null, lastMessage = null, maxLastChars = 800, language = 'en', workerModel = null, rewound = false }) {
   const t = TEXT[language] ?? TEXT.en;
   const active = status.state?.activeSteer ?? '?';
   const lines = [
     kind === 'worker'
-      ? t.workerHead(status.repo, title ?? from.title ?? 'Worker', from.id, to.id, owner ?? '?')
-      : t.refreshHead(status.repo, slot, epoch, active),
+      ? (rewound
+        ? t.workerRewindHead(status.repo, title ?? from.title ?? 'Worker', from.id, owner ?? '?')
+        : t.workerHead(status.repo, title ?? from.title ?? 'Worker', from.id, to.id, owner ?? '?'))
+      : (rewound
+        ? t.rewindHead(status.repo, slot, from.id, epoch, active)
+        : t.refreshHead(status.repo, slot, epoch, active)),
     kind === 'worker'
       ? t.workerRole(title ?? from.title ?? 'Worker', owner ?? '?')
       : t.refreshRole(slot),
@@ -456,6 +467,49 @@ async function verifyFreshAgentParent(client, agentId, expectedParent) {
       ? `Fresh agent ${agentId} has parent ${actual}; refusing a parented fresh agent`
       : `Fresh agent ${agentId} has no parent, expected ${expected}`);
   }
+}
+
+/**
+ * Idempotency guard for a same-tab rewind refresh: a pending cleanup action
+ * or an already-recorded rewind after the last turn ends makes a second
+ * fresh a no-op (double-click safe). Returns the reason string, or null to
+ * proceed. Unparsable timestamps fail open (proceed).
+ */
+export function freshRewindIdempotent(entry) {
+  if (entry?.pendingAction) return 'a cleanup action is already pending';
+  const cleared = entry?.cleared;
+  if (cleared?.mode === 'rewind' && typeof cleared.at === 'string') {
+    const clearedMs = Date.parse(cleared.at);
+    if (!Number.isFinite(clearedMs)) return null;
+    const lastEnd = typeof entry?.lastTurnEndedAt === 'string' ? Date.parse(entry.lastTurnEndedAt) : NaN;
+    // No recorded turn since the rewind (unknown last end counts as none):
+    // rewinding again would be pointless, so the second fresh is a no-op.
+    if (!Number.isFinite(lastEnd)) return 'already rewound; no new turn recorded since';
+    if (clearedMs >= lastEnd) return 'already rewound after the last turn';
+  }
+  return null;
+}
+
+/**
+ * `wsf.agents` patch recorded after a successful same-tab rewind: `cleared`
+ * with mode `rewind` (so the C5 "already cleaned" rule and the turn hook see
+ * it as a cleaning) plus an explicit `refreshed` marker with the rewind
+ * message id and the brief's message id (when the brief landed as
+ * user_message). Compaction debt and the fresh hint are wiped like after a
+ * clear; a previous action failure is lifted.
+ */
+export function buildRewindRecord({ checkpoint = null, messageId = null, briefMessageId = null, now = () => new Date() } = {}) {
+  const at = (typeof now === 'function' ? now() : now)?.toISOString?.() ?? new Date().toISOString();
+  const checkpointAt = checkpoint?.capturedAt ?? checkpoint?.updatedAt ?? null;
+  return {
+    cleared: { at, mode: 'rewind', checkpointAt },
+    refreshed: { at, mode: 'rewind', ...(messageId ? { messageId } : {}), ...(briefMessageId ? { briefMessageId } : {}) },
+    freshHint: null,
+    compactions: 0,
+    lastCompactBaseTokens: null,
+    compactionPendingBase: null,
+    lastActionFailed: null,
+  };
 }
 
 /** Hard budget for the resume brief: ≤6000 chars (~1.5k tokens), enforced. */
@@ -834,6 +888,100 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
 }
 
 /**
+ * Reads the rewind point for a fresh preview without side effects. Returns
+ * the first user_message id, or null when rewind is disabled, the daemon is
+ * unreachable, or the agent has no user message (send-only history).
+ */
+async function previewRewindPoint(fromId, rewindClient) {
+  if (typeof rewindClient !== 'function' || !fromId) return null;
+  try {
+    return await readRewindPoint(fromId, { createClient: rewindClient });
+  } catch {
+    return null;
+  }
+}
+
+function rewindFallbackWarning(fromId, outcomeStatus) {
+  if (outcomeStatus === 'no-point') return `No rewind point for ${fromId} (send-only history has no user message); falling back to a new agent`;
+  if (outcomeStatus === 'unsupported') return `Rewind is not supported for ${fromId}; falling back to a new agent`;
+  return `Rewind check unavailable for ${fromId}; falling back to a new agent`;
+}
+
+/**
+ * Runs the same-tab rewind and records it in `wsf.agents`. Returns the
+ * rewind outcome; `failed` throws (nothing sent, nothing recorded, no new
+ * agent), anything but `rewound` means the caller falls back to the new-agent
+ * path. A landed rewind is recorded even when the brief send failed (the
+ * rewind stands; resend the packet manually).
+ */
+async function runTabRewind({ client, workspaceId, agentId, packet, checkpoint, lock, now, rewindClient }) {
+  const outcome = await rewindAndBrief(agentId, packet, { createClient: rewindClient });
+  if (outcome.status === 'failed') {
+    throw new SwitchRefused(`Rewind of ${agentId} failed (${outcome.error ?? 'unknown error'}); nothing sent, nothing recorded, no new agent created`);
+  }
+  if (outcome.status !== 'rewound') return { outcome };
+  await updateAgentEntry({
+    client, workspaceId, agentId, lock,
+    patch: buildRewindRecord({ checkpoint, messageId: outcome.messageId ?? null, briefMessageId: outcome.briefMessageId ?? null, now }),
+    liveIds: null,
+  });
+  return { outcome };
+}
+
+/**
+ * Same-tab rewind for the ACTIVE steer: no takeover, no epoch change, the
+ * agent keeps its tab, id and labels. Returns the fresh result (preview,
+ * applied, or idempotent double-click), or `{ fallback }` when the caller
+ * must continue with the new-agent path.
+ */
+async function tryActiveRewind({ client, discovery, status, expected, slot, from, apply, language, git, lock, now, workerModel, rewindClient }) {
+  const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;
+  const entry = agentState?.[from.id] ?? null;
+  const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory) : null;
+  const checkpoint = Boolean(status.checkpoint?.task);
+  if (!apply) {
+    const point = await previewRewindPoint(from.id, rewindClient);
+    if (!point) return { fallback: 'unavailable' };
+    const packet = buildRefreshPacket(status, {
+      kind: 'steer', slot, from, to: { id: from.id }, epoch: expected.epoch, git: gitSnapshot,
+      note: entry?.note ?? null, noteAt: entry?.noteAt ?? null,
+      lastMessage: await hintOf(client, from.id), language, workerModel, rewound: true,
+    });
+    return {
+      repo: status.repo, slot, kind: 'steer', from: from.id, to: from.id, epoch: expected.epoch, epochBumped: false, profile: null,
+      provider: from.provider, model: from.model, idempotencyKey: null, packet, packetChars: packet.length,
+      checkpoint, applied: false, delivered: false, deliveryError: null, previousNotified: false, reused: false, renameError: null,
+      warnings: [], fallbackFrom: null, profileSuggestion: null, refreshMode: 'rewind', rewindPoint: point,
+    };
+  }
+  const idem = freshRewindIdempotent(entry);
+  if (idem) {
+    return {
+      repo: status.repo, slot, kind: 'steer', from: from.id, to: from.id, epoch: expected.epoch, epochBumped: false, profile: null,
+      provider: from.provider, model: from.model, idempotencyKey: null, packet: '', packetChars: 0,
+      checkpoint, applied: false, idempotent: true, idempotentReason: idem, delivered: false, deliveryError: null,
+      previousNotified: false, reused: false, renameError: null, warnings: [], fallbackFrom: null, profileSuggestion: null,
+      refreshMode: 'rewind',
+    };
+  }
+  const packet = buildRefreshPacket(status, {
+    kind: 'steer', slot, from, to: { id: from.id }, epoch: expected.epoch, git: gitSnapshot,
+    note: entry?.note ?? null, noteAt: entry?.noteAt ?? null,
+    lastMessage: await hintOf(client, from.id), language, workerModel, rewound: true,
+  });
+  const { outcome } = await runTabRewind({ client, workspaceId: status.workspace.id, agentId: from.id, packet, checkpoint: status.checkpoint, lock, now, rewindClient });
+  if (outcome.status !== 'rewound') return { fallback: outcome.status };
+  return {
+    repo: status.repo, slot, kind: 'steer', from: from.id, to: from.id, epoch: expected.epoch, epochBumped: false, profile: null,
+    provider: from.provider, model: from.model, idempotencyKey: null, packet, packetChars: packet.length,
+    checkpoint, applied: true, delivered: !outcome.sendError, deliveryError: outcome.sendError ?? null,
+    previousNotified: false, reused: false, renameError: null,
+    warnings: [], fallbackFrom: null, profileSuggestion: null, refreshMode: 'rewind',
+    rewindPoint: outcome.messageId ?? null, briefMessageId: outcome.briefMessageId ?? null,
+  };
+}
+
+/**
  * Hands a steer to a NEW agent of the same slot and profile (empty
  * context). Without `--slot`/`--worker` this is the active-steer takeover:
  * preview without apply; apply, under the workspace lock: verify the
@@ -850,8 +998,12 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
  * fresh agent is created without a parent link (a fresh worker keeps its
  * previous parent, never the caller). The packet preview names a placeholder
  * id; the applied packet carries the real one.
+ * With an injected `rewindClient` (DaemonClient factory) every path tries a
+ * same-tab rewind first and only falls back to a new agent when no rewind
+ * point exists or the provider lacks rewind; the preview names `rewind` vs
+ * `new agent` in `refreshMode`.
  */
-export async function freshSteer({ client, discovery, config, apply = false, slot: slotArg = null, workerId = null, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, now = () => new Date(), workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 90, zerosub = null, paseoCli = null }) {
+export async function freshSteer({ client, discovery, config, apply = false, slot: slotArg = null, workerId = null, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, now = () => new Date(), workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 90, zerosub = null, paseoCli = null, rewindClient = null }) {
   const status = steerStatus(discovery);
   if (!status.workspace || !status.state) throw new SwitchRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
@@ -860,12 +1012,12 @@ export async function freshSteer({ client, discovery, config, apply = false, slo
   const wantWorker = workerId !== null && workerId !== undefined && String(workerId).trim() !== '';
   if (wantSlot && wantWorker) throw new SwitchRefused('fresh takes either --slot or --worker, not both');
   if (wantWorker) {
-    return freshWorkerAgent({ client, discovery, status, expected, workerId: String(workerId).trim(), config, apply, language, git, lookupReceipt, execute, workerModel });
+    return freshWorkerAgent({ client, discovery, status, expected, workerId: String(workerId).trim(), config, apply, language, git, lookupReceipt, execute, workerModel, lock, now, rewindClient });
   }
   const target = wantSlot ? String(slotArg).trim().toUpperCase() : expected.activeSteer;
   if (!/^[A-Z]$/.test(target ?? '')) throw new SwitchRefused(`Not a steer slot: ${JSON.stringify(slotArg)}`);
   if (target !== expected.activeSteer) {
-    return freshNonActiveSteer({ client, discovery, status, expected, slot: target, config, apply, language, git, lookupReceipt, execute, workerModel, quotaSnapshot, quotaExhaustedPct, zerosub });
+    return freshNonActiveSteer({ client, discovery, status, expected, slot: target, config, apply, language, git, lookupReceipt, execute, workerModel, quotaSnapshot, quotaExhaustedPct, zerosub, lock, now, rewindClient });
   }
   const slot = expected.activeSteer;
   const holders = status.steers.filter((s) => s.slot === slot);
@@ -878,6 +1030,15 @@ export async function freshSteer({ client, discovery, config, apply = false, slo
   const unexplained = holders.filter((h) => h.superseded && h.id !== expected.previousSteer);
   const single = holders.length === 1 ? holders[0] : (live.length === 1 && !unexplained.length ? live[0] : null);
   if (single && BUSY.has(single.status)) throw new SwitchRefused(`Active Steer ${slot} is ${single.status}; stop it or wait for its turn to end first`);
+  // Same-tab rewind first (when a DaemonClient factory is injected): the
+  // agent keeps its tab, id and labels; a new parent-free agent is only the
+  // fallback when no rewind point exists or the provider lacks rewind.
+  let rewindFallback = null;
+  if (typeof rewindClient === 'function' && single) {
+    const rewound = await tryActiveRewind({ client, discovery, status, expected, slot, from: single, config, apply, language, git, lock, now, workerModel, rewindClient });
+    if (rewound && !rewound.fallback) return rewound;
+    if (rewound?.fallback) rewindFallback = rewound.fallback;
+  }
   const profileName = config?.steers?.slots?.[slot];
   if (!profileName || !config.profiles?.[profileName]) throw new SwitchRefused(`Steer slot ${slot} references unknown profile "${profileName}"`);
   const advisorSlot = isAdvisorSlot(config, slot);
@@ -889,6 +1050,7 @@ export async function freshSteer({ client, discovery, config, apply = false, slo
   if (!profile) throw new SwitchRefused(`Profile "${profileName}" for Steer ${slot} is not startable${skipped[0] ? `: ${skipped[0].reason}` : ''} (no fallback available)`);
   const warnings = [];
   if (advisorSlot) warnings.push(`Steer ${slot} is an advisor (profile "${profileName}"); advisors never coordinate`);
+  if (rewindFallback && single) warnings.push(rewindFallbackWarning(single.id, rewindFallback));
   // Slot-profile alignment: a fallback creation suggests pointing the slot
   // at the created profile afterwards; a live holder running another model
   // suggests aligning the slot first, else fresh recreates with the slot
@@ -923,6 +1085,7 @@ export async function freshSteer({ client, discovery, config, apply = false, slo
     provider: profile.provider, model: profile.model, idempotencyKey: key, packet: '', packetChars: 0,
     checkpoint: Boolean(status.checkpoint?.task), applied: false, delivered: false, deliveryError: null, previousNotified: false, reused: false, renameError: null,
     warnings, fallbackFrom: profile.name !== profileName ? profileName : null, profileSuggestion,
+    refreshMode: 'new-agent', ...(rewindFallback ? { rewindFallback } : {}),
   };
   if (!apply) {
     if (!single) throw new SwitchRefused(`Steer ${slot} has several live agents (${holders.map((s) => s.id).join(', ')}); if a previous fresh apply was interrupted, rerun with --apply to recover it, otherwise archive the retired one in Paseo`);
@@ -993,18 +1156,76 @@ export async function freshSteer({ client, discovery, config, apply = false, slo
 }
 
 /**
+ * Same-tab rewind for a NON-active steer or a worker: the agent keeps its
+ * tab, id and labels, no epoch change. Returns the fresh result (preview,
+ * applied, or idempotent double-click), or `{ fallback }` when the caller
+ * must continue with the new-agent path. `packetArgs` carries the
+ * kind-specific buildRefreshPacket fields (slot or owner/title).
+ */
+async function tryTabRewind({ client, discovery, status, expected, from, kind, packetArgs, apply, language, git, lock, now, workerModel, rewindClient, resultBase }) {
+  const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;
+  const entry = agentState?.[from.id] ?? null;
+  const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory) : null;
+  const checkpoint = Boolean(status.checkpoint?.task);
+  const packetOf = async () => buildRefreshPacket(status, {
+    kind, from, to: { id: from.id }, epoch: expected.epoch, git: gitSnapshot,
+    note: entry?.note ?? null, noteAt: entry?.noteAt ?? null,
+    lastMessage: await hintOf(client, from.id), language, workerModel, rewound: true,
+    ...packetArgs,
+  });
+  if (!apply) {
+    const point = await previewRewindPoint(from.id, rewindClient);
+    if (!point) return { fallback: 'unavailable' };
+    const packet = await packetOf();
+    return {
+      ...resultBase, from: from.id, to: from.id, epoch: expected.epoch, epochBumped: false, profile: null,
+      provider: from.provider, model: from.model, idempotencyKey: null, packet, packetChars: packet.length,
+      checkpoint, applied: false, delivered: false, deliveryError: null, previousNotified: false, reused: false, renameError: null,
+      warnings: [], fallbackFrom: null, profileSuggestion: null, refreshMode: 'rewind', rewindPoint: point,
+    };
+  }
+  const idem = freshRewindIdempotent(entry);
+  if (idem) {
+    return {
+      ...resultBase, from: from.id, to: from.id, epoch: expected.epoch, epochBumped: false, profile: null,
+      provider: from.provider, model: from.model, idempotencyKey: null, packet: '', packetChars: 0,
+      checkpoint, applied: false, idempotent: true, idempotentReason: idem, delivered: false, deliveryError: null,
+      previousNotified: false, reused: false, renameError: null, warnings: [], fallbackFrom: null, profileSuggestion: null,
+      refreshMode: 'rewind',
+    };
+  }
+  const packet = await packetOf();
+  const { outcome } = await runTabRewind({ client, workspaceId: status.workspace.id, agentId: from.id, packet, checkpoint: status.checkpoint, lock, now, rewindClient });
+  if (outcome.status !== 'rewound') return { fallback: outcome.status };
+  return {
+    ...resultBase, from: from.id, to: from.id, epoch: expected.epoch, epochBumped: false, profile: null,
+    provider: from.provider, model: from.model, idempotencyKey: null, packet, packetChars: packet.length,
+    checkpoint, applied: true, delivered: !outcome.sendError, deliveryError: outcome.sendError ?? null,
+    previousNotified: false, reused: false, renameError: null,
+    warnings: [], fallbackFrom: null, profileSuggestion: null, refreshMode: 'rewind',
+    rewindPoint: outcome.messageId ?? null, briefMessageId: outcome.briefMessageId ?? null,
+  };
+}
+
+/**
  * Refreshes a NON-active steer: a new agent of the same slot and profile,
  * no takeover. Nothing is written to the steer state (no epoch change, no
  * active-steer write); the daemon idempotency key carries the refreshed
  * agent id, so retries reuse the receipt while later refreshes get a new
  * key. The new agent is created without the active marker and parent-free.
  */
-async function freshNonActiveSteer({ client, discovery, status, expected, slot, config, apply, language, git, lookupReceipt, execute, workerModel, quotaSnapshot, quotaExhaustedPct, zerosub }) {
+async function freshNonActiveSteer({ client, discovery, status, expected, slot, config, apply, language, git, lookupReceipt, execute, workerModel, quotaSnapshot, quotaExhaustedPct, zerosub, lock = withLock, now = () => new Date(), rewindClient = null }) {
   const holders = status.steers.filter((s) => s.slot === slot);
   if (!holders.length) throw new SwitchRefused(`No live Steer ${slot} to refresh for ${status.repo}; plan and apply one first`);
   const live = holders.filter((h) => !h.superseded);
   const single = holders.length === 1 ? holders[0] : (live.length === 1 ? live[0] : null);
   if (single && BUSY.has(single.status)) throw new SwitchRefused(`Steer ${slot} is ${single.status}; stop it or wait for its turn to end first`);
+  let rewindFallback = null;
+  if (typeof rewindClient === 'function' && single) {
+    const rewound = await tryTabRewind({ client, discovery, status, expected, from: single, kind: 'steer', packetArgs: { slot }, apply, language, git, lock, now, workerModel, rewindClient, resultBase: { repo: status.repo, slot, kind: 'steer' } });
+    if (rewound && !rewound.fallback) return rewound;
+    if (rewound?.fallback) rewindFallback = rewound.fallback;
+  }
   const profileName = config?.steers?.slots?.[slot];
   if (!profileName || !config.profiles?.[profileName]) throw new SwitchRefused(`Steer slot ${slot} references unknown profile "${profileName}"`);
   const advisorSlot = isAdvisorSlot(config, slot);
@@ -1016,6 +1237,7 @@ async function freshNonActiveSteer({ client, discovery, status, expected, slot, 
   if (!profile) throw new SwitchRefused(`Profile "${profileName}" for Steer ${slot} is not startable${skipped[0] ? `: ${skipped[0].reason}` : ''} (no fallback available)`);
   const warnings = [];
   if (advisorSlot) warnings.push(`Steer ${slot} is an advisor (profile "${profileName}"); advisors never coordinate`);
+  if (rewindFallback && single) warnings.push(rewindFallbackWarning(single.id, rewindFallback));
   let profileSuggestion = null;
   if (profile.name !== profileName) {
     warnings.push(`Profile "${profileName}" is not startable (${skipped[0]?.reason ?? 'unknown reason'}); using fallback "${profile.name}"`);
@@ -1048,6 +1270,7 @@ async function freshNonActiveSteer({ client, discovery, status, expected, slot, 
     provider: profile.provider, model: profile.model, idempotencyKey: key, packet: '', packetChars: 0,
     checkpoint: Boolean(status.checkpoint?.task), applied: false, delivered: false, deliveryError: null, previousNotified: false, reused: false, renameError: null,
     warnings, fallbackFrom: profile.name !== profileName ? profileName : null, profileSuggestion,
+    refreshMode: 'new-agent', ...(rewindFallback ? { rewindFallback } : {}),
   };
   if (!apply) {
     if (!single) throw new SwitchRefused(`Steer ${slot} has several live agents (${holders.map((s) => s.id).join(', ')}); if a previous fresh apply was interrupted, rerun with --apply to recover it, otherwise archive the retired one in Paseo`);
@@ -1114,22 +1337,30 @@ async function freshNonActiveSteer({ client, discovery, status, expected, slot, 
  * otherwise the provider defaults apply. The new worker keeps the
  * previous parent (the owning steer), never the calling agent.
  */
-async function freshWorkerAgent({ client, discovery, status, expected, workerId, config, apply, language, git, lookupReceipt, execute, workerModel }) {
+async function freshWorkerAgent({ client, discovery, status, expected, workerId, config, apply, language, git, lookupReceipt, execute, workerModel, lock = withLock, now = () => new Date(), rewindClient = null }) {
   const matches = (status.workers ?? []).filter((w) => w.id === workerId || w.id.startsWith(workerId));
   if (!matches.length) throw new SwitchRefused(`${workerId} is not a live worker of ${status.repo}`);
   if (matches.length > 1) throw new SwitchRefused(`Worker ${JSON.stringify(workerId)} is ambiguous (${matches.map((w) => w.id).join(', ')}); pass the full agent id`);
   const from = matches[0];
   if (BUSY.has(from.status)) throw new SwitchRefused(`Worker ${from.id} is ${from.status}; stop it or wait for its turn to end first`);
   const owner = from.owner ?? from.parentSlot ?? expected.activeSteer;
+  const title = from.title ?? 'Worker';
+  let rewindFallback = null;
+  if (typeof rewindClient === 'function') {
+    const rewound = await tryTabRewind({ client, discovery, status, expected, from, kind: 'worker', packetArgs: { owner, title }, apply, language, git, lock, now, workerModel, rewindClient, resultBase: { repo: status.repo, kind: 'worker', workerId: from.id, owner } });
+    if (rewound && !rewound.fallback) return rewound;
+    if (rewound?.fallback) rewindFallback = rewound.fallback;
+  }
   const parentId = from.parent ?? null;
   const scopeId = discovery.scope?.id ?? status.repo;
   const labels = { [LABEL.scope]: scopeId, [LABEL.role]: 'worker', [LABEL.owner]: owner };
   const twins = Object.entries(config?.profiles ?? {}).filter(([, entry]) => entry?.provider === from.provider && entry?.model === from.model);
   const twin = twins.length === 1 ? twins[0][1] : null;
   const warnings = [];
+  if (rewindFallback) warnings.push(rewindFallbackWarning(from.id, rewindFallback));
   if (twins.length > 1) warnings.push(`Several profiles match ${from.provider}/${from.model} (${twins.map(([name]) => name).join(', ')}); the fresh worker uses provider defaults for thinking/mode`);
   const request = {
-    workspaceId: from.workspaceId ?? status.workspace.id, title: from.title ?? 'Worker', labels,
+    workspaceId: from.workspaceId ?? status.workspace.id, title, labels,
     config: { provider: `${from.provider}/${from.model}`, ...(twin?.mode ? { modeId: twin.mode } : {}), ...(twin?.thinking ? { thinkingOptionId: twin.thinking } : {}) },
     ...(parentId ? { parent: parentId } : {}),
   };
@@ -1145,6 +1376,7 @@ async function freshWorkerAgent({ client, discovery, status, expected, workerId,
     idempotencyKey: key, packet: '', packetChars: 0,
     checkpoint: Boolean(status.checkpoint?.task), applied: false, delivered: false, deliveryError: null, previousNotified: false, reused: false, renameError: null,
     warnings, fallbackFrom: null, profileSuggestion: null,
+    refreshMode: 'new-agent', ...(rewindFallback ? { rewindFallback } : {}),
   };
   if (!apply) {
     result.packet = buildRefreshPacket(status, {

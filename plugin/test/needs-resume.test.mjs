@@ -736,3 +736,144 @@ test("sweepOnce maps mode clear to /compact for Codex, never /clear", async () =
   assert.match(sends[0], /^\/compact /);
   assert.ok(!sends.some((text) => text.startsWith("/clear")), "no /clear is sent to Codex");
 });
+
+// ---------------------------------------------------------------------------
+// Sweep rewind execution (fresh-recommended as same-tab rewind).
+// ---------------------------------------------------------------------------
+
+test("sweepOnce rewinds a fresh-recommended Codex agent when rewindFresh is on", async () => {
+  const { world, agent, nowMs } = sweepWorld({ provider: "codex", model: "gpt-6.2-sol", idleMs: 45 * MIN });
+  const calls = [];
+  const results = await sweep.sweepOnce({
+    paseo: fakeClient(world),
+    settings: { ...CLEANUP_DEFAULTS, mode: "compact-warm", providers: ["claude", "codex"], rewindFresh: true },
+    nowMs,
+    quotaSnapshot: null,
+    lock: noLock,
+    log: () => {},
+    rewindFn: async (id) => {
+      calls.push(id);
+      return { status: "rewound", messageId: "msg-1" };
+    },
+  });
+  assert.equal(results.length, 1);
+  assert.equal(results[0].agentId, agent.id);
+  assert.equal(results[0].action, "rewind");
+  assert.equal(results[0].sent, true);
+  assert.match(results[0].reason, /rewound .* to msg-1/);
+  assert.deepEqual(calls, [agent.id]);
+  assert.deepEqual(sendsTo(world, agent.id), [], "no SDK send: the rewind empties the context");
+  const entry = world.workspaces[0].metadata[AGENTS_KEY][agent.id];
+  assert.equal(entry.cleared.mode, "rewind");
+  assert.equal(entry.refreshed.mode, "rewind");
+  assert.equal(entry.refreshed.messageId, "msg-1");
+  assert.equal(entry.pendingAction, undefined);
+  // The recorded cleaning keeps the next sweep quiet.
+  const second = await sweep.sweepOnce({
+    paseo: fakeClient(world),
+    settings: { ...CLEANUP_DEFAULTS, mode: "compact-warm", providers: ["claude", "codex"], rewindFresh: true },
+    nowMs,
+    quotaSnapshot: null,
+    lock: noLock,
+    log: () => {},
+    rewindFn: async (id) => {
+      calls.push(id);
+      return { status: "rewound", messageId: "msg-2" };
+    },
+  });
+  assert.deepEqual(second, []);
+  assert.deepEqual(calls, [agent.id], "no second rewind in the same idle period");
+});
+
+test("sweepOnce keeps Claude on its native path even with rewindFresh on", async () => {
+  const { world, agent, nowMs } = sweepWorld();
+  const calls = [];
+  const results = await sweep.sweepOnce({
+    paseo: fakeClient(world),
+    settings: { ...CLEANUP_DEFAULTS, mode: "compact-warm", rewindFresh: true },
+    nowMs,
+    quotaSnapshot: null,
+    lock: noLock,
+    log: () => {},
+    rewindFn: async (id) => {
+      calls.push(id);
+      return { status: "rewound", messageId: "msg-1" };
+    },
+  });
+  assert.equal(results.length, 1);
+  assert.equal(results[0].action, "fresh-recommended");
+  assert.equal(results[0].sent, false);
+  assert.deepEqual(calls, [], "Claude is never rewound by the sweep");
+  assert.ok(world.workspaces[0].metadata[AGENTS_KEY][agent.id].freshHint);
+});
+
+test("sweepOnce without rewindFresh only hints a fresh-recommended Codex agent", async () => {
+  const { world, agent, nowMs } = sweepWorld({ provider: "codex", model: "gpt-6.2-sol", idleMs: 45 * MIN });
+  const calls = [];
+  const results = await sweep.sweepOnce({
+    paseo: fakeClient(world),
+    settings: { ...CLEANUP_DEFAULTS, mode: "compact-warm", providers: ["claude", "codex"] },
+    nowMs,
+    quotaSnapshot: null,
+    lock: noLock,
+    log: () => {},
+    rewindFn: async (id) => {
+      calls.push(id);
+      return { status: "rewound", messageId: "msg-1" };
+    },
+  });
+  assert.equal(results.length, 1);
+  assert.equal(results[0].action, "fresh-recommended");
+  assert.deepEqual(calls, [], "default off: the hint is recorded, nothing is rewound");
+  assert.ok(world.workspaces[0].metadata[AGENTS_KEY][agent.id].freshHint);
+});
+
+test("sweepOnce falls back to the hint when the rewind has no point", async () => {
+  const { world, agent, nowMs } = sweepWorld({ provider: "codex", model: "gpt-6.2-sol", idleMs: 45 * MIN });
+  const results = await sweep.sweepOnce({
+    paseo: fakeClient(world),
+    settings: { ...CLEANUP_DEFAULTS, mode: "compact-warm", providers: ["claude", "codex"], rewindFresh: true },
+    nowMs,
+    quotaSnapshot: null,
+    lock: noLock,
+    log: () => {},
+    rewindFn: async () => ({ status: "no-point" }),
+  });
+  assert.equal(results.length, 1);
+  assert.equal(results[0].action, "fresh-recommended");
+  assert.equal(results[0].sent, false);
+  const entry = world.workspaces[0].metadata[AGENTS_KEY][agent.id];
+  assert.ok(entry.freshHint, "hint recorded as without the setting");
+  assert.equal(entry.cleared, undefined);
+});
+
+test("sweepOnce records a failed rewind and retries only after a new real turn", async () => {
+  const { world, agent, nowMs } = sweepWorld({ provider: "codex", model: "gpt-6.2-sol", idleMs: 45 * MIN });
+  const settings = { ...CLEANUP_DEFAULTS, mode: "compact-warm", providers: ["claude", "codex"], rewindFresh: true };
+  const results = await sweep.sweepOnce({
+    paseo: fakeClient(world),
+    settings,
+    nowMs,
+    quotaSnapshot: null,
+    lock: noLock,
+    log: () => {},
+    rewindFn: async () => ({ status: "failed", error: "boom" }),
+  });
+  assert.equal(results.length, 1);
+  assert.equal(results[0].action, "fresh-recommended");
+  assert.equal(results[0].sent, false);
+  assert.match(results[0].reason, /rewind failed: boom/);
+  const entry = world.workspaces[0].metadata[AGENTS_KEY][agent.id];
+  assert.equal(entry.lastActionFailed.error, "boom");
+  assert.equal(entry.cleared, undefined);
+  const second = await sweep.sweepOnce({
+    paseo: fakeClient(world),
+    settings,
+    nowMs,
+    quotaSnapshot: null,
+    lock: noLock,
+    log: () => {},
+    rewindFn: async () => ({ status: "rewound", messageId: "msg-2" }),
+  });
+  assert.deepEqual(second, [], "the failure blocks retries in the same idle period");
+});

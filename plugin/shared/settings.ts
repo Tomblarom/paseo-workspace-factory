@@ -102,7 +102,8 @@ export function migrateFactoryCleanup(values: unknown, fromVersion: number): unk
 // Idle cleanup (C5): how the plugin server shrinks cold factory agents.
 // Defaults mirror CLEANUP_DEFAULTS in shared/idle-cleanup.ts; {} parses into
 // a complete document. `fresh` is deliberately not a mode: creating agents
-// stays behind plan → confirm and manual C6 only.
+// stays behind plan → confirm and manual C6 only. `rewindFresh` (default
+// off) needs no migration: stored v2 documents parse with the default.
 export const factoryCleanupSettings = defineSettings({
   id: "factory-cleanup",
   scope: "host",
@@ -118,6 +119,7 @@ export const factoryCleanupSettings = defineSettings({
     seedAfterClear: z.boolean().default(false),
     clearAcknowledged: z.boolean().default(false),
     dailyCap: z.number().int().min(1).default(20),
+    rewindFresh: z.boolean().default(false),
   }),
 });
 

@@ -79,6 +79,7 @@ import { createGit } from "./factory/local.js";
 import { formatCatalog, paseoRunFlags, resolveProfile, usedProfilesByLiveSteers } from "./factory/models.js";
 import { applySteerAdd, formatSteerAddPreview, planSteerAdd } from "./factory/steer-add.js";
 import { planHash } from "./factory/planner.js";
+import { defaultCreateRewindClient } from "./factory/rewind.js";
 import { relocateScope } from "./factory/relocate.js";
 import { formatWorkersText, readWorkers, workersReport } from "./factory/supervision.js";
 import { assessWorker, readGitState } from "./factory/workers.js";
@@ -392,7 +393,7 @@ export async function previewFresh(
     input.repo,
     input.workspaceId,
   );
-  const freshOptions: any = { client: paseo, discovery, config, apply: false, git: createGit() };
+  const freshOptions: any = { client: paseo, discovery, config, apply: false, git: createGit(), rewindClient: defaultCreateRewindClient };
   const dry: any = await freshSteer(freshOptions);
   return {
     repo: dry.repo,
@@ -405,6 +406,7 @@ export async function previewFresh(
     packet: dry.packet,
     packetChars: dry.packetChars,
     checkpoint: dry.checkpoint,
+    refreshMode: dry.refreshMode ?? "new-agent",
     fingerprint: freshFingerprint({ repo: dry.repo, slot: dry.slot, epoch: dry.epoch }),
     scope,
     deprecatedAlias,
@@ -418,7 +420,7 @@ export async function applyFresh(
 ): Promise<any> {
   const { config, discovery } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
   const git = createGit();
-  const dryOptions: any = { client: paseo, discovery, config, apply: false, git };
+  const dryOptions: any = { client: paseo, discovery, config, apply: false, git, rewindClient: defaultCreateRewindClient };
   const dry: any = await freshSteer(dryOptions);
   const fresh = freshFingerprint({ repo: dry.repo, slot: dry.slot, epoch: dry.epoch });
   if (fresh !== input.fingerprint) {
@@ -441,6 +443,7 @@ export async function applyFresh(
     lookupReceipt: lookupCreationReceipt,
     execute: createExecutors(executeOptions),
     paseoCli: createPaseoCli(),
+    rewindClient: defaultCreateRewindClient,
   };
   const applied: any = await freshSteer(applyOptions);
   return applied;

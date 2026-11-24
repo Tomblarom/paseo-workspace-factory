@@ -114,6 +114,7 @@ export interface CleanupSettingsValues {
   seedAfterClear: boolean;
   clearAcknowledged: boolean;
   dailyCap: number;
+  rewindFresh: boolean;
 }
 
 export interface QuotaSettingsValues {
@@ -246,7 +247,7 @@ export function validateCleanupSettings(values: CleanupSettingsValues): string[]
       }
     }
   }
-  for (const key of ["seedAfterClear", "clearAcknowledged"] as const) {
+  for (const key of ["seedAfterClear", "clearAcknowledged", "rewindFresh"] as const) {
     if (typeof values[key] !== "boolean") errors.push(`${key} must be a boolean`);
   }
   if (!Number.isInteger(values.dailyCap) || values.dailyCap < 1) {

@@ -155,6 +155,12 @@ Optional setup (the instruction rule stays the fallback; the factory never chang
 
 Use the absolute binary path when `paseo-factory` is not on the hook's `PATH`; inside factory agent sessions `PASEO_AGENT_ID` resolves scope and agent.
 
+## Same-tab refresh (rewind)
+
+`fresh` refreshes a steer or worker in the same tab via Paseo rewind when the agent has a real user message to rewind to: the context is rewound to the first user message and the refresh packet is delivered as the resume brief (sent without a caller id, so the next refresh rewinds to exactly that brief). The agent keeps its tab, id, labels and title; nothing is created and the epoch stays. The preview shows `rewind` vs `new agent`. A new parent-free agent is only the fallback when no rewind point exists (send-only history) or the provider lacks rewind; a failed rewind aborts without sending, recording, or creating anything, and a second apply without a new turn is idempotent. The run is recorded in `wsf.agents` as `cleared`/`refreshed` with mode `rewind`.
+
+The idle cleanup can execute its `fresh-recommended` hint the same way for Codex chats (no native `/clear`): Settings → Plugins → Factory → Idle agents → “Rewind ‘fresh’ Codex chats in place” (default off; Claude chats always keep their native `/clear`). Details: [cold context design](design/cold-context-resume.md#same-tab-refresh-via-rewind).
+
 ## Advisors
 
 Second opinions ("Advisor") are policy only: the factory creates no advisor agents itself. Steers brief advisors through the native Paseo advisor mechanism (skill `paseo-advisor`); workers that get stuck end their answer with an `ADVISOR-REQUEST` block and stop, and the steer decides whether to answer, reject, or consult an advisor. Format and limits (read-only, close after the answer, sanitized context only) live in [steer instructions](steer-instructions.md#advisor-policy).

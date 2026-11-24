@@ -4,6 +4,8 @@ import { LEGACY_PREFIX, METADATA_KEY, readPaseoState } from "./factory/paseo.js"
 import { quotaExhausted } from "./factory/quota.js";
 import { listScopes } from "./factory/scope.js";
 import { WORKERS_KEY } from "./factory/supervision.js";
+import { buildRewindRecord } from "./factory/steer.js";
+import { rewindSameTab } from "./factory/rewind.js";
 import { getQuotaSnapshot } from "./quota.js";
 import {
   CLEAR_COMMAND,
@@ -17,6 +19,7 @@ import {
   isSupervisionProtectedState,
   pushPreviousSession,
   sendCleanupCommand,
+  shouldRewindFresh,
   type CleanupSettings,
   type NeedsResumeReason,
 } from "../shared/idle-cleanup.js";
@@ -28,6 +31,8 @@ const LEGACY_CHECKPOINT_KEY = `${LEGACY_PREFIX}.checkpoint`;
 // The synced core is unchecked (@ts-nocheck): its inferred parameter types are
 // too narrow for real calls, so the sweep talks to it as any (as handlers do).
 const updateEntry = updateAgentEntry as unknown as (args: any) => Promise<any>;
+const buildRewind = buildRewindRecord as unknown as (args: any) => Record<string, unknown>;
+const rewindTab = rewindSameTab as unknown as (agentId: string) => Promise<any>;
 
 /**
  * C5 effect kill-switch. A cleanup command that demonstrably arrived as text
@@ -177,6 +182,8 @@ export interface SweepDeps {
   quotaSnapshot?: Record<string, any> | null;
   /** Lock for the entry write; tests only (defaults to the real one). */
   lock?: (name: string, fn: (held: { verify: () => void }) => Promise<any>) => Promise<any>;
+  /** Same-tab rewind runner; tests only (defaults to the synced rewind core). */
+  rewindFn?: (agentId: string) => Promise<{ status: string; messageId?: string; error?: string }>;
 }
 
 /**
@@ -200,7 +207,9 @@ export function quotaAvailableForCleanup(
  * decision, re-checks candidates against fresh snapshots right before
  * sending, sends through the plugin SDK only, and records pendingAction
  * (plus the previous session id for clear) under the workspace lock.
- * `fresh-recommended` decisions are recorded as hints without sending.
+ * `fresh-recommended` decisions are recorded as hints without sending,
+ * except when `rewindFresh` executes them as a same-tab rewind for providers
+ * without native /clear (Codex; Claude keeps /clear).
  */
 export async function sweepOnce({
   paseo,
@@ -209,6 +218,7 @@ export async function sweepOnce({
   log = console.log,
   quotaSnapshot,
   lock,
+  rewindFn,
 }: SweepDeps): Promise<SweepResult[]> {
   // A mode change re-probes after an effect failure.
   if (lastMode !== null && lastMode !== settings.mode) effectBlock = null;
@@ -233,7 +243,7 @@ export async function sweepOnce({
   const quota = quotaSnapshot !== undefined ? quotaSnapshot : getQuotaSnapshot();
   for (const agent of state.agents ?? []) {
     try {
-      const result = await sweepAgent(paseo, agent, state, lookup, liveIds, settings, nowMs, log, quota, lock);
+      const result = await sweepAgent(paseo, agent, state, lookup, liveIds, settings, nowMs, log, quota, lock, rewindFn);
       if (result) results.push(result);
     } catch (error) {
       log(
@@ -242,6 +252,27 @@ export async function sweepOnce({
     }
   }
   return results;
+}
+
+/** Records the fresh hint (once per idle period); shared by the hint-only path and the rewind fallback. */
+async function recordFreshHint(
+  paseo: any,
+  mainId: string,
+  agentId: string,
+  reason: string,
+  liveIds: string[],
+  lock?: (name: string, fn: (held: { verify: () => void }) => Promise<any>) => Promise<any>,
+): Promise<void> {
+  await updateEntry({
+    client: paseo,
+    workspaceId: mainId,
+    agentId,
+    patch: {
+      freshHint: { at: new Date().toISOString(), reason: reason.slice(0, MAX_FRESH_REASON) },
+    },
+    liveIds,
+    ...(lock ? { lock } : {}),
+  });
 }
 
 async function sweepAgent(
@@ -255,6 +286,7 @@ async function sweepAgent(
   log: (message: string) => void,
   quota: Record<string, any> | null,
   lock?: (name: string, fn: (held: { verify: () => void }) => Promise<any>) => Promise<any>,
+  rewindFn?: (agentId: string) => Promise<{ status: string; messageId?: string; error?: string }>,
 ): Promise<SweepResult | null> {
   const scope = scopeForAgent(agent, lookup);
   const reads = scope ? scopeReads(scope) : null;
@@ -276,21 +308,20 @@ async function sweepAgent(
     }),
   );
   if (!first.action) return null;
-  if (first.action === "fresh-recommended") {
+  const modelOf = (snapshot: any): string | null =>
+    typeof snapshot?.model === "string" ? snapshot.model : null;
+  const wantRewind = shouldRewindFresh({
+    action: first.action,
+    provider: agent?.provider,
+    model: modelOf(agent),
+    settings,
+  });
+  if (first.action === "fresh-recommended" && !wantRewind) {
     // Hint only: record it (once per idle period, via the decision's
     // cooldown) without sending, capping, or re-checking — the write is
     // idempotent and the next real turn clears it.
     try {
-      await updateEntry({
-        client: paseo,
-        workspaceId: reads.mainId,
-        agentId: agent.id,
-        patch: {
-          freshHint: { at: new Date().toISOString(), reason: first.reason.slice(0, MAX_FRESH_REASON) },
-        },
-        liveIds,
-        ...(lock ? { lock } : {}),
-      });
+      await recordFreshHint(paseo, reads.mainId, agent.id, first.reason, liveIds, lock);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       log(`[factory] idle cleanup: fresh hint for ${agent.id} not recorded (${message})`);
@@ -299,7 +330,7 @@ async function sweepAgent(
     log(`[factory] idle cleanup: fresh recommended for ${agent.id} (${first.reason})`);
     return { agentId: agent.id, action: first.action, sent: false, reason: first.reason };
   }
-  if (!first.command) return null;
+  if (!first.command && !wantRewind) return null;
   // Re-check against a fresh snapshot and fresh metadata right before sending.
   const freshSnap: any = await paseo.agents.ref(agent.id).refresh().catch(() => null);
   const freshAgent: any = freshSnap?.agent ?? null;
@@ -325,6 +356,78 @@ async function sweepAgent(
       openWorkers: openWorkerCount(freshWorkers),
     }),
   );
+  if (wantRewind) {
+    // Same-tab rewind for a fresh-recommended compact-only agent (Codex, no
+    // native /clear): re-checked like a send, recorded as cleared/refreshed
+    // with mode rewind (no brief is sent; the agent resumes from its
+    // checkpoint). A pending action or a moved-on decision stops the rewind,
+    // exactly like a send.
+    if (recheck.action !== "fresh-recommended") return null;
+    if (
+      !shouldRewindFresh({
+        action: recheck.action,
+        provider: freshAgent?.provider,
+        model: modelOf(freshAgent),
+        settings,
+      })
+    ) {
+      return null;
+    }
+    const run = rewindFn ?? rewindTab;
+    let outcome: { status: string; messageId?: string; error?: string };
+    try {
+      outcome = await run(agent.id);
+    } catch (error) {
+      outcome = { status: "failed", error: error instanceof Error ? error.message : String(error) };
+    }
+    if (outcome?.status === "rewound") {
+      const checkpoint =
+        asRecord(freshMeta[CHECKPOINT_KEY]) ?? asRecord(freshMeta[LEGACY_CHECKPOINT_KEY]);
+      try {
+        await updateEntry({
+          client: paseo,
+          workspaceId: reads.mainId,
+          agentId: agent.id,
+          patch: buildRewind({ checkpoint, messageId: outcome.messageId ?? null, briefMessageId: null }),
+          liveIds,
+          ...(lock ? { lock } : {}),
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        log(`[factory] idle cleanup: rewind of ${agent.id} not recorded (${message})`);
+        return { agentId: agent.id, action: "rewind", sent: false, reason: message };
+      }
+      countAction(nowMs);
+      const reason = `rewound ${agent.id} to ${outcome.messageId ?? "first user message"} (fresh-recommended executed as rewind)`;
+      log(`[factory] idle cleanup: ${reason}`);
+      return { agentId: agent.id, action: "rewind", sent: true, reason };
+    }
+    if (outcome?.status === "failed") {
+      const at = new Date().toISOString();
+      const error = String(outcome.error ?? "rewind failed").slice(0, 300);
+      await updateEntry({
+        client: paseo,
+        workspaceId: reads.mainId,
+        agentId: agent.id,
+        patch: { lastActionFailed: { at, error } },
+        liveIds,
+        ...(lock ? { lock } : {}),
+      }).catch(() => null);
+      log(`[factory] idle cleanup: rewind of ${agent.id} failed (${error}); retry needs a new real turn`);
+      return { agentId: agent.id, action: "fresh-recommended", sent: false, reason: `rewind failed: ${error}` };
+    }
+    // No rewind point, unsupported provider, or unreachable daemon: hint-only
+    // fallback, exactly like a disabled setting.
+    try {
+      await recordFreshHint(paseo, reads.mainId, agent.id, recheck.reason, liveIds, lock);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      log(`[factory] idle cleanup: fresh hint for ${agent.id} not recorded (${message})`);
+      return { agentId: agent.id, action: "fresh-recommended", sent: false, reason: message };
+    }
+    log(`[factory] idle cleanup: fresh recommended for ${agent.id} (${recheck.reason})`);
+    return { agentId: agent.id, action: "fresh-recommended", sent: false, reason: recheck.reason };
+  }
   if (!recheck.action || !recheck.command) return null;
   const kind = recheck.action === "clear" ? "clear" : "compact";
   const sessionId =

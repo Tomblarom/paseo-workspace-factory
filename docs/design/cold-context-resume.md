@@ -4,7 +4,7 @@ For the provider-by-provider manual validation matrix, see [Provider live checks
 
 New to the factory? Start with [Getting started](../getting-started.md); this page is the detailed reference.
 
-Status: C2–C6 and R are implemented. The remaining [C1 and C7 live checks](#c1--c7-checks-live-scratch-agent-only) use approved scratch agents. The factory resume brief is available from `paseo-factory resume` and `/factory resume --brief`. Section R covers `/factory resume`, which can clear a Claude steer's context before delivering the brief.
+Status: C2–C6 and R are implemented. The remaining [C1 and C7 live checks](#c1--c7-checks-live-scratch-agent-only) use approved scratch agents. The factory resume brief is available from `paseo-factory resume` and `/factory resume --brief`. Section R covers `/factory resume`, which can clear a Claude steer's context before delivering the brief. `fresh` refreshes in the same tab via Paseo rewind when possible ([Same-tab refresh via rewind](#same-tab-refresh-via-rewind)); C5 can execute `fresh-recommended` as a rewind for Codex when `rewindFresh` allows it.
 
 ## Goal
 
@@ -37,7 +37,8 @@ wsf.agents      { <agentId>: {
                     note,                        // last CHECKPOINT block of a non-active steer or worker
                     noteAt,
                     interrupted: { at, outcome, error, excerpt, git } | null,
-                    cleared: { at, mode, checkpointAt } | null,
+                    cleared: { at, mode, checkpointAt } | null,  // mode: clear|compact|rewind
+                    refreshed: { at, mode: rewind, messageId?, briefMessageId? } | null,
                     pendingAction: { kind: clear|compact, at } | null,
                     compactions,                 // verified warm compactions, capped at 99
                     compactionPendingBase,       // true until the first post-compact turn settles the base
@@ -45,7 +46,7 @@ wsf.agents      { <agentId>: {
                     freshHint: { at, reason } | null } }
 ```
 
-Bounds: `excerpt` ≤ 1500 chars (tail of the last answer), `error` ≤ 300 chars, `note` ≤ 1500 chars, `freshHint.reason` ≤ 300 chars; entries of archived agents are dropped on write.
+Bounds: `excerpt` ≤ 1500 chars (tail of the last answer), `error` ≤ 300 chars, `note` ≤ 1500 chars, `freshHint.reason` ≤ 300 chars; entries of archived agents are dropped on write. `refreshed.messageId` is the rewind point (first user message), `refreshed.briefMessageId` the resume brief delivered after the rewind (when it landed as user_message).
 
 ## C2 Auto-checkpoint (plugin, `agent.turn.after`)
 
@@ -106,7 +107,7 @@ Plugin server interval every 5 minutes (cleared in cleanup). All conditions must
 | `clear` (default) | send `/clear`; optional `seedAfterClear` sends a one-line "context was cleared, run resume before the next task". Codex agents are compacted instead (no native `/clear`), without needing the acknowledgement | 0 (seed: one small turn; Codex compact: one turn) |
 | `compact-warm` | compact mid-package agents while the cache is still warm (profile threshold ≤ idle < group TTL), only with provider quota available; cold, over-compacted, or boundary agents get `fresh-recommended` (recorded hint, no send) | one turn on cached context, also when nobody returns |
 
-Automatic `fresh` (new agent) is not offered: creating agents stays behind plan → confirm. Safety: per-agent cooldown (one action per idle period), daily cap per host, every action logged (`paseo plugin logs`) and recorded in `wsf.agents`. Settings (host scope): `mode`, `profile`, `idleMinutes`, `minContextTokens`, `providers`, `roles`, `seedAfterClear`.
+Automatic `fresh` (new agent) is not offered: creating agents stays behind plan → confirm. Safety: per-agent cooldown (one action per idle period), daily cap per host, every action logged (`paseo plugin logs`) and recorded in `wsf.agents`. Settings (host scope): `mode`, `profile`, `idleMinutes`, `minContextTokens`, `providers`, `roles`, `seedAfterClear`, `rewindFresh`.
 
 ### Cache reference and cost profiles
 
@@ -129,6 +130,8 @@ The `profile` setting (default `balanced`) derives the per-group compact thresho
 
 Hybrid compact/fresh rule (from the Codex compact-vs-fresh measurements): mid-package agents compact while warm, because the working detail survives; at package boundaries a fresh agent plus the brief is cheaper than another compact. In order: an already-cold context is never compacted (always `fresh-recommended`); after 2 warm compactions or with a post-compact base above ~60k tokens the decision is `fresh-recommended`; at a package boundary — a valid checkpoint/note with no open workers (running/blocked/interrupted) for steers, an idle worker with a fresh note — the decision is `fresh-recommended`. The hint is recorded on the entry (once per idle period) and never auto-creates an agent. Otherwise the compact needs provider quota: the sweep reuses the core quota reader (`quotaExhausted` on the sampled `paseo usage` snapshot) and blocks the compact on proven exhaustion, as does a flagged `needsResume: limit`; the hint itself is free and ignores both. Unknown quota fails open on purpose: sampling is best-effort, and blocking on unknown would silently disable the cleanup; a compact that hits a real limit is flagged by the turn hook as a limit, which blocks later compacts. Agents without a valid package state (no task checkpoint or note) are left to cool untouched: cooling costs nothing, and resume creates a fresh agent when needed. Guiding rule: no agent with a large context should go cold; a small, compacted context may go cold, because that is cheaper than keeping it warm forever.
 
+Rewind execution (opt-in): with the `rewindFresh` cleanup setting on (default off), a `fresh-recommended` decision for a provider without native `/clear` (Codex) is executed as a same-tab Paseo rewind instead of only recording the hint. The sweep re-checks the decision against a fresh snapshot first (a pending action or a moved-on decision stops the rewind, like a send), then rewinds to the first user message without sending a brief — the agent resumes from its checkpoint on its next turn. The run is recorded as `cleared`/`refreshed` with mode `rewind` and counts against the daily cap; a failed rewind records `lastActionFailed` (retry needs a new real turn), while a missing rewind point or an unsupported/unreachable daemon falls back to the hint. Claude keeps its native `/clear` path and is never rewound by the sweep.
+
 ## C6 Cold hint (manual)
 
 Composer pill on factory agents that are cold (idle ≥ `idleMinutes`, context ≥ `minContextTokens`) and not handled by C5: "Cold · 350k" with actions "Clear + resume" (sends `/clear`), "Fresh" (opens the `fresh` preview), "Dismiss".
@@ -143,7 +146,7 @@ A steer that hangs after a daemon restart, a crash, a provider limit, or a cold 
 |---|---|---|---|
 | `resume` (CLI / `/factory resume --brief`) | same | kept | only read, e.g. worker or user |
 | **`/factory resume` (new)** | same | cleared (claude) | steer after restart, crash, limit, or cold |
-| `fresh` | new (new tab) | empty | agent broken or model change |
+| `fresh` | same tab (rewind) or new tab (fallback) | empty | agent broken or model change |
 | `switch` | other slot | — | handover |
 | C5 compact/clear | same | auto | idle, without user |
 
@@ -168,7 +171,7 @@ Setting `resumeClear.providers`, default `["claude"]` (native `/clear` is verifi
 | claude | `/clear`, verify effect, brief | on `effectFailed`: brief without clearing, note "context not cleared" |
 | codex, copilot, muse | no clearing by default, brief only | opt-in per setting once a live check proves `/clear` or `/compact` for the provider; same effect verification protects |
 
-**Live check Codex (2026-11-24, scratch agent gpt-6.2-sol, Paseo 0.16.2):** `/clear` is not a native command for Codex. The model answered in prose ("treating your next message as a new task") and pretended to forget; the context was **not** cleared (input tokens rose from 20101 to 23050, the history stayed in the same thread). `/compact` is native: the timeline shows `[Compacted]` and the same agent and tab survive. Consequence: keep `resumeClear.providers` at `["claude"]`; for Codex steers use `/compact` (cache-warm) or `fresh` (new agent for the slot with the CHECKPOINT brief), never `/clear`.
+**Live check Codex (2026-11-24, scratch agent gpt-6.2-sol, Paseo 0.16.2):** `/clear` is not a native command for Codex. The model answered in prose ("treating your next message as a new task") and pretended to forget; the context was **not** cleared (input tokens rose from 20101 to 23050, the history stayed in the same thread). `/compact` is native: the timeline shows `[Compacted]` and the same agent and tab survive. Consequence: keep `resumeClear.providers` at `["claude"]`; for Codex steers use `/compact` (cache-warm) or `fresh` (same-tab rewind with the CHECKPOINT brief, new agent only as fallback), never `/clear`.
 
 ### Attention pill (E5)
 
@@ -179,6 +182,14 @@ New field `wsf.agents[id].needsResume = {reason, at}`, reasons `daemon-restart |
 - Pill matrix: the active steer keeps "Resume nötig · Neustart/Limit/Fehler". Any other recently active steer shows "Zuletzt steuerte Steer X. Du kannst hier weitermachen; dieser Steer wird dann zum steuernden." Its button (and `/factory resume` in that tab) performs resume AND takeover (self-takeover `switch --to <own slot> --apply`), so afterwards this steer is the controlling one. Advisor steers keep the active text and never take over.
 - Factory sidebar item with a counter "n steers need resume" (existing sidebar element; no panel badge). The counter counts only the active steer; non-active reminders do not count as urgent.
 - A toast alone is not enough (no toast API in the onSubmit context except thrown errors, and toasts disappear). The pill stays until the resume. Normal chatting is not blocked (no API, and not wanted).
+
+## Same-tab refresh via rewind
+
+`fresh` (CLI `paseo-factory fresh`, panel Fresh) refreshes steers and workers in the same tab via Paseo rewind instead of creating a new agent: `DaemonClient.rewindAgent(agentId, firstUserMessageId, 'conversation')` with the first `user_message` from `fetchAgentTimeline(id, { limit: 0, projection: 'canonical' })`, then the refresh packet as the resume brief. The agent keeps its tab, id, labels and title; no epoch change, no takeover, no retire notice, no superseded twin. The preview names `rewind` vs `new agent` (`refreshMode`); the applied run records `cleared`/`refreshed` with mode `rewind` in `wsf.agents`.
+
+Only real `user_message` entries are rewind points. A brief sent via `paseo send` from inside an agent (with `PASEO_AGENT_ID`) arrives as a `tool_call` (`paseo-agent-message`), and rewinding to it fails ("could not find user message"). The brief after a rewind therefore goes through `DaemonClient.sendMessage` with an explicit `messageId` and WITHOUT a caller agent id, so it arrives as `user_message` and the next refresh rewinds to exactly that brief. The brief's message id is recorded in `refreshed.briefMessageId` when it landed. (Keeping earlier agents' history in the tab is a later package; not implemented.)
+
+Fallback and failure: a new parent-free agent is created only when no rewind point exists (agents driven only via `send` have no `messageId`) or the provider lacks rewind — the result carries the fallback reason as a warning. A failed rewind aborts with no side effects: nothing sent, nothing recorded, no new agent. A second apply while a cleanup action is pending, or with no new turn recorded since the rewind, is idempotent (no second rewind, no second brief). DaemonClient access lives in one small injectable module (`src/rewind.mjs`, fail-soft like the ZeroSub reader); tests inject a fake, production passes the real factory.
 
 ## C1 / C7 Checks (live, scratch agent only)
 

@@ -26,6 +26,7 @@ import { applyContinuations } from './discovery.mjs';
 import { validateProfilesAgainstCatalog } from './config.mjs';
 import { recordProfileFailure } from './quota.mjs';
 import { readZerosubState } from './zerosub.mjs';
+import { defaultCreateRewindClient } from './rewind.mjs';
 import { attachProjectArchivedAgents, collectCleanupCandidates, formatCandidate, formatLoss, planCleanupOps, selectApplyRunPlans } from './cleanup.mjs';
 import { relocateScope } from './relocate.mjs';
 
@@ -36,7 +37,7 @@ const USAGE = `Usage: paseo-factory <command> [options]
   checkpoint <repo> --task <text> [--test <text>]... [--blocker <text>]... [--next <text>]
   checkpoint <repo> --from-agent <steer-id> [--next <text>]   take the CHECKPOINT block of its last answer
   switch <repo> --to <slot> [--apply] [--no-send] [--wait] [--notify-previous] [--language en|de]
-  fresh <repo> [--slot <S>|--worker <id>] [--apply]   new agent for the active steer (takeover); --slot/--worker refresh without takeover
+  fresh <repo> [--slot <S>|--worker <id>] [--apply]   same-tab rewind first, else a new agent (active steer: takeover); --slot/--worker refresh without takeover
   relocate <scope> --to <path|project> [--apply]
   assign <scope> --task <text> [--test <text>]... [--blocker <text>]... [--next <text>] [--report-to <agent-id>] [--apply] [--no-send]   (report-to defaults to the calling agent)
   resume [scope] [--agent <id>] [--json]   cold-start brief: task, next step, git, workers
@@ -540,13 +541,22 @@ async function main() {
           slot: values.slot ?? null, workerId: values.worker ?? null,
           lookupReceipt: lookupCreationReceipt, language: runtime().handoffLanguage,
           workerModel: workerModelLine(config, discovery), paseoCli: createPaseoCli(),
+          rewindClient: defaultCreateRewindClient,
         });
+        const mode = result.refreshMode === 'rewind' ? 'rewind' : 'new agent';
         const target = result.kind === 'worker'
-          ? `worker ${result.from} → ${result.to ?? '(new agent)'} (owner Steer ${result.owner}, epoch ${result.epoch}, unchanged)`
-          : `Steer ${result.slot} ${result.from} → ${result.to ?? '(new agent)'} (epoch ${result.epoch}${result.epochBumped ? '' : ', unchanged'})`;
+          ? (result.refreshMode === 'rewind'
+            ? `worker ${result.from} (same tab, rewound, owner Steer ${result.owner}, epoch ${result.epoch}, unchanged)`
+            : `worker ${result.from} → ${result.to ?? '(new agent)'} (owner Steer ${result.owner}, epoch ${result.epoch}, unchanged)`)
+          : (result.refreshMode === 'rewind'
+            ? `Steer ${result.slot} ${result.from} (same tab, rewound, epoch ${result.epoch}, unchanged)`
+            : `Steer ${result.slot} ${result.from} → ${result.to ?? '(new agent)'} (epoch ${result.epoch}${result.epochBumped ? '' : ', unchanged'})`);
         const model = result.profile ? `profile "${result.profile}" (${result.provider}/${result.model})` : `${result.provider}/${result.model}`;
         const retired = result.kind === 'worker' ? 'retired worker' : 'retired steer';
-        console.log(`${result.applied ? 'Refreshed' : 'Dry-run'}: ${target} · ${model}${result.fallbackFrom ? ` (fallback for "${result.fallbackFrom}")` : ''} · ${result.epochBumped ? 'handoff' : 'refresh brief'} ${result.packetChars} characters, built without a model call${result.checkpoint ? '' : ' · NO task checkpoint'}${result.reused ? ' · agent reused after receipt' : ''}${result.delivered ? ' · delivered' : ''}${result.previousNotified ? ` · previous ${result.kind} notified` : ''}${result.deliveryError ? ` · delivery failed: ${result.deliveryError}` : ''}${result.renameError ? ` · title rename failed: ${result.renameError}` : ''}${(result.warnings ?? []).map((w) => `\nWarning: ${w}`).join('')}${result.profileSuggestion ? `\nSuggestion: ${result.profileSuggestion}` : ''}\nNote: the ${retired} ${result.from} keeps its chat and labels${result.applied ? ' (a short notice was sent)' : ' (a short notice will be sent on apply)'}; archive it in Paseo — until then status marks it superseded (newest wins).\n---\n${result.packet}`);
+        const note = result.refreshMode === 'rewind'
+          ? `Note: the agent keeps its tab, id and labels${result.applied ? ' (context rewound, brief delivered into the fresh timeline)' : ' (context will be rewound on apply, brief delivered into the fresh timeline)'}.`
+          : `Note: the ${retired} ${result.from} keeps its chat and labels${result.applied ? ' (a short notice was sent)' : ' (a short notice will be sent on apply)'}; archive it in Paseo — until then status marks it superseded (newest wins).`;
+        console.log(`${result.applied ? 'Refreshed' : 'Dry-run'} [${mode}]: ${target} · ${model}${result.fallbackFrom ? ` (fallback for "${result.fallbackFrom}")` : ''} · ${result.epochBumped ? 'handoff' : 'refresh brief'} ${result.packetChars} characters, built without a model call${result.checkpoint ? '' : ' · NO task checkpoint'}${result.reused ? ' · agent reused after receipt' : ''}${result.idempotent ? ` · already refreshed (${result.idempotentReason ?? 'idempotent'})` : ''}${result.delivered ? ' · delivered' : ''}${result.previousNotified ? ` · previous ${result.kind} notified` : ''}${result.deliveryError ? ` · delivery failed: ${result.deliveryError}` : ''}${result.renameError ? ` · title rename failed: ${result.renameError}` : ''}${(result.warnings ?? []).map((w) => `\nWarning: ${w}`).join('')}${result.profileSuggestion ? `\nSuggestion: ${result.profileSuggestion}` : ''}\n${note}\n---\n${result.packet}`);
         return;
       }
       if (command === 'switch') {

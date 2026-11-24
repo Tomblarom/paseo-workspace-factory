@@ -33,6 +33,7 @@ type CleanupDoc = {
   seedAfterClear: boolean;
   clearAcknowledged: boolean;
   dailyCap: number;
+  rewindFresh: boolean;
 };
 
 const SECTION_TITLE = "Idle agents (save quota)";
@@ -253,6 +254,13 @@ export function CleanupSettingsSection({
           value={draft.seedAfterClear}
           disabled={state.saving}
           onValueChange={(next) => update({ ...draft, seedAfterClear: next })}
+        />
+        <SettingsSwitch
+          label="Rewind “fresh” Codex chats in place"
+          hint="When the cleanup recommends a fresh agent for a Codex chat (no native /clear), rewind it in the same tab instead of only recording the hint. The agent keeps its tab and continues from its checkpoint with /factory resume. Off by default; Claude chats always keep their native /clear."
+          value={draft.rewindFresh}
+          disabled={state.saving}
+          onValueChange={(next) => update({ ...draft, rewindFresh: next })}
         />
         <SettingsInput
           key={`cap-${formKey}`}

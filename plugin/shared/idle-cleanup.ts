@@ -201,6 +201,12 @@ export interface CleanupSettings {
   seedAfterClear: boolean;
   clearAcknowledged: boolean;
   dailyCap: number;
+  /**
+   * Execute `fresh-recommended` as a same-tab Paseo rewind for providers
+   * without native /clear (Codex) instead of only recording the hint.
+   * Default off; Claude always keeps its native /clear path.
+   */
+  rewindFresh: boolean;
 }
 
 /** Mirrors the defaults of the host-scope cleanup settings document. */
@@ -214,6 +220,7 @@ export const CLEANUP_DEFAULTS: CleanupSettings = {
   seedAfterClear: false,
   clearAcknowledged: false,
   dailyCap: 20,
+  rewindFresh: false,
 };
 
 export interface FactoryIdentity {
@@ -509,6 +516,24 @@ export function decideCleanupAction(input: CleanupInput): CleanupDecision {
     };
   }
   return { action: "clear", command: CLEAR_COMMAND, reason: `clear ${input.agentId}` };
+}
+
+/**
+ * True when a `fresh-recommended` decision may be executed as a same-tab
+ * Paseo rewind: only for providers without native /clear (the compact-only
+ * groups, Codex) and only when the `rewindFresh` cleanup setting allows it
+ * (default off). Claude keeps its native /clear path and every other group
+ * keeps the recorded hint.
+ */
+export function shouldRewindFresh(args: {
+  action: string | null;
+  provider: string;
+  model: string | null;
+  settings: CleanupSettings;
+}): boolean {
+  if (args.action !== "fresh-recommended") return false;
+  if (args.settings?.rewindFresh !== true) return false;
+  return isCompactOnlyGroup(groupForProviderModel(args.provider, args.model ?? null));
 }
 
 export interface ColdInput {

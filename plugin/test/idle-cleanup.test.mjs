@@ -19,6 +19,7 @@ const {
   pushPreviousSession,
   scanCleanupEvidence,
   sendCleanupCommand,
+  shouldRewindFresh,
 } = await import("../shared/idle-cleanup.ts");
 
 const NOW = Date.parse("2026-11-23T12:00:00.000Z");
@@ -653,5 +654,47 @@ test("agents without a valid package state cool untouched", () => {
       }),
     ).reason,
     /no note/,
+  );
+});
+
+test("shouldRewindFresh gates the rewind execution by setting and group", () => {
+  const on = { ...CLEANUP_DEFAULTS, rewindFresh: true };
+  const off = { ...CLEANUP_DEFAULTS, rewindFresh: false };
+  assert.equal(CLEANUP_DEFAULTS.rewindFresh, false, "default off");
+  // Codex (compact-only groups) with the setting on.
+  assert.equal(
+    shouldRewindFresh({ action: "fresh-recommended", provider: "codex", model: "gpt-6.2-sol", settings: on }),
+    true,
+  );
+  assert.equal(
+    shouldRewindFresh({ action: "fresh-recommended", provider: "codex", model: "gpt-5.5", settings: on }),
+    true,
+  );
+  // Setting off: hint only.
+  assert.equal(
+    shouldRewindFresh({ action: "fresh-recommended", provider: "codex", model: "gpt-6.2-sol", settings: off }),
+    false,
+  );
+  assert.equal(
+    shouldRewindFresh({ action: "fresh-recommended", provider: "codex", model: "gpt-6.2-sol", settings: CLEANUP_DEFAULTS }),
+    false,
+  );
+  // Claude keeps its native /clear even with the setting on.
+  assert.equal(
+    shouldRewindFresh({ action: "fresh-recommended", provider: "claude", model: null, settings: on }),
+    false,
+  );
+  // Other groups and other actions never rewind.
+  assert.equal(
+    shouldRewindFresh({ action: "fresh-recommended", provider: "muse", model: "m", settings: on }),
+    false,
+  );
+  assert.equal(
+    shouldRewindFresh({ action: "compact-warm", provider: "codex", model: "gpt-6.2-sol", settings: on }),
+    false,
+  );
+  assert.equal(
+    shouldRewindFresh({ action: null, provider: "codex", model: "gpt-6.2-sol", settings: on }),
+    false,
   );
 });

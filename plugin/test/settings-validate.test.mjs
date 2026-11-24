@@ -247,3 +247,19 @@ test("factory-cleanup v1 -> v2 drops compactAtMinutes and defaults the profile",
   assert.deepEqual(factoryCleanupSettings.schema.parse({}), { ...CLEANUP_DEFAULTS });
   assert.equal(migrateFactoryCleanup({ a: 1 }, 2).a, 1);
 });
+
+test("validateCleanupSettings and the schema cover rewindFresh (default off)", async () => {
+  const { factoryCleanupSettings } = await import("../shared/settings.ts");
+  assert.equal(CLEANUP_DEFAULTS.rewindFresh, false);
+  assert.deepEqual(validateCleanupSettings({ ...CLEANUP_DEFAULTS }), []);
+  assert.deepEqual(validateCleanupSettings({ ...CLEANUP_DEFAULTS, rewindFresh: true }), []);
+  assert.match(
+    JSON.stringify(validateCleanupSettings({ ...CLEANUP_DEFAULTS, rewindFresh: "yes" })),
+    /rewindFresh must be a boolean/,
+  );
+  assert.equal(factoryCleanupSettings.schema.parse({}).rewindFresh, false);
+  // Stored v2 documents without the new key parse with the default.
+  const stored = { ...CLEANUP_DEFAULTS };
+  delete stored.rewindFresh;
+  assert.equal(factoryCleanupSettings.schema.parse(stored).rewindFresh, false);
+});
