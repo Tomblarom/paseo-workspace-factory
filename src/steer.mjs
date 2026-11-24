@@ -97,6 +97,7 @@ export function steerStatus(discovery, { warnContextTokens, daemonStartedAt = nu
   if (daemonStartedAt && lastTurnCheckpoints && typeof lastTurnCheckpoints === 'object' && checkpointAt) {
     for (const a of [...(discovery.steers.labelled ?? []), ...(discovery.workers ?? [])]) {
       if (!a || a.archivedAt || markedIds.has(a.id)) continue;
+      if (a.continuedFrom && markedIds.has(a.continuedFrom)) continue;
       if (isHeuristicRestart({ daemonStartedAt, checkpointAt, agentStatus: a.status, lastTurnHadCheckpoint: lastTurnCheckpoints[a.id] })) {
         heuristicIds.add(a.id);
       }
@@ -112,7 +113,7 @@ export function steerStatus(discovery, { warnContextTokens, daemonStartedAt = nu
   };
   const steers = discovery.steers.labelled
     .filter((a) => !a.archivedAt)
-    .map((a) => ({ slot: a.labels[LABEL.slot], id: a.id, title: a.title, provider: a.provider, model: a.model, status: a.status, parent: parentOf(a), workspaceId: a.workspaceId, usage: agentUsage(a), retired: retiredId !== null && a.id === retiredId, ...(config ? { advisor: isAdvisorSlot(config, a.labels[LABEL.slot]), sensitive: isSensitiveSlot(config, a.labels[LABEL.slot]) } : {}), ...withInterruption(a.id) }))
+    .map((a) => ({ slot: a.labels[LABEL.slot], id: a.id, title: a.title, provider: a.provider, model: a.model, status: a.status, parent: parentOf(a), workspaceId: a.workspaceId, usage: agentUsage(a), retired: retiredId !== null && a.id === retiredId, ...(a.continuedFrom ? { continuedFrom: a.continuedFrom } : {}), ...(config ? { advisor: isAdvisorSlot(config, a.labels[LABEL.slot]), sensitive: isSensitiveSlot(config, a.labels[LABEL.slot]) } : {}), ...withInterruption(a.id) }))
     .sort((a, b) => a.slot.localeCompare(b.slot));
   const steerById = new Map(steers.map((s) => [s.id, s]));
   // Unlabelled steer candidates by id (lettered and digit-titled): a worker
@@ -131,6 +132,8 @@ export function steerStatus(discovery, { warnContextTokens, daemonStartedAt = nu
       parentSlot: (parent && steerById.get(parent)?.slot) ?? null, parent, usage: agentUsage(w),
       parentCandidate: parent && !steerById.has(parent) ? (candidateById.get(parent) ?? null) : null,
       workspaceId: w.workspaceId ?? null, owner: w.labels?.[LABEL.owner] ?? null,
+      ...(w.continuedFrom ? { continuedFrom: w.continuedFrom } : {}),
+      ...(w.parentContinuedFrom ? { parentContinuedFrom: w.parentContinuedFrom } : {}),
       ...withInterruption(w.id),
     };
   });

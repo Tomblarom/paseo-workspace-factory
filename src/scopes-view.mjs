@@ -6,12 +6,16 @@ import { LABEL, METADATA_KEY, parentOf, restartMessage } from './paseo.mjs';
 import { AGENTS_KEY } from './agent-state.mjs';
 import { CHECKPOINT_KEY, agentUsage, isHeuristicRestart, restartInterruptions } from './steer.mjs';
 import { isAdvisorSlot, isSensitiveSlot } from './config.mjs';
-import { isWorktreeWorkspace } from './discovery.mjs';
+import { applyContinuations, isWorktreeWorkspace } from './discovery.mjs';
 
 /** One row per live scope: id, kind, active steer, epoch, checkpoint, usage, hints. */
-export function scopeRows(paseoState, { now = () => Date.now(), daemonStartedAt = null, lastTurnCheckpoints = null, config = null } = {}) {
+export function scopeRows(paseoState, { now = () => Date.now(), daemonStartedAt = null, lastTurnCheckpoints = null, config = null, zerosubSwitches = [] } = {}) {
   const agents = paseoState?.agents ?? [];
   const scopes = listScopes(paseoState);
+  // Live continuation tabs inherit their origin's slot/scope labels (see
+  // zerosub.mjs); the heuristic scan below runs over the resolved list so the
+  // live tab — not the superseded origin — is checked, without duplicates.
+  const resolvedAll = applyContinuations(agents, agents, zerosubSwitches);
   const lower = (v) => (typeof v === 'string' ? v.toLowerCase() : null);
   const blockersOf = new Map(scopes.map((s) => {
     const blockers = s.workspace.metadata?.[CHECKPOINT_KEY]?.blockers;
@@ -22,7 +26,11 @@ export function scopeRows(paseoState, { now = () => Date.now(), daemonStartedAt 
     const state = meta && typeof meta === 'object' ? meta : null;
     const checkpoint = scope.workspace.metadata?.[CHECKPOINT_KEY] ?? null;
     const agentState = scope.workspace.metadata?.[AGENTS_KEY] ?? null;
-    const live = agents.filter((a) => a.workspaceId === scope.workspaceId && !a.archivedAt && a.labels?.[LABEL.role] === 'steer');
+    // Slot holders follow the live continuation tab: origins in this workspace
+    // are replaced by their live tab (which inherits role/slot), so the active
+    // holder is the live tab and the origin never appears as a second holder.
+    const labelledFound = agents.filter((a) => a.workspaceId === scope.workspaceId && a.labels?.[LABEL.role] === 'steer');
+    const live = applyContinuations(labelledFound, agents, zerosubSwitches).filter((a) => a && !a.archivedAt);
     const active = live.find((a) => a.labels?.[LABEL.slot] === state?.activeSteer) ?? null;
     const updatedAt = checkpoint?.updatedAt ?? null;
     const updatedMs = updatedAt ? Date.parse(updatedAt) : NaN;
@@ -33,8 +41,9 @@ export function scopeRows(paseoState, { now = () => Date.now(), daemonStartedAt 
     const heuristic = [];
     const checkpointAt = checkpoint?.capturedAt ?? checkpoint?.updatedAt ?? null;
     if (daemonStartedAt && lastTurnCheckpoints && typeof lastTurnCheckpoints === 'object' && checkpointAt) {
-      for (const a of agents) {
+      for (const a of resolvedAll) {
         if (!a || a.archivedAt || markedIds.has(a.id)) continue;
+        if (a.continuedFrom && markedIds.has(a.continuedFrom)) continue;
         const scopeId = a.labels?.[LABEL.scope];
         if (scopeId !== scope.id) continue;
         const role = a.labels?.[LABEL.role];
@@ -83,7 +92,7 @@ export function scopeRows(paseoState, { now = () => Date.now(), daemonStartedAt 
       workspaceId: scope.workspaceId,
       domain,
       children,
-      active: active ? { slot: active.labels[LABEL.slot], id: active.id, model: `${active.provider}/${active.model}`, status: active.status, ...(config ? { advisor: isAdvisorSlot(config, activeSlot), sensitive: isSensitiveSlot(config, activeSlot) } : {}) } : null,
+      active: active ? { slot: active.labels[LABEL.slot], id: active.id, model: `${active.provider}/${active.model}`, status: active.status, ...(active.continuedFrom ? { continuedFrom: active.continuedFrom } : {}), ...(config ? { advisor: isAdvisorSlot(config, activeSlot), sensitive: isSensitiveSlot(config, activeSlot) } : {}) } : null,
       ...(config ? { warnings } : {}),
       epoch: state?.epoch ?? null,
       checkpoint: checkpoint?.task
@@ -150,9 +159,10 @@ export function formatScopeRows(rows) {
   for (const row of rows) push(row);
   return ordered.map((row) => {
     const tags = `${row.active?.advisor ? ' [advisor]' : ''}${row.active?.sensitive ? ' [sensitive]' : ''}`;
+    const continued = row.active?.continuedFrom ? ` continued-from ${row.active.continuedFrom}` : '';
     const parts = [
       `${row.id} [${row.kind}]`,
-      row.active ? `steer ${row.active.slot} ${row.active.model}${tags}` : 'steer -',
+      row.active ? `steer ${row.active.slot} ${row.active.model}${tags}${continued}` : 'steer -',
       `epoch ${row.epoch ?? '-'}`,
       `cp ${formatAge(row.checkpoint?.ageMs ?? null)}`,
       `next: ${row.checkpoint?.next ? JSON.stringify(row.checkpoint.next) : '-'}`,
@@ -247,11 +257,11 @@ export function formatStatus(status, warnContextTokens) {
   for (const w of status.warnings ?? []) lines.push(`  ! ${w}`);
   for (const s of status.steers) {
     const tags = `${s.advisor ? ' [advisor]' : ''}${s.sensitive ? ' [sensitive]' : ''}`;
-    lines.push(`  Steer ${s.slot}${tags}  ${s.id}  ${s.provider}/${s.model}  ${s.status}  ${formatStatusUsage(s.usage)}${s.retired ? '  RETIRED — archive it in Paseo' : ''}${s.parent ? `  PARENT ${s.parent}` : ''}`);
+    lines.push(`  Steer ${s.slot}${tags}  ${s.id}  ${s.provider}/${s.model}  ${s.status}  ${formatStatusUsage(s.usage)}${s.continuedFrom ? `  continued-from ${s.continuedFrom}` : ''}${s.retired ? '  RETIRED — archive it in Paseo' : ''}${s.parent ? `  PARENT ${s.parent}` : ''}`);
   }
   for (const c of status.candidates ?? []) lines.push(`  candidate "${c.title}" ${c.id} ${c.provider}/${c.model} ${c.status}  ${formatStatusUsage(c.usage)} → adopt with --adopt ${c.slot ?? '<slot>'}=${c.id}${c.parent ? ` (has parent ${c.parent}; needs --detach)` : ''}`);
   const supervised = new Map((status.openWorkers ?? []).map((e) => [e.id, e]));
-  for (const w of status.workers) lines.push(`  worker ${w.id} "${w.title}" ${w.provider}/${w.model} ${w.status}  ${formatStatusUsage(w.usage)}${(w.parentSlot ?? w.owner) ? ` ← Steer ${w.parentSlot ?? w.owner}` : w.parentCandidate ? ` ← candidate "${w.parentCandidate.title}" ${w.parentCandidate.id}` : ' ← Steer ?'}${w.workspaceId && status.workspace && w.workspaceId !== status.workspace.id ? ` · workspace ${w.workspaceId}` : ''}${supervised.has(w.id) ? ` · supervised ${supervised.get(w.id).state}` : ''}`);
+  for (const w of status.workers) lines.push(`  worker ${w.id} "${w.title}" ${w.provider}/${w.model} ${w.status}  ${formatStatusUsage(w.usage)}${(w.parentSlot ?? w.owner) ? ` ← Steer ${w.parentSlot ?? w.owner}` : w.parentCandidate ? ` ← candidate "${w.parentCandidate.title}" ${w.parentCandidate.id}` : ' ← Steer ?'}${w.workspaceId && status.workspace && w.workspaceId !== status.workspace.id ? ` · workspace ${w.workspaceId}` : ''}${w.continuedFrom ? ` · continued-from ${w.continuedFrom}` : ''}${supervised.has(w.id) ? ` · supervised ${supervised.get(w.id).state}` : ''}`);
   for (const e of (status.openWorkers ?? []).filter((entry) => !status.workers.some((w) => w.id === entry.id))) lines.push(`  worker ${e.id} (agent not live) · supervised ${e.state} "${(e.task ?? '').slice(0, 120)}"`);
   for (const warn of status.usageWarnings ?? []) {
     lines.push(warn.kind === 'steer'

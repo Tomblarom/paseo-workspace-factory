@@ -22,6 +22,7 @@ import { formatWorkersText, readWorkers, workersReport } from './supervision.mjs
 import { assignScope } from './assign.mjs';
 import { flagValue, formatCatalog, formatWorkerModel, parseProviderModel, paseoRunFlags, planAdvisorTag, planSensitiveTag, planSlotRemove, planSlotSet, planSteerRemove, planSteerSet, planWorkerDefault, planWorkerRemove, planWorkerSet, previewConfig, resolveProfile, steerFallbackList, writeConfigAtomic } from './models.mjs';
 import { scopeRows, scopeCandidates, formatScopeRows, formatScopeCandidates, formatStatus } from './scopes-view.mjs';
+import { applyContinuations } from './discovery.mjs';
 import { validateProfilesAgainstCatalog } from './config.mjs';
 import { recordProfileFailure } from './quota.mjs';
 import { readZerosubState } from './zerosub.mjs';
@@ -191,6 +192,7 @@ async function heuristicInputsForScopes(client, paseoState) {
   }
   if (!started || !Number.isFinite(Date.parse(started))) return null;
   const scopes = listScopes(paseoState);
+  const resolved = applyContinuations(paseoState.agents ?? [], paseoState.agents ?? []);
   const candidates = [];
   for (const scope of scopes) {
     const checkpoint = scope.workspace.metadata?.[CHECKPOINT_KEY] ?? null;
@@ -199,8 +201,9 @@ async function heuristicInputsForScopes(client, paseoState) {
     if (!Number.isFinite(Date.parse(checkpointAt)) || Date.parse(started) <= Date.parse(checkpointAt)) continue;
     const agentState = scope.workspace.metadata?.[AGENTS_KEY] ?? null;
     const markedIds = new Set(restartInterruptions({ checkpoint, agentState }).map((m) => m.agentId));
-    for (const a of paseoState.agents ?? []) {
+    for (const a of resolved) {
       if (!a || a.archivedAt || a.status !== 'idle' || markedIds.has(a.id)) continue;
+      if (a.continuedFrom && markedIds.has(a.continuedFrom)) continue;
       if (a.labels?.[LABEL.scope] !== scope.id) continue;
       const role = a.labels?.[LABEL.role];
       if (role !== 'steer' && role !== 'worker') continue;
