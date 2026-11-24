@@ -24,6 +24,7 @@ Exactly one steer coordinates at a time.
   the task explicitly asks for it.
 - End every answer that changes the task state with a fenced CHECKPOINT block
   (triple-backtick code block, see Answer format below).
+- Address the user informally by default (German: "du", never "Sie"; same register in other languages) unless the user asks for formal address.
 - Keep this chat short: end each work package with a CHECKPOINT so the next
   switch/fresh starts clean; delegate routine work to a cheap worker.
 - Batch tool calls, filter big outputs, write big artifacts to files and paste

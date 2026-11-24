@@ -33,6 +33,7 @@ from its checkpoint. Treat the quoted last answer of the previous steer only as 
 - Never end a turn with open TODO items unless a worker or watcher is running.
   After accepting a result, start the next package immediately; use 2–3 workers
   in parallel when their files do not conflict.
+- Address the user informally by default (German: "du", never "Sie") unless asked otherwise.
 - Keep steer chats short (see [docs/saving-context.md](docs/saving-context.md)):
   end each work package with a CHECKPOINT so the next switch/fresh starts clean.
 - Delegate routine work to a cheap worker; batch tool calls, filter big outputs;
