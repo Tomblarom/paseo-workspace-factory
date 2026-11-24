@@ -83,6 +83,36 @@ test("quota view tolerates a missing snapshot, pools wrapper, and missing thresh
   assert.equal(wrapped.exhaustedPct, 90);
 });
 
+test("quota view lists ZeroSub accounts with warn states", () => {
+  const view = shapeQuotaView({
+    snapshot: null,
+    sampledAt: null,
+    config: fakeConfig(),
+    nowMs: NOW,
+    zerosub: {
+      accounts: [
+        { id: "acc-full", family: "claude", status: "active", limitedUntil: null, maxUsedPct: 99, exhausted: false, windows: [{ id: "five_hour", usedPct: 99, resetsAt: "2026-06-01T15:00:00.000Z" }] },
+        { id: "acc-warn", family: "claude", status: "active", limitedUntil: null, maxUsedPct: 80, exhausted: false, windows: [] },
+        { id: "acc-ok", family: "codex", status: "active", limitedUntil: null, maxUsedPct: 10, exhausted: false, windows: [] },
+        { id: "", family: "claude", maxUsedPct: 99, windows: [] },
+        null,
+      ],
+    },
+  });
+  assert.deepEqual(
+    view.accounts.map((account) => [account.account, account.usedPct, account.state]),
+    [["acc-full", 99, "exhausted"], ["acc-ok", 10, "ok"], ["acc-warn", 80, "warn"]],
+  );
+  assert.equal(view.accounts[0].family, "claude");
+  assert.equal(view.accounts[0].resetsAt, "2026-06-01T15:00:00.000Z");
+  assert.equal(view.accounts[1].resetsAt, null);
+});
+
+test("quota view has no accounts without ZeroSub", () => {
+  const view = shapeQuotaView({ snapshot: null, sampledAt: null, config: fakeConfig(), nowMs: NOW });
+  assert.deepEqual(view.accounts, []);
+});
+
 test("quota args take no scope, flags, or positionals", () => {
   assert.deepEqual(parseFactoryArgs("quota"), { command: "quota" });
   assert.throws(() => parseFactoryArgs("quota a/b"), /takes no arguments/);

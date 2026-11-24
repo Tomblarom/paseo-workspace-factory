@@ -154,6 +154,7 @@ export function parseSwitchData(data) {
     from: text(data.from),
     to: text(data.to),
     toFamily: text(data.toFamily),
+    toProvider: text(data.toProvider),
     at: text(data.at),
     reason: text(data.reason),
     outcome: text(data.outcome),

@@ -49,6 +49,7 @@ import {
 } from "./server/supervise.js";
 import { startQuotaTimer } from "./server/quota.js";
 import { getQuota } from "./server/quota-rpc.js";
+import { readZerosubStateSafe } from "./server/zerosub-runtime.js";
 import {
   factoryApply,
   factoryAssign,
@@ -119,6 +120,9 @@ export default function contribute(server: PluginServerContext) {
     getConfig: () => loader.loadEffectiveConfig(),
   };
   let bootChained = false;
+  // Fail-soft ZeroSub state for supervision wakes, failover, and the turn-end
+  // hint; without ZeroSub every call resolves null and keeps legacy behavior.
+  const getZerosub = () => readZerosubStateSafe();
   const bootOnce = (paseo: unknown): void => {
     captureSupervisionPaseo(paseo);
     if (bootChained) {
@@ -127,7 +131,7 @@ export default function contribute(server: PluginServerContext) {
     }
     bootChained = true;
     void ensureBootChecked(paseo, bootDeps).then((marks) =>
-      handleBootFinished(paseo, marks, { getSettings: readSupervision, getConfig: () => loader.loadEffectiveConfig(), resumeSteer }),
+      handleBootFinished(paseo, marks, { getSettings: readSupervision, getConfig: () => loader.loadEffectiveConfig(), resumeSteer, getZerosub }),
     );
   };
   server.handle(factoryPing, ping);
@@ -159,7 +163,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(factoryModelsCatalog, getModelsCatalog);
   server.handle(factoryWorkerPick, (input, ctx) => pickWorker(input, ctx, loader));
   server.handle(factoryDrain, runDrain);
-  server.handle(factoryQuota, (input, ctx) => getQuota(input, ctx, loader));
+  server.handle(factoryQuota, (input, ctx) => getQuota(input, ctx, loader, { getZerosub }));
   server.handle(factoryAssignPreview, (input, ctx) => previewAssign(input, ctx, loader));
   server.handle(factoryAssign, (input, ctx) => applyAssign(input, ctx, loader));
   server.handle(factoryRelocatePreview, (input, ctx) => previewRelocate(input, ctx, loader));
@@ -191,6 +195,7 @@ export default function contribute(server: PluginServerContext) {
       getResumeBrief: buildResumeBrief,
       getConfig: () => loader.loadEffectiveConfig(),
       getSupervisionSettings: readSupervision,
+      getZerosub,
     });
   });
   const removeCreateHook = server.addHook("agent.create.after", async (payload, context) => {
@@ -201,10 +206,10 @@ export default function contribute(server: PluginServerContext) {
   // pass; hook order is irrelevant).
   const removeSuperviseHook = server.addHook("agent.turn.after", async (payload, context) => {
     captureSupervisionPaseo(context.paseo);
-    await handleWorkerTurnAfter(payload, context, { getSettings: readSupervision, getConfig: () => loader.loadEffectiveConfig(), resumeSteer });
+    await handleWorkerTurnAfter(payload, context, { getSettings: readSupervision, getConfig: () => loader.loadEffectiveConfig(), resumeSteer, getZerosub });
   });
   const stopCleanupTimer = startCleanupTimer({ readSettings });
-  const stopSupervisionTimer = startSupervisionTimer({ getSettings: readSupervision, getConfig: () => loader.loadEffectiveConfig(), resumeSteer });
+  const stopSupervisionTimer = startSupervisionTimer({ getSettings: readSupervision, getConfig: () => loader.loadEffectiveConfig(), resumeSteer, getZerosub });
   const stopQuotaTimer = startQuotaTimer({ getSettings: readQuotaSettings });
   return () => {
     removeTurnBefore();

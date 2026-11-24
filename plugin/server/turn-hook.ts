@@ -19,7 +19,13 @@ import {
 } from "../shared/idle-cleanup.js";
 import { firstUserText } from "../shared/supervise.js";
 import { extractTurnUsage, mergeTurnUsage } from "./quota.js";
-import { runFailoverCheck } from "./supervise.js";
+import { proactiveHintDecision, runFailoverCheck } from "./supervise.js";
+import {
+  findZerosubSwitch,
+  resolveZerosub,
+  zerosubForkWarning,
+  type ZerosubSource,
+} from "./zerosub-runtime.js";
 import {
   checkRace,
   cleanupCommandKind,
@@ -49,7 +55,7 @@ interface TurnBeforePayload {
   turnId: string | null;
 }
 
-export interface TurnHookDeps {
+export interface TurnHookDeps extends ZerosubSource {
   /** Reads the C5 settings for the seed-after-clear step; absent means no seed. */
   getCleanupSettings?: () => Promise<{ seedAfterClear: boolean } | null>;
   /** Builds the resume brief after a verified resume clear; absent means none. */
@@ -144,6 +150,73 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+/**
+ * Proactive ZeroSub switch hint for one completed steer turn: at or above the
+ * account window's warnPct (with room elsewhere) the steer gets the handoff
+ * text, debounced to once per account window (re-hint after its reset, an
+ * account change, or 24h). Returns the text plus the agent-entry patch, or
+ * null. Never throws (fail-soft: no hint without ZeroSub, config, or room).
+ */
+async function proactiveHintForTurn(args: {
+  paseoState: any;
+  scope: any;
+  wsf: Record<string, unknown> | null;
+  agents: Record<string, unknown>;
+  agentId: string;
+  entries: unknown[];
+  previous: Record<string, unknown> | null;
+  deps: TurnHookDeps;
+  nowMs: number;
+}): Promise<{ text: string; patch: Record<string, unknown> } | null> {
+  try {
+    const zerosub = await resolveZerosub(args.deps);
+    if (!zerosub || !Array.isArray((zerosub as { accounts?: unknown }).accounts)) return null;
+    const config = args.deps.getConfig ? await args.deps.getConfig().catch(() => null) : null;
+    const supervision = args.deps.getSupervisionSettings
+      ? await args.deps.getSupervisionSettings().catch(() => null)
+      : null;
+    const hint = proactiveHintDecision({
+      paseoState: args.paseoState,
+      scope: args.scope,
+      wsf: args.wsf as Record<string, any> | null,
+      agentState: args.agents,
+      config,
+      agentId: args.agentId,
+      zerosub,
+      nowMs: args.nowMs,
+      warnPct: config?.quota?.warnPct ?? supervision?.quota?.warnPct ?? 75,
+      exhaustedPct: config?.quota?.exhaustedPct ?? supervision?.quota?.exhaustedPct ?? 90,
+    });
+    if (hint.decision !== "hint" || !hint.text) return null;
+    const last = asRecord(args.previous?.proactiveHint);
+    const lastAccount = typeof last?.accountId === "string" ? last.accountId : null;
+    const lastAt = typeof last?.at === "string" ? Date.parse(last.at) : NaN;
+    const lastReset = typeof last?.resetsAt === "string" ? Date.parse(last.resetsAt) : NaN;
+    const windowReset = Number.isFinite(lastReset) && args.nowMs >= lastReset;
+    if (lastAccount === hint.accountId && Number.isFinite(lastAt) && args.nowMs - lastAt < 24 * 3_600_000 && !windowReset) {
+      return null;
+    }
+    let text = hint.text;
+    const forkNote = zerosubForkWarning(findZerosubSwitch(args.entries));
+    if (forkNote) text = `${text}\n${forkNote}`;
+    return {
+      text,
+      patch: {
+        proactiveHint: {
+          accountId: hint.accountId ?? null,
+          at: new Date(args.nowMs).toISOString(),
+          resetsAt: hint.resetsAt ?? null,
+        },
+      },
+    };
+  } catch (error) {
+    console.error(
+      `[factory] turn hook: proactive hint check failed (${error instanceof Error ? error.message : String(error)})`,
+    );
+    return null;
+  }
 }
 
 async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps): Promise<void> {
@@ -257,6 +330,15 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
     if (flagged) needsResumePatch = { needsResume: flagged };
   }
 
+  // Proactive ZeroSub switch hint for completed steer turns (computed before
+  // the write so its debounce stamp merges into the same agent entry; the
+  // text goes out after the write below).
+  const nowMs = Date.now();
+  const proactiveHint =
+    identity.role === "steer" && kind === "completed" && !decision.dropSelf
+      ? await proactiveHintForTurn({ paseoState, scope, wsf, agents, agentId, entries, previous, deps, nowMs })
+      : null;
+
   // One core lock helper names and takes workspace locks (never duplicated here).
   const lockOptions: any = undefined;
   await withWorkspaceLock(mainId, async (held: any) => {
@@ -291,6 +373,7 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
       ...prev,
       ...(decision.entryUpdate ?? {}),
       ...(needsResumePatch ?? {}),
+      ...(proactiveHint?.patch ?? {}),
       ...(turnUsage ? { usage: mergeTurnUsage(prev.usage, turnUsage) } : {}),
     };
     if (decision.resolvePending) merged.pendingAction = null;
@@ -310,6 +393,17 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
     await paseo.workspaces.ref(mainId).setMetadata(patch);
     console.log(`[factory] turn hook: ${decision.log}`);
   }, lockOptions);
+
+  if (proactiveHint) {
+    try {
+      await paseo.agents.ref(agentId).send(proactiveHint.text);
+      console.log(`[factory] turn hook: proactive switch hint to ${agentId}`);
+    } catch (error) {
+      console.error(
+        `[factory] turn hook: proactive hint to ${agentId} failed (${error instanceof Error ? error.message : String(error)})`,
+      );
+    }
+  }
 
   if (needsResumePatch?.needsResume && (needsResumePatch.needsResume as any).reason === "limit") {
     try {

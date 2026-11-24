@@ -17,6 +17,7 @@ import * as lockCore from "./factory/lock.js";
 import * as supervisionCore from "./factory/supervision.js";
 import * as agentStateCore from "./factory/agent-state.js";
 import * as steerCore from "./factory/steer.js";
+import * as quotaCore from "./factory/quota.js";
 
 // The synced core is unchecked (@ts-nocheck): its inferred parameter types are
 // too narrow for real calls, so supervision talks to it as any (as the sweep
@@ -27,6 +28,7 @@ const L = lockCore as unknown as Record<string, any>;
 const S = supervisionCore as unknown as Record<string, any>;
 const AS = agentStateCore as unknown as Record<string, any>;
 const ST = steerCore as unknown as Record<string, any>;
+const Q = quotaCore as unknown as Record<string, any>;
 const { LEGACY_PREFIX, METADATA_KEY, readPaseoState } = P;
 const { listScopes, sameScopeId } = SC;
 const { withLock, workspaceLockName } = L;
@@ -35,6 +37,7 @@ const {
   clipTask,
   collectPendingWakes,
   eventForRestartReason,
+  exhaustedWakeDecision,
   failoverChain,
   formatWakeMessage,
   isBatchDue,
@@ -50,12 +53,23 @@ const {
   turnEndEvent,
   updateWorkerEntry,
   workersReport,
+  zerosubMoveDecision,
+  zerosubPendingTarget,
 } = S;
 const { AGENTS_KEY } = AS;
-const { lastAssistantText, parseCheckpointBlock } = ST;
+const { lastAssistantText, parseCheckpointBlock, proactiveSwitchDecision } = ST;
+const { accountForAgent, formatQuotaLine, profilePool, quotaExhausted } = Q;
 import { factoryIdentity } from "../shared/auto-checkpoint.js";
 import { getQuotaSnapshot } from "./quota.js";
-import { formatQuotaLine, profilePool, quotaExhausted } from "./factory/quota.js";
+import {
+  findZerosubSwitch,
+  futureWakeAtMs,
+  resolveZerosub,
+  zerosubForkWarning,
+  zerosubSwitchFollowup,
+  type ZerosubSource,
+  type ZerosubSwitchRow,
+} from "./zerosub-runtime.js";
 import {
   DRAIN_METADATA_KEY,
   WORKER_METADATA_KEY,
@@ -88,7 +102,7 @@ export interface SettingsSource {
   getConfig?: () => Promise<any>;
 }
 
-export interface SuperviseDeps extends SettingsSource {
+export interface SuperviseDeps extends SettingsSource, ZerosubSource {
   nowIso?: string;
   nowMs?: number;
   factoryCmd?: string;
@@ -127,6 +141,8 @@ let bootCheckDone = false;
 let draining = false;
 let lastWatchdogScanMs = 0;
 const failoverAsked = new Map<string, { activeSlot: string | null; asked: string[]; updatedAt: string }>();
+/** First sighting (epoch ms) of each agent's current ZeroSub pending move. */
+const zerosubPendingSince = new Map<string, number>();
 
 export function captureSupervisionPaseo(paseo: any): void {
   if (paseo) supervisionPaseo = paseo;
@@ -170,6 +186,7 @@ export function resetSupervisionForTests(): void {
   draining = false;
   lastWatchdogScanMs = 0;
   failoverAsked.clear();
+  zerosubPendingSince.clear();
 }
 
 /** Reads the supervision settings document; null fails the tick closed. */
@@ -483,6 +500,8 @@ export interface SendWakeResult {
   events?: number;
   /** True when the wake was delivered as an F4 automatic resume. */
   resumed?: boolean;
+  /** Earliest resetsAt to retry at when the wake waits for quota (`wait-reset`). */
+  wakeAt?: string | null;
 }
 
 /**
@@ -499,6 +518,8 @@ export async function sendScopeWake(
     events: WakeEvent[];
     state?: any;
     factoryCmd?: string;
+    /** Extra ZeroSub note (e.g. a fork warning) appended after the quota line. */
+    zerosubNote?: string | null;
   },
   deps: SuperviseDeps,
 ): Promise<SendWakeResult> {
@@ -530,14 +551,17 @@ export async function sendScopeWake(
   const activeRow = rows.find((row: any) => row.id === target) ?? null;
   const activeProfile = active && config?.profiles?.[config?.steers?.slots?.[active]];
   const activePool = activeProfile ? profilePool(activeProfile) : null;
+  const exhaustedPct = config?.quota?.exhaustedPct ?? settings?.quota?.exhaustedPct ?? 90;
   const exhausted = activePool && quotaExhausted(
     getQuotaSnapshot(),
     activePool,
-    config?.quota?.exhaustedPct ?? settings?.quota?.exhaustedPct ?? 90,
+    exhaustedPct,
   );
+  const zerosub = await resolveZerosub(deps);
   if ((activeRow?.advisor === true || exhausted) && active) {
     const takeover = await runFailoverCheck(paseo, scope, {
       ...deps,
+      zerosub,
       state: paseoState,
       force: true,
       failingPool: activePool,
@@ -546,7 +570,20 @@ export async function sendScopeWake(
     if (takeover.action === "failover") {
       return { sent: true, target: takeover.to?.steerId ?? null, events: events.length };
     }
-    return { sent: false, reason: takeover.reason ?? "no-failover-candidate", target };
+    return {
+      sent: false,
+      reason: takeover.reason ?? "no-failover-candidate",
+      target,
+      ...(takeover.wakeAt ? { wakeAt: takeover.wakeAt } : {}),
+    };
+  }
+  // All accounts (or the target's family) exhausted: hold the news until the
+  // earliest reset instead of waking a steer that cannot run a turn. The
+  // events stay queued; the next flush after the reset delivers them.
+  const waitWakeAt = waitResetWakeAt({ zerosub, targetId: target, nowMs: stampsOf(deps).nowMs, exhaustedPct });
+  if (waitWakeAt) {
+    log(`[factory] supervise: wake for ${scope.id} waits for quota reset at ${waitWakeAt}`);
+    return { sent: false, reason: "wait-reset", target, wakeAt: waitWakeAt };
   }
   const maxAutoResumes = settings?.maxAutoResumes ?? 2;
   const overContinued = openWorkers(register)
@@ -564,8 +601,10 @@ export async function sendScopeWake(
   const quotaLine = formatQuotaLine(config, getQuotaSnapshot(), {
     currentPool: activeProfile ? profilePool(activeProfile) : null,
     warnPct: config?.quota?.warnPct ?? settings?.quota?.warnPct ?? 75,
+    zerosub,
   });
   if (quotaLine) text = `${text}\n${quotaLine}`;
+  if (args.zerosubNote) text = `${text}\n${args.zerosubNote}`;
   const escalation = escalationHintLine(overContinued);
   if (escalation) text = `${text}\n${escalation}`;
   if (!text) return { sent: false, reason: "no-text", target };
@@ -618,6 +657,60 @@ function mergeWakeEvents(register: Record<string, any>, workerId: string, state:
   return [...merged.entries()]
     .map(([id, st]) => ({ workerId: id, state: st }))
     .sort((a, b) => a.workerId.localeCompare(b.workerId));
+}
+
+/**
+ * First-sighting stamp of an agent's ZeroSub pending move: the first call with
+ * a pending target records nowMs, later calls return the stored stamp, and a
+ * cleared move forgets it. Unknown moves count as just seen, so a stuck route
+ * trips the `zerosubPendingMinutes` timeout instead of wedging wakes forever.
+ */
+function trackZerosubPending(agentId: string | null, pendingTarget: string | null, nowMs: number): number | null {
+  if (!agentId || !pendingTarget) {
+    if (agentId) zerosubPendingSince.delete(agentId);
+    return null;
+  }
+  const known = zerosubPendingSince.get(agentId);
+  if (known === undefined) zerosubPendingSince.set(agentId, nowMs);
+  return zerosubPendingSince.get(agentId) ?? nowMs;
+}
+
+/**
+ * Earliest future resetsAt to wait for when nothing can run now: the
+ * `exhausted`+`stayed` switch row's resetsAt, the all-accounts-exhausted
+ * reset, or the wake target's family reset — whichever is earliest. Null
+ * means some account has room (proceed) or no reset is known (legacy).
+ */
+function waitResetWakeAt(args: {
+  zerosub: any;
+  targetId: string | null;
+  switchWakeAt?: string | null;
+  nowMs: number;
+  exhaustedPct: number;
+}): string | null {
+  const candidates: string[] = [];
+  if (args.switchWakeAt && futureWakeAtMs(args.switchWakeAt, args.nowMs) !== null) {
+    candidates.push(args.switchWakeAt);
+  }
+  if (args.zerosub) {
+    const all = exhaustedWakeDecision({ zerosub: args.zerosub, now: args.nowMs, exhaustedPct: args.exhaustedPct });
+    if (all.decision === "wait-reset" && all.wakeAt) candidates.push(all.wakeAt);
+    const family = args.targetId ? (accountForAgent(args.zerosub, args.targetId)?.family ?? null) : null;
+    if (family) {
+      const scoped = exhaustedWakeDecision({ zerosub: args.zerosub, family, now: args.nowMs, exhaustedPct: args.exhaustedPct });
+      if (scoped.decision === "wait-reset" && scoped.wakeAt) candidates.push(scoped.wakeAt);
+    }
+  }
+  let best: string | null = null;
+  let bestMs = Infinity;
+  for (const stamp of candidates) {
+    const ms = Date.parse(stamp);
+    if (Number.isFinite(ms) && ms > args.nowMs && ms < bestMs) {
+      best = stamp;
+      bestMs = ms;
+    }
+  }
+  return best;
 }
 
 async function queueWake(
@@ -731,6 +824,17 @@ export async function runWorkerTurnAfter(
   register = readWorkers(meta);
   const { nowMs } = stampsOf(deps);
   const draining = (deps.draining ?? isDraining()) || isDrainMarkerActive(meta[DRAIN_METADATA_KEY], nowMs);
+  // ZeroSub already continued this turn (its follow-up carries on, possibly
+  // in continuedIn): no factory follow-up of our own (the transition above is
+  // still recorded). A pending in-place move instead defers the wake via
+  // planWake; the next turn end reports.
+  const zerosub = await resolveZerosub(deps);
+  const switchRow = findZerosubSwitch(entries);
+  if (zerosubSwitchFollowup(switchRow).decision === "suppress") {
+    log(`[factory] supervise: no follow-up for ${agentId} (ZeroSub continued it)`);
+    return { ok: true, action: "skipped", reason: "zerosub-continued", event, state: newState };
+  }
+  const zerosubNote = zerosubForkWarning(switchRow);
   const plan = planWake({
     agent,
     newState,
@@ -740,6 +844,8 @@ export async function runWorkerTurnAfter(
     wakeDebounceSeconds: settings.wakeDebounceSeconds,
     draining,
     bootCheckDone: deps.bootCheckDone ?? isBootCheckDone(),
+    zerosub,
+    zerosubPendingSince: trackZerosubPending(agentId, zerosub ? zerosubPendingTarget(zerosub, agentId) : null, nowMs),
   });
   if (plan.action === "skip") {
     // Quiet but eligible: queue so the post-quiet combined wake includes it.
@@ -755,8 +861,8 @@ export async function runWorkerTurnAfter(
   }
   const sent = await sendScopeWake(
     paseo,
-    { scope, events: newState ? mergeWakeEvents(register, agentId, newState) : [], state },
-    deps,
+    { scope, events: newState ? mergeWakeEvents(register, agentId, newState) : [], state, zerosubNote },
+    { ...deps, zerosub },
   );
   if (!sent.sent && entry && newState) {
     // No live holder: keep the news queued until someone can hear it.
@@ -927,6 +1033,14 @@ export async function runBootFinished(
         continue;
       }
       const sent = await sendScopeWake(paseo, { scope, events, state: paseoState }, deps);
+      if (!sent.sent && sent.reason === "wait-reset") {
+        for (const event of events) {
+          const current = register[event.workerId];
+          if (current) await queueWake(paseo, scope.workspaceId, event.workerId, current, event.state, deps);
+        }
+        wakes.push({ scopeId: scope.id, sent: false, reason: "wait-reset" });
+        continue;
+      }
       wakes.push({ scopeId: scope.id, sent: sent.sent, reason: sent.sent ? undefined : (sent.reason ?? "send-failed") });
     } catch (error) {
       log(`[factory] supervise: post-boot wake for ${scope?.id ?? "?"} failed (${error instanceof Error ? error.message : String(error)})`);
@@ -960,6 +1074,8 @@ export interface FailoverResult {
   reason?: string;
   to?: { kind: string; slot?: string | null; steerId: string; scopeId?: string | null } | null;
   logged?: boolean;
+  /** Earliest resetsAt to retry at when the check waits for quota (`wait-reset`). */
+  wakeAt?: string | null;
 }
 
 /**
@@ -1040,6 +1156,9 @@ export async function runFailoverCheck(
   const config = deps.getConfig ? await deps.getConfig().catch(() => null) : null;
   const rows = steerRows(paseoState, scope.id, wsf, agentState, config);
   const holder = resolveWakeTarget(wsf, rows);
+  const zerosub = await resolveZerosub(deps);
+  let holderRow: ZerosubSwitchRow | null = null;
+  let holderSwitchWakeAt: string | null = null;
   let reason: string;
   if (!holder) {
     reason = "no live holder of the active slot";
@@ -1054,6 +1173,28 @@ export async function runFailoverCheck(
       failoverAsked.delete(scope.id);
       return { action: response };
     }
+    // No double reaction with ZeroSub's own failover (applies to forced
+    // checks too: a limit failover stands down exactly when ZeroSub acted).
+    // A continued holder (follow-up sent, or carries on in continuedIn) needs
+    // no factory follow-up; a pending in-place move waits for ZeroSub;
+    // `exhausted`+`stayed` without continuedIn proceeds below (no account is
+    // free, so ZeroSub will not act) and only delays an empty chain to reset.
+    holderRow = findZerosubSwitch(await readTurnTail(paseo, holder, null));
+    const followup = zerosubSwitchFollowup(holderRow);
+    if (followup.decision === "suppress") {
+      failoverAsked.delete(scope.id);
+      return { action: "clear", reason: followup.reason };
+    }
+    holderSwitchWakeAt = followup.wakeAt;
+    const move = zerosub
+      ? zerosubMoveDecision({
+          zerosub,
+          agentId: holder,
+          pendingSince: trackZerosubPending(holder, zerosubPendingTarget(zerosub, holder), nowMs),
+          nowMs,
+        })
+      : null;
+    if (move?.decision === "wait-zerosub") return { action: "wait", reason: "wait-zerosub" };
     if (!deps.force && lastWake && nowMs - Date.parse(lastWake) < settings.answerMinutes * 60_000) return { action: "wait" };
     reason = deps.failoverReason ?? `no answer within ${settings.answerMinutes}m`;
   }
@@ -1066,6 +1207,7 @@ export async function runFailoverCheck(
   }
   const scopes = deps.scopes ?? listScopes(paseoState);
   const retired = retiredAgentId(wsf);
+  const exhaustedPct = config?.quota?.exhaustedPct ?? settings?.quota?.exhaustedPct ?? 90;
   const chain = failoverChain({
     steers: rows,
     activeSlot,
@@ -1074,12 +1216,20 @@ export async function runFailoverCheck(
     advisorIds: rows.filter((r) => r.advisor).map((r) => r.id),
     ...domainHubSteers(paseoState, scopes, scope, wsf),
     failingPool: deps.failingPool ?? (activeSlot ? profilePool(config?.profiles?.[config?.steers?.slots?.[activeSlot]]) : null),
+    zerosub,
+    failingAccountId: holder && zerosub ? (zerosub.agentAccount?.[holder] ?? null) : null,
+    exhaustedPct,
+    now: nowMs,
   });
+  const waitReset = (): FailoverResult | null => {
+    const wakeAt = waitResetWakeAt({ zerosub, targetId: holder, switchWakeAt: holderSwitchWakeAt, nowMs, exhaustedPct });
+    return wakeAt ? { action: "wait", reason: "wait-reset", wakeAt } : null;
+  };
   const stored = failoverAsked.get(scope.id);
   let asked = stored && stored.activeSlot === activeSlot ? [...stored.asked] : [];
   let next = chain.find((c: any) => c && !asked.includes(c.steerId)) ?? null;
   if (!next) {
-    if (!chain.length) return { action: "none", reason: "no-candidates" };
+    if (!chain.length) return waitReset() ?? { action: "none", reason: "no-candidates" };
     asked = [];
     next = chain[0];
   }
@@ -1090,10 +1240,10 @@ export async function runFailoverCheck(
     asked.push(next.steerId);
     next = chain.find((c: any) => c && !asked.includes(c.steerId)) ?? null;
   }
-  if (!next) return { action: "none", reason: "candidates-ineligible" };
+  if (!next) return waitReset() ?? { action: "none", reason: "candidates-ineligible" };
   const factoryCmd = deps.factoryCmd ?? FACTORY_CMD;
   const summary = open.map((entry: any) => ({ id: entry.id, state: entry.state as string }));
-  const text = next.kind === "steer"
+  let text = next.kind === "steer"
     ? formatSteerTakeover({
         scopeId: scope.id,
         epoch: wsf.epoch,
@@ -1111,6 +1261,8 @@ export async function runFailoverCheck(
         openWorkers: summary,
         factoryCmd,
       });
+  const forkNote = zerosubForkWarning(holderRow);
+  if (forkNote) text = `${text}\n${forkNote}`;
   await sendText(paseo, next.steerId, text);
   const logged = await logFailoverCheckpoint(
     paseo,
@@ -1129,6 +1281,105 @@ export async function runFailoverCheck(
   failoverAsked.set(scope.id, { activeSlot, asked: [...asked, next.steerId], updatedAt: nowIso });
   log(`[factory] supervise: failover for ${scope.id} → ${next.kind} ${next.steerId} (${reason})`);
   return { action: "failover", to: next, logged };
+}
+
+// ---------------------------------------------------------------------------
+// Proactive switch hint at steer turn end.
+// ---------------------------------------------------------------------------
+
+export interface ProactiveHint {
+  decision: "hint" | "skip";
+  reason: string;
+  to?: { kind: string; slot?: string | null; steerId: string; scopeId?: string | null } | null;
+  accountId?: string | null;
+  usedPct?: number | null;
+  warnPct?: number | null;
+  resetsAt?: string | null;
+  text?: string | null;
+}
+
+function formatProactiveHint(args: {
+  scopeId: string;
+  to: { kind: string; slot?: string | null; steerId: string };
+  accountId: string;
+  usedPct: number;
+  warnPct: number;
+  factoryCmd: string;
+}): string {
+  const head = `[factory] Account ${args.accountId} is at ${args.usedPct}% of its window (warn ${args.warnPct}%).`;
+  if (args.to.kind === "steer" && args.to.slot) {
+    return (
+      `${head} Hand over now while it is cheap: ` +
+      `\`${args.factoryCmd} switch ${args.scopeId} --to ${args.to.slot} --apply\` — ` +
+      `a planned CHECKPOINT handoff beats an abort mid-turn.`
+    );
+  }
+  return (
+    `${head} No steer slot with room; hand over to the ${args.to.kind} steer ` +
+    `before the window closes — a planned CHECKPOINT handoff beats an abort mid-turn.`
+  );
+}
+
+/**
+ * Pure proactive-switch evaluation for a steer turn end: when the steer's
+ * ZeroSub account window sits at or above `warnPct` and the failover chain
+ * offers a candidate with room, the caller sends `text` so the steer hands
+ * over now instead of aborting mid-turn later. `skip` covers no ZeroSub
+ * state, usage below warn, a pending ZeroSub move, and no room anywhere.
+ */
+export function proactiveHintDecision(args: {
+  paseoState: any;
+  scope: any;
+  wsf: Record<string, any> | null;
+  agentState: Record<string, unknown>;
+  config?: any;
+  agentId: string;
+  zerosub?: any;
+  nowMs?: number;
+  warnPct?: number;
+  exhaustedPct?: number;
+  factoryCmd?: string;
+}): ProactiveHint {
+  const nowMs = typeof args.nowMs === "number" ? args.nowMs : Date.now();
+  const rows = steerRows(args.paseoState, args.scope?.id, args.wsf, args.agentState, args.config ?? null);
+  const activeSlot = typeof args.wsf?.activeSteer === "string" ? args.wsf.activeSteer : null;
+  const retired = retiredAgentId(args.wsf);
+  const decision = proactiveSwitchDecision({
+    zerosub: args.zerosub ?? null,
+    agentId: args.agentId,
+    steers: rows,
+    activeSlot,
+    ...(args.warnPct !== undefined ? { warnPct: args.warnPct } : {}),
+    ...(args.exhaustedPct !== undefined ? { exhaustedPct: args.exhaustedPct } : {}),
+    now: nowMs,
+    retiredIds: retired ? [retired] : [],
+    interruptedIds: rows.filter((r) => r.interrupted).map((r) => r.id),
+    advisorIds: rows.filter((r) => r.advisor).map((r) => r.id),
+    ...domainHubSteers(args.paseoState, listScopes(args.paseoState), args.scope, args.wsf),
+  });
+  if (decision.decision !== "switch" || !decision.to) return { decision: "skip", reason: decision.reason ?? "stay" };
+  const account = accountForAgent(args.zerosub ?? null, args.agentId);
+  const resetsAt = (account?.windows ?? [])
+    .map((window: any) => (typeof window?.resetsAt === "string" ? window.resetsAt : null))
+    .filter((stamp: string | null): stamp is string => !!stamp)
+    .sort()[0] ?? null;
+  return {
+    decision: "hint",
+    reason: decision.reason ?? "account-window-warn",
+    to: decision.to,
+    accountId: decision.accountId ?? account?.id ?? null,
+    usedPct: decision.usedPct ?? null,
+    warnPct: decision.warnPct ?? args.warnPct ?? null,
+    resetsAt,
+    text: formatProactiveHint({
+      scopeId: args.scope?.id ?? "?",
+      to: decision.to,
+      accountId: decision.accountId ?? account?.id ?? "?",
+      usedPct: decision.usedPct ?? 0,
+      warnPct: decision.warnPct ?? args.warnPct ?? 75,
+      factoryCmd: args.factoryCmd ?? FACTORY_CMD,
+    }),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1264,6 +1515,7 @@ export async function watchdogScan(paseo: any, deps: SuperviseDeps & { state?: a
 export interface SupervisionTimerDeps {
   getSettings: () => Promise<SupervisionSettings | null>;
   getConfig?: () => Promise<any>;
+  getZerosub?: SuperviseDeps["getZerosub"];
   intervalMs?: number;
   lock?: SuperviseDeps["lock"];
   log?: (message: string) => void;
@@ -1282,6 +1534,7 @@ export function startSupervisionTimer({
   log = console.log,
   resumeSteer,
   getConfig,
+  getZerosub,
 }: SupervisionTimerDeps): () => void {
   let stopped = false;
   const timer = setInterval(() => {
@@ -1300,6 +1553,7 @@ export function startSupervisionTimer({
           log,
           ...(resumeSteer ? { resumeSteer } : {}),
           ...(getConfig ? { getConfig } : {}),
+          ...(getZerosub ? { getZerosub } : {}),
         };
         await flushAllScopes(paseo, deps);
         if (nowMs - lastWatchdogScanMs >= settings.watchdogMinutes * 60_000) {

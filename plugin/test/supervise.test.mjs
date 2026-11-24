@@ -31,10 +31,11 @@ import {
   withArchiveHint,
 } from "../shared/supervise.ts";
 import { factorySupervisionSettings } from "../shared/settings.ts";
-import { LABEL, METADATA_KEY } from "../../src/paseo.mjs";
+import { LABEL, METADATA_KEY, readPaseoState } from "../../src/paseo.mjs";
 import { WORKERS_KEY } from "../../src/supervision.mjs";
 import { AGENTS_KEY } from "../../src/agent-state.mjs";
 import { CHECKPOINT_KEY, SwitchRefused, switchSteer } from "../../src/steer.mjs";
+import { normalizeZerosubState } from "../../src/zerosub.mjs";
 
 const REPO = "example-owner/example-repo";
 const NOW = new Date("2026-11-24T12:00:00.000Z").getTime();
@@ -1062,4 +1063,301 @@ test("cold sweep feeds the register state into the C5 skip rule", () => {
   assert.ok(idleCleanup.includes("isSupervisionProtectedState"), "C5 skip rule exported");
   assert.match(idleCleanup, /state === "running" \|\| state === "blocked" \|\| state === "interrupted"/);
   assert.ok(idleCleanup.includes("the steer has not seen it yet"), "skip reason names the steer");
+});
+
+// ---------------------------------------------------------------------------
+// ZeroSub wiring: pending moves defer, continued suppresses, exhausted waits.
+// ---------------------------------------------------------------------------
+
+const RESET_AT = at(NOW + 3 * 3_600_000);
+
+function zsAccount(id, pct, resetsAt = RESET_AT) {
+  return {
+    id, family: "claude", label: id, kind: "oauth", plan: "pro",
+    status: "active", isDefault: false, limitedUntil: null,
+    usage: {
+      fetchedAt: at(NOW - MIN),
+      windows: [{ id: "five_hour", label: "5h", usedPercent: pct, resetsAt }],
+      cached: false,
+    },
+    agentCount: 1,
+  };
+}
+
+function zsRoute(agentId, accountId, pendingAccountId = null) {
+  return { agentId, family: "claude", accountId, pinned: false, pendingAccountId, movable: true };
+}
+
+function zsState({ accounts, routes }) {
+  return normalizeZerosubState({ accounts, agents: routes }, { now: NOW });
+}
+
+function zsSwitchData(overrides = {}) {
+  return {
+    family: "claude", from: "acc-old", to: "acc-new", reason: "limit", outcome: "switched",
+    resetsAt: null, continued: false, continuedIn: null, toFamily: null, toProvider: null,
+    detail: null, at: at(NOW - MIN), ...overrides,
+  };
+}
+
+function zsSwitchEntry(data) {
+  return {
+    turnId: "t1",
+    item: { type: "plugin", pluginId: "zerosub", kind: "zerosub-switch", version: 1, data },
+  };
+}
+
+test("pending ZeroSub move defers the worker wake until the route clears or times out", async () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  const worker = addWorker(world, ws);
+  world.workspaces[0].metadata[WORKERS_KEY] = { [worker.id]: entry("running", "t") };
+  const pending = () => zsState({
+    accounts: [zsAccount("acc-old", 99), zsAccount("acc-new", 20)],
+    routes: [zsRoute(worker.id, "acc-old", "acc-new")],
+  });
+  const deferred = await turnedOut(world, worker, { assistant: checkpointOf("t", "done") }, { zerosub: pending() });
+  assert.equal(deferred.action, "deferred");
+  assert.equal(deferred.reason, "wait-zerosub");
+  assert.deepEqual(world.workspaces[0].metadata[WORKERS_KEY][worker.id].pendingWake, { state: "done", queuedAt: at(NOW) });
+  assert.equal(sendsTo(world, steers.A.id).length, 0);
+  // A move still pending past 10 minutes is assumed stuck: the wake goes out.
+  const late = await turnedOut(
+    world,
+    worker,
+    { assistant: checkpointOf("t", "done") },
+    { zerosub: pending(), nowMs: NOW + 11 * MIN, nowIso: at(NOW + 11 * MIN) },
+  );
+  assert.equal(late.action, "sent");
+  assert.equal(sendsTo(world, steers.A.id).length, 1);
+});
+
+test("continued switch row suppresses the factory follow-up but records the transition", async () => {
+  const world = makeWorld();
+  const { ws } = provisioned(world);
+  const worker = addWorker(world, ws);
+  world.workspaces[0].metadata[WORKERS_KEY] = { [worker.id]: entry("running", "t") };
+  setTimeline(world, worker.id, [
+    ...turnEntries("t1", "do it", "hit the limit, no block"),
+    zsSwitchEntry({ ...zsSwitchData({ outcome: "continued", continued: true, continuedIn: { agentId: "agent-99", title: "cont." } }) }),
+  ]);
+  const result = await supervise.runWorkerTurnAfter(
+    fakeClient(world),
+    { agent: { id: worker.id, background: false }, turnId: "t1", outcome: { kind: "failed" } },
+    depsOf(),
+  );
+  assert.equal(result.action, "skipped");
+  assert.equal(result.reason, "zerosub-continued");
+  assert.equal(world.workspaces[0].metadata[WORKERS_KEY][worker.id].state, "interrupted");
+  assert.ok(!world.workspaces[0].metadata[WORKERS_KEY][worker.id].pendingWake, "nothing queued");
+  assert.equal(world.calls.filter((c) => c[0] === "agent.send").length, 0);
+});
+
+test("continuedIn on a stayed row follows the continuation instead of failing over", async () => {
+  const world = makeWorld();
+  const { ws } = provisioned(world);
+  const worker = addWorker(world, ws);
+  world.workspaces[0].metadata[WORKERS_KEY] = { [worker.id]: entry("running", "t") };
+  setTimeline(world, worker.id, [
+    ...turnEntries("t1", "do it", "hit the limit, no block"),
+    zsSwitchEntry(zsSwitchData({
+      reason: "exhausted", outcome: "stayed", resetsAt: RESET_AT, continued: false,
+      continuedIn: { agentId: "agent-99", title: "cont." },
+    })),
+  ]);
+  const result = await supervise.runWorkerTurnAfter(
+    fakeClient(world),
+    { agent: { id: worker.id, background: false }, turnId: "t1", outcome: { kind: "failed" } },
+    depsOf(),
+  );
+  assert.equal(result.action, "skipped");
+  assert.equal(result.reason, "zerosub-continued");
+  assert.equal(world.calls.filter((c) => c[0] === "agent.send").length, 0);
+});
+
+test("all accounts exhausted holds the wake until the earliest reset", async () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  const worker = addWorker(world, ws);
+  world.workspaces[0].metadata[WORKERS_KEY] = { [worker.id]: entry("running", "t") };
+  const exhausted = zsState({ accounts: [zsAccount("acc-a", 99), zsAccount("acc-b", 95)], routes: [] });
+  const queued = await turnedOut(world, worker, { assistant: checkpointOf("t", "done") }, { zerosub: exhausted });
+  assert.equal(queued.action, "queued");
+  assert.equal(queued.reason, "wait-reset");
+  assert.equal(sendsTo(world, steers.A.id).length, 0);
+  assert.ok(world.workspaces[0].metadata[WORKERS_KEY][worker.id].pendingWake, "news held, not dropped");
+  // After the reset, with room again, the flush delivers the held wake.
+  const roomy = normalizeZerosubState(
+    { accounts: [zsAccount("acc-a", 20)], agents: [] },
+    { now: NOW + 4 * 3_600_000 },
+  );
+  const flushed = await supervise.flushScope(
+    fakeClient(world),
+    { id: REPO, workspaceId: ws.id },
+    depsOf({ zerosub: roomy, nowMs: NOW + 4 * 3_600_000, nowIso: at(NOW + 4 * 3_600_000) }),
+  );
+  assert.equal(flushed.flushed, true);
+  assert.equal(sendsTo(world, steers.A.id).length, 1);
+});
+
+test("wake text carries the ZeroSub quota line and fork warnings", async () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  const config = {
+    profiles: { sonnet: { provider: "claude", model: "s" } },
+    steers: { slots: { A: "sonnet", B: "sonnet", C: "sonnet" } },
+    quota: { warnPct: 75, exhaustedPct: 90 },
+  };
+  const worker = addWorker(world, ws);
+  world.workspaces[0].metadata[WORKERS_KEY] = { [worker.id]: entry("running", "t") };
+  const zerosub = zsState({
+    accounts: [zsAccount("acc-old", 99), zsAccount("acc-new", 20)],
+    routes: [zsRoute(worker.id, "acc-old")],
+  });
+  setTimeline(world, worker.id, [
+    ...turnEntries("t1", "do it", checkpointOf("t", "done")),
+    zsSwitchEntry(zsSwitchData({ outcome: "switched", toFamily: "codex" })),
+  ]);
+  const result = await supervise.runWorkerTurnAfter(
+    fakeClient(world),
+    { agent: { id: worker.id, background: false }, turnId: "t1", outcome: { kind: "completed" } },
+    depsOf({ zerosub, getConfig: async () => config }),
+  );
+  assert.equal(result.action, "sent");
+  const texts = sendsTo(world, steers.A.id);
+  assert.equal(texts.length, 1);
+  assert.match(texts[0], /Quota: claude 99% \(5h\) — prefer acc-new/);
+  assert.match(texts[0], /fork to other provider/);
+});
+
+test("failover waits on the holder's pending move, then proceeds past the timeout", async () => {
+  const { world, ws, steers } = unansweredWorld();
+  const scope = { id: REPO, workspaceId: ws.id };
+  const pending = () => zsState({
+    accounts: [zsAccount("acc-old", 99), zsAccount("acc-new", 20)],
+    routes: [
+      zsRoute(steers.A.id, "acc-old", "acc-new"),
+      zsRoute(steers.B.id, "acc-new"),
+      zsRoute(steers.C.id, "acc-new"),
+    ],
+  });
+  const waited = await supervise.runFailoverCheck(fakeClient(world), scope, depsOf({ zerosub: pending() }));
+  assert.equal(waited.action, "wait");
+  assert.equal(waited.reason, "wait-zerosub");
+  assert.equal(world.calls.filter((c) => c[0] === "agent.send").length, 0);
+  const later = await supervise.runFailoverCheck(
+    fakeClient(world),
+    scope,
+    depsOf({ zerosub: pending(), nowMs: NOW + 11 * MIN, nowIso: at(NOW + 11 * MIN) }),
+  );
+  assert.equal(later.action, "failover");
+  assert.equal(later.to.slot, "B");
+});
+
+test("failover stands down when ZeroSub continued the holder", async () => {
+  const { world, ws, steers } = unansweredWorld();
+  setTimeline(world, steers.A.id, [
+    zsSwitchEntry(zsSwitchData({ outcome: "continued", continued: true, continuedIn: { agentId: "agent-9", title: "x" } })),
+  ]);
+  const result = await supervise.runFailoverCheck(fakeClient(world), { id: REPO, workspaceId: ws.id }, depsOf());
+  assert.equal(result.action, "clear");
+  assert.equal(result.reason, "zerosub-continued");
+  assert.equal(world.calls.filter((c) => c[0] === "agent.send").length, 0);
+});
+
+test("failover with no candidates waits for the exhausted+stayed reset", async () => {
+  const { world, ws, steers } = unansweredWorld();
+  for (const id of [steers.B.id, steers.C.id]) {
+    world.agents.find((a) => a.id === id).archivedAt = at(NOW - MIN);
+  }
+  setTimeline(world, steers.A.id, [
+    zsSwitchEntry(zsSwitchData({ reason: "exhausted", outcome: "stayed", resetsAt: RESET_AT })),
+  ]);
+  const scope = { id: REPO, workspaceId: ws.id };
+  const waited = await supervise.runFailoverCheck(fakeClient(world), scope, depsOf());
+  assert.equal(waited.action, "wait");
+  assert.equal(waited.reason, "wait-reset");
+  assert.equal(waited.wakeAt, RESET_AT);
+  setTimeline(world, steers.A.id, []);
+  const legacy = await supervise.runFailoverCheck(fakeClient(world), scope, depsOf());
+  assert.equal(legacy.action, "none");
+  assert.equal(legacy.reason, "no-candidates");
+});
+
+test("failover skips steers on the exhausted failing account", async () => {
+  const { world, ws, steers } = unansweredWorld();
+  const zerosub = zsState({
+    accounts: [zsAccount("acc-full", 99), zsAccount("acc-roomy", 20)],
+    routes: [
+      zsRoute(steers.A.id, "acc-full"),
+      zsRoute(steers.B.id, "acc-full"),
+      zsRoute(steers.C.id, "acc-roomy"),
+    ],
+  });
+  const result = await supervise.runFailoverCheck(
+    fakeClient(world),
+    { id: REPO, workspaceId: ws.id },
+    depsOf({ zerosub }),
+  );
+  assert.equal(result.action, "failover");
+  assert.equal(result.to.slot, "C", "B shares the exhausted account with A");
+});
+
+test("proactive hint fires at warnPct with room elsewhere, else stays quiet", async () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  const paseoState = await readPaseoState(fakeClient(world));
+  const scope = { id: REPO, workspaceId: ws.id };
+  const wsf = world.workspaces[0].metadata[METADATA_KEY];
+  const config = {
+    profiles: { sonnet: { provider: "claude", model: "s" } },
+    steers: { slots: { A: "sonnet", B: "sonnet", C: "sonnet" } },
+    quota: { warnPct: 75, exhaustedPct: 90 },
+  };
+  const decide = (zerosub) => supervise.proactiveHintDecision({
+    paseoState, scope, wsf, agentState: {}, config,
+    agentId: steers.A.id, zerosub, nowMs: NOW, warnPct: 75, exhaustedPct: 90,
+  });
+  const routes = (pendingA = null) => [
+    zsRoute(steers.A.id, "acc-a", pendingA),
+    zsRoute(steers.B.id, "acc-b"),
+    zsRoute(steers.C.id, "acc-b"),
+  ];
+  const hint = decide(zsState({ accounts: [zsAccount("acc-a", 80), zsAccount("acc-b", 20)], routes: routes() }));
+  assert.equal(hint.decision, "hint");
+  assert.equal(hint.to.slot, "B");
+  assert.equal(hint.accountId, "acc-a");
+  assert.equal(hint.usedPct, 80);
+  assert.match(hint.text, /Account acc-a is at 80% of its window \(warn 75%\)/);
+  assert.match(hint.text, new RegExp(`switch ${REPO.replace(/[./-]/g, (c) => `\\${c}`)} --to B --apply`));
+  assert.equal(decide(null).decision, "skip");
+  assert.equal(decide(null).reason, "no-zerosub");
+  const calm = decide(zsState({ accounts: [zsAccount("acc-a", 74), zsAccount("acc-b", 20)], routes: routes() }));
+  assert.equal(calm.decision, "skip");
+  assert.equal(calm.reason, "below-warn");
+  const moving = decide(zsState({ accounts: [zsAccount("acc-a", 80), zsAccount("acc-b", 20)], routes: routes("acc-b") }));
+  assert.equal(moving.decision, "skip");
+  assert.equal(moving.reason, "zerosub-move-pending");
+  const full = decide(zsState({ accounts: [zsAccount("acc-a", 80), zsAccount("acc-b", 99)], routes: routes() }));
+  assert.equal(full.decision, "skip");
+  assert.equal(full.reason, "no-candidate-with-room");
+});
+
+test("boot finished queues post-boot wakes while all accounts are exhausted", async () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  const worker = addWorker(world, ws);
+  world.workspaces[0].metadata[WORKERS_KEY] = { [worker.id]: entry("running", "t") };
+  const exhausted = zsState({ accounts: [zsAccount("acc-a", 99), zsAccount("acc-b", 95)], routes: [] });
+  const result = await supervise.runBootFinished(
+    fakeClient(world),
+    [{ agentId: worker.id, scopeId: REPO }],
+    depsOf({ zerosub: exhausted }),
+  );
+  assert.deepEqual(result.marked, [worker.id]);
+  assert.equal(result.wakes.length, 1);
+  assert.equal(result.wakes[0].sent, false);
+  assert.equal(result.wakes[0].reason, "wait-reset");
+  assert.equal(sendsTo(world, steers.A.id).length, 0);
+  assert.ok(world.workspaces[0].metadata[WORKERS_KEY][worker.id].pendingWake, "interrupted news queued");
 });

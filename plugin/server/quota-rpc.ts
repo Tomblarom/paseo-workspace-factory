@@ -5,8 +5,9 @@ import type { RpcInput } from "@getpaseo/plugin";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import type { factoryQuota } from "../shared/factory.js";
 import type { ConfigLoader } from "./config.js";
-import { QUOTA_DEFAULTS, profilePool, quotaPct } from "./factory/quota.js";
+import { QUOTA_DEFAULTS, accountExhausted, earliestResetOf, profilePool, quotaPct } from "./factory/quota.js";
 import { getQuotaSampledAt, getQuotaSnapshot } from "./quota.js";
+import { resolveZerosub, type ZerosubSource } from "./zerosub-runtime.js";
 
 export type QuotaState = "ok" | "warn" | "exhausted";
 
@@ -19,6 +20,14 @@ export type QuotaPoolView = {
   sampledAt: string | null;
 };
 
+export type ZeroSubAccountView = {
+  account: string;
+  family: string;
+  usedPct: number | null;
+  resetsAt: string | null;
+  state: QuotaState;
+};
+
 export type QuotaView = {
   sampledAt: string | null;
   warnPct: number;
@@ -26,6 +35,8 @@ export type QuotaView = {
   pools: QuotaPoolView[];
   steers: { slot: string; profile: string; pool: string; advisor: boolean }[];
   workers: { position: number; profile: string; pool: string }[];
+  /** ZeroSub accounts with the same warn/exhausted states; empty without ZeroSub. */
+  accounts: ZeroSubAccountView[];
 };
 
 function finiteNumber(value: unknown): number | null {
@@ -75,10 +86,28 @@ export function shapeQuotaView(args: {
   sampledAt: string | null;
   config: any;
   nowMs?: number;
+  zerosub?: { accounts?: any[] } | null;
 }): QuotaView {
   const nowMs = typeof args.nowMs === "number" ? args.nowMs : Date.now();
   const warnPct = finiteNumber(args.config?.quota?.warnPct) ?? QUOTA_DEFAULTS.warnPct;
   const exhaustedPct = finiteNumber(args.config?.quota?.exhaustedPct) ?? QUOTA_DEFAULTS.exhaustedPct;
+  const accounts: ZeroSubAccountView[] = (Array.isArray(args.zerosub?.accounts) ? args.zerosub.accounts : [])
+    .filter((account): account is Record<string, any> => !!account && typeof account.id === "string" && !!account.id)
+    .sort((a, b) => a.id.localeCompare(b.id))
+    .map((account) => {
+      const usedPct = finiteNumber(account.maxUsedPct);
+      return {
+        account: account.id,
+        family: typeof account.family === "string" ? account.family : "",
+        usedPct,
+        resetsAt: earliestResetOf([account], { now: nowMs }),
+        state: accountExhausted(account, { exhaustedPct, now: nowMs })
+          ? "exhausted"
+          : (usedPct ?? -1) >= warnPct
+            ? "warn"
+            : "ok",
+      };
+    });
   const pools: QuotaPoolView[] = Object.entries(snapshotEntries(args.snapshot))
     .filter((entry): entry is [string, any] => typeof entry[0] === "string" && !!entry[0])
     .sort(([a], [b]) => a.localeCompare(b))
@@ -118,13 +147,14 @@ export function shapeQuotaView(args: {
       profile,
       pool: profilePool(profiles[profile]) ?? "",
     }));
-  return { sampledAt: args.sampledAt, warnPct, exhaustedPct, pools, steers, workers };
+  return { sampledAt: args.sampledAt, warnPct, exhaustedPct, pools, steers, workers, accounts };
 }
 
 export async function getQuota(
   _input: RpcInput<typeof factoryQuota>,
   _ctx: PluginHandlerContext,
   loader: ConfigLoader,
+  opts: ZerosubSource = {},
 ): Promise<QuotaView> {
   const config = await loader.loadEffectiveConfig();
   const at = getQuotaSampledAt();
@@ -132,5 +162,6 @@ export async function getQuota(
     snapshot: getQuotaSnapshot(),
     sampledAt: at === null ? null : new Date(at).toISOString(),
     config,
+    zerosub: await resolveZerosub(opts),
   });
 }
