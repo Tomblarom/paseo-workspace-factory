@@ -513,14 +513,46 @@ export function createExecutors({ client, gh, git, paseoCli, sleep = (ms) => new
     },
 
     async 'paseo.agent.create'(op) {
-      const { workspaceId, title, config: agentConfig, labels, idempotencyKey, metadata } = op.params;
+      const { workspaceId, title, config: agentConfig, labels, idempotencyKey, metadata, clearInheritedParent: clearParent = false } = op.params;
       if (!workspaceId || workspaceId === WORKSPACE_REF || typeof workspaceId !== 'string') throw new Error('Main workspace is not resolved yet');
       // Deliberately no `parent` and no `prompt`: a top-level steer without a first turn.
       // Optional `metadata` pins the agent (e.g. {"zerosub.account": id}, Paseo 0.16+).
+      // `clearInheritedParent` (fresh only) detaches a link inherited from the
+      // calling agent; plan/apply keeps failing closed with PARENT VIOLATION.
       const handle = await client.workspaces.ref(workspaceId).agents.create({ config: agentConfig, title, labels, idempotencyKey, ...(metadata ? { metadata } : {}) });
-      const agent = (await handle.refresh())?.agent;
+      let agent = (await handle.refresh())?.agent;
+      if (clearParent) agent = await detachInheritedParent(paseoCli, handle, agent);
       verifySteer(agent, { workspaceId, labels });
       return { agentId: agent.id, parent: null };
+    },
+
+    async 'paseo.agent.createWorker'(op) {
+      const { workspaceId, title, config: agentConfig, labels, parent = null, idempotencyKey, metadata, clearInheritedParent: clearParent = false } = op.params;
+      if (!workspaceId || typeof workspaceId !== 'string') throw new Error('Worker workspace is not resolved yet');
+      if (parent !== null && (typeof parent !== 'string' || !parent)) throw new Error('Worker parent must be an agent id or null');
+      // A fresh worker starts without a first turn; the brief is delivered
+      // afterwards like the steer handoff. The parent is the owning steer
+      // taken from the refreshed worker — never the calling agent. A parent
+      // expected to be absent is detached when the fresh flag allows it.
+      const handle = await client.workspaces.ref(workspaceId).agents.create({
+        title, labels, config: agentConfig, idempotencyKey,
+        ...(parent ? { parent } : {}),
+        ...(metadata ? { metadata } : {}),
+      });
+      let agent = (await handle.refresh())?.agent;
+      if (!parent && clearParent) agent = await detachInheritedParent(paseoCli, handle, agent);
+      if (!agent) throw new Error('Agent snapshot missing after write');
+      if (agent.archivedAt) throw new Error(`Agent ${agent.id} is archived (an old idempotency receipt?)`);
+      if (agent.workspaceId !== workspaceId) throw new Error(`Agent ${agent.id} landed in ${agent.workspaceId}, expected ${workspaceId}`);
+      if ((parentOf(agent) ?? null) !== parent) {
+        throw new Error(parent
+          ? `Agent ${agent.id} parent is ${parentOf(agent)}, expected ${parent}`
+          : `PARENT VIOLATION: agent ${agent.id} has parent ${parentOf(agent)}; not continuing`);
+      }
+      for (const [key, value] of Object.entries(labels)) {
+        if (agent.labels?.[key] !== value) throw new Error(`Agent ${agent.id} label ${key} is ${agent.labels?.[key]}, expected ${value}`);
+      }
+      return { agentId: agent.id, parent };
     },
 
     async 'paseo.agent.adopt'(op) {
@@ -776,6 +808,21 @@ async function listArchivedProjectAgents(client, projectKey) {
 async function listProjectWorkspaces(client, projectId) {
   const entries = await collectListPages((cursor) => client.workspaces.list({ includeBackground: true, filter: { includeBackground: true, projectId }, page: { limit: 200, ...(cursor ? { cursor } : {}) } }));
   return entries.filter((w) => w.projectId === projectId);
+}
+
+/**
+ * Clears a parent link the daemon inherited from the calling agent context:
+ * steer creates never pass `parent`, so any parent on the fresh snapshot is
+ * unintended. Detaches once through the CLI (which runs without
+ * PASEO_AGENT_ID, so no parent can be inherited again) and re-reads.
+ * Without a CLI the agent is returned unchanged and the caller verifies
+ * (verifySteer refuses a remaining parent).
+ */
+async function detachInheritedParent(paseoCli, handle, agent) {
+  if (!agent || !parentOf(agent)) return agent;
+  if (typeof paseoCli !== 'function') return agent;
+  paseoCli(['agent', 'detach', agent.id]);
+  return (await handle.refresh())?.agent ?? agent;
 }
 
 export function verifySteer(agent, { workspaceId, labels }) {

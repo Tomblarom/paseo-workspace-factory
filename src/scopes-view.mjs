@@ -6,7 +6,7 @@ import { LABEL, METADATA_KEY, parentOf, restartMessage } from './paseo.mjs';
 import { AGENTS_KEY } from './agent-state.mjs';
 import { CHECKPOINT_KEY, agentUsage, isHeuristicRestart, restartInterruptions } from './steer.mjs';
 import { isAdvisorSlot, isSensitiveSlot } from './config.mjs';
-import { applyContinuations, isWorktreeWorkspace } from './discovery.mjs';
+import { applyContinuations, isWorktreeWorkspace, markSupersededSlotHolders } from './discovery.mjs';
 
 /** One row per live scope: id, kind, active steer, epoch, checkpoint, usage, hints. */
 export function scopeRows(paseoState, { now = () => Date.now(), daemonStartedAt = null, lastTurnCheckpoints = null, config = null, zerosubSwitches = [] } = {}) {
@@ -29,9 +29,16 @@ export function scopeRows(paseoState, { now = () => Date.now(), daemonStartedAt 
     // Slot holders follow the live continuation tab: origins in this workspace
     // are replaced by their live tab (which inherits role/slot), so the active
     // holder is the live tab and the origin never appears as a second holder.
+    // Same-slot newer-wins applies on top: superseded older holders are
+    // listed separately and never selected as the active holder.
     const labelledFound = agents.filter((a) => a.workspaceId === scope.workspaceId && a.labels?.[LABEL.role] === 'steer');
-    const live = applyContinuations(labelledFound, agents, zerosubSwitches).filter((a) => a && !a.archivedAt);
-    const active = live.find((a) => a.labels?.[LABEL.slot] === state?.activeSteer) ?? null;
+    const live = markSupersededSlotHolders(applyContinuations(labelledFound, agents, zerosubSwitches)).filter((a) => a && !a.archivedAt);
+    const candidates = live.filter((a) => a.labels?.[LABEL.slot] === state?.activeSteer);
+    const active = candidates.find((a) => a.superseded !== true) ?? candidates[0] ?? null;
+    const superseded = live
+      .filter((a) => a.superseded === true && typeof a.labels?.[LABEL.slot] === 'string')
+      .map((a) => ({ slot: a.labels[LABEL.slot], id: a.id }))
+      .sort((a, b) => a.slot.localeCompare(b.slot) || a.id.localeCompare(b.id));
     const updatedAt = checkpoint?.updatedAt ?? null;
     const updatedMs = updatedAt ? Date.parse(updatedAt) : NaN;
     const ageMs = Number.isFinite(updatedMs) ? Math.max(0, now() - updatedMs) : null;
@@ -105,6 +112,7 @@ export function scopeRows(paseoState, { now = () => Date.now(), daemonStartedAt 
         : null,
       usage: agentUsage(active),
       ...(restartInterrupted.length ? { restartInterrupted } : {}),
+      ...(superseded.length ? { superseded } : {}),
       ...(inbox.length ? { inbox } : {}),
       ...(legacyAlias ? { legacyAlias } : {}),
       ...(hints.length ? { hints } : {}),
@@ -170,6 +178,7 @@ export function formatScopeRows(rows) {
     ];
     for (const w of row.warnings ?? []) parts.push(`! ${w}`);
     if (row.checkpoint?.domainEscalations?.length) parts.push(`domain: ${row.checkpoint.domainEscalations.join('; ')}`);
+    if ((row.superseded ?? []).length) parts.push(`superseded ${(row.superseded ?? []).map((s) => `${s.slot}:${s.id}`).join(', ')} (newest wins; archive them in Paseo)`);
     if (row.inbox?.length) parts.push(`inbox: ${row.inbox.join('; ')}`);
     parts.push(`ctx ${formatUsage(row.usage)}`);
     if (row.domain) parts.push(`domain ${row.domain}`);
@@ -261,7 +270,7 @@ export function formatStatus(status, warnContextTokens) {
   for (const w of status.warnings ?? []) lines.push(`  ! ${w}`);
   for (const s of status.steers) {
     const tags = `${s.advisor ? ' [advisor]' : ''}${s.sensitive ? ' [sensitive]' : ''}`;
-    lines.push(`  Steer ${s.slot}${tags}  ${s.id}  ${s.provider}/${s.model}  ${s.status}  ${formatStatusUsage(s.usage)}${s.continuedFrom ? `  continued-from ${s.continuedFrom}` : ''}${s.retired ? '  RETIRED — archive it in Paseo' : ''}${s.parent ? `  PARENT ${s.parent}` : ''}`);
+    lines.push(`  Steer ${s.slot}${tags}  ${s.id}  ${s.provider}/${s.model}  ${s.status}  ${formatStatusUsage(s.usage)}${s.continuedFrom ? `  continued-from ${s.continuedFrom}` : ''}${s.retired ? '  RETIRED — archive it in Paseo' : ''}${s.superseded && !s.retired ? '  SUPERSEDED — archive it in Paseo' : ''}${s.parent ? `  PARENT ${s.parent}` : ''}`);
   }
   for (const c of status.candidates ?? []) lines.push(`  candidate "${c.title}" ${c.id} ${c.provider}/${c.model} ${c.status}  ${formatStatusUsage(c.usage)} → adopt with --adopt ${c.slot ?? '<slot>'}=${c.id}${c.parent ? ` (has parent ${c.parent}; needs --detach)` : ''}`);
   const supervised = new Map((status.openWorkers ?? []).map((e) => [e.id, e]));

@@ -59,6 +59,39 @@ export function steerFallbackList(config, slot) {
   return names;
 }
 
+/**
+ * Slot-profile suggestion for a live steer running provider/model: the
+ * profile to point the slot at so the config matches reality. Matches on
+ * provider/model only (thinking/mode/tags are ignored). Returns
+ * `{ kind: 'existing', profile }` for exactly one match,
+ * `{ kind: 'ambiguous', profiles }` when several profiles share the pair
+ * (preview-only: the caller lists the options instead of picking one), and
+ * `{ kind: 'none' }` when no profile matches (the caller suggests
+ * `steer set <slot> <provider/model>` to create or update one).
+ */
+export function suggestSlotProfile(config, provider, model) {
+  const matches = Object.keys(config?.profiles ?? {}).filter((name) => {
+    const entry = config.profiles[name];
+    return entry?.provider === provider && entry?.model === model;
+  });
+  if (matches.length === 1) return { kind: 'existing', profile: matches[0] };
+  if (matches.length > 1) return { kind: 'ambiguous', profiles: matches };
+  return { kind: 'none' };
+}
+
+/**
+ * Renders a suggestSlotProfile outcome as the `steer set` command (or the
+ * ambiguous option list) that aligns the slot profile with the live steer.
+ * Pure text; the caller decides whether to apply it or show it as a
+ * preview-only suggestion.
+ */
+export function formatSlotProfileSuggestion(config, slot, provider, model, { factoryCmd = 'paseo-factory' } = {}) {
+  const suggestion = suggestSlotProfile(config, provider, model);
+  if (suggestion.kind === 'existing') return `${factoryCmd} steer set ${slot} "${suggestion.profile}"`;
+  if (suggestion.kind === 'ambiguous') return `one of ${suggestion.profiles.map((name) => `"${name}"`).join(', ')} via ${factoryCmd} steer set ${slot} <profile>`;
+  return `${factoryCmd} steer set ${slot} ${provider}/${model}`;
+}
+
 /** First free steer slot letter (A-Z) in priority order, or null when all 26 are used. */
 export function nextFreeSlot(config) {
   const slots = config?.steers?.slots ?? {};

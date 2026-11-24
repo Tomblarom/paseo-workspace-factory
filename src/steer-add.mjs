@@ -21,6 +21,7 @@ import { suggestAccountPin } from './zerosub.mjs';
  */
 export function liveSteerForSlot(liveSteers, slot, scopeId) {
   const want = typeof scopeId === 'string' ? scopeId.toLowerCase() : null;
+  let fallback = null;
   for (const agent of liveSteers ?? []) {
     if (!agent || agent.archivedAt) continue;
     if (agent.labels?.[LABEL.role] !== 'steer') continue;
@@ -33,9 +34,15 @@ export function liveSteerForSlot(liveSteers, slot, scopeId) {
       if (!scopeMatch && !repoMatch) continue;
     }
     if (typeof agent.id !== 'string' || !agent.id) continue;
+    // Same-slot newer-wins: a superseded older holder never shadows the
+    // live one; it only counts when nothing else matches.
+    if (agent.superseded === true) {
+      fallback ??= agent;
+      continue;
+    }
     return agent;
   }
-  return null;
+  return fallback;
 }
 
 /**

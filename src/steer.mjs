@@ -14,7 +14,7 @@ import { LABEL, METADATA_KEY, parentOf, agentUsage, isRestartReason, restartMess
 import { withLock, workspaceLockName } from './lock.mjs';
 import { runtime } from './runtime.mjs';
 import { isAdvisorSlot, isSensitiveSlot } from './config.mjs';
-import { resolveProfile, steerFallbackList, usedProfilesByLiveSteers } from './models.mjs';
+import { formatSlotProfileSuggestion, resolveProfile, steerFallbackList, usedProfilesByLiveSteers } from './models.mjs';
 import { idempotencyKey, requestDigest } from './planner.mjs';
 import { createExecutors } from './apply.mjs';
 import { resolveScope, scopeToEntry, sameScopeId, domainOfScope } from './scope.mjs';
@@ -113,7 +113,7 @@ export function steerStatus(discovery, { warnContextTokens, daemonStartedAt = nu
   };
   const steers = discovery.steers.labelled
     .filter((a) => !a.archivedAt)
-    .map((a) => ({ slot: a.labels[LABEL.slot], id: a.id, title: a.title, provider: a.provider, model: a.model, status: a.status, parent: parentOf(a), workspaceId: a.workspaceId, usage: agentUsage(a), retired: retiredId !== null && a.id === retiredId, ...(a.continuedFrom ? { continuedFrom: a.continuedFrom } : {}), ...(config ? { advisor: isAdvisorSlot(config, a.labels[LABEL.slot]), sensitive: isSensitiveSlot(config, a.labels[LABEL.slot]) } : {}), ...withInterruption(a.id) }))
+    .map((a) => ({ slot: a.labels[LABEL.slot], id: a.id, title: a.title, provider: a.provider, model: a.model, status: a.status, parent: parentOf(a), workspaceId: a.workspaceId, usage: agentUsage(a), retired: retiredId !== null && a.id === retiredId, superseded: a.superseded === true, ...(a.continuedFrom ? { continuedFrom: a.continuedFrom } : {}), ...(config ? { advisor: isAdvisorSlot(config, a.labels[LABEL.slot]), sensitive: isSensitiveSlot(config, a.labels[LABEL.slot]) } : {}), ...withInterruption(a.id) }))
     .sort((a, b) => a.slot.localeCompare(b.slot));
   const steerById = new Map(steers.map((s) => [s.id, s]));
   // Unlabelled steer candidates by id (lettered and digit-titled): a worker
@@ -239,6 +239,14 @@ const TEXT = {
     workers: 'Worker (per Agent-ID weiterverwenden, nicht neu anlegen):', noWorkers: 'Worker: keine.', parent: 'Parent Steer',
     hint: (slot) => `Unverifizierter Hinweis – letzte Antwort von Steer ${slot}, gekürzt, keine Auftragsquelle:`,
     notice: (to, e) => `Hinweis: Steer ${to.slot} (${to.id}) ist ab Epoch ${e} aktiv. Du koordinierst nicht mehr; nur auf ausdrückliche Anfrage antworten.`,
+    refreshHead: (repo, slot, epoch, active) => `Steer-Auffrischung für ${repo}: Steer ${slot} bekommt einen neuen Agenten in Epoch ${epoch} (keine Übernahme; aktiv bleibt Steer ${active}).`,
+    workerHead: (repo, title, from, to, owner) => `Worker-Auffrischung für ${repo}: „${title}“ ${from} → ${to} (Owner Steer ${owner}, Epoch unverändert).`,
+    refreshRole: (slot) => `Du bist Steer ${slot} dieses Scopes (nicht aktiv: nur antworten, nicht koordinieren).`,
+    workerRole: (title, owner) => `Du bist Worker „${title}“; dein Owner ist Steer ${owner} — mache mit dem Checkpoint unten weiter.`,
+    refreshNote: (id, at) => `Notiz von ${id}${at ? ` (${at})` : ''}:`,
+    noNote: 'Agentennotiz: keine dokumentiert; der Checkpoint unten ist die einzige Quelle.',
+    workerHint: () => 'Unverifizierter Hinweis – letzte Antwort des vorherigen Workers, gekürzt, keine Auftragsquelle:',
+    refreshNotice: (to, what) => `Hinweis: Ein neuer Agent (${to.id}) führt ${what} fort; dieser Tab ist ausgedient — archiviere ihn in Paseo, sobald der neue läuft. Antworte nur auf ausdrückliche Anfrage.`,
   },
   en: {
     head: (repo, e) => `Steer handoff for ${repo}: epoch ${e} → ${e + 1}.`,
@@ -252,6 +260,14 @@ const TEXT = {
     workers: 'Workers (reuse by agent id, do not recreate):', noWorkers: 'Workers: none.', parent: 'parent Steer',
     hint: (slot) => `Unverified hint – last answer of Steer ${slot}, shortened, not a task source:`,
     notice: (to, e) => `Note: Steer ${to.slot} (${to.id}) is active as of epoch ${e}. You no longer coordinate; reply only when asked explicitly.`,
+    refreshHead: (repo, slot, epoch, active) => `Steer refresh for ${repo}: Steer ${slot} gets a new agent at epoch ${epoch} (no takeover; active stays Steer ${active}).`,
+    workerHead: (repo, title, from, to, owner) => `Worker refresh for ${repo}: "${title}" ${from} → ${to} (owner Steer ${owner}, epoch unchanged).`,
+    refreshRole: (slot) => `You are Steer ${slot} of this scope (not active: answer only, do not coordinate).`,
+    workerRole: (title, owner) => `You are worker "${title}"; your owner is Steer ${owner} — continue from the checkpoint below.`,
+    refreshNote: (id, at) => `Note of ${id}${at ? ` (${at})` : ''}:`,
+    noNote: 'Agent note: none recorded; the checkpoint below is the only source.',
+    workerHint: () => 'Unverified hint – last answer of the previous worker, shortened, not a task source:',
+    refreshNotice: (to, what) => `Note: a fresh agent (${to.id}) continues ${what}; this tab is retired — archive it in Paseo once the new one runs. Reply only when asked explicitly.`,
   },
 };
 
@@ -327,6 +343,119 @@ export function buildHandoff(status, { from, to, epoch, git, lastMessage, maxLas
 
 export function previousSteerNotice(to, epoch, language = 'en') {
   return (TEXT[language] ?? TEXT.en).notice(to, epoch);
+}
+
+export function refreshSteerNotice(to, slot, language = 'en') {
+  const t = TEXT[language] ?? TEXT.en;
+  return t.refreshNotice(to, language === 'de' ? `Steer ${slot}` : `Steer ${slot}`);
+}
+
+export function refreshWorkerNotice(to, language = 'en') {
+  const t = TEXT[language] ?? TEXT.en;
+  return t.refreshNotice(to, language === 'de' ? 'diesen Worker' : 'this worker');
+}
+
+/**
+ * Refresh packet for a non-active steer or a worker: same agent role in a
+ * new agent, no takeover and no epoch change. The brief comes from the
+ * agent's own `wsf.agents` note (or the checkpoint when no note was
+ * recorded); workers are intentionally not listed (see `resume`).
+ * Deterministic like buildHandoff; no model call is made to build it.
+ */
+export function buildRefreshPacket(status, { kind, slot = null, owner = null, title = null, from, to, epoch, git, note = null, noteAt = null, lastMessage = null, maxLastChars = 800, language = 'en', workerModel = null }) {
+  const t = TEXT[language] ?? TEXT.en;
+  const active = status.state?.activeSteer ?? '?';
+  const lines = [
+    kind === 'worker'
+      ? t.workerHead(status.repo, title ?? from.title ?? 'Worker', from.id, to.id, owner ?? '?')
+      : t.refreshHead(status.repo, slot, epoch, active),
+    kind === 'worker'
+      ? t.workerRole(title ?? from.title ?? 'Worker', owner ?? '?')
+      : t.refreshRole(slot),
+    `Workspace ${status.workspace.id} · ${status.workspace.directory}`,
+    git ? t.git(git) : t.noGit,
+  ];
+  if (workerModel) lines.push(workerModel);
+  if (typeof note === 'string' && note.trim()) {
+    lines.push(t.refreshNote(from.id, noteAt));
+    lines.push(clip(note, 1500));
+  } else {
+    lines.push(t.noNote);
+  }
+  const cp = status.checkpoint;
+  if (!cp?.task) {
+    lines.push(t.noCheckpoint);
+  } else {
+    lines.push(t.checkpoint(cp, cp.epoch !== epoch));
+    lines.push(`- ${t.task}: ${cp.task}`);
+    lines.push(`- ${t.tests}: ${cp.tests?.length ? cp.tests.join('; ') : t.none}`);
+    lines.push(`- ${t.blockers}: ${cp.blockers?.length ? cp.blockers.join('; ') : t.none}`);
+    lines.push(`- ${t.next}: ${cp.next ? cp.next : t.noNext}`);
+    if (cp.source === 'failover' && cp.failover) lines.push(`- Failover: takeover from ${cp.failover.previousSteer ?? '?'} (${cp.failover.reason ?? 'no reason recorded'})`);
+    lines.push(formatCheckpointBlock(cp));
+  }
+  if (lastMessage) lines.push(kind === 'worker' ? t.workerHint() : t.hint(slot), clip(lastMessage, maxLastChars));
+  return lines.join('\n');
+}
+
+/** Shared receipt lookup for every fresh path: missing lookup or failed exchange refuses, never recreates blindly. */
+async function lookupFreshReceipt(lookupReceipt, key) {
+  if (typeof lookupReceipt !== 'function') throw new SwitchRefused('Fresh needs a receipt lookup; refusing to create without a receipt');
+  try {
+    return await lookupReceipt('agent', key);
+  } catch (error) {
+    throw new SwitchRefused(`Fresh receipt lookup failed (${error.message}); refusing to create without a receipt`);
+  }
+}
+
+/**
+ * Shared receipt validation for every fresh path: a completed receipt
+ * re-sends the identical request (the daemon returns the existing agent and
+ * creates nothing); anything else stops, as in apply.mjs.
+ */
+function checkedFreshReceipt(receipt, key) {
+  if (receipt.idempotencyKey && receipt.idempotencyKey !== key) throw new SwitchRefused('Fresh recovery stopped: the receipt belongs to a different key');
+  if (receipt.outcomeUnknown) throw new SwitchRefused(`Fresh recovery stopped: the receipt has an unknown outcome (${receipt.error ?? 'outcome unknown'})`);
+  if (receipt.phase !== 'completed') throw new SwitchRefused(`Fresh recovery stopped: the receipt is in phase ${receipt.phase}${receipt.error ? ` (${receipt.error})` : ''}`);
+  if (!receipt.agentId) throw new SwitchRefused('Fresh recovery stopped: the receipt names no agent');
+  return receipt;
+}
+
+/** Re-sends the identical request for a completed receipt and returns its agent id; any deviation stops. */
+async function confirmFreshReceipt(run, op, config, receipt) {
+  let confirmed;
+  try {
+    confirmed = await run(op, config);
+  } catch (error) {
+    throw new SwitchRefused(`Fresh recovery stopped: the identical request was rejected (${error.message})`);
+  }
+  if (confirmed?.agentId !== receipt.agentId) throw new SwitchRefused(`Fresh recovery stopped: the identical request returned ${confirmed?.agentId}, receipt says ${receipt.agentId}`);
+  return confirmed.agentId;
+}
+
+/**
+ * Fresh parent guarantee, independent of the executor: a fresh steer must
+ * be parent-free, a fresh worker must carry exactly its previous parent
+ * (the owning steer) — never the calling agent. The real executor already
+ * verifies (and clears an inherited link); this refuses a parented agent
+ * from any custom executor too. Fails open when the snapshot is
+ * unreadable (the executor then owns verification).
+ */
+async function verifyFreshAgentParent(client, agentId, expectedParent) {
+  let snapshot = null;
+  try {
+    snapshot = (await client.agents.ref(agentId).refresh())?.agent ?? null;
+  } catch {
+    snapshot = null;
+  }
+  if (!snapshot) return;
+  const actual = parentOf(snapshot) ?? null;
+  const expected = expectedParent ?? null;
+  if (actual !== expected) {
+    throw new SwitchRefused(actual
+      ? `Fresh agent ${agentId} has parent ${actual}; refusing a parented fresh agent`
+      : `Fresh agent ${agentId} has no parent, expected ${expected}`);
+  }
 }
 
 /** Hard budget for the resume brief: ≤6000 chars (~1.5k tokens), enforced. */
@@ -626,16 +755,19 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
   if (!status.workspace || !status.state) throw new SwitchRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
   refuseIfRetired(status);
-  const from = status.steers.find((s) => s.slot === expected.activeSteer);
-  const to = status.steers.find((s) => s.slot === toSlot);
+  // Same-slot newer-wins: superseded holders (older, not yet archived)
+  // are ignored for selection; only several live holders refuse as
+  // ambiguous (missing or tied creation timestamps).
+  const liveHolders = (slot) => status.steers.filter((s) => s.slot === slot && !s.superseded);
+  const from = liveHolders(expected.activeSteer)[0] ?? null;
+  const to = liveHolders(toSlot)[0] ?? null;
   if (!to) throw new SwitchRefused(`Steer ${toSlot} does not exist for ${status.repo}`);
   if (toSlot === expected.activeSteer) throw new SwitchRefused(`Steer ${toSlot} is already active`);
   if (config && isAdvisorSlot(config, toSlot)) {
     throw new SwitchRefused(`Steer ${toSlot} is an advisor (profile ${config.steers.slots[toSlot]}); remove the advisor tag to make it a coordinator`);
   }
-  const ambiguous = (slot) => status.steers.filter((s) => s.slot === slot);
-  if (ambiguous(toSlot).length > 1) throw new SwitchRefused(`Steer ${toSlot} has several live agents (${ambiguous(toSlot).map((s) => s.id).join(', ')}); archive the retired one in Paseo, then rerun`);
-  if (from && ambiguous(from.slot).length > 1) throw new SwitchRefused(`Active Steer ${from.slot} has several live agents (${ambiguous(from.slot).map((s) => s.id).join(', ')}); archive the retired one in Paseo, then rerun`);
+  if (liveHolders(toSlot).length > 1) throw new SwitchRefused(`Steer ${toSlot} has several live agents (${liveHolders(toSlot).map((s) => s.id).join(', ')}); archive the retired one in Paseo, then rerun`);
+  if (from && liveHolders(from.slot).length > 1) throw new SwitchRefused(`Active Steer ${from.slot} has several live agents (${liveHolders(from.slot).map((s) => s.id).join(', ')}); archive the retired one in Paseo, then rerun`);
   if (to.parent) throw new SwitchRefused(`Steer ${toSlot} has parent ${to.parent}; refusing to make it coordinator`);
   if (to.workspaceId !== status.workspace.id) throw new SwitchRefused(`Steer ${toSlot} is not in the main workspace`);
   const selfTakeover = Boolean(callerId) && callerId === to.id; // the target requests its own takeover: it is the running caller
@@ -702,26 +834,49 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
 }
 
 /**
- * Hands the active steer to a NEW agent of the same slot and profile (empty
- * context). Preview without apply; apply, under the workspace lock: verify the
+ * Hands a steer to a NEW agent of the same slot and profile (empty
+ * context). Without `--slot`/`--worker` this is the active-steer takeover:
+ * preview without apply; apply, under the workspace lock: verify the
  * expected epoch and active steer, create the agent under a stable idempotency
  * key, write the new epoch, read back, release; both deliveries happen after the
  * lock. An interrupted apply (agent created, state not written) is recovered
  * through its receipt on the next apply, never recreated. The old steer is left
  * unchanged except for a short notice (one turn); it keeps its slot label, so
- * until it is archived in Paseo the slot has two live agents and switch/plan
- * refuse it as ambiguous. The packet preview names a placeholder id; the applied
- * packet carries the real one.
+ * until it is archived in Paseo the slot has two live agents — the older one
+ * is marked superseded (newest by creation wins) and selections ignore it.
+ * `--slot <S>` refreshes a non-active steer and `--worker <id>` a worker the
+ * same way but without any takeover: same slot/role, brief from the agent's
+ * own note or the checkpoint, no epoch change, no active-steer write. Every
+ * fresh agent is created without a parent link (a fresh worker keeps its
+ * previous parent, never the caller). The packet preview names a placeholder
+ * id; the applied packet carries the real one.
  */
-export async function freshSteer({ client, discovery, config, apply = false, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, now = () => new Date(), workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 90, zerosub = null, paseoCli = null }) {
+export async function freshSteer({ client, discovery, config, apply = false, slot: slotArg = null, workerId = null, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, now = () => new Date(), workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 90, zerosub = null, paseoCli = null }) {
   const status = steerStatus(discovery);
   if (!status.workspace || !status.state) throw new SwitchRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
   refuseIfRetired(status);
+  const wantSlot = slotArg !== null && slotArg !== undefined && String(slotArg).trim() !== '';
+  const wantWorker = workerId !== null && workerId !== undefined && String(workerId).trim() !== '';
+  if (wantSlot && wantWorker) throw new SwitchRefused('fresh takes either --slot or --worker, not both');
+  if (wantWorker) {
+    return freshWorkerAgent({ client, discovery, status, expected, workerId: String(workerId).trim(), config, apply, language, git, lookupReceipt, execute, workerModel });
+  }
+  const target = wantSlot ? String(slotArg).trim().toUpperCase() : expected.activeSteer;
+  if (!/^[A-Z]$/.test(target ?? '')) throw new SwitchRefused(`Not a steer slot: ${JSON.stringify(slotArg)}`);
+  if (target !== expected.activeSteer) {
+    return freshNonActiveSteer({ client, discovery, status, expected, slot: target, config, apply, language, git, lookupReceipt, execute, workerModel, quotaSnapshot, quotaExhaustedPct, zerosub });
+  }
   const slot = expected.activeSteer;
   const holders = status.steers.filter((s) => s.slot === slot);
   if (!holders.length) throw new SwitchRefused(`No live Steer ${slot} to refresh for ${status.repo}; plan and apply one first`);
-  const single = holders.length === 1 ? holders[0] : null;
+  // Same-slot newer-wins: one live holder plus superseded extras from a
+  // completed fresh (previousSteer) proceeds; unexplained extras keep the
+  // recovery-or-archive refusal below. Without creation timestamps every
+  // holder counts as live, exactly as before.
+  const live = holders.filter((h) => !h.superseded);
+  const unexplained = holders.filter((h) => h.superseded && h.id !== expected.previousSteer);
+  const single = holders.length === 1 ? holders[0] : (live.length === 1 && !unexplained.length ? live[0] : null);
   if (single && BUSY.has(single.status)) throw new SwitchRefused(`Active Steer ${slot} is ${single.status}; stop it or wait for its turn to end first`);
   const profileName = config?.steers?.slots?.[slot];
   if (!profileName || !config.profiles?.[profileName]) throw new SwitchRefused(`Steer slot ${slot} references unknown profile "${profileName}"`);
@@ -734,7 +889,21 @@ export async function freshSteer({ client, discovery, config, apply = false, lan
   if (!profile) throw new SwitchRefused(`Profile "${profileName}" for Steer ${slot} is not startable${skipped[0] ? `: ${skipped[0].reason}` : ''} (no fallback available)`);
   const warnings = [];
   if (advisorSlot) warnings.push(`Steer ${slot} is an advisor (profile "${profileName}"); advisors never coordinate`);
-  if (profile.name !== profileName) warnings.push(`Profile "${profileName}" is not startable (${skipped[0]?.reason ?? 'unknown reason'}); using fallback "${profile.name}"`);
+  // Slot-profile alignment: a fallback creation suggests pointing the slot
+  // at the created profile afterwards; a live holder running another model
+  // suggests aligning the slot first, else fresh recreates with the slot
+  // profile. Ambiguous matches stay a preview-only option list.
+  let profileSuggestion = null;
+  if (profile.name !== profileName) {
+    warnings.push(`Profile "${profileName}" is not startable (${skipped[0]?.reason ?? 'unknown reason'}); using fallback "${profile.name}"`);
+    profileSuggestion = `paseo-factory steer set ${slot} "${profile.name}"`;
+  }
+  const slotProfile = config.profiles?.[profileName] ?? null;
+  if (single && slotProfile && (single.provider !== slotProfile.provider || single.model !== slotProfile.model)) {
+    const cmd = formatSlotProfileSuggestion(config, slot, single.provider, single.model);
+    warnings.push(`Steer ${slot} runs ${single.provider}/${single.model} but slot profile "${profileName}" names ${slotProfile.provider}/${slotProfile.model}; the fresh agent uses "${profile.name}" — to keep the live model, point the slot at it first (${cmd})`);
+    profileSuggestion ??= cmd;
+  }
 
   // Same create request the planner builds for a slot (mirrored here; planner
   // internals are not exported), bound to the current epoch so a retry before the
@@ -746,14 +915,14 @@ export async function freshSteer({ client, discovery, config, apply = false, lan
     config: { provider: `${profile.provider}/${profile.model}`, ...(profile.mode ? { modeId: profile.mode } : {}), ...(profile.thinking ? { thinkingOptionId: profile.thinking } : {}) },
   };
   const key = idempotencyKey(status.repo, 'steer', slot, `fresh-e${expected.epoch}`, requestDigest(request));
-  const op = { key: `steer.${slot}.fresh`, kind: 'paseo.agent.create', summary: `Create fresh Steer ${slot} (${profile.provider}/${profile.model}) without prompt`, params: { ...request, idempotencyKey: key } };
+  const op = { key: `steer.${slot}.fresh`, kind: 'paseo.agent.create', summary: `Create fresh Steer ${slot} (${profile.provider}/${profile.model}) without prompt`, params: { ...request, clearInheritedParent: true, idempotencyKey: key } };
 
   const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory) : null;
   const result = {
-    repo: status.repo, slot, from: single?.id ?? null, to: null, epoch: expected.epoch + 1, profile: profile.name,
+    repo: status.repo, slot, kind: 'steer', from: single?.id ?? null, to: null, epoch: expected.epoch + 1, epochBumped: true, profile: profile.name,
     provider: profile.provider, model: profile.model, idempotencyKey: key, packet: '', packetChars: 0,
     checkpoint: Boolean(status.checkpoint?.task), applied: false, delivered: false, deliveryError: null, previousNotified: false, reused: false, renameError: null,
-    warnings, fallbackFrom: profile.name !== profileName ? profileName : null,
+    warnings, fallbackFrom: profile.name !== profileName ? profileName : null, profileSuggestion,
   };
   if (!apply) {
     if (!single) throw new SwitchRefused(`Steer ${slot} has several live agents (${holders.map((s) => s.id).join(', ')}); if a previous fresh apply was interrupted, rerun with --apply to recover it, otherwise archive the retired one in Paseo`);
@@ -761,7 +930,6 @@ export async function freshSteer({ client, discovery, config, apply = false, lan
     result.packetChars = result.packet.length;
     return result;
   }
-  if (typeof lookupReceipt !== 'function') throw new SwitchRefused('Fresh needs a receipt lookup; refusing to create without a receipt');
   const run = execute ?? createExecutors({ client });
 
   const workspace = client.workspaces.ref(status.workspace.id);
@@ -772,23 +940,13 @@ export async function freshSteer({ client, discovery, config, apply = false, lan
     if (!current || current.epoch !== expected.epoch || current.activeSteer !== expected.activeSteer) {
       throw new SwitchRefused(`Steer state changed (expected ${expected.activeSteer}@${expected.epoch}, found ${current?.activeSteer}@${current?.epoch}); rerun the fresh command`);
     }
-    let receipt;
-    try {
-      receipt = await lookupReceipt('agent', key);
-    } catch (error) {
-      throw new SwitchRefused(`Fresh receipt lookup failed (${error.message}); refusing to create without a receipt`);
-    }
+    const receipt = await lookupFreshReceipt(lookupReceipt, key);
     if (!receipt) {
       if (!from) throw new SwitchRefused(`Steer ${slot} has several live agents (${holders.map((s) => s.id).join(', ')}); archive the retired one in Paseo, then rerun`);
       freshId = (await run(op, config))?.agentId; // the executor verifies parent freedom, labels and workspace
       if (!freshId) throw new Error('Fresh agent creation returned no agent id');
     } else {
-      // A completed receipt re-sends the identical request (the daemon returns the
-      // existing agent and creates nothing); anything else stops, as in apply.mjs.
-      if (receipt.idempotencyKey && receipt.idempotencyKey !== key) throw new SwitchRefused('Fresh recovery stopped: the receipt belongs to a different key');
-      if (receipt.outcomeUnknown) throw new SwitchRefused(`Fresh recovery stopped: the receipt has an unknown outcome (${receipt.error ?? 'outcome unknown'})`);
-      if (receipt.phase !== 'completed') throw new SwitchRefused(`Fresh recovery stopped: the receipt is in phase ${receipt.phase}${receipt.error ? ` (${receipt.error})` : ''}`);
-      if (!receipt.agentId) throw new SwitchRefused('Fresh recovery stopped: the receipt names no agent');
+      checkedFreshReceipt(receipt, key);
       if (!from) {
         // Interrupted apply: the receipt names the in-flight agent, the other
         // holder is the old steer. Anything else stays ambiguous and stops.
@@ -799,17 +957,12 @@ export async function freshSteer({ client, discovery, config, apply = false, lan
         from = rest[0];
         if (BUSY.has(from.status)) throw new SwitchRefused(`Active Steer ${slot} is ${from.status}; stop it or wait for its turn to end first`);
       }
-      let confirmed;
-      try {
-        confirmed = await run(op, config);
-      } catch (error) {
-        throw new SwitchRefused(`Fresh recovery stopped: the identical request was rejected (${error.message})`);
-      }
-      if (confirmed?.agentId !== receipt.agentId) throw new SwitchRefused(`Fresh recovery stopped: the identical request returned ${confirmed?.agentId}, receipt says ${receipt.agentId}`);
-      if (receipt.agentId === from.id) throw new SwitchRefused('Fresh recovery stopped: the receipt names the current Steer itself');
-      freshId = receipt.agentId;
+      const confirmedId = await confirmFreshReceipt(run, op, config, receipt);
+      if (confirmedId === from.id) throw new SwitchRefused('Fresh recovery stopped: the receipt names the current Steer itself');
+      freshId = confirmedId;
       result.reused = true;
     }
+    await verifyFreshAgentParent(client, freshId, null); // parent-free, whoever the executor was
     held.verify(); // the lock file must still be the locked inode right before the write
     await workspace.setMetadata({ [METADATA_KEY]: { ...current, activeSteer: slot, epoch: current.epoch + 1, previousSteer: from.id, switchedAt: now().toISOString() } });
     const written = (await workspace.refresh())?.metadata?.[METADATA_KEY];
@@ -832,6 +985,206 @@ export async function freshSteer({ client, discovery, config, apply = false, lan
   }
   try {
     await client.agents.ref(from.id).send(previousSteerNotice({ slot, id: freshId }, expected.epoch + 1, language)); // costs one turn of the retired steer
+    result.previousNotified = true;
+  } catch {
+    result.previousNotified = false;
+  }
+  return result;
+}
+
+/**
+ * Refreshes a NON-active steer: a new agent of the same slot and profile,
+ * no takeover. Nothing is written to the steer state (no epoch change, no
+ * active-steer write); the daemon idempotency key carries the refreshed
+ * agent id, so retries reuse the receipt while later refreshes get a new
+ * key. The new agent is created without the active marker and parent-free.
+ */
+async function freshNonActiveSteer({ client, discovery, status, expected, slot, config, apply, language, git, lookupReceipt, execute, workerModel, quotaSnapshot, quotaExhaustedPct, zerosub }) {
+  const holders = status.steers.filter((s) => s.slot === slot);
+  if (!holders.length) throw new SwitchRefused(`No live Steer ${slot} to refresh for ${status.repo}; plan and apply one first`);
+  const live = holders.filter((h) => !h.superseded);
+  const single = holders.length === 1 ? holders[0] : (live.length === 1 ? live[0] : null);
+  if (single && BUSY.has(single.status)) throw new SwitchRefused(`Steer ${slot} is ${single.status}; stop it or wait for its turn to end first`);
+  const profileName = config?.steers?.slots?.[slot];
+  if (!profileName || !config.profiles?.[profileName]) throw new SwitchRefused(`Steer slot ${slot} references unknown profile "${profileName}"`);
+  const advisorSlot = isAdvisorSlot(config, slot);
+  const used = usedProfilesByLiveSteers(config, status.steers.filter((s) => s.slot !== slot));
+  const { profile, skipped } = resolveProfile(config, discovery.providers, steerFallbackList(config, slot), {
+    role: 'steer', advisorSlot, usedProfiles: used,
+    quotaSnapshot, quotaExhaustedPct, zerosub,
+  });
+  if (!profile) throw new SwitchRefused(`Profile "${profileName}" for Steer ${slot} is not startable${skipped[0] ? `: ${skipped[0].reason}` : ''} (no fallback available)`);
+  const warnings = [];
+  if (advisorSlot) warnings.push(`Steer ${slot} is an advisor (profile "${profileName}"); advisors never coordinate`);
+  let profileSuggestion = null;
+  if (profile.name !== profileName) {
+    warnings.push(`Profile "${profileName}" is not startable (${skipped[0]?.reason ?? 'unknown reason'}); using fallback "${profile.name}"`);
+    profileSuggestion = `paseo-factory steer set ${slot} "${profile.name}"`;
+  }
+  const slotProfile = config.profiles?.[profileName] ?? null;
+  if (single && slotProfile && (single.provider !== slotProfile.provider || single.model !== slotProfile.model)) {
+    const cmd = formatSlotProfileSuggestion(config, slot, single.provider, single.model);
+    warnings.push(`Steer ${slot} runs ${single.provider}/${single.model} but slot profile "${profileName}" names ${slotProfile.provider}/${slotProfile.model}; the fresh agent uses "${profile.name}" — to keep the live model, point the slot at it first (${cmd})`);
+    profileSuggestion ??= cmd;
+  }
+  if (single && holders.length > 1) {
+    warnings.push(`Steer ${slot} has superseded agent(s) ${holders.filter((h) => h.superseded).map((h) => h.id).join(', ') || holders.filter((h) => h.id !== single.id).map((h) => h.id).join(', ')}; the refresh targets the live holder ${single.id} — archive the superseded ones in Paseo`);
+  }
+
+  const scopeId = discovery.scope?.id ?? status.repo;
+  const labels = { [LABEL.repo]: status.repo, [LABEL.role]: 'steer', [LABEL.slot]: slot, [LABEL.scope]: scopeId };
+  const request = {
+    workspaceId: status.workspace.id, title: `Steer ${slot}`, labels,
+    config: { provider: `${profile.provider}/${profile.model}`, ...(profile.mode ? { modeId: profile.mode } : {}), ...(profile.thinking ? { thinkingOptionId: profile.thinking } : {}) },
+  };
+  const short = String(single?.id ?? 'x').replace(/[^A-Za-z0-9]/g, '').slice(0, 8) || 'x';
+  const key = idempotencyKey(status.repo, 'steer', slot, `fresh-e${expected.epoch}-${short}`, requestDigest(request));
+  const op = { key: `steer.${slot}.fresh`, kind: 'paseo.agent.create', summary: `Create fresh Steer ${slot} (${profile.provider}/${profile.model}) without prompt`, params: { ...request, clearInheritedParent: true, idempotencyKey: key } };
+
+  const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory) : null;
+  const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;
+  const result = {
+    repo: status.repo, slot, kind: 'steer', from: single?.id ?? null, to: null, epoch: expected.epoch, epochBumped: false, profile: profile.name,
+    provider: profile.provider, model: profile.model, idempotencyKey: key, packet: '', packetChars: 0,
+    checkpoint: Boolean(status.checkpoint?.task), applied: false, delivered: false, deliveryError: null, previousNotified: false, reused: false, renameError: null,
+    warnings, fallbackFrom: profile.name !== profileName ? profileName : null, profileSuggestion,
+  };
+  if (!apply) {
+    if (!single) throw new SwitchRefused(`Steer ${slot} has several live agents (${holders.map((s) => s.id).join(', ')}); if a previous fresh apply was interrupted, rerun with --apply to recover it, otherwise archive the retired one in Paseo`);
+    result.packet = buildRefreshPacket(status, {
+      kind: 'steer', slot, from: single, to: { id: 'new agent, created on apply' }, epoch: expected.epoch, git: gitSnapshot,
+      note: agentState?.[single.id]?.note ?? null, noteAt: agentState?.[single.id]?.noteAt ?? null,
+      lastMessage: await hintOf(client, single.id), language, workerModel,
+    });
+    result.packetChars = result.packet.length;
+    return result;
+  }
+  const receipt = await lookupFreshReceipt(lookupReceipt, key);
+  const run = execute ?? createExecutors({ client });
+  let from = single;
+  let freshId;
+  if (!receipt) {
+    if (!from) throw new SwitchRefused(`Steer ${slot} has several live agents (${holders.map((s) => s.id).join(', ')}); archive the retired one in Paseo, then rerun`);
+    freshId = (await run(op, config))?.agentId; // the executor verifies parent freedom, labels and workspace
+    if (!freshId) throw new Error('Fresh agent creation returned no agent id');
+  } else {
+    checkedFreshReceipt(receipt, key);
+    if (!from) {
+      const rest = holders.filter((h) => h.id !== receipt.agentId);
+      if (!holders.some((h) => h.id === receipt.agentId) || rest.length !== 1) {
+        throw new SwitchRefused(`Steer ${slot} has several live agents (${holders.map((s) => s.id).join(', ')}); archive the retired one in Paseo, then rerun`);
+      }
+      from = rest[0];
+      if (BUSY.has(from.status)) throw new SwitchRefused(`Steer ${slot} is ${from.status}; stop it or wait for its turn to end first`);
+    }
+    const confirmedId = await confirmFreshReceipt(run, op, config, receipt);
+    if (confirmedId === from.id) throw new SwitchRefused('Fresh recovery stopped: the receipt names the current Steer itself');
+    freshId = confirmedId;
+    result.reused = true;
+  }
+  await verifyFreshAgentParent(client, freshId, null); // parent-free, whoever the executor was
+  result.from = from.id;
+  result.applied = true;
+  result.to = freshId;
+  result.packet = buildRefreshPacket(status, {
+    kind: 'steer', slot, from, to: { id: freshId }, epoch: expected.epoch, git: gitSnapshot,
+    note: agentState?.[from.id]?.note ?? null, noteAt: agentState?.[from.id]?.noteAt ?? null,
+    lastMessage: await hintOf(client, from.id), language, workerModel,
+  });
+  result.packetChars = result.packet.length;
+  try {
+    await client.agents.ref(freshId).send(result.packet);
+    result.delivered = true;
+  } catch (error) {
+    result.deliveryError = error.message; // the fresh steer stands; resend the packet manually
+  }
+  try {
+    await client.agents.ref(from.id).send(refreshSteerNotice({ id: freshId }, slot, language)); // costs one turn of the retired steer
+    result.previousNotified = true;
+  } catch {
+    result.previousNotified = false;
+  }
+  return result;
+}
+
+/**
+ * Refreshes a worker: a new agent with the same role, owner, workspace,
+ * provider and model, no takeover and no epoch change. Thinking/mode are
+ * reused when exactly one profile matches the provider/model pair,
+ * otherwise the provider defaults apply. The new worker keeps the
+ * previous parent (the owning steer), never the calling agent.
+ */
+async function freshWorkerAgent({ client, discovery, status, expected, workerId, config, apply, language, git, lookupReceipt, execute, workerModel }) {
+  const matches = (status.workers ?? []).filter((w) => w.id === workerId || w.id.startsWith(workerId));
+  if (!matches.length) throw new SwitchRefused(`${workerId} is not a live worker of ${status.repo}`);
+  if (matches.length > 1) throw new SwitchRefused(`Worker ${JSON.stringify(workerId)} is ambiguous (${matches.map((w) => w.id).join(', ')}); pass the full agent id`);
+  const from = matches[0];
+  if (BUSY.has(from.status)) throw new SwitchRefused(`Worker ${from.id} is ${from.status}; stop it or wait for its turn to end first`);
+  const owner = from.owner ?? from.parentSlot ?? expected.activeSteer;
+  const parentId = from.parent ?? null;
+  const scopeId = discovery.scope?.id ?? status.repo;
+  const labels = { [LABEL.scope]: scopeId, [LABEL.role]: 'worker', [LABEL.owner]: owner };
+  const twins = Object.entries(config?.profiles ?? {}).filter(([, entry]) => entry?.provider === from.provider && entry?.model === from.model);
+  const twin = twins.length === 1 ? twins[0][1] : null;
+  const warnings = [];
+  if (twins.length > 1) warnings.push(`Several profiles match ${from.provider}/${from.model} (${twins.map(([name]) => name).join(', ')}); the fresh worker uses provider defaults for thinking/mode`);
+  const request = {
+    workspaceId: from.workspaceId ?? status.workspace.id, title: from.title ?? 'Worker', labels,
+    config: { provider: `${from.provider}/${from.model}`, ...(twin?.mode ? { modeId: twin.mode } : {}), ...(twin?.thinking ? { thinkingOptionId: twin.thinking } : {}) },
+    ...(parentId ? { parent: parentId } : {}),
+  };
+  const short = String(from.id).replace(/[^A-Za-z0-9]/g, '').slice(0, 8) || 'x';
+  const key = idempotencyKey(status.repo, 'worker', owner, `fresh-e${expected.epoch}-${short}`, requestDigest(request));
+  const op = { key: `worker.${from.id}.fresh`, kind: 'paseo.agent.createWorker', summary: `Create fresh worker "${request.title}" (${from.provider}/${from.model}) without prompt`, params: { ...request, parent: parentId ?? null, clearInheritedParent: true, idempotencyKey: key } };
+
+  const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory) : null;
+  const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;
+  const result = {
+    repo: status.repo, kind: 'worker', workerId: from.id, owner, from: from.id, to: null, epoch: expected.epoch, epochBumped: false,
+    profile: twins.length === 1 ? twins[0][0] : null, provider: from.provider, model: from.model,
+    idempotencyKey: key, packet: '', packetChars: 0,
+    checkpoint: Boolean(status.checkpoint?.task), applied: false, delivered: false, deliveryError: null, previousNotified: false, reused: false, renameError: null,
+    warnings, fallbackFrom: null, profileSuggestion: null,
+  };
+  if (!apply) {
+    result.packet = buildRefreshPacket(status, {
+      kind: 'worker', owner, title: request.title, from, to: { id: 'new agent, created on apply' }, epoch: expected.epoch, git: gitSnapshot,
+      note: agentState?.[from.id]?.note ?? null, noteAt: agentState?.[from.id]?.noteAt ?? null,
+      lastMessage: await hintOf(client, from.id), language, workerModel,
+    });
+    result.packetChars = result.packet.length;
+    return result;
+  }
+  const receipt = await lookupFreshReceipt(lookupReceipt, key);
+  const run = execute ?? createExecutors({ client });
+  let freshId;
+  if (!receipt) {
+    freshId = (await run(op, config))?.agentId; // the executor verifies the parent, labels and workspace
+    if (!freshId) throw new Error('Fresh agent creation returned no agent id');
+  } else {
+    checkedFreshReceipt(receipt, key);
+    const confirmedId = await confirmFreshReceipt(run, op, config, receipt);
+    if (confirmedId === from.id) throw new SwitchRefused('Fresh recovery stopped: the receipt names the current worker itself');
+    freshId = confirmedId;
+    result.reused = true;
+  }
+  await verifyFreshAgentParent(client, freshId, parentId); // previous parent only, never the caller
+  result.applied = true;
+  result.to = freshId;
+  result.packet = buildRefreshPacket(status, {
+    kind: 'worker', owner, title: request.title, from, to: { id: freshId }, epoch: expected.epoch, git: gitSnapshot,
+    note: agentState?.[from.id]?.note ?? null, noteAt: agentState?.[from.id]?.noteAt ?? null,
+    lastMessage: await hintOf(client, from.id), language, workerModel,
+  });
+  result.packetChars = result.packet.length;
+  try {
+    await client.agents.ref(freshId).send(result.packet);
+    result.delivered = true;
+  } catch (error) {
+    result.deliveryError = error.message; // the fresh worker stands; resend the packet manually
+  }
+  try {
+    await client.agents.ref(from.id).send(refreshWorkerNotice({ id: freshId }, language)); // costs one turn of the retired worker
     result.previousNotified = true;
   } catch {
     result.previousNotified = false;

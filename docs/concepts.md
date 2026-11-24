@@ -25,7 +25,7 @@ Typical flow: `/factory plan <repo>` once, confirm `/factory apply <hash>`, then
 When a provider limit hits, the chat gets long, or another model fits better, the checkpoint moves — never the chat. A **handoff** is built from the checkpoint plus git state (branch, SHA, changes) and open workers; the previous steer's last answer travels only as a shortened, unverified hint.
 
 - `/factory switch --to B`: another steer takes over.
-- `/factory fresh`: a new agent in the same slot starts with an empty chat.
+- `/factory fresh`: a new agent in the same slot starts with an empty chat (`--slot`/`--worker` refresh a non-active steer or worker without takeover).
 - `/factory resume`: the way back after a break, restart, or cleared chat.
 
 Every switch raises the **epoch** counter, which invalidates older previews. Details: [provider limit](workflow-provider-limit.md), [saving context](saving-context.md).
@@ -61,7 +61,7 @@ ZeroSub accounts are optional: when its daemon plugin is installed, families wit
 - **Dry-run first.** `plan` never writes to GitHub, git or Paseo. It stores the complete plan as an authorization (`plans/<hash>.json`, never overwritten).
 - **Confirmed plan only.** `apply --confirm <hash>` runs only that stored plan. After each step it rediscovers the state; the next operation must match the authorized one in every effect-relevant parameter, otherwise it stops and asks for a new dry-run.
 - **Idempotent creation.** Workspaces and steers are created with daemon idempotency keys, with receipt recovery before anything else: recover the id, allow one first execution, or stop.
-- **Parent-free steers.** Steers are created without `parent` and without a prompt; the parent label is verified after creation. CLI calls run without `PASEO_AGENT_ID`.
+- **Parent-free steers.** Steers are created without `parent` and without a prompt; the parent label is verified after creation, and a link inherited from the calling agent is detached again right away. Fresh workers keep their previous parent, never the caller. CLI calls run without `PASEO_AGENT_ID`.
 - **Paths.** Clone targets must stay below `checkoutRoot` without symlink components; the target's parent identity is re-checked right before cloning.
 - **One apply at a time.** A kernel `flock` serializes `apply` runs on the host; switches and checkpoints use a per-workspace lock.
 - **Conflicts are reported, never resolved automatically**: ambiguous checkouts, occupied targets, a different `upstream`, steers with a parent, duplicate main workspaces, unstartable profiles, unconfirmed adoption of unlabelled agents.

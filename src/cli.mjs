@@ -18,7 +18,7 @@ import { listScopes, resolveScope, domainFirstPlanOrder } from './scope.mjs';
 import { planLabelFixes, formatLabelFixes } from './labels.mjs';
 import { DRAIN_DEFAULT_TIMEOUT_MS, drain, parseTimeout } from './drain.mjs';
 import { assessWorker, readGitState, startScopedWorker } from './workers.mjs';
-import { formatWorkersText, readWorkers, workersReport } from './supervision.mjs';
+import { formatWorkersPruneText, formatWorkersText, pruneWorkerRegister, readWorkers, staleWorkerEntries, workersReport } from './supervision.mjs';
 import { assignScope } from './assign.mjs';
 import { flagValue, formatCatalog, formatWorkerModel, parseProviderModel, paseoRunFlags, planAdvisorTag, planSensitiveTag, planSlotRemove, planSlotSet, planSteerRemove, planSteerSet, planWorkerDefault, planWorkerRemove, planWorkerSet, previewConfig, resolveProfile, steerFallbackList, writeConfigAtomic } from './models.mjs';
 import { scopeRows, scopeCandidates, formatScopeRows, formatScopeCandidates, formatStatus } from './scopes-view.mjs';
@@ -36,11 +36,11 @@ const USAGE = `Usage: paseo-factory <command> [options]
   checkpoint <repo> --task <text> [--test <text>]... [--blocker <text>]... [--next <text>]
   checkpoint <repo> --from-agent <steer-id> [--next <text>]   take the CHECKPOINT block of its last answer
   switch <repo> --to <slot> [--apply] [--no-send] [--wait] [--notify-previous] [--language en|de]
-  fresh <repo> [--apply]       hand the active steer to a new agent of the same slot/profile
+  fresh <repo> [--slot <S>|--worker <id>] [--apply]   new agent for the active steer (takeover); --slot/--worker refresh without takeover
   relocate <scope> --to <path|project> [--apply]
   assign <scope> --task <text> [--test <text>]... [--blocker <text>]... [--next <text>] [--report-to <agent-id>] [--apply] [--no-send]   (report-to defaults to the calling agent)
   resume [scope] [--agent <id>] [--json]   cold-start brief: task, next step, git, workers
-  workers [scope] [--json]           print the worker register (task, state, resumes)
+  workers [scope] [--prune] [--apply] [--json]   print the worker register (task, state, resumes); --prune removes entries whose agent is gone
   retire <agent-id>                  preview only; archiving is disabled
   cleanup [--json]                   read-only cleanup report over the whole instance
   cleanup --plan [--allow-destructive] [--allow-ignored] [--only <id,...>] [--json]
@@ -263,6 +263,7 @@ async function main() {
       candidates: { type: 'boolean' }, plan: { type: 'boolean' }, 'allow-destructive': { type: 'boolean' }, 'allow-ignored': { type: 'boolean' }, only: { type: 'string' },
       timeout: { type: 'string' }, title: { type: 'string' },
       failed: { type: 'string' }, reason: { type: 'string' },
+      slot: { type: 'string' }, worker: { type: 'string' }, prune: { type: 'boolean' },
     },
   });
   const [command, ...args] = positionals;
@@ -453,6 +454,9 @@ async function main() {
       return [match[1], match[2] ? match[2].toUpperCase() : null];
     }));
     if (values.detach && command !== 'plan') throw new Error('--detach is only accepted with plan');
+    if (values.slot !== undefined && command !== 'fresh') throw new Error('--slot is only accepted with fresh');
+    if (values.worker !== undefined && command !== 'fresh') throw new Error('--worker is only accepted with fresh');
+    if (values.prune && command !== 'workers') throw new Error('--prune is only accepted with workers');
 
     if (command === 'plan') {
       if (!entries.length) throw new Error('plan needs at least one repository');
@@ -533,10 +537,16 @@ async function main() {
       if (command === 'fresh') {
         const result = await freshSteer({
           client, discovery, config, apply: Boolean(values.apply), git,
+          slot: values.slot ?? null, workerId: values.worker ?? null,
           lookupReceipt: lookupCreationReceipt, language: runtime().handoffLanguage,
           workerModel: workerModelLine(config, discovery), paseoCli: createPaseoCli(),
         });
-        console.log(`${result.applied ? 'Refreshed' : 'Dry-run'}: Steer ${result.slot} ${result.from} → ${result.to ?? '(new agent)'} (epoch ${result.epoch}) · profile "${result.profile}" (${result.provider}/${result.model})${result.fallbackFrom ? ` (fallback for "${result.fallbackFrom}")` : ''} · handoff ${result.packetChars} characters, built without a model call${result.checkpoint ? '' : ' · NO task checkpoint'}${result.reused ? ' · agent reused after receipt' : ''}${result.delivered ? ' · delivered' : ''}${result.previousNotified ? ' · previous steer notified' : ''}${result.deliveryError ? ` · delivery failed: ${result.deliveryError}` : ''}${result.renameError ? ` · title rename failed: ${result.renameError}` : ''}${(result.warnings ?? []).map((w) => `\nWarning: ${w}`).join('')}\nNote: the retired steer ${result.from} keeps its chat and labels${result.applied ? ' (a short notice was sent)' : ' (a short notice will be sent on apply)'}; archive it in Paseo — until then the slot stays ambiguous for switch/plan.\n---\n${result.packet}`);
+        const target = result.kind === 'worker'
+          ? `worker ${result.from} → ${result.to ?? '(new agent)'} (owner Steer ${result.owner}, epoch ${result.epoch}, unchanged)`
+          : `Steer ${result.slot} ${result.from} → ${result.to ?? '(new agent)'} (epoch ${result.epoch}${result.epochBumped ? '' : ', unchanged'})`;
+        const model = result.profile ? `profile "${result.profile}" (${result.provider}/${result.model})` : `${result.provider}/${result.model}`;
+        const retired = result.kind === 'worker' ? 'retired worker' : 'retired steer';
+        console.log(`${result.applied ? 'Refreshed' : 'Dry-run'}: ${target} · ${model}${result.fallbackFrom ? ` (fallback for "${result.fallbackFrom}")` : ''} · ${result.epochBumped ? 'handoff' : 'refresh brief'} ${result.packetChars} characters, built without a model call${result.checkpoint ? '' : ' · NO task checkpoint'}${result.reused ? ' · agent reused after receipt' : ''}${result.delivered ? ' · delivered' : ''}${result.previousNotified ? ` · previous ${result.kind} notified` : ''}${result.deliveryError ? ` · delivery failed: ${result.deliveryError}` : ''}${result.renameError ? ` · title rename failed: ${result.renameError}` : ''}${(result.warnings ?? []).map((w) => `\nWarning: ${w}`).join('')}${result.profileSuggestion ? `\nSuggestion: ${result.profileSuggestion}` : ''}\nNote: the ${retired} ${result.from} keeps its chat and labels${result.applied ? ' (a short notice was sent)' : ' (a short notice will be sent on apply)'}; archive it in Paseo — until then status marks it superseded (newest wins).\n---\n${result.packet}`);
         return;
       }
       if (command === 'switch') {
@@ -615,6 +625,17 @@ async function main() {
       }
       const scopeId = discovery.scope?.id ?? discovery.forkName;
       const epoch = discovery.mainWorkspace?.metadata?.[METADATA_KEY]?.epoch ?? null;
+      if (values.prune) {
+        const stale = staleWorkerEntries(readWorkers(discovery.mainWorkspace?.metadata ?? null), discovery.agents ?? []);
+        if (!values.apply) {
+          if (values.json) return console.log(JSON.stringify({ scope: scopeId, epoch, stale, applied: false }, null, 2));
+          return console.log(formatWorkersPruneText(scopeId, epoch, stale));
+        }
+        if (!discovery.mainWorkspace) throw new Error('workers --prune --apply needs a factory main workspace with worker state');
+        const pruned = await pruneWorkerRegister({ client, workspaceId: discovery.mainWorkspace.id, agents: discovery.agents ?? [] });
+        if (values.json) return console.log(JSON.stringify({ scope: scopeId, epoch, removed: pruned.removed, applied: true }, null, 2));
+        return console.log(formatWorkersPruneText(scopeId, epoch, pruned.removed, { applied: true }));
+      }
       const report = workersReport(readWorkers(discovery.mainWorkspace?.metadata ?? null));
       if (values.json) return console.log(JSON.stringify({ scope: scopeId, epoch, workers: report }, null, 2));
       return console.log(formatWorkersText(scopeId, epoch, report));

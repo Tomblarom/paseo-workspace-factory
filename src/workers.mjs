@@ -16,7 +16,7 @@ const BUSY = new Set(['running', 'initializing']);
 export async function startScopedWorker({ client, status, callerId, profile, accountId, prompt, title, apply = false }) {
   const { state, workspace, repo, steers } = status;
   const slot = state?.activeSteer;
-  const holders = steers.filter((steer) => steer.slot === slot && !steer.retired);
+  const holders = steers.filter((steer) => steer.slot === slot && !steer.retired && !steer.superseded);
   const parent = holders.length === 1 ? holders[0] : null;
   if (!workspace?.id || state?.retired || !parent || parent.id !== callerId || parent.advisor || parent.parent || parent.workspaceId !== workspace.id) {
     throw new Error('Only the active steer can start a worker in this scope');

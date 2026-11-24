@@ -2,7 +2,7 @@
 // Operations carry stable keys; apply only executes keys confirmed in a dry-run.
 import { createHash } from 'node:crypto';
 import { isAdvisorSlot, providerIsSensitive, slotProfile, configWarnings } from './config.mjs';
-import { resolveProfile, steerFallbackList, usedProfilesByLiveSteers } from './models.mjs';
+import { formatSlotProfileSuggestion, resolveProfile, steerFallbackList, usedProfilesByLiveSteers } from './models.mjs';
 import { LABEL, METADATA_KEY, describeParent, parentOf, pendingLegacyKeys, agentUsage } from './paseo.mjs';
 import { STEER_TITLE, STEER_DIGIT_TITLE } from './discovery.mjs';
 import { validScope } from './scope.mjs';
@@ -434,7 +434,7 @@ export function planRepository(discovery, config, { allowFork = false, adopt = {
       notes.push(`Steer ${slot} uses advisor profile "${profile.name}" (advisor, never active)`);
     }
     if (mismatch) {
-      notes.push(`Adopted Steer ${slot} runs ${candidate.provider}/${candidate.model}; profile "${profile.name}" names ${profile.provider}/${profile.model} (kept)`);
+      notes.push(`Adopted Steer ${slot} runs ${candidate.provider}/${candidate.model}; profile "${profile.name}" names ${profile.provider}/${profile.model} (kept) — to match the slot profile to the live steer: ${formatSlotProfileSuggestion(config, slot, candidate.provider, candidate.model)}`);
     }
     const warn = config.usage?.warnContextTokens;
     const usage = agentUsage(candidate);
@@ -466,18 +466,23 @@ export function planRepository(discovery, config, { allowFork = false, adopt = {
     const live = labelled.filter((a) => !a.archivedAt);
     const legacy = discovery.steers.legacy.filter((a) => (a.title ?? '').trim().match(STEER_TITLE)[1] === slot);
 
-    if (live.length > 1) {
-      conflict(key, `Several agents are labelled as Steer ${slot}: ${live.map((a) => a.id).join(', ')}`);
+    // Same-slot newer-wins: superseded older holders stay visible but never
+    // block the plan; only several live holders conflict.
+    const holders = live.filter((a) => a.superseded !== true);
+    const extra = live.filter((a) => a.superseded === true);
+    if (holders.length > 1) {
+      conflict(key, `Several agents are labelled as Steer ${slot}: ${holders.map((a) => a.id).join(', ')}`);
       continue;
     }
-    if (live.length === 1) {
-      const existing = live[0];
+    if (holders.length === 1) {
+      const existing = holders[0];
       const parent = parentOf(existing);
+      if (extra.length) notes.push(`Steer ${slot} has superseded agent(s) ${extra.map((a) => a.id).join(', ')}; newest ${existing.id} wins (archive the superseded ones in Paseo)`);
       if (adopt[slot] && adopt[slot] !== existing.id) conflict(key, `--adopt ${slot}=${adopt[slot]} conflicts with the already labelled Steer ${slot} ${existing.id}`);
       else if (parent) conflict(key, `Steer ${slot} (${existing.id}) has ${describeParent(existing)}; detach it in Paseo or archive it before the factory can use the slot`);
       else if (main && existing.workspaceId !== main.id) conflict(key, `Steer ${slot} (${existing.id}) lives in workspace ${existing.workspaceId}, not in main workspace ${main.id}`);
       else if (existing.provider !== profile.provider || existing.model !== profile.model) {
-        notes.push(`Steer ${slot} runs ${existing.provider}/${existing.model}; config profile "${profile.name}" names ${profile.provider}/${profile.model} (kept, no recreation)`);
+        notes.push(`Steer ${slot} runs ${existing.provider}/${existing.model}; config profile "${profile.name}" names ${profile.provider}/${profile.model} (kept, no recreation) — to match the slot profile to the live steer: ${formatSlotProfileSuggestion(config, slot, existing.provider, existing.model)}`);
       }
       continue;
     }
