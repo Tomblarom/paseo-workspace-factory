@@ -1,17 +1,17 @@
 # Cold context and interrupted agents — detailed plan
 
-Status: planned (TODO §10, C1–C7). "resume" below always means the **factory
-resume brief** (`paseo-factory resume`, `/factory resume`), never Claude's own
-session resume (`claude --resume`, `/resume`).
+For the provider-by-provider manual validation matrix, see
+[Provider live checks](provider-live-check.md).
+
+New to the factory? Start with [Getting started](getting-started.md); this page is the detailed reference.
+
+Status: planned (TODO §10, C1–C7, R). "resume" below always means the **factory resume brief** (`paseo-factory resume`, `/factory resume --brief`), never Claude's own session resume (`claude --resume`, `/resume`). Section R adds `/factory resume` as the restart path: same brief, but the steer context is cleared first (claude).
 
 ## Goal
 
-1. A Claude session that has been idle longer than its prompt-cache TTL must not
-   re-read its whole history on the next message.
-2. The agent that continues still knows its task and next step, from a small
-   brief instead of the old transcript.
-3. Any agent that stops without a clean CHECKPOINT (limit, cancel, error) leaves
-   enough state for another steer to take over cheaply.
+1. A Claude session that has been idle longer than its prompt-cache TTL must not re-read its whole history on the next message.
+2. The agent that continues still knows its task and next step, from a small brief instead of the old transcript.
+3. Any agent that stops without a clean CHECKPOINT (limit, cancel, error) leaves enough state for another steer to take over cheaply.
 
 ## Evidence (Paseo 0.16.2)
 
@@ -23,13 +23,11 @@ session resume (`claude --resume`, `/resume`).
 | A prompt cannot be intercepted or redirected | `agent.turn.before` does not wait |
 | A resumed session cannot be emptied at open | `agent.open.before` changes env/tools/MCP/metadata only |
 
-Consequence: the context must be made small **before** the next user message,
-and the state must be stored **after every turn**, without model calls.
+Consequence: the context must be made small **before** the next user message, and the state must be stored **after every turn**, without model calls.
 
 ## Data model
 
-All state lives in the scope's main workspace metadata (written under the
-workspace lock from `src/lock.mjs`; agent labels stay string-only):
+All state lives in the scope's main workspace metadata (written under the workspace lock from `src/lock.mjs`; agent labels stay string-only):
 
 ```text
 wsf.checkpoint  (existing)  + source: agent|auto|manual, agentId, turnId,
@@ -44,8 +42,7 @@ wsf.agents      { <agentId>: {
                     pendingAction: { kind: clear|compact, at } | null } }
 ```
 
-Bounds: `excerpt` ≤ 1500 chars (tail of the last answer), `error` ≤ 300 chars,
-`note` ≤ 1500 chars; entries of archived agents are dropped on write.
+Bounds: `excerpt` ≤ 1500 chars (tail of the last answer), `error` ≤ 300 chars, `note` ≤ 1500 chars; entries of archived agents are dropped on write.
 
 ## C2 Auto-checkpoint (plugin, `agent.turn.after`)
 
@@ -59,26 +56,20 @@ Only for factory agents (label `wsf.scope`; roles `steer`, `worker`).
 | failed / canceled | any | `interrupted` record (outcome, error, excerpt, git: branch, sha, changed-file count); scope checkpoint gets `interrupted` flag, task/next stay |
 | our own `/clear` or `/compact` turn | any | resolve `pendingAction` → `cleared`; nothing else |
 
-Reuse the CHECKPOINT parser of `checkpoint --from-agent`. Never call a model,
-never throw out of the hook (log and continue).
+Reuse the CHECKPOINT parser of `checkpoint --from-agent`. Never call a model, never throw out of the hook (log and continue).
 
 ## C3 Resume brief (core, CLI, RPC, slash)
 
-`buildResumeBrief(scope, { agentId })` next to the handoff builder; `switch`
-and `fresh` use the same builder.
+`buildResumeBrief(scope, { agentId })` next to the handoff builder; `switch` and `fresh` use the same builder.
 
-- Header: scope id/kind, the caller's role and slot, active steer, epoch, and
-  one line "You are the active steer" / "You are not active: answer only".
-- Checkpoint: task, next, tests, blockers; source and age; warnings for stale
-  or interrupted state, with the excerpt.
+- Header: scope id/kind, the caller's role and slot, active steer, epoch, and one line "You are the active steer" / "You are not active: answer only".
+- Checkpoint: task, next, tests, blockers; source and age; warnings for stale or interrupted state, with the excerpt.
 - Git: branch, short sha, ahead/behind, changed files (count + up to 10 paths).
 - Workers: id, title, status, first line of their last note.
 - Open items: `hub:` blockers.
 - Budget: ≤ 6000 characters, enforced by truncation and a test.
 
-Commands: `paseo-factory resume [scope] [--agent <id>] [--json]` (scope and
-agent default to the caller's workspace and `PASEO_AGENT_ID`),
-`/factory resume`, RPC `factory.resume`.
+Commands: `paseo-factory resume [scope] [--agent <id>] [--json]` (scope and agent default to the caller's workspace and `PASEO_AGENT_ID`), `/factory resume --brief`, RPC `factory.resume`. All three only read: same agent, context untouched. The CLI semantics never change, because the AGENTS.md resume rule points at this read path. The clearing restart path is `/factory resume` (section R).
 
 ## C4 Instruction rule
 
@@ -91,20 +82,17 @@ step. Do not use the provider's own session resume. Read only what the brief
 points to.
 ```
 
-Verify in C1 that a cleared Claude session still loads the project
-instructions that carry this rule. If not, see `seedAfterClear` in C5.
+Verify in C1 that a cleared Claude session still loads the project instructions that carry this rule. If not, see `seedAfterClear` in C5.
 
 ## C5 Idle cleanup (plugin timer)
 
-Plugin server interval every 5 minutes (cleared in cleanup). All conditions
-must hold, checked again right before sending:
+Plugin server interval every 5 minutes (cleared in cleanup). All conditions must hold, checked again right before sending:
 
 - provider in `providers` (default `["claude"]`), role in `roles`,
 - status idle, no pending permission, no `pendingAction`,
 - `now - lastTurnEndedAt ≥ idleMinutes` (default 60),
 - `contextTokens ≥ minContextTokens` (default 60000; unknown → skip),
-- valid state: active steer → scope checkpoint `capturedAt ≥ lastTurnEndedAt`,
-  not interrupted; others → `noteAt ≥ lastTurnEndedAt`,
+- valid state: active steer → scope checkpoint `capturedAt ≥ lastTurnEndedAt`, not interrupted; others → `noteAt ≥ lastTurnEndedAt`,
 - not cleared since the last turn, no label `wsf.keepContext=true`.
 
 | Mode | Action | Cost |
@@ -113,33 +101,64 @@ must hold, checked again right before sending:
 | `clear` | send `/clear`; optional `seedAfterClear` sends a one-line "context was cleared, run resume before the next task" | 0 (seed: one small turn) |
 | `compact-warm` | at `compactAtMinutes` (default 50, before a 1 h TTL expires) send `/compact Keep: task, decisions, open ids, next step.` | one turn on cached context, also when nobody returns |
 
-Automatic `fresh` (new agent) is not offered: creating agents stays behind
-plan → confirm. Safety: per-agent cooldown (one action per idle period), daily
-cap per host, every action logged (`paseo plugin logs`) and recorded in
-`wsf.agents`. Settings (host scope): `mode`, `idleMinutes`, `compactAtMinutes`,
-`minContextTokens`, `providers`, `roles`, `seedAfterClear`.
+Automatic `fresh` (new agent) is not offered: creating agents stays behind plan → confirm. Safety: per-agent cooldown (one action per idle period), daily cap per host, every action logged (`paseo plugin logs`) and recorded in `wsf.agents`. Settings (host scope): `mode`, `idleMinutes`, `compactAtMinutes`, `minContextTokens`, `providers`, `roles`, `seedAfterClear`.
 
 ## C6 Cold hint (manual)
 
-Composer pill on factory agents that are cold (idle ≥ `idleMinutes`, context ≥
-`minContextTokens`) and not handled by C5: "Cold · 350k" with actions
-"Clear + resume" (sends `/clear`), "Fresh" (opens the `fresh` preview),
-"Dismiss".
+Composer pill on factory agents that are cold (idle ≥ `idleMinutes`, context ≥ `minContextTokens`) and not handled by C5: "Cold · 350k" with actions "Clear + resume" (sends `/clear`), "Fresh" (opens the `fresh` preview), "Dismiss".
+
+## R — `/factory resume` as the restart path
+
+A steer that hangs after a daemon restart, a crash, a provider limit, or a cold context must not re-read its old chat and must not lose its tab. `/factory resume`, typed in the steer's own tab, saves the state, clears the context of the same agent (same id, same tab, same name), and then sends it the resume brief from the main workspace. A visible pill asks the user to do this as soon as a steer needs it.
+
+### Scope (E3)
+
+| Way | Agent | Context | When |
+|---|---|---|---|
+| `resume` (CLI / `/factory resume --brief`) | same | kept | only read, e.g. worker or user |
+| **`/factory resume` (new)** | same | cleared (claude) | steer after restart, crash, limit, or cold |
+| `fresh` | new (new tab) | empty | agent broken or model change |
+| `switch` | other slot | — | handover |
+| C5 compact/clear | same | auto | idle, without user |
+
+### Flow and safety (E2)
+
+1. Guard: steers only. Workers get an error toast.
+2. Preview fingerprint as in switch/fresh (agent status, sessionId, checkpoint time). `/factory resume` in the steer's own tab counts as confirmation, because the target is the caller itself. For a foreign agent (`--agent <id>`): preview in the panel, confirm by button.
+3. **Running → no clearing.** The RPC answers "running; retry after the turn ends" as an error toast. No auto-stop; the user can `stop` first.
+4. Save the checkpoint: the agent's last answer is read with the `auto-checkpoint` parser (as `checkpoint --from-agent`). A valid CHECKPOINT block newer than the scope checkpoint is written; otherwise the scope checkpoint stays and the brief carries `interrupted` if needed. Only then is the context cleared.
+5. `previousSessions` is recorded before the clear (already exists). The old history stays reachable as an extra tab via `factory.history.open` / `paseo agent import`.
+6. Closed agent (after restart): `send` is expected to reopen it. Still unverified live; if it fails, an error toast says "open the tab, then retry".
+7. No rate/day cap for manual resume (the C5 cap does not apply). One open `pendingAction` per agent, so a double-click is idempotent.
+
+Technically the RPC reuses the C5 cleanup (`sendCleanupCommand` without sourceAgentId, same `pendingAction`/`previousSessions` bookkeeping; the single-agent logic of `sweepAgent` is extracted as `runCleanup` and shared). The brief is sent by the turn-hook only after a verified clear (new sessionId), as `[Factory resume]` plus the full `buildResumeBrief` — never directly behind the RPC, so the brief does not land in the old context and no turn is spent on the `resume` call. A text without effect yields `effectFailed` and locks the provider capability. `/compact` is not needed in resume (the history may be lost; compact stays with C5 for warm idle), and `fresh` is no fallback (the tab must survive; it stays a manual panel action).
+
+### Provider matrix (E1)
+
+Setting `resumeClear.providers`, default `["claude"]` (native `/clear` is verified for claude only):
+
+| Provider | Action | Fallback |
+|---|---|---|
+| claude | `/clear`, verify effect, brief | on `effectFailed`: brief without clearing, note "context not cleared" |
+| codex, copilot, muse | no clearing by default, brief only | opt-in per setting once a live check proves `/clear` or `/compact` for the provider; same effect verification protects |
+
+### Attention pill (E5)
+
+New field `wsf.agents[id].needsResume = {reason, at}`, reasons `daemon-restart | limit | failed | cold` (`cold` comes from the existing C6 feed and gets no pill of its own). It is set by the boot check (steers that were `closed` or had an interrupted turn) and by the turn-hook on `failed` (limit/quota pattern in the failure text → `limit`, else `failed`), and cleared on verified resume or a successful normal turn.
+
+- Composer pill on the affected steer, driven by the existing `factoryCold` feed, extended to `factoryAttention` (rows with `reason`; one pill map, never two pills). Labels: "Resume nötig · Neustart", "… · Limit", "… · Fehler"; icon `RotateCcw`; popover with one sentence and a "Resume jetzt" button (same RPC as `/factory resume`). When the C6 pill is active, the stronger reason replaces the label.
+- After a daemon restart or a limit, every steer of a labelled scope whose last turn ended within `recentHours` (default 24) shows the pill, not only the last active one. Advisors only with an open turn, as before.
+- Pill matrix: the active steer keeps "Resume nötig · Neustart/Limit/Fehler". Any other recently active steer shows "Zuletzt steuerte Steer X. Du kannst hier weitermachen; dieser Steer wird dann zum steuernden." Its button (and `/factory resume` in that tab) performs resume AND takeover (self-takeover `switch --to <own slot> --apply`), so afterwards this steer is the controlling one. Advisor steers keep the active text and never take over.
+- Factory sidebar item with a counter "n steers need resume" (existing sidebar element; no panel badge). The counter counts only the active steer; non-active reminders do not count as urgent.
+- A toast alone is not enough (no toast API in the onSubmit context except thrown errors, and toasts disappear). The pill stays until the resume. Normal chatting is not blocked (no API, and not wanted).
 
 ## C1 / C7 Checks (live, scratch agent only)
 
-C1: on a scratch Claude agent (with approval): `/clear` → new session id
-notice, context tokens drop, project instructions still present, Paseo
-attention/notification behaviour; same for `/compact`. C7: build ~150k context,
-wait past the TTL, measure the first turn's usage without action and after
-`/clear` + resume; record numbers here, then choose the default `mode`.
+C1: on a scratch Claude agent (with approval): `/clear` → new session id notice, context tokens drop, project instructions still present, Paseo attention/notification behaviour; same for `/compact`. C7: build ~150k context, wait past the TTL, measure the first turn's usage without action and after `/clear` + resume; record numbers here, then choose the default `mode`.
 
 ## Interrupted handover
 
-`status` and `scopes` show `interrupted` and stale checkpoints. `switch` to
-another steer is allowed with an interrupted checkpoint; the handoff carries
-the resume brief and the line "Previous steer was interrupted at …; verify git
-state before continuing."
+`status` and `scopes` show `interrupted` and stale checkpoints. `switch` to another steer is allowed with an interrupted checkpoint; the handoff carries the resume brief and the line "Previous steer was interrupted at …; verify git state before continuing."
 
 ## Work split
 
@@ -150,9 +169,7 @@ state before continuing."
 | C4 instruction text, docs | docs worker or steer | `docs/steer-instructions.md`, `AGENTS.md`, this file |
 | C1, C7 live checks | steer, with user approval for scratch agents | none |
 
-Order: C1 → C3 and C2 in parallel → C4 → C5/C6 → C7 → choose the default.
-Tests with fakes for every rule in the C2 table, every C5 condition (each one
-false → no action), the brief budget, and lock/epoch races.
+Order: C1 → C3 and C2 in parallel → C4 → C5/C6 → C7 → choose the default. Tests with fakes for every rule in the C2 table, every C5 condition (each one false → no action), the brief budget, and lock/epoch races.
 
 ## Review decisions (implementation round 1)
 
