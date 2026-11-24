@@ -10,7 +10,8 @@
   },
   "scripts": {
     "test": "node --experimental-strip-types --test --test-timeout=30000 test/*.test.mjs plugin/test/*.test.mjs",
-    "plugin:sync": "node scripts/plugin-sync.mjs"
+    "plugin:sync": "node scripts/plugin-sync.mjs",
+    "build-snapshot": "node scripts/build-snapshot.mjs"
   },
   "engines": {
     "node": ">=22"

@@ -36,6 +36,7 @@
 - Quota pools and profile health: profiles share a quota pool (`pool`, `quota.warnPct/exhaustedPct`); exhausted pools are skipped with failover to another pool; `worker pick <scope> --failed <profile> --reason <text>` marks a profile unhealthy for 10 minutes.
 - Full `/factory` slash coverage: every CLI function is a `/factory` subcommand (`scopes`, `workers`, `models`, `drain`, `retire`, `worker|steer|model` …) with inline results and panel previews; plugin settings for model lists, cleanup, resume and supervision.
 - Domain follow-ups: `relocate` carries the scope's domain pointer (shown in the preview), and `plan` can create a domain scope and its child in the same run (domain first).
+- Plugin release snapshots: `npm run build-snapshot` verifies the factory mirror, typecheck and plugin tests, builds the content-hashed snapshot, and prints the install/rollback commands (install and prune deletion only with `--confirm`).
 
 ## 0.0.0 – initial import
 

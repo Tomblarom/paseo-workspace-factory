@@ -161,7 +161,7 @@ Small, each independently verifiable (`npm run typecheck`, install/reload on a t
 - Tests: pure logic (`shared/factory-args.ts`, `shared/preview.ts`, `shared/settings-validate.ts`) runs under `node --test` with type stripping; the root script passes `--experimental-strip-types` so Node 22.6+ works too.
 - Optional scope address: every `/factory` subcommand resolves the scope of the current workspace when no address is given (server-side, same resolution as the CLI). A workspace without a scope gets a clear error plus the adopting `plan` call. `scopes`/`cleanup` report on the whole instance and take no address.
 - Worker guard: the slash command and the four Command Center entries use agent context and reject workers at runtime (parented or `wsf.role=worker`); Paseo shows the refusal as a toast. One extra workspace entry ("Factory: Panel öffnen") keeps the panel reachable from drafts. Tradeoff: the command stays in autocomplete everywhere (the API has no visibility predicate) and is unavailable in drafts. Upstream proposal: an `isAvailable(context)` predicate for `addSlashCommand` (and Command Center items).
-- Release snapshots are documented, not scripted: the four commands in "Update flow" are explicit and auditable; a script would only hide the `remove` step that wipes settings.
+- Release snapshots are scripted (M5) but never auto-installed: `npm run build-snapshot` verifies the mirror, typecheck and plugin tests, builds the content-hashed snapshot, and prints the `remove`/`install`/rollback commands for explicit execution, so the settings-wiping `remove` step stays visible; installation and prune deletion only happen with `--confirm`.
 
 ## Notification suppression for workers: research
 
@@ -203,12 +203,11 @@ The plugin side of [supervision](supervision-design.md): `server/supervise.ts` (
 
 ## Update flow
 
-The live instance runs a snapshot install: a content-hashed copy of the plugin sources under `<releases-dir>/workspace-factory-<hash>`, installed with id `workspace-factory`. To ship a new snapshot (decided by the user, never automatically):
+The live instance runs a snapshot install: a content-hashed copy of the plugin sources under `<releases-dir>/workspace-factory-<hash12>`, installed with id `workspace-factory`. To ship a new snapshot (decided by the user, never automatically), run from the repo root:
 
-1. `node scripts/plugin-sync.mjs` (repo root) to refresh `plugin/server/factory/`, then `cd plugin && npm run typecheck` and `node --test test/*.mjs`.
-2. Copy exactly this subset to a new snapshot directory whose name carries a content hash, e.g. `workspace-factory-<hash12>`: `paseo-plugin.json`, `OVERVIEW.md`, `package.json`, `tsconfig.json`, `index.client.tsx`, `index.server.ts`, `client/`, `server/`, `shared/`. No `node_modules`, no `test/`, no lockfile. Hash the snapshot contents, e.g. `find <snapshot> -type f | sort | xargs sha256sum | sha256sum`, and name the directory with the short hash.
-3. `paseo plugin remove workspace-factory`, then `paseo plugin install <snapshot>` (an already installed id is rejected, so remove first). Warning: removing deletes the installation's settings; note the slots/profiles first and re-enter them afterwards.
-4. Verify with `paseo plugin ls` (status `running`) and `paseo plugin logs workspace-factory` (clean start, `Plugin ready`); `/factory ping` answers; delete the old snapshot; reload the app.
+1. `npm run build-snapshot` (`scripts/build-snapshot.mjs`). It fails when `plugin/server/factory/` is stale (re-run `npm run plugin:sync` first), then runs `npm run typecheck` and the plugin tests in `plugin/`, then builds the snapshot: a copy of `plugin/` without `node_modules`, `package-lock.json` and `test/` under `<releases>/workspace-factory-<hash12>` (default releases dir `~/projects/paseo/releases`, `--out-dir` overrides it). hash12 is the first 12 hex chars of sha256 over the sorted file list with file hashes, so identical content gives an identical directory and rebuilding is a no-op.
+2. The script prints the exact install commands and the rollback command (previous snapshot from `paseo plugin ls --json`, text fallback) and never installs by default. Run the printed `paseo plugin remove workspace-factory` and `paseo plugin install <snapshot>` yourself (an already installed id is rejected, so remove first). Warning: removing deletes the installation's settings; note the slots/profiles first and re-enter them afterwards. Scripted installation exists only as `npm run build-snapshot -- --install --confirm <hash12>` naming the built hash.
+3. Verify with `paseo plugin ls` (status `running`) and `paseo plugin logs workspace-factory` (clean start, `Plugin ready`); `/factory ping` answers; reload the app. Old snapshots: `npm run build-snapshot -- --prune` previews the cleanup (keeps the installed and the previous snapshot); files are deleted only with `--prune --confirm`.
 
 Never edit Paseo state files directly.
 
