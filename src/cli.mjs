@@ -764,6 +764,16 @@ async function runModelCommand({ command, args, values, config, configPath, clie
         entries = discovery.providers ?? [];
         const priv = discovery.github?.fork?.repo?.private;
         repoPublic = priv === false ? true : priv === true ? false : null;
+        // Worktree scopes (owner/repo@branch) carry no fork info of their own: resolve visibility via the parent repo.
+        const parentAddress = typeof scopeAddress === 'string' ? scopeAddress.split('@')[0] : null;
+        if (repoPublic === null && parentAddress && parentAddress !== scopeAddress) {
+          try {
+            const { entry: parentEntry } = resolveTargetEntry(parentAddress, paseoState);
+            const [parent] = await runner.discoverAll([parentEntry]);
+            const parentPriv = parent?.github?.fork?.repo?.private;
+            repoPublic = parentPriv === false ? true : parentPriv === true ? false : null;
+          } catch { /* unknown stays unknown (fail-closed) */ }
+        }
       } else {
         if (values.failed !== undefined) throw new Error('worker pick --failed needs a scope so the failure can be recorded');
         entries = await catalog();
