@@ -740,7 +740,7 @@ export function FactorySettings({ theme, layout }: PluginSurfaceProps) {
           {displayState.status === "ready" ? (
             <SettingsSwitch
               label="Show CHECKPOINT blocks in chat"
-              hint="The model still writes the full CHECKPOINT block; only the chat display is shortened to one line. This saves no model tokens. Shortened answers render as plain text."
+              hint="Turn off to show a checkmark and short title in place of the full CHECKPOINT block. The model still writes the full block."
               value={displayState.values.checkpointInChat}
               disabled={displayState.saving}
               onValueChange={(next) => void toggleDisplay(next)}

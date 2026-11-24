@@ -58,14 +58,14 @@ export const transformCheckpointMessage: PluginTimelineTransformerContribution<"
     if (phase !== "complete") return undefined;
     if (checkpointInChat) return undefined;
     const shortened = shortenCheckpoint(item.text);
-    if (shortened === item.text) return undefined;
+    if (!shortened) return undefined;
     return {
       items: [
         {
           type: "plugin",
           kind: "factory-checkpoint",
           version: 1,
-          data: { text: shortened },
+          data: shortened,
         },
       ],
     };

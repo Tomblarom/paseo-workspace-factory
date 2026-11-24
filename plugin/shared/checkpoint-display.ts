@@ -21,12 +21,11 @@ function clip(value: string, max: number): string {
 }
 
 /**
- * Replaces the CHECKPOINT block (the last one the parser would read) with a
- * single summary line; returns the input unchanged when there is no valid
- * block. Only the block span is replaced, everything else stays identical.
+ * Extracts a short title for the last CHECKPOINT and preserves the Markdown
+ * on either side. Returns null when there is no valid block to replace.
  */
-export function shortenCheckpoint(text: string): string {
-  if (typeof text !== "string" || !/checkpoint/i.test(text)) return text;
+export function shortenCheckpoint(text: string): { before: string; summary: string; after: string } | null {
+  if (typeof text !== "string" || !/checkpoint/i.test(text)) return null;
   const lines = text.split("\n");
   let start = -1;
   for (let i = lines.length - 1; i >= 0; i -= 1) {
@@ -35,7 +34,7 @@ export function shortenCheckpoint(text: string): string {
       break;
     }
   }
-  if (start < 0) return text;
+  if (start < 0) return null;
   // Track fence pairs so a bare opener is accepted and the end of the
   // previous code sample cannot be mistaken for the checkpoint opener.
   let open = -1;
@@ -57,7 +56,7 @@ export function shortenCheckpoint(text: string): string {
     }
   }
   const fenced = open === start - 1 && close > start;
-  if (open >= 0 && !fenced) return text;
+  if (open >= 0 && !fenced) return null;
 
   const fields: Record<string, string> = {};
   let lastField = -1;
@@ -77,14 +76,14 @@ export function shortenCheckpoint(text: string): string {
     if (line.trim() === "") continue;
     if (!fenced) break;
   }
-  if (!fields.task) return text;
+  if (!fields.task) return null;
   const next = fields.next && !NONE.test(fields.next) ? fields.next : null;
   const status =
     fields.status && STATUS.test(fields.status.trim()) ? fields.status.trim().toLowerCase() : null;
   const summary = clip(oneLine(next ?? status ?? fields.task), SUMMARY_MAX);
-  return [
-    ...lines.slice(0, fenced ? open : start),
-    `✓ Checkpoint gespeichert · ${summary}`,
-    ...lines.slice((fenced ? close : lastField) + 1),
-  ].join("\n");
+  return {
+    before: lines.slice(0, fenced ? open : start).join("\n"),
+    summary,
+    after: lines.slice((fenced ? close : lastField) + 1).join("\n"),
+  };
 }

@@ -10,10 +10,10 @@ register("./ts-resolve-hooks.mjs", import.meta.url);
 const { shortenCheckpoint } = await import("../shared/checkpoint-display.ts");
 const display = await import("../client/checkpoint-display.ts");
 
-const PREFIX = "✓ Checkpoint gespeichert · ";
+const MARKDOWN = "Done with the **feature**. See [the code](./src/steer.mjs).";
 
 const FULL = [
-  "Done with the feature.",
+  MARKDOWN,
   "",
   "```text",
   "CHECKPOINT",
@@ -25,105 +25,85 @@ const FULL = [
   "```",
 ].join("\n");
 
-test("shortenCheckpoint replaces a full fenced block with one line", () => {
-  assert.equal(shortenCheckpoint(FULL), `Done with the feature.\n\n${PREFIX}Release tomorrow`);
+test("shortenCheckpoint keeps the surrounding Markdown and extracts a title", () => {
+  assert.deepEqual(shortenCheckpoint(FULL), {
+    before: `${MARKDOWN}\n`,
+    summary: "Release tomorrow",
+    after: "",
+  });
 });
 
 test("shortenCheckpoint accepts the ## CHECKPOINT variant", () => {
   const text = ["# Update", "", "## CHECKPOINT", "task: Fix login", "next: Deploy"].join("\n");
-  assert.equal(shortenCheckpoint(text), `# Update\n\n${PREFIX}Deploy`);
+  assert.deepEqual(shortenCheckpoint(text), {
+    before: "# Update\n",
+    summary: "Deploy",
+    after: "",
+  });
 });
 
 test("shortenCheckpoint accepts the **CHECKPOINT** variant", () => {
   const text = ["**CHECKPOINT**", "task: t", "status: blocked"].join("\n");
-  assert.equal(shortenCheckpoint(text), `${PREFIX}blocked`);
+  assert.equal(shortenCheckpoint(text).summary, "blocked");
 });
 
 test("shortenCheckpoint accepts a bare CHECKPOINT header", () => {
   const text = ["CHECKPOINT", "task: t", "next: n"].join("\n");
-  assert.equal(shortenCheckpoint(text), `${PREFIX}n`);
+  assert.deepEqual(shortenCheckpoint(text), { before: "", summary: "n", after: "" });
 });
 
 test("shortenCheckpoint leaves messages without a block untouched", () => {
   const text = "Just a message\nwith `code` and no checkpoint.";
-  assert.equal(shortenCheckpoint(text), text);
+  assert.equal(shortenCheckpoint(text), null);
 });
 
 test("shortenCheckpoint leaves other fences untouched", () => {
+  const before = ["Here is code:", "```js", "const x = 1;", "```", ""].join("\n");
+  const after = ["", "More code:", "```py", "print(1)", "```"].join("\n");
   const text = [
-    "Here is code:",
-    "```js",
-    "const x = 1;",
-    "```",
-    "",
-    "```text",
-    "CHECKPOINT",
-    "task: Ship it",
-    "next: Release",
-    "```",
-    "",
-    "More code:",
-    "```py",
-    "print(1)",
-    "```",
+    before, "```text", "CHECKPOINT", "task: Ship it", "next: Release", "```", after,
   ].join("\n");
-  assert.equal(
-    shortenCheckpoint(text),
-    [
-      "Here is code:",
-      "```js",
-      "const x = 1;",
-      "```",
-      "",
-      `${PREFIX}Release`,
-      "",
-      "More code:",
-      "```py",
-      "print(1)",
-      "```",
-    ].join("\n"),
-  );
+  assert.deepEqual(shortenCheckpoint(text), { before, summary: "Release", after });
 });
 
 test("shortenCheckpoint removes a bare fenced block with trailing metadata", () => {
+  const before = ["```js", "const x = 1;", "```", ""].join("\n");
   const text = [
-    "```js", "const x = 1;", "```", "", "```", "CHECKPOINT",
-    "task: Ship it", "next: Release", "workers: none", "git: clean", "```",
+    before, "```", "CHECKPOINT", "task: Ship it", "next: Release", "workers: none", "git: clean", "```",
   ].join("\n");
-  assert.equal(
-    shortenCheckpoint(text),
-    ["```js", "const x = 1;", "```", "", `${PREFIX}Release`].join("\n"),
-  );
+  assert.deepEqual(shortenCheckpoint(text), { before, summary: "Release", after: "" });
 });
 
 test("shortenCheckpoint leaves a malformed block untouched", () => {
   const fenced = ["```text", "CHECKPOINT", "next: Something", "```"].join("\n");
-  assert.equal(shortenCheckpoint(fenced), fenced);
+  assert.equal(shortenCheckpoint(fenced), null);
   const heading = ["## CHECKPOINT", "", "Some prose, not fields."].join("\n");
-  assert.equal(shortenCheckpoint(heading), heading);
+  assert.equal(shortenCheckpoint(heading), null);
 });
 
 test("shortenCheckpoint keeps text after the block", () => {
-  const text = ["```text", "CHECKPOINT", "task: t", "next: n", "```", "", "Trailing stays."].join(
-    "\n",
-  );
-  assert.equal(shortenCheckpoint(text), `${PREFIX}n\n\nTrailing stays.`);
+  const text = ["```text", "CHECKPOINT", "task: t", "next: n", "```", "", "**Trailing** stays."].join("\n");
+  assert.deepEqual(shortenCheckpoint(text), {
+    before: "",
+    summary: "n",
+    after: "\n**Trailing** stays.",
+  });
 });
 
 test("shortenCheckpoint falls back from next=none to status, then task", () => {
   assert.equal(
-    shortenCheckpoint(["CHECKPOINT", "task: t", "next: none", "status: partial"].join("\n")),
-    `${PREFIX}partial`,
+    shortenCheckpoint(["CHECKPOINT", "task: t", "next: none", "status: partial"].join("\n")).summary,
+    "partial",
   );
-  assert.equal(shortenCheckpoint(["CHECKPOINT", "task: Only a task here"].join("\n")),
-    `${PREFIX}Only a task here`);
+  assert.equal(
+    shortenCheckpoint(["CHECKPOINT", "task: Only a task here"].join("\n")).summary,
+    "Only a task here",
+  );
 });
 
 test("shortenCheckpoint clips a long summary to about 60 chars", () => {
   const next = "Rewrite the entire authentication flow to support passkeys and hardware tokens";
-  const result = shortenCheckpoint(["CHECKPOINT", "task: t", `next: ${next}`].join("\n"));
-  assert.ok(result.startsWith(PREFIX));
-  const summary = result.slice(PREFIX.length);
+  const { summary } = shortenCheckpoint(["CHECKPOINT", "task: t", `next: ${next}`].join("\n"));
   assert.ok(!summary.includes("\n"));
   assert.ok(summary.length <= 61);
   assert.ok(summary.endsWith("…"));
@@ -162,7 +142,7 @@ test("transformer replaces a completed message holding a block", () => {
         type: "plugin",
         kind: "factory-checkpoint",
         version: 1,
-        data: { text: `Done with the feature.\n\n${PREFIX}Release tomorrow` },
+        data: { before: `${MARKDOWN}\n`, summary: "Release tomorrow", after: "" },
       },
     ],
   });
