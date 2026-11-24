@@ -141,6 +141,8 @@ Setting `resumeClear.providers`, default `["claude"]` (native `/clear` is verifi
 | claude | `/clear`, verify effect, brief | on `effectFailed`: brief without clearing, note "context not cleared" |
 | codex, copilot, muse | no clearing by default, brief only | opt-in per setting once a live check proves `/clear` or `/compact` for the provider; same effect verification protects |
 
+**Live check Codex (2026-11-24, scratch agent gpt-6.2-sol, Paseo 0.16.2):** `/clear` is not a native command for Codex. The model answered in prose ("treating your next message as a new task") and pretended to forget; the context was **not** cleared (input tokens rose from 20101 to 23050, the history stayed in the same thread). `/compact` is native: the timeline shows `[Compacted]` and the same agent and tab survive. Consequence: keep `resumeClear.providers` at `["claude"]`; for Codex steers use `/compact` (cache-warm) or `fresh` (new agent for the slot with the CHECKPOINT brief), never `/clear`.
+
 ### Attention pill (E5)
 
 New field `wsf.agents[id].needsResume = {reason, at}`, reasons `daemon-restart | limit | failed | cold` (`cold` comes from the existing C6 feed and gets no pill of its own). It is set by the boot check (steers that were `closed` or had an interrupted turn) and by the turn-hook on `failed` (limit/quota pattern in the failure text → `limit`, else `failed`), and cleared on verified resume or a successful normal turn.
