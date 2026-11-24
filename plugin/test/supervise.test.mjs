@@ -433,6 +433,24 @@ test("turn end maps CHECKPOINT status, advisor requests, and failures", async ()
   }
 });
 
+test("workers without wsf labels are identified by their worker metadata", async () => {
+  const world = makeWorld();
+  const { ws } = provisioned(world);
+  // Steers start workers with only the native parent label; runCreateAfter
+  // wrote the worker metadata, which must be enough for the turn-end hook.
+  const worker = addWorker(world, ws, {
+    labels: { "paseo.parent-agent-id": "steer-a" },
+    metadata: { [WORKER_METADATA_KEY]: { scopeId: REPO, startedBy: "A", epoch: 3, task: "t" } },
+  });
+  world.workspaces[0].metadata[WORKERS_KEY] = { [worker.id]: entry("running", "t") };
+  const result = await turnedOut(world, worker, { assistant: checkpointOf("t", "done") });
+  assert.equal(result.event, "checkpoint-done");
+  assert.equal(result.state, "done");
+  assert.notEqual(result.reason, "not-worker");
+  const unlabelled = addWorker(world, ws, { labels: {} });
+  assert.equal((await turnedOut(world, unlabelled, { assistant: checkpointOf("u", "done") })).reason, "not-worker");
+});
+
 test("all actionable outcomes wake immediately; simultaneous events debounce", async () => {
   const world = makeWorld();
   const { ws, steers } = provisioned(world);

@@ -378,6 +378,14 @@ export interface CreateAfterResult {
   metaWritten?: boolean;
 }
 
+/** Worker identity from the plugin's worker metadata (scope id), else null. */
+function workerIdentityFromMetadata(agent: any): { scopeId: string; role: string; slot: string | null } | null {
+  const meta = asRecord(agent?.metadata)?.[WORKER_METADATA_KEY];
+  if (!isWorkerMetadata(meta)) return null;
+  const scopeId = (meta as { scopeId?: unknown }).scopeId;
+  return typeof scopeId === "string" && scopeId ? { scopeId, role: "worker", slot: null } : null;
+}
+
 /**
  * Registers an agent started by a labelled steer of a scope (parent is a
  * steer with wsf.scope) in wsf.workers as running, and writes the immutable
@@ -672,7 +680,10 @@ export async function runWorkerTurnAfter(
   if (payload?.agent?.background === true) return { ok: true, action: "skipped", reason: "background" };
   const agent = await refreshAgent(paseo, agentId);
   if (!agent) return { ok: true, action: "skipped", reason: "gone" };
-  const identity = factoryIdentity(agent.labels ?? null);
+  // Workers started by a steer usually carry no wsf labels (only the native
+  // parent label); runCreateAfter registers them and writes the worker
+  // metadata with the scope id, so that metadata identifies them here too.
+  const identity = factoryIdentity(agent.labels ?? null) ?? workerIdentityFromMetadata(agent);
   const state: any = await readPaseoState(paseo);
   const scope = identity ? findScope(listScopes(state), identity.scopeId) : null;
   if (agent.archivedAt) {
