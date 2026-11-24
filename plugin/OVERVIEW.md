@@ -16,7 +16,7 @@ The optional idle cleanup shrinks cold agents automatically: mode `compact-warm`
 
 The plugin needs the factory config file on the daemon host, the same file the factory CLI reads. It also needs Paseo 0.16.2 or later on both the daemon and the app. The daemon host needs git, the gh CLI, the paseo CLI, flock, and Node 22 or later.
 
-Settings live under Settings, Plugins, Factory. The host section edits steer slots, the prepare list, the start steer, the worker default profile, and the profiles they use, with provider, model, thinking, and mode taken from the live provider catalog. The idle cleanup section holds the automation mode (default off), thresholds, providers, roles, and the clear acknowledgement. The chat display section holds one host-wide switch for CHECKPOINT blocks in chat: on (default) shows the full block, off shortens it to one summary line (display only, no token savings). The sidebar section notes that the entry is shown or hidden in Paseo's own sidebar settings.
+Settings live under Settings, Plugins, Factory. The host section edits steer slots, the prepare list, the start steer, the worker default profile, and the profiles they use, with provider, model, thinking, and mode taken from the live provider catalog. The idle cleanup section holds the automation mode (default off), thresholds, providers, roles, and the clear acknowledgement. The chat display section holds one host-wide switch for CHECKPOINT blocks in chat: on (default) shows the full block, off shortens it to one summary line (display only, no token savings).
 
 ## Capabilities and limits
 

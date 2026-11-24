@@ -763,15 +763,6 @@ export function FactorySettings({ theme, layout }: PluginSurfaceProps) {
           )}
         </SettingsCard>
       </SettingsSection>
-
-      <SettingsSection title="Sidebar">
-        <SettingsCard>
-          <SettingsRow
-            label="Sidebar entry"
-            hint="The Workspace Factory row is shown or hidden in Paseo's own sidebar settings."
-          />
-        </SettingsCard>
-      </SettingsSection>
     </View>
   );
 }
