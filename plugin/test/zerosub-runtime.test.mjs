@@ -52,6 +52,7 @@ test("parse normalizes a switch row and tolerates sparse data", () => {
     from: "acc-old",
     to: "acc-new",
     toFamily: null,
+    toProvider: null,
     at: "2026-11-24T11:59:00.000Z",
     reason: "limit",
     outcome: "switched",
