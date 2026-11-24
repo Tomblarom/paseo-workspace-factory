@@ -82,9 +82,11 @@ With the plugin installed, type `/factory help` in any steer chat. Normal use go
 | You want to … | Type |
 |---|---|
 | see who is active and what the task is | `/factory status` |
+| see all projects at a glance | `/factory scopes` |
 | preview setting up a project | `/factory plan <you>/<repo>` |
 | run a previewed plan | `/factory apply <hash>` |
 | hand over to Steer B | `/factory switch --to B`, then confirm in the panel |
+| save the checkpoint from the last answer | `/factory checkpoint --from-agent <id>`, then confirm in the panel |
 | restart your steer after a break | `/factory resume` (clears the chat, then shows task and next step) |
 | only read the status report | `/factory resume --brief` |
 | replace the active steer with a new agent | `/factory fresh`, then confirm in the panel |
@@ -120,7 +122,7 @@ Without a project name, commands use the workspace you are in. Every change show
 | Main workspace | The scope's home workspace in Paseo. |
 | Hub | An optional scope that coordinates other scopes (hands out tasks, manages models). Only for setups with many projects. |
 | Domain | A project that coordinates a group of related projects, e.g. one product made of several repositories. Sits between the hub and those projects. |
-| Epoch (shown as "round") | Handover counter. It goes up by one on every switch; previews made before a switch become invalid. |
+| Epoch | Handover counter. It goes up by one on every switch; previews made before a switch become invalid. |
 | Cold context | An agent idle for so long that its next message is expensive (the provider cache expired). |
 
 ## Typical workflows

@@ -2,7 +2,7 @@
 
 New to the factory? Start with [Getting started](getting-started.md); this page is the detailed reference.
 
-Status: pilot implemented in `plugin/` (built and typechecked, not installed).
+Status: implemented in `plugin/` (built, typechecked, installed as a snapshot).
 
 Scope: how the workspace factory (`src/`, ESM, Node `>=22`) could be driven from inside Paseo through the public plugin API: slash commands, plugin RPC, Command Center items, a settings screen, and (not available) agent tab order.
 
@@ -45,7 +45,7 @@ Design: register one `factory` command (single name, minimal collision surface) 
 
 This preserves the factory safety model (dry-run first, confirmed plan only; see [docs/concepts.md](concepts.md)): the hash is the confirmation token, and stage two never runs without stage one's stored artifact.
 
-Planned: inline output instead of the panel (E6). `onSubmit` opens the panel only when `args` is empty. For subcommands, errors are thrown and appear as error toasts (the only toast path in `onSubmit`; already used by the worker guard), while success appears as a short transient composer pill "Factory: \<one-liner\>" on the calling agent, with a popover for details (rendered from the existing `setFactoryResult` store, so the same renderers as the panel). The pill disappears after 60 s or on the next `/factory`. `resume` shows no success of its own; it becomes visible through the brief arriving in the timeline. Previews that need confirmation (`plan`, `switch --apply`, `checkpoint`, `fresh`, `apply`) still open the panel, because a button is needed. An agent answer as output (timeline renderer) is rejected: it would cost tokens in the agent context. `/factory resume` (clear plus brief, steers only) and `/factory resume --brief` (read-only brief, the old path) share this output model.
+Implemented: inline output instead of the panel (E6). `onSubmit` opens the panel only when `args` is empty. For subcommands, errors are thrown and appear as error toasts (the only toast path in `onSubmit`; already used by the worker guard), while success appears as a short transient composer pill "Factory: \<one-liner\>" on the calling agent, with a popover for details (rendered from the existing `setFactoryResult` store, so the same renderers as the panel). The pill disappears after 60 s or on the next `/factory`. `resume` shows no success of its own; it becomes visible through the brief arriving in the timeline. Previews that need confirmation (`plan`, `switch --apply`, `checkpoint`, `fresh`, `apply`) still open the panel, because a button is needed. An agent answer as output (timeline renderer) is rejected: it would cost tokens in the agent context. `/factory resume` (clear plus brief, steers only) and `/factory resume --brief` (read-only brief, the old path) share this output model.
 
 ## (b) Execution via plugin RPC; reusing the factory core
 
@@ -88,7 +88,7 @@ Settings are a first-class contribution ([reference](https://paseo.sh/docs/plugi
 
 Design:
 
-- One `host`-scope document for factory configuration subset: steer slots (`A`–`Z` → profile name), `prepare` list, `initialActive`, worker `defaultProfile`. Schema defaults must make `{}` parse into a complete document (define a single-steer-`A` default mirroring `config.example.json`).
+- `host`-scope documents for the factory configuration: `factory-config` (steer slots `A`–`Z` → profile name, `prepare` list, `initialActive`, worker `priority` list, profiles with advisor/sensitive flags, quota), plus `factory-cleanup`, `factory-resume` and `factory-supervision` for idle cleanup, resume and supervision. Schema defaults must make `{}` parse into a complete document (define a single-steer-`A` default mirroring `config.example.json`).
 - Catalog-backed selects via the handler/client `paseo.providers` API ([SDK](https://paseo.sh/docs/sdk/reference.md#clientproviders)): `snapshot()` (the factory already consumes `result.entries` in `readPaseoState`), `listModels`, `listModes`, `listFeatures`, `waitForReady`; reuse the `validateProfilesAgainstCatalog` logic for the same "not startable" conflicts the CLI reports.
 - Sidebar entry default off: `addSidebarHeaderItem`/`addSidebarFooterItem` take only `{ id, title, Component }` — there is no static default-hidden flag, and Settings → Sidebar reorder/hide is user-owned. The native way to default off is runtime registration: both add-functions "work after the entry returns" and return a remover, "the item appears and disappears without a reload" ([reference](https://paseo.sh/docs/plugins/reference.md#add-and-remove-items-at-runtime)). Drive that from a `device`-scope `sidebarVisible` setting defaulting to `false`, toggled from the settings screen. The settings stay reachable via the plugin row cog either way.
 - Optional follow-up (not in the first cut): a workspace row badge (`addWorkspaceRowBadgeItem`) showing the active steer per Main workspace row. Note these start visible with a Show-menu toggle.
@@ -114,7 +114,7 @@ Quoted rule for automation: "An automated tool must read the current value and g
 
 This task deliberately does neither: `pluginsEnabled` was not read for modification, not enabled, and nothing was installed. The `paseo plugin init` scaffold used for research lived in a throwaway directory under `/tmp` and was inspected only.
 
-## Proposed package shape
+## Package shape
 
 A plugin is its own package (`paseo-plugin.json` + `package.json` with a `files` list covering the entries and `client/`/`server/`/`shared/`). The smallest repo-local shape is a top-level `plugin/` directory installed from a directory path or via Git with a `:plugin` path suffix ([sources](https://paseo.sh/docs/plugins/reference.md#plugin-sources)):
 
@@ -154,7 +154,7 @@ Small, each independently verifiable (`npm run typecheck`, install/reload on a t
 ## Decisions
 
 - Core reuse: dev-time sync, no hand duplication. `npm run plugin:sync` (`scripts/plugin-sync.mjs`) copies `src/*.mjs` except the CLI entry to `plugin/server/factory/*.ts`, rewrites `.mjs` imports to `.js` for the TypeScript bundler resolution, and adds an `@ts-nocheck` banner. `src/` stays the single source of truth; re-run after `src/` changes. Rationale: the plugin compiler only bundles in-package files, and the scaffold typechecks `**/*.ts(x)` only, so `.ts` is the only documented shape; a daemon-side build copy from `../src` fails for Git `:plugin` installs where only the subdir is staged; an npm dependency needs a publish, a shrinkwrap, and npm on the daemon `PATH`; shelling out couples the plugin to an out-of-band binary install.
-- Config layering: the file stays the source of truth for `github`, `checkoutRoot`, `runtime`, and `knownLimits`; the host-scope settings document replaces slots, prepare, start steer, and worker default and overlays profiles per name. The server re-validates the merged config with the CLI validator. Settings edits never touch live steers; the panel shows profile drift per steer.
+- Config layering: the file stays the source of truth for `github`, `checkoutRoot`, `runtime`, and `knownLimits`; the host-scope settings document replaces slots, prepare, start steer, and the worker priority list and overlays profiles per name. The server re-validates the merged config with the CLI validator. Settings edits never touch live steers; the panel shows profile drift per steer.
 - Writes: `factory.apply` quotes the stored plan hash (stored authorization, same checks as the CLI); `factory.switch` and `factory.checkpoint` quote a preview fingerprint that the server recomputes from fresh state and refuses when stale. `/factory switch --apply` and `/factory checkpoint` only preview; the panel button confirms. RPC names stay lowercase with dots (`factory.switch.preview`).
 - Sidebar: device-scope `visible` defaulting to off, runtime add/remove; the entry ("Workspace Factory", with a resume counter for the active steer) opens the plugin settings page. Limit: sidebar props offer `openScreen` only — `openSettings(id)` exists solely on command contexts — so a dedicated screen hosts the same settings component. Startup sync reads the device document and stays hidden when unreadable.
 - Tab order: read-only recommendation only (steers A-Z, then workers); no layout manipulation, no state file edits.
@@ -162,17 +162,6 @@ Small, each independently verifiable (`npm run typecheck`, install/reload on a t
 - Optional scope address: every `/factory` subcommand resolves the scope of the current workspace when no address is given (server-side, same resolution as the CLI). A workspace without a scope gets a clear error plus the adopting `plan` call. `scopes`/`cleanup` report on the whole instance and take no address.
 - Worker guard: the slash command and the four Command Center entries use agent context and reject workers at runtime (parented or `wsf.role=worker`); Paseo shows the refusal as a toast. One extra workspace entry ("Factory: Panel öffnen") keeps the panel reachable from drafts. Tradeoff: the command stays in autocomplete everywhere (the API has no visibility predicate) and is unavailable in drafts. Upstream proposal: an `isAvailable(context)` predicate for `addSlashCommand` (and Command Center items).
 - Release snapshots are documented, not scripted: the four commands in "Update flow" are explicit and auditable; a script would only hide the `remove` step that wipes settings.
-
-## Update flow (release snapshots)
-
-The live instance runs a snapshot install: a content-hashed copy of the plugin sources under `<releases-dir>/workspace-factory-<hash>`, installed with id `workspace-factory`. To ship a new snapshot (decided by the user, never automatically):
-
-1. `npm run plugin:sync` (repo root) to refresh `plugin/server/factory/`.
-2. `npm run typecheck` in `plugin/`.
-3. Copy exactly this subset to the snapshot dir: `paseo-plugin.json`, `OVERVIEW.md`, `package.json`, `tsconfig.json`, `index.client.tsx`, `index.server.ts`, `client/`, `server/`, `shared/`. No `node_modules`, no `test/`, no lockfile.
-4. Hash the snapshot contents, e.g. `find <snapshot> -type f | sort | xargs sha256sum | sha256sum`, and name the directory with the short hash.
-5. Replace the install: `paseo plugin install <snapshot>` with an already installed id is rejected ("An existing installation ID is rejected", plugin reference), so run `paseo plugin remove workspace-factory` first. Warning: removing deletes the installation's settings; note the slots/profiles first and re-enter them afterwards.
-6. Verify: `paseo plugin ls` shows `running`, `paseo plugin logs workspace-factory` shows a clean start, `/factory ping` answers.
 
 ## Notification suppression for workers: research
 
@@ -204,20 +193,22 @@ Recommendation for C2-C6 stands as in [cold-context-resume.md](cold-context-resu
 The plugin side of [supervision](supervision-design.md): `server/supervise.ts` (hooks, wakes, watchdog, failover) reuses the S-A core through the synced factory copy (`server/factory/supervision.js`, single source `src/supervision.mjs`), never duplicating its rules; plugin-only text and scans (worker metadata, ADVISOR-REQUEST detection, archive hint, takeover requests, answered/busy/unanswered) live in `shared/supervise.ts`, where plain `node:test` reaches them.
 
 - `agent.create.after` registers agents started by a labelled scope steer as `running` and writes the immutable worker metadata (`wsf.worker`: scope id, starting steer, epoch, task excerpt); background agents are skipped.
-- A second `agent.turn.after` hook transitions supervised workers (CHECKPOINT status, ADVISOR-REQUEST, missing CHECKPOINT, failed/canceled) and wakes the steer that is active at send time: immediately for `blocked`/`interrupted`, batched every `batchMinutes` otherwise, queued during the quiet periods (drain flag, before the boot check). Archived workers lose their entry; steers, unassigned and background agents are ignored; `closed` agents stay supervised.
+- A second `agent.turn.after` hook transitions supervised workers (CHECKPOINT status, ADVISOR-REQUEST, missing CHECKPOINT, failed/canceled) and wakes the steer that is active at send time: immediately for every actionable outcome (debounced by `wakeDebounceSeconds`), queued during the quiet periods (drain flag, before the boot check). Archived workers lose their entry; steers, unassigned and background agents are ignored; `closed` agents stay supervised.
 - The boot check chains `handleBootFinished`: restart marks interrupt workers, then one combined wake per scope lists every interrupted worker.
-- `startSupervisionTimer` (60 s tick) flushes due batches and runs the watchdog every `watchdogMinutes`: backfill adopted workers without an entry, drop archived entries, reconcile restart marks that never got a turn.after (CLI drain marks `planned-restart`, then the daemon restarts), mark idle `running` workers `stale` (queued for the batch), and walk the failover chain on unanswered wakes (`answerMinutes`): next slot, then domain, then hub, each asked once with a takeover request (`switch --to <slot> --apply` for steers), logged as checkpoint source `failover`. A completed turn since the wake answers it; a still-running turn waits; anything else fails over.
+- `startSupervisionTimer` (10 s tick) flushes due wakes and runs the watchdog every `watchdogMinutes`: backfill adopted workers without an entry, drop archived entries, reconcile restart marks that never got a turn.after (CLI drain marks `planned-restart`, then the daemon restarts), mark idle `running` workers `stale` (wake debounced), and walk the failover chain on unanswered wakes (`answerMinutes`): next slot, then domain, then hub, each asked once with a takeover request (`switch --to <slot> --apply` for steers), logged as checkpoint source `failover`. A completed turn since the wake answers it; a still-running turn waits; anything else fails over.
 - No auto-archive: wakes carry an "archive accepted workers" hint listing done workers, and the steer archives per the standing rule. The plugin never calls `archive` and never wakes background agents. Open workers at `maxAutoResumes` continuations add an advisor hint (consult an advisor, then `domain:`/`hub:`).
-- Settings (`factory-supervision`, host scope): `enabled` (default on), `batchMinutes` 10, `watchdogMinutes` 15, `staleMinutes` 60, `answerMinutes` 10, `maxAutoResumes` 2. Off silences registration, wakes, and watchdog.
+- Settings (`factory-supervision`, host scope): `enabled` (default on), `wakeDebounceSeconds` (20), `batchMinutes` (0, compatibility), `watchdogMinutes` (15), `staleMinutes` (60), `answerMinutes` (10), `maxAutoResumes` (2). Off silences registration, wakes, and watchdog.
 - C5 feeds the register state into the cleanup decision and skips `running`/`blocked`/`interrupted` workers (`isSupervisionProtectedState`).
 - Limits: the CLI drain does not signal the plugin yet, so drain-quiet currently only engages when set (failover and flush take an explicit `draining` flag; tests cover it) — a drain marker is the follow-up. Like all plugin sends, wakes probably raise the normal attention (see Limits in the supervision design).
 
-## Update flow (installed plugin)
+## Update flow
 
-1. `node scripts/plugin-sync.mjs` (vendored core), then `cd plugin && npm run typecheck` and `node --test plugin/test/*.mjs`.
-2. Copy `plugin/` (without `node_modules`, `package-lock.json`) to a new snapshot directory whose name carries a content hash, e.g. `workspace-factory-<hash12>`.
-3. `paseo plugin remove workspace-factory`, then `paseo plugin install <snapshot>`.
-4. Verify with `paseo plugin ls` (status `running`) and `paseo plugin logs workspace-factory` (`Plugin ready`); delete the old snapshot; reload the app.
+The live instance runs a snapshot install: a content-hashed copy of the plugin sources under `<releases-dir>/workspace-factory-<hash>`, installed with id `workspace-factory`. To ship a new snapshot (decided by the user, never automatically):
+
+1. `node scripts/plugin-sync.mjs` (repo root) to refresh `plugin/server/factory/`, then `cd plugin && npm run typecheck` and `node --test test/*.mjs`.
+2. Copy exactly this subset to a new snapshot directory whose name carries a content hash, e.g. `workspace-factory-<hash12>`: `paseo-plugin.json`, `OVERVIEW.md`, `package.json`, `tsconfig.json`, `index.client.tsx`, `index.server.ts`, `client/`, `server/`, `shared/`. No `node_modules`, no `test/`, no lockfile. Hash the snapshot contents, e.g. `find <snapshot> -type f | sort | xargs sha256sum | sha256sum`, and name the directory with the short hash.
+3. `paseo plugin remove workspace-factory`, then `paseo plugin install <snapshot>` (an already installed id is rejected, so remove first). Warning: removing deletes the installation's settings; note the slots/profiles first and re-enter them afterwards.
+4. Verify with `paseo plugin ls` (status `running`) and `paseo plugin logs workspace-factory` (clean start, `Plugin ready`); `/factory ping` answers; delete the old snapshot; reload the app.
 
 Never edit Paseo state files directly.
 

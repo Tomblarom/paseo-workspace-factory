@@ -28,6 +28,13 @@
 - Instruction rule: steer/worker blocks and `AGENTS.md` require `resume` after a cleared context; optional Claude Code SessionStart hook (clear|compact) documented, host settings untouched.
 - Plugin idle cleanup (C5, default `off`; `clear`/`compact-warm`, re-check before sending, auto-off after a failed attempt), cold-context pill/panel (C6) and `/factory resume`.
 - Scope and hub docs: concepts (scope, hub, roles), configuration (kinds, addressing, alias) and the hub instruction block.
+- Scope domains: `plan <scope> --domain <id>` groups scopes under a coordinating domain scope (Hub → Domain → Child); `domain:` blockers escalate to the domain steer, `hub:` further to the hub.
+- Restart detection and `drain`: daemon restarts mark interrupted agents (`daemon-restart`, heuristic without the plugin); `drain` waits for a clean restart and marks leftovers `planned-restart` instead of killing turns.
+- Worker register and supervision: `workers` shows the `wsf.workers` register; the plugin wakes the active steer on worker outcomes, watches idle workers, and fails over to the next slot, domain or hub when a steer stalls.
+- `/factory resume` as the restart path: clears the steer's context and delivers the resume brief; a "Resume nötig" pill marks affected steers, and resuming on a non-active steer takes over coordination.
+- Priority model lists: `worker list/set/rm/pick` and `steer list/set/rm` manage ordered profiles with availability fallback (`slot set/rm`, `worker-default` deprecated); `model advisor/sensitive` flip the flags; advisor profiles never coordinate, sensitive profiles only get sanitized tasks on provably public repositories.
+- Quota pools and profile health: profiles share a quota pool (`pool`, `quota.warnPct/exhaustedPct`); exhausted pools are skipped with failover to another pool; `worker pick <scope> --failed <profile> --reason <text>` marks a profile unhealthy for 10 minutes.
+- Full `/factory` slash coverage: every CLI function is a `/factory` subcommand (`scopes`, `workers`, `models`, `drain`, `retire`, `worker|steer|model` …) with inline results and panel previews; plugin settings for model lists, cleanup, resume and supervision.
 
 ## 0.0.0 – initial import
 

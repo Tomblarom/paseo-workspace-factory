@@ -2,7 +2,7 @@
 
 New to the factory? Start with [Getting started](getting-started.md); this page is the detailed reference.
 
-Status: accepted (decisions F1–F4 below), implementation planned as packages S-A, S-B, S-C. Builds on restart detection and `drain` ([configuration](configuration.md#planned-restarts)) and on the cold-context work ([cold context](cold-context-resume.md)).
+Status: accepted (decisions F1–F4 below), implemented as packages S-A, S-B, S-C. Builds on restart detection and `drain` ([configuration](configuration.md#planned-restarts)) and on the cold-context work ([cold context](cold-context-resume.md)).
 
 ## Principle
 

@@ -169,11 +169,7 @@ A profile with `"advisor": true` marks its model as a second-opinion candidate f
 
 ## Quota pools
 
-Profiles belong to a quota pool named by `profiles.<name>.pool`, or by their
-provider when `pool` is omitted. A pool at `quota.exhaustedPct` is skipped by
-profile resolution. Briefs show a preferred different pool at
-`quota.warnPct`; configure at least two non-advisor steer pools to make that
-failover useful.
+Profiles belong to a quota pool named by `profiles.<name>.pool`, or by their provider when `pool` is omitted. A pool at `quota.exhaustedPct` is skipped by profile resolution. Briefs show a preferred different pool at `quota.warnPct`; configure at least two non-advisor steer pools to make that failover useful.
 
 ## Managing models from the CLI
 
@@ -247,12 +243,7 @@ A domain pointer (`scope.domain`) is not carried over; set it again with `plan <
 
 ## Planned restarts
 
-`drain [--timeout 10m] [--json]` waits until no factory agent is running, so a
-daemon restart kills no turn. Exit 0 means cleanly restartable; exit 2 means
-the timeout expired and the leftovers were marked `interrupted` with reason
-`planned-restart` (git snapshot, last answer tail, open-turn tracking cleared,
-so the post-restart boot check keeps the planned reason). `drain` never
-restarts anything itself.
+`drain [--timeout 10m] [--json]` waits until no factory agent is running, so a daemon restart kills no turn. Exit 0 means cleanly restartable; exit 2 means the timeout expired and the leftovers were marked `interrupted` with reason `planned-restart` (git snapshot, last answer tail, open-turn tracking cleared, so the post-restart boot check keeps the planned reason). `drain` never restarts anything itself.
 
 A restart script calls `drain` before `paseo daemon restart`:
 
@@ -272,8 +263,7 @@ else
 fi
 ```
 
-`status`, `scopes` and `resume` show the marks as
-`Agent <id> durch Neustart unterbrochen (planned-restart)`.
+`status`, `scopes` and `resume` show the marks as `Agent <id> durch Neustart unterbrochen (planned-restart)`.
 
 ## Live tests
 

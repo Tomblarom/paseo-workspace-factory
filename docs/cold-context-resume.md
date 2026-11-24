@@ -1,11 +1,10 @@
 # Cold context and interrupted agents — detailed plan
 
-For the provider-by-provider manual validation matrix, see
-[Provider live checks](provider-live-check.md).
+For the provider-by-provider manual validation matrix, see [Provider live checks](provider-live-check.md).
 
 New to the factory? Start with [Getting started](getting-started.md); this page is the detailed reference.
 
-Status: planned (TODO §10, C1–C7, R). "resume" below always means the **factory resume brief** (`paseo-factory resume`, `/factory resume --brief`), never Claude's own session resume (`claude --resume`, `/resume`). Section R adds `/factory resume` as the restart path: same brief, but the steer context is cleared first (claude).
+Status: C2–C6 and R implemented (see TODO §12); C1/C7 live checks still pending (need user approval for scratch agents). "resume" below always means the **factory resume brief** (`paseo-factory resume`, `/factory resume --brief`), never Claude's own session resume (`claude --resume`, `/resume`). Section R adds `/factory resume` as the restart path: same brief, but the steer context is cleared first (claude).
 
 ## Goal
 
