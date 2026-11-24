@@ -9,13 +9,15 @@ import { validScope } from './scope.mjs';
 import { continuedFromId, inheritContinuationLabels, resolveContinuations } from './zerosub.mjs';
 
 /**
- * Marker prefix on the active steer's tab title ("● Steer E"); the single
+ * Marker prefix on the active steer's tab title ("▷ Steer E"); the single
  * constant for it. Configurable per repository via `steers.activeMarker`
  * (empty disables the marker); see activeMarker().
  */
-const ACTIVE_STEER_MARKER = '●';
+const ACTIVE_STEER_MARKER = '▷';
+/** Earlier default markers: still stripped so existing tabs migrate without a doubled prefix. */
+const LEGACY_STEER_MARKERS = ['●'];
 
-/** Effective active-steer marker for a config: the default "●" unless `steers.activeMarker` overrides it (empty disables). */
+/** Effective active-steer marker for a config: the default "▷" unless `steers.activeMarker` overrides it (empty disables). */
 function activeMarker(config) {
   const value = config?.steers?.activeMarker;
   return value === undefined || value === null ? ACTIVE_STEER_MARKER : value;
@@ -23,8 +25,10 @@ function activeMarker(config) {
 
 /** Removes the leading "<marker> " prefix from a tab title (trims; idempotent). */
 function stripActiveMarker(title, marker = ACTIVE_STEER_MARKER) {
-  const trimmed = typeof title === 'string' ? title.trim() : '';
-  if (marker && trimmed.startsWith(marker)) return trimmed.slice(marker.length).replace(/^\s+/, '');
+  let trimmed = typeof title === 'string' ? title.trim() : '';
+  for (const prefix of [marker, ...LEGACY_STEER_MARKERS]) {
+    if (prefix && trimmed.startsWith(prefix)) trimmed = trimmed.slice(prefix.length).replace(/^\s+/, '');
+  }
   return trimmed;
 }
 
@@ -41,7 +45,7 @@ function markSteerTitle(title, marker = ACTIVE_STEER_MARKER) {
  * letter, so planner.mjs:300 (`match(STEER_TITLE)[1] === slot`) works unchanged.
  * A digit ("Steer 3") never matches here: it is only a digit candidate, never
  * auto-assigned (see STEER_DIGIT_TITLE). An optional leading run of symbol
- * characters (the active-steer marker, e.g. "● Steer E") is tolerated and
+ * characters (the active-steer marker, e.g. "▷ Steer E") is tolerated and
  * ignored; word characters never match there, so "My Steer A" still rejects.
  */
 const MARKER_PREFIX_PATTERN = String.raw`(?:[^\w\s]+\s+)?`;

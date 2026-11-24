@@ -298,6 +298,9 @@ test('switch handoff carries the brief only when interrupted', async () => {
   const dry = await runSwitch({ client: fakeClient(world), discovery: discoveryOf(world), toSlot: 'B', git: fakeGit({}), lock: noLock });
   assert.match(dry.packet, /Previous steer was interrupted at .*; verify git state before continuing\./);
   assert.match(dry.packet, /--- resume brief ---/);
+  assert.match(dry.packet, /epoch 4 · active steer B/);
+  assert.match(dry.packet, /You are the active steer of this scope/);
+  assert.doesNotMatch(dry.packet, /You are not active/);
   assert.match(dry.packet, /boom tail/);
   const clean = makeWorld();
   provisioned(clean, { checkpoint: { task: 't', epoch: 3 } });
@@ -316,6 +319,8 @@ test('fresh preview carries the brief when interrupted', async () => {
   const discovery = { ...discoveryOf(world), providers };
   const preview = await freshSteer({ client: fakeClient(world), discovery, config, git: fakeGit({}), lock: noLock });
   assert.match(preview.packet, /Previous steer was interrupted at .*; verify git state before continuing\./);
+  assert.match(preview.packet, /epoch 4 · active steer A \(new agent, created on apply\)/);
+  assert.match(preview.packet, /You are the active steer of this scope/);
   assert.match(preview.packet, /fresh tail/);
 });
 

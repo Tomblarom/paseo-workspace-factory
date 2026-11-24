@@ -185,9 +185,9 @@ export function CleanupSettingsSection({
           hint="Off only shows a \u201cKontext kalt\u201d hint on the agent; nothing is sent. Compact shrinks the chat shortly before the provider cache expires (one small model turn). Clear empties the chat (no model turn) and needs the confirmation below."
           value={draft.mode}
           options={[
-            { label: "Off \u2013 only show a hint (default)", value: "off" },
+            { label: "Off \u2013 only show a hint", value: "off" },
             { label: "Compact before the cache expires", value: "compact-warm" },
-            { label: "Clear the chat", value: "clear" },
+            { label: "Clear the chat (default)", value: "clear" },
           ]}
           onValueChange={(value) => update({ ...draft, mode: value })}
         />

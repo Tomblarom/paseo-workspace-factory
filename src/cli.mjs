@@ -17,7 +17,7 @@ import { AGENTS_KEY } from './agent-state.mjs';
 import { listScopes, resolveScope, domainFirstPlanOrder } from './scope.mjs';
 import { planLabelFixes, formatLabelFixes } from './labels.mjs';
 import { DRAIN_DEFAULT_TIMEOUT_MS, drain, parseTimeout } from './drain.mjs';
-import { assessWorker, readGitState } from './workers.mjs';
+import { assessWorker, readGitState, startScopedWorker } from './workers.mjs';
 import { formatWorkersText, readWorkers, workersReport } from './supervision.mjs';
 import { assignScope } from './assign.mjs';
 import { flagValue, formatCatalog, formatWorkerModel, parseProviderModel, paseoRunFlags, planAdvisorTag, planSensitiveTag, planSlotRemove, planSlotSet, planSteerRemove, planSteerSet, planWorkerDefault, planWorkerRemove, planWorkerSet, previewConfig, resolveProfile, steerFallbackList, writeConfigAtomic } from './models.mjs';
@@ -49,6 +49,7 @@ const USAGE = `Usage: paseo-factory <command> [options]
   worker set <n> <profile|provider/model> [--thinking X] [--mode Y] [--profile name] [--dry-run]
   worker rm <n> [--dry-run]
   worker pick [scope] [--json]         chosen worker profile plus paseo run flags
+  worker start [scope] --task <text> [--title <title>] [--apply]   start a worker from the active steer
   steer list [--json]                  slots in priority order with tags, availability, fallbacks
   steer set <n|slot> <profile|provider/model> [--thinking X] [--mode Y] [--profile name] [--dry-run]
   steer rm <n|slot> [--dry-run]
@@ -260,7 +261,7 @@ async function main() {
       main: { type: 'string' }, domain: { type: 'string' },
       thinking: { type: 'string' }, mode: { type: 'string' }, profile: { type: 'string' }, 'dry-run': { type: 'boolean' },
       candidates: { type: 'boolean' }, plan: { type: 'boolean' }, 'allow-destructive': { type: 'boolean' }, 'allow-ignored': { type: 'boolean' }, only: { type: 'string' },
-      timeout: { type: 'string' },
+      timeout: { type: 'string' }, title: { type: 'string' },
       failed: { type: 'string' }, reason: { type: 'string' },
     },
   });
@@ -747,9 +748,13 @@ async function runModelCommand({ command, args, values, config, configPath, clie
       const planned = planWorkerRemove(config, nArg);
       return writePlanned({ planned, configPath, dryRun });
     }
-    if (sub === 'pick') {
+    if (sub === 'pick' || sub === 'start') {
+      const starting = sub === 'start';
       const [scopeArg, ...extra] = rest;
-      if (extra.length) throw new Error('worker pick takes at most one scope');
+      if (extra.length) throw new Error(`worker ${sub} takes at most one scope`);
+      if (starting && !values.task?.trim()) throw new Error('worker start needs --task <text>');
+      if (starting && values.failed !== undefined) throw new Error('--failed is only accepted with worker pick');
+      if (starting && !process.env.PASEO_AGENT_ID) throw new Error('Run worker start from the active steer');
       if (values.failed !== undefined && !values.reason) throw new Error('worker pick --failed needs --reason <text>');
       if (values.reason !== undefined && values.failed === undefined) throw new Error('worker pick --reason needs --failed <profile>');
       let entries;
@@ -763,13 +768,14 @@ async function runModelCommand({ command, args, values, config, configPath, clie
       }
       if (scopeAddress) {
         paseoState ??= await readPaseoState(client);
-        const { entry: target } = resolveTargetEntry(scopeAddress, paseoState);
+        const { entry: target, scope } = resolveTargetEntry(scopeAddress, paseoState);
         [discovery] = await runner.discoverAll([target]);
         entries = discovery.providers ?? [];
         const priv = discovery.github?.fork?.repo?.private;
         repoPublic = priv === false ? true : priv === true ? false : null;
         // Worktree scopes (owner/repo@branch) carry no fork info of their own: resolve visibility via the parent repo.
-        const parentAddress = typeof scopeAddress === 'string' ? scopeAddress.split('@')[0] : null;
+        const parent = scope?.parent ?? discovery.scope?.parent;
+        const parentAddress = parent?.kind === 'github' ? parent.id : typeof parent === 'string' ? parent : scopeAddress.includes('@') ? scopeAddress.split('@')[0] : null;
         if (repoPublic === null && parentAddress && parentAddress !== scopeAddress) {
           try {
             const { entry: parentEntry } = resolveTargetEntry(parentAddress, paseoState);
@@ -779,6 +785,7 @@ async function runModelCommand({ command, args, values, config, configPath, clie
           } catch { /* unknown stays unknown (fail-closed) */ }
         }
       } else {
+        if (starting) throw new Error('worker start needs a Factory scope');
         if (values.failed !== undefined) throw new Error('worker pick --failed needs a scope so the failure can be recorded');
         entries = await catalog();
       }
@@ -796,6 +803,15 @@ async function runModelCommand({ command, args, values, config, configPath, clie
       if (!profile) {
         const tried = skipped.length ? skipped.map((s) => `"${s.name}" (${s.reason})`).join('; ') : 'no worker profiles configured';
         throw new Error(`No startable worker profile (tried ${tried})`);
+      }
+      if (starting) {
+        const result = await startScopedWorker({
+          client, status: steerStatus(discovery, { config }), callerId: process.env.PASEO_AGENT_ID,
+          profile, accountId: zerosubAccount, prompt: values.task, title: values.title, apply: Boolean(values.apply),
+        });
+        if (values.json) return console.log(JSON.stringify(result, null, 2));
+        if (result.agentId) return console.log(`Started worker ${result.agentId} (${result.provider}) in ${result.scope}`);
+        return console.log(`Dry-run: worker in ${result.scope} (${result.provider})${result.accountId ? ` · account ${result.accountId}` : ''}; add --apply to start`);
       }
       if (values.json) {
         return console.log(JSON.stringify({ profile: profile.name, provider: profile.provider, model: profile.model, thinking: profile.thinking ?? null, mode: profile.mode ?? null, sensitive: isSensitiveProfile(config, profile.name), flags: paseoRunFlags(profile), skipped, repoPublic, zerosubAccount: zerosubAccount ?? null }, null, 2));

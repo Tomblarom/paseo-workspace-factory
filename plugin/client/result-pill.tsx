@@ -24,6 +24,8 @@ const DISABLED_ACTIONS: FactoryResultActions = {
   confirmFresh: () => {},
   confirmRelocate: () => {},
   confirmAssign: () => {},
+  confirmLabels: () => {},
+  confirmSteerAdd: () => {},
 };
 
 /**

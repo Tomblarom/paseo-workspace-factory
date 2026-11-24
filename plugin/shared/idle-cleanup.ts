@@ -192,7 +192,7 @@ export interface CleanupSettings {
 
 /** Mirrors the defaults of the host-scope cleanup settings document. */
 export const CLEANUP_DEFAULTS: CleanupSettings = {
-  mode: "off",
+  mode: "clear",
   idleMinutes: 60,
   compactAtMinutes: 50,
   minContextTokens: 60000,

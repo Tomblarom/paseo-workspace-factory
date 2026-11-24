@@ -513,10 +513,11 @@ export function createExecutors({ client, gh, git, paseoCli, sleep = (ms) => new
     },
 
     async 'paseo.agent.create'(op) {
-      const { workspaceId, title, config: agentConfig, labels, idempotencyKey } = op.params;
+      const { workspaceId, title, config: agentConfig, labels, idempotencyKey, metadata } = op.params;
       if (!workspaceId || workspaceId === WORKSPACE_REF || typeof workspaceId !== 'string') throw new Error('Main workspace is not resolved yet');
       // Deliberately no `parent` and no `prompt`: a top-level steer without a first turn.
-      const handle = await client.workspaces.ref(workspaceId).agents.create({ config: agentConfig, title, labels, idempotencyKey });
+      // Optional `metadata` pins the agent (e.g. {"zerosub.account": id}, Paseo 0.16+).
+      const handle = await client.workspaces.ref(workspaceId).agents.create({ config: agentConfig, title, labels, idempotencyKey, ...(metadata ? { metadata } : {}) });
       const agent = (await handle.refresh())?.agent;
       verifySteer(agent, { workspaceId, labels });
       return { agentId: agent.id, parent: null };

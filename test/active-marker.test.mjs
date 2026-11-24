@@ -1,4 +1,4 @@
-// Active-steer tab marker ("● Steer E"): title parsing tolerates the prefix,
+// Active-steer tab marker ("▷ Steer E"): title parsing tolerates the prefix,
 // switch --apply / fresh move it via `paseo agent update --name`. Fakes only.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -92,35 +92,36 @@ const testLock = (name, fn) => withLock(name, fn, { dir: LOCK_TMP });
 // ---------------------------------------------------------------- parsing
 
 test('marker: STEER_TITLE tolerates the marker prefix, group 1 stays the slot', () => {
-  assert.equal(ACTIVE_STEER_MARKER, '●');
+  assert.equal(ACTIVE_STEER_MARKER, '▷');
   for (const [title, slot] of [
-    ['● Steer E', 'E'], ['● Steer A [kn]', 'A'], ['● Steer A (kn)', 'A'], ['● Steer A · fp', 'A'],
-    ['● steer b', 'B'], ['● STEER C - x', 'C'], ['* Steer D', 'D'],
+    ['▷ Steer E', 'E'], ['▷ Steer A [kn]', 'A'], ['▷ Steer A (kn)', 'A'], ['▷ Steer A · fp', 'A'],
+    ['▷ steer b', 'B'], ['▷ STEER C - x', 'C'], ['* Steer D', 'D'],
   ]) {
     assert.equal(STEER_TITLE.test(title), true, title);
     assert.equal(title.match(STEER_TITLE)[1], slot, title);
   }
-  for (const title of ['Steer 3', 'Steer AB', 'Steer A foo', 'Steer', 'Assistant', 'My Steer A', '9 Steer A', '● Steer', '● Assistant']) {
+  for (const title of ['Steer 3', 'Steer AB', 'Steer A foo', 'Steer', 'Assistant', 'My Steer A', '9 Steer A', '▷ Steer', '▷ Assistant']) {
     assert.equal(STEER_TITLE.test(title), false, title);
     assert.equal(title.match(STEER_TITLE), null, title);
   }
 });
 
 test('marker: STEER_DIGIT_TITLE tolerates the marker prefix too', () => {
-  for (const title of ['● Steer 3', '● Steer 30 · y']) assert.equal(STEER_DIGIT_TITLE.test(title), true, title);
-  assert.equal(STEER_DIGIT_TITLE.test('● Steer E'), false);
+  for (const title of ['▷ Steer 3', '▷ Steer 30 · y']) assert.equal(STEER_DIGIT_TITLE.test(title), true, title);
+  assert.equal(STEER_DIGIT_TITLE.test('▷ Steer E'), false);
 });
 
 test('marker: helpers are idempotent and the config default disables with empty', () => {
-  assert.equal(activeMarker(null), '●');
-  assert.equal(activeMarker(CONFIG), '●');
+  assert.equal(activeMarker(null), '▷');
+  assert.equal(activeMarker(CONFIG), '▷');
   assert.equal(activeMarker({ steers: { activeMarker: '▶' } }), '▶');
   assert.equal(activeMarker({ steers: { activeMarker: '' } }), '');
-  assert.equal(markSteerTitle('Steer A'), '● Steer A');
-  assert.equal(markSteerTitle('● Steer A'), '● Steer A');
-  assert.equal(markSteerTitle('Steer A [kn]'), '● Steer A [kn]');
-  assert.equal(stripActiveMarker('● Steer A'), 'Steer A');
-  assert.equal(stripActiveMarker('● Steer A'), 'Steer A');
+  assert.equal(markSteerTitle('Steer A'), '▷ Steer A');
+  assert.equal(markSteerTitle('▷ Steer A'), '▷ Steer A');
+  assert.equal(markSteerTitle('Steer A [kn]'), '▷ Steer A [kn]');
+  assert.equal(stripActiveMarker('▷ Steer A'), 'Steer A');
+  assert.equal(stripActiveMarker('● Steer A'), 'Steer A'); // legacy marker
+  assert.equal(markSteerTitle('● Steer A'), '▷ Steer A');
   assert.equal(stripActiveMarker('Steer A'), 'Steer A');
   assert.equal(markSteerTitle('Steer A', ''), 'Steer A');
   assert.equal(markSteerTitle('Steer A', '▶'), '▶ Steer A');
@@ -138,7 +139,7 @@ test('marker: steers.activeMarker validates as an optional string', () => {
 
 test('marker: switch --apply marks the new active steer and unmarks the old one', async () => {
   const world = makeWorld();
-  const { steers } = provisioned(world, { A: '● Steer A' });
+  const { steers } = provisioned(world, { A: '▷ Steer A' });
   const result = await switchSteer({
     client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG,
     toSlot: 'B', apply: true, send: false, lock: testLock, paseoCli: fakePaseoCli(world),
@@ -146,14 +147,14 @@ test('marker: switch --apply marks the new active steer and unmarks the old one'
   assert.equal(result.applied, true);
   assert.equal(result.renameError, null);
   assert.deepEqual(world.cli, [
-    ['agent', 'update', steers.B.id, '--name', '● Steer B'],
+    ['agent', 'update', steers.B.id, '--name', '▷ Steer B'],
     ['agent', 'update', steers.A.id, '--name', 'Steer A'],
   ]);
 });
 
 test('marker: switch skips renames that are already correct and stays silent without a CLI', async () => {
   const world = makeWorld();
-  provisioned(world, { A: '● Steer A' });
+  provisioned(world, { A: '▷ Steer A' });
   const dry = await switchSteer({
     client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG,
     toSlot: 'B', apply: false, lock: testLock, paseoCli: fakePaseoCli(world),
@@ -162,7 +163,7 @@ test('marker: switch skips renames that are already correct and stays silent wit
   assert.deepEqual(world.cli, [], 'dry-run renames nothing');
 
   const world2 = makeWorld();
-  provisioned(world2, { A: '● Steer A' });
+  provisioned(world2, { A: '▷ Steer A' });
   const silent = await switchSteer({
     client: fakeClient(world2), discovery: discoveryOf(world2), config: CONFIG,
     toSlot: 'B', apply: true, send: false, lock: testLock,
@@ -172,7 +173,7 @@ test('marker: switch skips renames that are already correct and stays silent wit
   assert.deepEqual(world2.cli, [], 'no paseoCli means no rename');
 
   const world3 = makeWorld();
-  const { steers } = provisioned(world3, { A: '● Steer A', B: '● Steer B' });
+  const { steers } = provisioned(world3, { A: '▷ Steer A', B: '▷ Steer B' });
   const partial = await switchSteer({
     client: fakeClient(world3), discovery: discoveryOf(world3), config: CONFIG,
     toSlot: 'B', apply: true, send: false, lock: testLock, paseoCli: fakePaseoCli(world3),
@@ -183,7 +184,7 @@ test('marker: switch skips renames that are already correct and stays silent wit
 
 test('marker: switch records rename failures but the switch stands', async () => {
   const world = makeWorld();
-  provisioned(world, { A: '● Steer A' });
+  provisioned(world, { A: '▷ Steer A' });
   const result = await switchSteer({
     client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG,
     toSlot: 'B', apply: true, send: false, lock: testLock, paseoCli: fakePaseoCli(world, { fail: true }),
@@ -195,7 +196,7 @@ test('marker: switch records rename failures but the switch stands', async () =>
 
 test('marker: switch with a disabled marker renames nothing', async () => {
   const world = makeWorld();
-  provisioned(world, { A: '● Steer A' });
+  provisioned(world, { A: '▷ Steer A' });
   const config = { ...CONFIG, steers: { ...CONFIG.steers, activeMarker: '' } };
   const result = await switchSteer({
     client: fakeClient(world), discovery: discoveryOf(world), config,
@@ -210,7 +211,7 @@ test('marker: switch with a disabled marker renames nothing', async () => {
 
 test('marker: fresh creates the new steer marked and unmarks the retired one', async () => {
   const world = makeWorld();
-  const { steers } = provisioned(world, { A: '● Steer A' });
+  const { steers } = provisioned(world, { A: '▷ Steer A' });
   const result = await freshSteer({
     client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG,
     apply: true, lock: testLock, lookupReceipt: async () => null, language: 'en', paseoCli: fakePaseoCli(world),
@@ -218,7 +219,7 @@ test('marker: fresh creates the new steer marked and unmarks the retired one', a
   assert.equal(result.applied, true);
   assert.equal(result.renameError, null);
   const created = world.agents.find((a) => a.id === result.to);
-  assert.equal(created.title, '● Steer A');
+  assert.equal(created.title, '▷ Steer A');
   assert.deepEqual(world.cli, [['agent', 'update', steers.A.id, '--name', 'Steer A']]);
 });
 
@@ -238,10 +239,10 @@ test('marker: fresh with a disabled marker creates plain titles and renames noth
 // ---------------------------------------------------------------- helper
 
 test('marker: applyActiveMarker never throws and skips same-agent pairs', () => {
-  assert.equal(applyActiveMarker({ paseoCli: null, marker: '●', mark: { id: 'a' }, unmark: null }), null);
+  assert.equal(applyActiveMarker({ paseoCli: null, marker: '▷', mark: { id: 'a' }, unmark: null }), null);
   assert.equal(applyActiveMarker({ paseoCli: () => { throw new Error('boom'); }, marker: '', mark: { id: 'a' }, unmark: null }), null);
   const err = applyActiveMarker({
-    paseoCli: () => { throw new Error('boom'); }, marker: '●',
+    paseoCli: () => { throw new Error('boom'); }, marker: '▷',
     mark: { id: 'a', title: 'Steer A', slot: 'A' }, unmark: { id: 'a', title: 'Steer A', slot: 'A' },
   });
   assert.equal(err, 'boom');

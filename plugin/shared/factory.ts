@@ -106,6 +106,18 @@ export const factoryPlan = defineRpc({
     allowFork: z.boolean().optional(),
     slots: z.array(z.string()).optional(),
     adopt: z.record(z.string(), z.string()).optional(),
+    adoptScoped: z.record(z.string(), z.record(z.string(), z.string())).optional(),
+    local: z.array(z.string().min(1)).max(20).optional(),
+    hub: z.array(z.string().min(1)).max(20).optional(),
+    checkout: z.string().min(1).optional(),
+    name: z.string().min(1).optional(),
+    subject: z.string().min(1).optional(),
+    main: z.string().min(1).optional(),
+    domain: z.string().max(200).optional(),
+    adoptWorker: z.record(z.string(), z.string().nullable()).optional(),
+    detach: z.boolean().optional(),
+    retitle: z.boolean().optional(),
+    renameProject: z.string().min(1).optional(),
   }),
   output: z.looseObject({
     hash: z.string(),
@@ -436,6 +448,7 @@ export const factoryWorkerPick = defineRpc({
     mode: z.string().nullable(),
     sensitive: z.boolean(),
     flags: z.string(),
+    zerosubAccount: z.string().nullable(),
     skipped: z.unknown(),
     text: z.string(),
   }),
@@ -578,5 +591,111 @@ export const factoryQuota = defineRpc({
         pool: z.string(),
       }),
     ),
+  }),
+});
+
+const labelRow = z.looseObject({
+  agentId: z.string(),
+  title: z.string().nullable(),
+  workspaceId: z.string().nullable(),
+  scope: z.string().nullable(),
+  kind: z.string().nullable(),
+  slot: z.string().nullable(),
+  owner: z.string().nullable(),
+  labels: z.record(z.string(), z.string()),
+  was: z.record(z.string(), z.string().nullable()),
+  migrate: z.array(z.string()),
+  note: z.string().nullable(),
+});
+
+// Label audit over the whole instance, one scope, or one agent (read-only).
+// Without an address every project is audited, like the CLI `labels`.
+export const factoryLabelsPreview = defineRpc({
+  name: "factory.labels.preview",
+  input: z.object({
+    address: z.string().min(1).optional(),
+  }),
+  output: z.looseObject({
+    address: z.string().nullable(),
+    rows: z.array(labelRow),
+    fixable: z.number(),
+    text: z.string(),
+    fingerprint: z.string(),
+  }),
+});
+
+// Sets the previewed labels; the server recomputes the audit from fresh state
+// and refuses the write when the fingerprint no longer matches.
+export const factoryLabels = defineRpc({
+  name: "factory.labels",
+  input: z.object({
+    address: z.string().min(1).optional(),
+    fingerprint: z.string().min(1),
+  }),
+  output: z.looseObject({
+    address: z.string().nullable(),
+    rows: z.array(labelRow),
+    applied: z.array(z.unknown()),
+    text: z.string(),
+  }),
+});
+
+const steerAddArgs = {
+  repo: z.string().min(1).optional(),
+  workspaceId: z.string().min(1).optional(),
+  slot: z.string().min(1).max(2).optional(),
+  spec: z.string().min(1).optional(),
+  thinking: z.string().optional(),
+  mode: z.string().optional(),
+  profile: z.string().min(1).optional(),
+};
+
+// Steer-add preview for the current scope (read-only): the slot, profile and
+// ZeroSub account the apply would use, the new settings document (unsaved)
+// and the fingerprint the apply must quote. Writes nothing.
+export const factorySteerAddPreview = defineRpc({
+  name: "factory.steer.add.preview",
+  input: z.object(steerAddArgs),
+  output: z.looseObject({
+    scope: z.string(),
+    repo: z.string(),
+    workspaceId: z.string(),
+    slot: z.string(),
+    profile: z.string().nullable(),
+    provider: z.string().nullable(),
+    model: z.string().nullable(),
+    advisor: z.boolean(),
+    account: z.string().nullable(),
+    skipped: z.array(z.unknown()),
+    earliestReset: z.string().nullable(),
+    summary: z.string(),
+    notes: z.array(z.string()),
+    warnings: z.array(z.string()),
+    text: z.string(),
+    fingerprint: z.string().nullable(),
+    revision: z.string(),
+    values: z.unknown(),
+  }),
+});
+
+// Creates the previewed steer; the server recomputes the preview from fresh
+// state and refuses the write when the fingerprint no longer matches. The
+// client saves `values` through the settings RPC first (guarded by
+// `revision`), so a retry converges: a configured-but-unprovisioned slot
+// provisions, a live-occupied slot returns the existing agent.
+export const factorySteerAdd = defineRpc({
+  name: "factory.steer.add",
+  input: z.object({ ...steerAddArgs, fingerprint: z.string().min(1) }),
+  output: z.looseObject({
+    scope: z.string(),
+    slot: z.string(),
+    agentId: z.string(),
+    profile: z.string(),
+    provider: z.string(),
+    model: z.string(),
+    account: z.string().nullable(),
+    applied: z.boolean(),
+    reused: z.boolean().optional(),
+    text: z.string(),
   }),
 });

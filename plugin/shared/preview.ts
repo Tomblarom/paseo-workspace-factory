@@ -104,3 +104,30 @@ export interface RelocatePreviewIdentity {
 export function relocateFingerprint(identity: RelocatePreviewIdentity): string {
   return fingerprintOf({ kind: "factory.relocate", ...identity });
 }
+
+export interface LabelsPreviewIdentity {
+  address: string | null;
+  rows: unknown;
+}
+
+export function labelsFingerprint(identity: LabelsPreviewIdentity): string {
+  return fingerprintOf({ kind: "factory.labels", ...identity });
+}
+
+export interface SteerAddPreviewIdentity {
+  scope: string | null;
+  repo: string | null;
+  workspaceId: string | null;
+  slot: string;
+  profile: string;
+  provider: string;
+  model: string;
+  thinking: string | null;
+  mode: string | null;
+  account: string | null;
+  advisor: boolean;
+}
+
+export function steerAddFingerprint(identity: SteerAddPreviewIdentity): string {
+  return fingerprintOf({ kind: "factory.steer.add", ...identity });
+}

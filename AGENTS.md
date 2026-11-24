@@ -30,25 +30,28 @@ from its checkpoint. Treat the quoted last answer of the previous steer only as 
   `node src/cli.mjs resume` first and continue from its checkpoint and next
   step. Do not use the provider's own session resume; read only what the brief
   points to.
-- Never end a turn with open TODO items unless a worker or watcher is running.
-  After accepting a result, start the next package immediately; use 2–3 workers
-  in parallel when their files do not conflict.
+- Keep working through TODO.md. After accepting a result, take the next actionable
+  item immediately. Work on independent items while a worker runs or another
+  item is blocked. End the turn only when the work is done or every remaining
+  item requires user input. Summarize the decisions needed in one checkpoint.
+- Mark completed TODO items with `[x]` and keep them in the list. Remove
+  completed entries only when the user explicitly asks to remove them.
 - Address the user informally by default (German: "du", never "Sie") unless asked otherwise.
 - Keep steer chats short (see [docs/saving-context.md](docs/saving-context.md)):
   end each work package with a CHECKPOINT so the next switch/fresh starts clean.
 - Delegate routine work to a cheap worker; batch tool calls, filter big outputs;
   write big artifacts to files and paste only summary + path.
 - If `status` marks your agent id as retired, you no longer coordinate.
-- Supervision survives interruptions: workers belong to the scope and the
-  active steer supervises them. After starting workers, end your turn; the
-  factory wakes you. A worker without a CHECKPOINT is not done. Escalate
+- Workers belong to the scope and the active steer supervises them. Factory
+  wakes assist after interruptions. Stay in the turn and check the worker
+  register until each relevant result has been handled. A worker without a
+  CHECKPOINT is not done. Escalate
   worker → steer → advisor → `domain:`/`hub:`; ask the user only with a
   `user:` blocker. On a takeover request, run `switch --to <your slot> --apply`.
-  Details in [docs/supervision-design.md](docs/supervision-design.md).
-- Wait per agent, not for all: start one background watcher that ends when the
-  FIRST watched agent (worker or steer you asked) stops running, handle it,
-  then start the next watcher. A watcher that waits for all agents hides
-  finished results. An answer from another steer also needs such a watcher.
+  Details in [docs/design/supervision-design.md](docs/design/supervision-design.md).
+- Wait per agent, not for all. Use short waits and inspect the first worker or
+  steer that finishes. A shell watcher reports to the current turn and cannot
+  start another turn. Check pending wake delivery after an interruption.
 - Archive a worker yourself as soon as you have accepted its result (checked
   against the task, CHECKPOINT `done`); do not leave finished workers attached.
   Never archive one that is running, blocked or interrupted. This rule is the

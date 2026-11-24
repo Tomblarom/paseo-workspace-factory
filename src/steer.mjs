@@ -271,11 +271,11 @@ export function checkpointRules({ reportTo = null } = {}) {
     'Factory rules for this scope: end every answer that changes the task state with exactly this fenced block (keys in English, values in any language; status is done, partial or blocked):',
     '```text',
     'CHECKPOINT',
-    '- task: <one line>',
-    '- tests: <commands and results, or none>',
-    '- status: done | partial | blocked',
-    '- blockers: <items, or none>',
-    '- next: <next step, or none>',
+    'task: <one line>',
+    'tests: <commands and results, or none>',
+    'blockers: <items, or none>',
+    'next: <next step, or none>',
+    'status: done | partial | blocked',
     '```',
     'Do not replace it with a heading such as "## CHECKPOINT" or prose; the factory parses this block.',
     'Tell every worker you start to end its answer with the same block (status included), and archive a worker once you have accepted its result.',
@@ -286,7 +286,7 @@ export function checkpointRules({ reportTo = null } = {}) {
 export function formatCheckpointBlock({ task, tests = [], blockers = [], next = null }) {
   const oneLine = (value) => String(value ?? '').replace(/\s*\n\s*/g, ' ').trim();
   const list = (values) => (values?.length ? values.map(oneLine).filter(Boolean).join('; ') : 'none');
-  return ['```text', 'CHECKPOINT', `- task: ${oneLine(task)}`, `- tests: ${list(tests)}`, `- blockers: ${list(blockers)}`, `- next: ${next ? oneLine(next) : 'none'}`, '```'].join('\n');
+  return ['```text', 'CHECKPOINT', `task: ${oneLine(task)}`, `tests: ${list(tests)}`, `blockers: ${list(blockers)}`, `next: ${next ? oneLine(next) : 'none'}`, '```'].join('\n');
 }
 
 /**
@@ -466,8 +466,13 @@ function handoffWithBrief(status, args, { discovery, git, language, workerModel 
   const packet = buildHandoff(status, { ...args, workerModel });
   const at = status.checkpoint?.interrupted?.at ?? null;
   if (at === null && !status.checkpoint?.interrupted) return packet;
-  const brief = buildResumeBrief(status, {
-    agentId: args.to?.id ?? null,
+  const receivingStatus = {
+    ...status,
+    state: { ...status.state, activeSteer: args.to.slot, epoch: args.epoch + 1 },
+    steers: [args.to, ...status.steers.filter((steer) => steer.slot !== args.to.slot)],
+  };
+  const brief = buildResumeBrief(receivingStatus, {
+    agentId: args.to.id,
     agentState: discovery?.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null,
     git: git ? readGitBrief(git, status.workspace.directory) : null,
     scope: discovery?.scope ?? null,
@@ -488,7 +493,7 @@ const NONE = /^(keine?|none|n\/a|-)\.?$/i;
  * Parses the last `CHECKPOINT` block of an agent answer, fenced or bare:
  *   ```text
  *   CHECKPOINT
- *   - task: …   - tests: …   - blockers: …   - next: …   (- workers: …)   (- status: …)
+ *   task: …   tests: …   blockers: …   next: …   (workers: …)   (status: …)
  *   ```
  * Dashes, the fence, the `workers` line (informational, ignored) and the
  * optional `status` line (`done`|`partial`|`blocked`, case-insensitive) are
@@ -535,7 +540,7 @@ export function lastAssistantText(timelinePayload) {
 }
 
 /**
- * Moves the active-steer tab marker ("● Steer E"): marks one agent, unmarks
+ * Moves the active-steer tab marker ("▷ Steer E"): marks one agent, unmarks
  * another. Best-effort and cosmetic only — never throws. Returns null on
  * success (or when there is nothing to do: no paseoCli, disabled marker, or
  * titles already correct), else the error message for `result.renameError`.

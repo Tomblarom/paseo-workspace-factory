@@ -186,7 +186,7 @@ export function formatScopeRows(rows) {
 }
 
 /** Workspaces without factory metadata: adoption candidates with a plan suggestion. Read-only. */
-export function scopeCandidates(paseoState) {
+export function scopeCandidates(paseoState, { factoryCmd = 'paseo-factory' } = {}) {
   const agents = paseoState?.agents ?? [];
   const byId = new Map(agents.map((a) => [a.id, a]));
   const projects = new Map((paseoState?.projects ?? []).map((p) => [p.projectId, p]));
@@ -197,6 +197,10 @@ export function scopeCandidates(paseoState) {
       const project = projects.get(w.projectId) ?? null;
       const worktree = isWorktreeWorkspace(w);
       const directory = w.workspaceDirectory ?? null;
+      let directoryArg = directory;
+      if (directory && !/^[\p{L}\p{N}/_.:-]+$/u.test(directory)) {
+        directoryArg = factoryCmd === '/factory' ? JSON.stringify(directory) : `'${directory.replace(/'/g, "'\\''")}'`;
+      }
       return {
         workspaceId: w.id,
         title: w.title ?? w.name ?? null,
@@ -212,7 +216,7 @@ export function scopeCandidates(paseoState) {
             : null;
           return { id: a.id, title: a.title ?? null, provider: a.provider ?? null, model: a.model ?? null, status: a.status ?? null, parentId: parentOf(a), ...(hint ? { hint } : {}) };
         }),
-        suggestedPlan: worktree || !directory ? `paseo-factory plan workspace:${w.id}` : `paseo-factory plan --local ${directory}`,
+        suggestedPlan: worktree || !directory ? `${factoryCmd} plan workspace:${w.id}` : `${factoryCmd} plan --local ${directoryArg}`,
       };
     });
 }

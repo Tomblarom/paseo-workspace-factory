@@ -4,7 +4,7 @@
 // unanswered-wake failover), and the post-boot combined wake. Workers belong
 // to the scope, so every decision re-reads the scope state; the plugin never
 // archives (the wake text tells the steer to archive accepted workers) and
-// never wakes background agents. Design: docs/supervision-design.md.
+// never wakes background agents. Design: docs/design/supervision-design.md.
 //
 // All register rules come from the synced core (./factory/supervision.js,
 // single source src/supervision.mjs, mirrored by `node scripts/plugin-sync.mjs`)
@@ -12,6 +12,7 @@
 // ../shared/supervise.ts. Only erasable TypeScript: node --test imports this
 // file with type stripping (see plugin/test/ts-resolve-hooks.mjs).
 import * as paseoCore from "./factory/paseo.js";
+import { setTimeout as delay } from "node:timers/promises";
 import * as scopeCore from "./factory/scope.js";
 import * as lockCore from "./factory/lock.js";
 import * as supervisionCore from "./factory/supervision.js";
@@ -31,7 +32,7 @@ const ST = steerCore as unknown as Record<string, any>;
 const Q = quotaCore as unknown as Record<string, any>;
 const { LEGACY_PREFIX, METADATA_KEY, readPaseoState } = P;
 const { listScopes, sameScopeId } = SC;
-const { withLock, workspaceLockName } = L;
+const { LockBusy, withLock, workspaceLockName } = L;
 const {
   canWakeAgent,
   clipTask,
@@ -212,10 +213,21 @@ function lockOf(deps: SuperviseDeps): (
   name: string,
   fn: (held: { verify: () => void }) => Promise<any>,
 ) => Promise<any> {
-  return deps.lock ?? (withLock as unknown as (
+  const lock = deps.lock ?? (withLock as unknown as (
     name: string,
     fn: (held: { verify: () => void }) => Promise<any>,
   ) => Promise<any>);
+  return async (name, fn) => {
+    const retryUntil = Date.now() + 2_000;
+    for (;;) {
+      try {
+        return await lock(name, fn);
+      } catch (error) {
+        if (!(error instanceof LockBusy) || Date.now() >= retryUntil) throw error;
+        await delay(50);
+      }
+    }
+  };
 }
 
 function logOf(deps: SuperviseDeps): (message: string) => void {
@@ -276,9 +288,9 @@ async function readTurnTail(paseo: any, agentId: string, turnId: string | null):
   }
 }
 
-/** Sends through the plugin SDK only, without options (no source agent). */
+/** Sends through the plugin SDK with no source agent. */
 async function sendText(paseo: any, agentId: string, text: string): Promise<void> {
-  await paseo.agents.ref(agentId).send(text);
+  await paseo.agents.ref(agentId).send(text, { activeTurnBehavior: "steer" });
 }
 
 /**
@@ -542,10 +554,12 @@ export async function sendScopeWake(
     log(`[factory] supervise: no live holder of ${scope.id} active steer; wake queued`);
     return { sent: false, reason: "no-target", target: null };
   }
-  const targetAgent =
-    (paseoState.agents ?? []).find((a: any) => a && a.id === target) ?? (await refreshAgent(paseo, target));
-  if (!targetAgent || targetAgent.archivedAt || targetAgent.background === true || !canWakeAgent(targetAgent)) {
+  const targetAgent = await refreshAgent(paseo, target);
+  if (!canWakeAgent(targetAgent, scope.id)) {
     return { sent: false, reason: "target-ineligible", target };
+  }
+  if (isBusyStatus(targetAgent.status) || targetAgent.activeTurn) {
+    return { sent: false, reason: "target-busy", target };
   }
   const active = typeof freshWsf.activeSteer === "string" ? freshWsf.activeSteer : null;
   const activeRow = rows.find((row: any) => row.id === target) ?? null;
@@ -837,6 +851,7 @@ export async function runWorkerTurnAfter(
   const zerosubNote = zerosubForkWarning(switchRow);
   const plan = planWake({
     agent,
+    scopeId: scope.id,
     newState,
     nowMs,
     lastWakeAt: scopeLastWakeAt(register),
@@ -859,16 +874,22 @@ export async function runWorkerTurnAfter(
     if (entry && newState) await queueWake(paseo, mainId, agentId, entry, newState, deps);
     return { ok: true, action: "deferred", reason: plan.reason, event, state: newState };
   }
-  const sent = await sendScopeWake(
-    paseo,
-    { scope, events: newState ? mergeWakeEvents(register, agentId, newState) : [], state, zerosubNote },
-    { ...deps, zerosub },
-  );
-  if (!sent.sent && entry && newState) {
-    // No live holder: keep the news queued until someone can hear it.
+  if (entry && newState) {
+    // Keep the result available to the timer even if delivery throws.
     await queueWake(paseo, mainId, agentId, entry, newState, deps);
-    return { ok: true, action: "queued", reason: sent.reason ?? "no-target", event, state: newState };
   }
+  let sent: SendWakeResult;
+  try {
+    sent = await sendScopeWake(
+      paseo,
+      { scope, events: newState ? mergeWakeEvents(register, agentId, newState) : [], state, zerosubNote },
+      { ...deps, zerosub },
+    );
+  } catch (error) {
+    log(`[factory] supervise: wake for ${scope.id} failed (${error instanceof Error ? error.message : String(error)}); wake queued`);
+    return { ok: true, action: "queued", reason: "send-failed", event, state: newState };
+  }
+  if (!sent.sent) return { ok: true, action: "queued", reason: sent.reason ?? "no-target", event, state: newState };
   return { ok: true, action: "sent", event, state: newState, target: sent.target ?? null };
 }
 

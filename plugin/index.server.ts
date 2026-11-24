@@ -3,9 +3,11 @@ import { createConfigLoader } from "./server/config.js";
 import {
   applyAssign,
   applyFresh,
+  applyLabels,
   applyPlan,
   applyRelocate,
   applyResumeRpc,
+  applySteerAddRpc,
   applySwitch,
   createResumeBriefBuilder,
   getCleanup,
@@ -23,7 +25,9 @@ import {
   previewAssign,
   previewCheckpoint,
   previewFresh,
+  previewLabels,
   previewRelocate,
+  previewSteerAdd,
   previewSwitch,
   runDrain,
   writeCheckpointRpc,
@@ -64,6 +68,8 @@ import {
   factoryFresh,
   factoryFreshPreview,
   factoryHistoryOpen,
+  factoryLabels,
+  factoryLabelsPreview,
   factoryModelsCatalog,
   factoryModelsList,
   factoryModelsSet,
@@ -78,6 +84,8 @@ import {
   factoryScopes,
   factoryScopesCandidates,
   factoryStatus,
+  factorySteerAdd,
+  factorySteerAddPreview,
   factorySwitch,
   factorySwitchPreview,
   factoryWorkerPick,
@@ -169,8 +177,12 @@ export default function contribute(server: PluginServerContext) {
   server.handle(factoryRelocatePreview, (input, ctx) => previewRelocate(input, ctx, loader));
   server.handle(factoryRelocate, (input, ctx) => applyRelocate(input, ctx, loader));
   server.handle(factoryCleanupPlan, (input, ctx) => planCleanup(input, ctx, loader));
+  server.handle(factoryLabelsPreview, previewLabels);
+  server.handle(factoryLabels, (input, ctx) => applyLabels(input, ctx, loader));
   server.handle(factoryModelsList, (input, ctx) => listModels(input, ctx, loader, hostSettings));
   server.handle(factoryModelsSet, (input, ctx) => setModels(input, ctx, loader, hostSettings));
+  server.handle(factorySteerAddPreview, (input, ctx) => previewSteerAdd(input, ctx, loader, hostSettings));
+  server.handle(factorySteerAdd, (input, ctx) => applySteerAddRpc(input, ctx, loader));
   server.handle(factoryResumeApply, (input, ctx) => {
     bootOnce(ctx.paseo);
     return applyResumeRpc(input, ctx, loader, {

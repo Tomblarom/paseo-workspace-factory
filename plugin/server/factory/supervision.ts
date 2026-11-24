@@ -16,7 +16,7 @@ export const TASK_MAX = 300;
 export const WORKERS_MAX = 100;
 export const SUPERVISION_DEFAULTS = { batchMinutes: 0, wakeDebounceSeconds: 20, watchdogMinutes: 15, staleMinutes: 60, answerMinutes: 10, maxAutoResumes: 2, zerosubPendingMinutes: 10 };
 
-/** State transition table from docs/supervision-design.md; `archived` removes the entry (null). `stale` is handled in nextWorkerState (running only). */
+/** State transition table from docs/design/supervision-design.md; `archived` removes the entry (null). `stale` is handled in nextWorkerState (running only). */
 const TRANSITIONS = {
   created: 'running',
   adopted: 'running',
@@ -161,6 +161,15 @@ export function applyWorkerEvent(register, workerId, event, details = {}) {
     return next;
   }
   const current = next[workerId] ?? null;
+  if (current && (event === 'created' || event === 'adopted')) {
+    next[workerId] = clipWorkerEntry({
+      ...current,
+      task: current.task || details.task || '',
+      startedBy: current.startedBy ?? details.startedBy ?? null,
+      epoch: current.epoch ?? details.epoch ?? null,
+    });
+    return pruneWorkers(next);
+  }
   const state = nextWorkerState(current?.state ?? 'running', event);
   if (!current) {
     next[workerId] = clipWorkerEntry(createWorkerEntry({
@@ -176,7 +185,6 @@ export function applyWorkerEvent(register, workerId, event, details = {}) {
   const entry = { ...current, state };
   const status = statusForEvent(event);
   if (status !== null) entry.status = status;
-  if ((event === 'created' || event === 'adopted') && details.task) entry.task = clipTask(details.task);
   if (event === 'reassigned') {
     entry.resumes = 0;
     if (details.task !== undefined) entry.task = clipTask(details.task);
@@ -229,16 +237,15 @@ export function isCleanupProtected(stateOrEntry) {
  * Ignore rule: an agent is ignored only when archived or without a scope
  * assignment. `closed` is never ignored (a restart closes live agents too).
  */
-export function isIgnoredAgent(agent) {
+export function isIgnoredAgent(agent, scopeId = agent?.labels?.[LABEL.scope]) {
   if (!agent || typeof agent !== 'object') return true;
   if (agent.archivedAt) return true;
-  const scope = agent.labels?.[LABEL.scope];
-  return !(typeof scope === 'string' && scope.trim());
+  return !(typeof scopeId === 'string' && scopeId.trim());
 }
 
 /** Never woken or escalated: ignored agents plus `background` agents. */
-export function canWakeAgent(agent) {
-  if (isIgnoredAgent(agent)) return false;
+export function canWakeAgent(agent, scopeId) {
+  if (isIgnoredAgent(agent, scopeId)) return false;
   return agent.background !== true;
 }
 
@@ -271,8 +278,8 @@ export function isQuietPeriod({ draining = false, bootCheckDone = true } = {}) {
  * account move for the woken agent defers as `wait-zerosub` until the route
  * clears or `zerosubPendingMinutes` pass; without it the order is unchanged.
  */
-export function planWake({ agent, newState, nowMs = Date.now(), lastWakeAt = null, batchMinutes = SUPERVISION_DEFAULTS.batchMinutes, wakeDebounceSeconds = SUPERVISION_DEFAULTS.wakeDebounceSeconds, draining = false, bootCheckDone = true, zerosub = null, zerosubPendingSince = null, zerosubPendingMinutes = SUPERVISION_DEFAULTS.zerosubPendingMinutes } = {}) {
-  if (!canWakeAgent(agent)) return { action: 'skip', reason: 'ineligible' };
+export function planWake({ agent, scopeId, newState, nowMs = Date.now(), lastWakeAt = null, batchMinutes = SUPERVISION_DEFAULTS.batchMinutes, wakeDebounceSeconds = SUPERVISION_DEFAULTS.wakeDebounceSeconds, draining = false, bootCheckDone = true, zerosub = null, zerosubPendingSince = null, zerosubPendingMinutes = SUPERVISION_DEFAULTS.zerosubPendingMinutes } = {}) {
+  if (!canWakeAgent(agent, scopeId)) return { action: 'skip', reason: 'ineligible' };
   if (isQuietPeriod({ draining, bootCheckDone })) return { action: 'skip', reason: draining === true ? 'drain' : 'boot' };
   if (!isImmediateWakeState(newState)) return { action: 'skip', reason: 'not-actionable' };
   if (zerosub && zerosubMoveDecision({ zerosub, agentId: agent?.id ?? null, pendingSince: zerosubPendingSince, nowMs, zerosubPendingMinutes }).decision === 'wait-zerosub') {

@@ -61,6 +61,16 @@ export function steerFallbackList(config, slot) {
   return names;
 }
 
+/** First free steer slot letter (A-Z) in priority order, or null when all 26 are used. */
+export function nextFreeSlot(config) {
+  const slots = config?.steers?.slots ?? {};
+  for (let code = 65; code <= 90; code++) {
+    const letter = String.fromCharCode(code);
+    if (!slots[letter]) return letter;
+  }
+  return null;
+}
+
 /** Profile names whose provider/model match a live steer (fallback duplicate avoidance). */
 export function usedProfilesByLiveSteers(config, steers) {
   const byPair = new Map();
@@ -94,8 +104,10 @@ export function usedProfilesByLiveSteers(config, steers) {
  * skips it (reason names the earliest reset when known), otherwise the
  * roomiest account id is reported plus a `zerosubPin` suggestion
  * ({ pluginId, method, accountId, metadata }) for creation.
+ * `zerosubExhaustedPct` (default `quotaExhaustedPct`) judges accounts only;
+ * pools without accounts keep `quotaExhaustedPct`.
  */
-export function resolveProfile(config, providerEntries, list, { role = 'worker', advisorSlot = false, usedProfiles = [], repoPublic = null, quotaSnapshot = null, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 90, profileHealth = null, now = Date.now(), zerosub = null } = {}) {
+export function resolveProfile(config, providerEntries, list, { role = 'worker', advisorSlot = false, usedProfiles = [], repoPublic = null, quotaSnapshot = null, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 90, profileHealth = null, now = Date.now(), zerosub = null, zerosubExhaustedPct = quotaExhaustedPct } = {}) {
   const skipped = [];
   const used = new Set(usedProfiles ?? []);
   const names = Array.isArray(list) ? list : [];
@@ -111,7 +123,7 @@ export function resolveProfile(config, providerEntries, list, { role = 'worker',
     }
     const family = profileFamily(config.profiles[name]);
     if (zerosub && familyAccounts(zerosub, family).length) {
-      if (familyExhausted(zerosub, family, { exhaustedPct: quotaExhaustedPct, now })) {
+      if (familyExhausted(zerosub, family, { exhaustedPct: zerosubExhaustedPct, now })) {
         const reset = earliestFamilyReset(zerosub, family, { now });
         skipped.push({ name, reason: reset ? `accounts exhausted, earliest reset ${reset}` : 'accounts exhausted' });
         continue;
@@ -150,11 +162,105 @@ export function resolveProfile(config, providerEntries, list, { role = 'worker',
       skipped.push({ name, reason: problems[name].join('; ') });
       continue;
     }
-    const account = zerosub ? bestFamilyAccount(zerosub, family, { exhaustedPct: quotaExhaustedPct, now }) : null;
-    const pin = suggestAccountPin(zerosub, family, { exhaustedPct: quotaExhaustedPct, now });
+    const account = zerosub ? bestFamilyAccount(zerosub, family, { exhaustedPct: zerosubExhaustedPct, now }) : null;
+    const pin = suggestAccountPin(zerosub, family, { exhaustedPct: zerosubExhaustedPct, now });
     return { profile: { name, ...config.profiles[name] }, skipped, zerosubAccount: account ? account.id : null, zerosubPin: pin };
   }
   return { profile: null, skipped, zerosubAccount: null, zerosubPin: null };
+}
+
+/**
+ * Pure model/account selection for a future `steer add`: validates or
+ * suggests the slot, then picks the profile and ZeroSub account. `slot`
+ * null/empty suggests the next free letter (slot priority, A first); an
+ * occupied slot throws pointing at `steer set`/`fresh`, a gappy one throws
+ * with the next free letter. `profile` null tries all profiles in
+ * slot-priority order (existing slots' profiles first, then unreferenced
+ * ones); an explicit profile is tried alone and decides the advisor flag,
+ * otherwise `advisorSlot` (default false) does. Eligibility reuses
+ * resolveProfile (catalog, health, advisor, live-duplicate avoidance,
+ * pools) with accounts judged against `quotaWarnPct`: exhausted/limited
+ * accounts and accounts at/over warn are skipped, the roomiest below warn
+ * wins, and when none fit each account skip names the earliest reset plus
+ * `earliestReset` carries the earliest future reset across the
+ * account-blocked families (null when picked or unknown). Pools without
+ * ZeroSub accounts keep the exhausted threshold. Returns
+ * `{ slot, advisorSlot, profile, skipped, zerosubAccount, zerosubPin,
+ * earliestReset }`. Throws on a bad slot/profile, an occupied slot, a gap,
+ * or a full A-Z.
+ */
+export function resolveSteerAdd(config, providerEntries, { slot = null, profile = null, advisorSlot = null, usedProfiles = [], quotaSnapshot = null, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 90, quotaWarnPct = config?.quota?.warnPct ?? 75, profileHealth = null, now = Date.now(), zerosub = null } = {}) {
+  const order = slotOrder(config);
+  const slots = config?.steers?.slots ?? {};
+  let target;
+  if (slot === null || slot === undefined || String(slot).trim() === '') {
+    target = nextFreeSlot(config);
+    if (!target) throw new Error('No free steer slot: all letters A-Z are defined in steers.slots');
+  } else {
+    const raw = String(slot).trim().toUpperCase();
+    if (!/^[A-Z]$/.test(raw)) throw new Error(`Steer slot must be a single capital letter A-Z, got ${JSON.stringify(slot)}`);
+    if (slots[raw]) throw new Error(`Slot ${raw} is already defined (profile "${slots[raw]}"); use steer set ${raw} <profile|provider/model> to replace it or fresh to refresh its steer`);
+    const max = order.length ? order[order.length - 1] : '@';
+    if (raw > String.fromCharCode(max.charCodeAt(0) + 1)) {
+      throw new Error(`Slot ${raw} would leave a gap (slots are ${order.join(', ') || 'none'}); use the next free letter ${nextFreeSlot(config)}`);
+    }
+    target = raw;
+  }
+  let names;
+  let advisor;
+  if (profile !== null && profile !== undefined) {
+    const name = String(profile).trim();
+    if (!name) throw new Error('steer add needs a non-empty profile name');
+    if (!config?.profiles?.[name]) throw new Error(`Unknown profile "${name}"`);
+    names = [name];
+    advisor = isAdvisorProfile(config, name);
+  } else {
+    advisor = advisorSlot === true;
+    const seen = new Set();
+    names = [];
+    for (const s of order) {
+      const name = slots[s];
+      if (typeof name === 'string' && name && config?.profiles?.[name] && !seen.has(name)) {
+        seen.add(name);
+        names.push(name);
+      }
+    }
+    for (const name of Object.keys(config?.profiles ?? {})) {
+      if (!seen.has(name)) {
+        seen.add(name);
+        names.push(name);
+      }
+    }
+  }
+  const { profile: picked, skipped, zerosubAccount, zerosubPin } = resolveProfile(config, providerEntries, names, {
+    role: 'steer', advisorSlot: advisor, usedProfiles, quotaSnapshot, quotaExhaustedPct, profileHealth, now, zerosub,
+    zerosubExhaustedPct: quotaWarnPct,
+  });
+  const mapped = (skipped ?? []).map((entry) => {
+    const reason = entry?.reason;
+    if (typeof reason === 'string' && reason.startsWith('accounts exhausted')) {
+      const prefix = 'accounts exhausted, earliest reset ';
+      const reset = reason.startsWith(prefix) ? reason.slice(prefix.length) : null;
+      return { ...entry, reason: reset ? `accounts over warn threshold (≥${quotaWarnPct}%), earliest reset ${reset}` : `accounts over warn threshold (≥${quotaWarnPct}%)` };
+    }
+    return entry;
+  });
+  let earliestReset = null;
+  if (!picked && zerosub) {
+    let bestMs = Infinity;
+    for (const entry of mapped) {
+      if (typeof entry?.reason !== 'string' || !entry.reason.startsWith('accounts over warn')) continue;
+      const family = profileFamily(config?.profiles?.[entry.name]);
+      if (!family) continue;
+      const reset = earliestFamilyReset(zerosub, family, { now });
+      const ms = reset ? Date.parse(reset) : NaN;
+      if (Number.isFinite(ms) && ms > now && ms < bestMs) {
+        bestMs = ms;
+        earliestReset = reset;
+      }
+    }
+  }
+  return { slot: target, advisorSlot: advisor, profile: picked, skipped: mapped, zerosubAccount, zerosubPin, earliestReset };
 }
 
 /** `paseo run` flags for a resolved profile. */

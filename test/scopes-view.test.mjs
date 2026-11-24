@@ -159,3 +159,9 @@ test('candidates list unadopted workspaces with agents and a plan suggestion', (
   assert.match(text, /agent-2 "Child" \(codex\/gpt-6\.2-sol, idle\) parent agent-1/);
   assert.equal(formatScopeCandidates([]), '(no adoption candidates)');
 });
+
+test('composer candidate suggestions use slash syntax and quote local paths', () => {
+  const state = { workspaces: [{ id: 'wks_plain', workspaceDirectory: '/tmp/my project', metadata: {} }] };
+  assert.equal(scopeCandidates(state, { factoryCmd: '/factory' })[0].suggestedPlan, '/factory plan --local "/tmp/my project"');
+  assert.equal(scopeCandidates(state)[0].suggestedPlan, "paseo-factory plan --local '/tmp/my project'");
+});

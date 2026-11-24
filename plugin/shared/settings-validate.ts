@@ -18,12 +18,19 @@ export interface FactorySettingsValues {
   workerPriority: string[];
   quota: { exhaustedPct: number; warnPct: number };
   quotaSampleMinutes: number;
+  /** Null/empty means "from the config file"; a saved value replaces it. */
+  githubOwner: string | null;
+  /** Null/empty means "from the config file"; a saved value replaces it. */
+  checkoutRoot: string | null;
 }
 
 /**
  * Settings document that equals `config` for everything the plugin owns.
  * Profiles keep the stored ones and add every profile `config` references or
  * changed, so file-only profiles are copied only when they become used.
+ * The host setup (githubOwner, checkoutRoot) is preserved from `current` and
+ * never copied from the file, so a models edit cannot pin file values into
+ * the settings and change later resolution.
  */
 export function settingsFromConfig(config: any, current: FactorySettingsValues): FactorySettingsValues {
   const slots: Record<string, string> = { ...(config.steers?.slots ?? {}) };
@@ -61,6 +68,8 @@ export function settingsFromConfig(config: any, current: FactorySettingsValues):
     workerPriority: priority,
     quota: current.quota ?? { exhaustedPct: 90, warnPct: 75 },
     quotaSampleMinutes: current.quotaSampleMinutes ?? 10,
+    githubOwner: current.githubOwner ?? null,
+    checkoutRoot: current.checkoutRoot ?? null,
   };
 }
 
@@ -129,6 +138,82 @@ export function validateQuotaSettings(values: QuotaSettingsValues): string[] {
   return errors;
 }
 
+/** Same account rule the CLI config validator uses (src/config.mjs). */
+export const GITHUB_OWNER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+
+/**
+ * Absolute-path check without node:path (this module stays import-free so the
+ * client bundle and plain node:test use it): POSIX roots plus Windows drive
+ * and UNC roots. The CLI re-checks with path.isAbsolute on its own platform.
+ */
+export function isAbsolutePath(value: string): boolean {
+  return value.startsWith("/") || value.startsWith("\\\\") || /^[A-Za-z]:[\\/]/.test(value);
+}
+
+/** Trimmed value, or null when unset, blank, or not a string. */
+export function normalizeGithubOwner(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+/** Trimmed value, or null when unset, blank, or not a string. */
+export function normalizeCheckoutRoot(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+/**
+ * Structural check of the optional host setup. Null/blank means "from the
+ * config file" and is valid; an explicit value must be well-formed. Empty
+ * means valid.
+ */
+export function validateHostSettings(values: Pick<FactorySettingsValues, "githubOwner" | "checkoutRoot">): string[] {
+  const errors: string[] = [];
+  if (!values || typeof values !== "object") return errors;
+  const owner = normalizeGithubOwner(values.githubOwner);
+  if (owner !== null && !GITHUB_OWNER_PATTERN.test(owner)) {
+    errors.push("githubOwner must be a GitHub account name");
+  }
+  const root = normalizeCheckoutRoot(values.checkoutRoot);
+  if (root !== null && !isAbsolutePath(root)) {
+    errors.push("checkoutRoot must be an absolute path");
+  }
+  return errors;
+}
+
+/** Host fields still unset (null/blank): "githubOwner" and/or "checkoutRoot". */
+export function missingHostSettings(values: Pick<FactorySettingsValues, "githubOwner" | "checkoutRoot">): string[] {
+  const missing: string[] = [];
+  if (normalizeGithubOwner(values?.githubOwner) === null) missing.push("githubOwner");
+  if (normalizeCheckoutRoot(values?.checkoutRoot) === null) missing.push("checkoutRoot");
+  return missing;
+}
+
+/**
+ * File-owned half of a minimal config for hosts without a config file, using
+ * the native defaults (https/upstream, workspace title "Main"). The caller
+ * layers the settings on top with mergeFactoryConfig and re-validates with
+ * the CLI validator. Assumes validateFactorySettings passed and both host
+ * fields are explicit; blank values stay blank so validation fails clearly.
+ */
+export function minimalFileConfigBase(settings: FactorySettingsValues): any {
+  return {
+    version: 1,
+    github: {
+      owner: normalizeGithubOwner(settings.githubOwner) ?? "",
+      cloneProtocol: "https",
+      upstreamRemote: "upstream",
+    },
+    checkoutRoot: normalizeCheckoutRoot(settings.checkoutRoot) ?? "",
+    workspaceTitle: "Main",
+    profiles: {},
+    steers: {},
+    workers: {},
+  };
+}
+
 /** Structural check of the C5 cleanup document. Empty means valid. */
 export function validateCleanupSettings(values: CleanupSettingsValues): string[] {
   const errors: string[] = [];
@@ -175,6 +260,7 @@ export function validateFactorySettings(values: FactorySettingsValues): string[]
   const errors: string[] = [];
   if (!values || typeof values !== "object") return ["settings must be an object"];
   errors.push(...validateQuotaSettings(values));
+  errors.push(...validateHostSettings(values));
   const profiles = values.profiles ?? {};
   if (typeof profiles !== "object" || !Object.keys(profiles).length) {
     errors.push("profiles must define at least one profile");
@@ -238,8 +324,10 @@ export function validateFactorySettings(values: FactorySettingsValues): string[]
 /**
  * Layers the host-scope settings document over the config file: profiles merge
  * per name, slots/prepare/initialActive/workerPriority replace the file values
- * (workers.defaultProfile follows priority[0] for older readers).
- * Everything else (github, checkoutRoot, runtime, knownLimits) stays file-owned.
+ * (workers.defaultProfile follows priority[0] for older readers). An explicit
+ * githubOwner/checkoutRoot (non-blank) replaces the matching file value;
+ * unset host fields leave the file alone. Everything else (github protocol
+ * and remotes, runtime, knownLimits) stays file-owned.
  */
 export function mergeFactoryConfig(fileConfig: any, settings: FactorySettingsValues): any {
   const next = JSON.parse(JSON.stringify(fileConfig));
@@ -257,6 +345,14 @@ export function mergeFactoryConfig(fileConfig: any, settings: FactorySettingsVal
   };
   next.quota = { ...(fileConfig.quota ?? {}), ...settings.quota };
   next.quotaSampleMinutes = settings.quotaSampleMinutes;
+  const owner = normalizeGithubOwner(settings?.githubOwner);
+  if (owner !== null) {
+    next.github = { ...(next.github ?? {}), owner };
+  }
+  const root = normalizeCheckoutRoot(settings?.checkoutRoot);
+  if (root !== null) {
+    next.checkoutRoot = root;
+  }
   return next;
 }
 

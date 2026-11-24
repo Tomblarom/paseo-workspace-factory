@@ -101,13 +101,20 @@ export const FACTORY_COMMANDS: Record<string, CommandHelp> = {
     examples: ["/factory quota"],
   },
   plan: {
-    usage: "/factory plan [scope…] [--allow-fork] [--slots A,B]",
+    usage: "/factory plan [scope…] [--allow-fork] [--slots A,B] [--adopt B=<agent-id>] [--local <path>] [--hub <path|workspace:id>] [--checkout <path>] [--name <id>] [--subject <text>] [--main workspace:<id>] [--domain <id>] [--adopt-worker <agent-id>[@A]] [--detach] [--retitle] [--rename-project <name>]",
     summary: "Preview setting up or updating a project. Writes nothing.",
     details: [
       "Ends with a 16-character plan hash; run it with /factory apply <hash>.",
       "--allow-fork lets the plan create your GitHub fork. --slots limits the plan to some steers.",
+      "--adopt B=<agent-id> takes over an existing tab as Steer B (repeatable, comma-separated); with several scopes use --adopt <scope>:B=<agent-id> per scope.",
+      "--local plans an existing folder without GitHub (repeatable). --hub plans a hub-kind scope from a folder or worktree workspace (repeatable).",
+      "--checkout, --name, --subject, --main, --domain and --rename-project each need exactly one entry.",
+      "--name sets the scope id of a folder or workspace entry. --subject fills the {subject} title placeholder.",
+      "--main adopts a worktree workspace as the main workspace of a github scope. --domain sets the domain pointer (--domain \"\" clears it).",
+      "--adopt-worker <agent-id>[@A] labels an agent as scope worker (repeatable, comma-separated). --detach plans a native detach for parented steer candidates.",
+      "--retitle plans renaming the main workspace to the title template. --rename-project renames the Paseo project.",
     ],
-    examples: ["/factory plan", "/factory plan me/my-repo", "/factory plan me/my-repo --slots A,B"],
+    examples: ["/factory plan", "/factory plan me/my-repo", "/factory plan me/my-repo --slots A,B", "/factory plan --adopt B=01234567-89ab-cdef-0123-456789abcdef", "/factory plan me/my-repo --domain my-domain --retitle", "/factory plan --hub /data/hub"],
   },
   apply: {
     usage: "/factory apply <plan-hash>",
@@ -172,14 +179,15 @@ export const FACTORY_COMMANDS: Record<string, CommandHelp> = {
   },
   steer: {
     usage:
-      "/factory steer list | set <n|slot> <profile|provider/model> [--thinking X] [--mode Y] [--profile name] [--dry-run] | rm <n|slot> [--dry-run]",
+      "/factory steer list | add [slot] [profile|provider/model] [--thinking X] [--mode Y] [--profile name] [--dry-run] | set <n|slot> <profile|provider/model> [--thinking X] [--mode Y] [--profile name] [--dry-run] | rm <n|slot> [--dry-run]",
     summary: "Show or edit the steer slots; slot order is the priority (1 = A, 2 = B …).",
     details: [
+      "add creates a new steer in this workspace's project; without a slot it suggests the next free letter.",
       "set replaces the model of that slot; letters never shift. A new letter must be the next free one.",
       "Running steers keep their model; /factory plan shows the difference.",
-      "The change is saved at once in the plugin settings (--dry-run only shows it).",
+      "set and rm save at once in the plugin settings (--dry-run only shows it); add shows a preview and confirms in the Factory panel.",
     ],
-    examples: ["/factory steer list", "/factory steer set B codex/gpt-6.2-sol --thinking high", "/factory steer rm C"],
+    examples: ["/factory steer list", "/factory steer add", "/factory steer add C codex/gpt-6.2-sol --thinking high", "/factory steer set B codex/gpt-6.2-sol --thinking high", "/factory steer rm C"],
   },
   model: {
     usage: "/factory model advisor|sensitive <profile|provider/model> on|off [--dry-run]",
@@ -189,6 +197,15 @@ export const FACTORY_COMMANDS: Record<string, CommandHelp> = {
       "Saved at once in the plugin settings (--dry-run only shows it).",
     ],
     examples: ["/factory model advisor claude-opus on", "/factory model sensitive muse-contributor off"],
+  },
+  labels: {
+    usage: "/factory labels [scope|agent-id] [--apply]",
+    summary: "Show agents with missing or wrong factory labels, and fix them.",
+    details: [
+      "Read-only. Without an address it audits every project; with one it audits that project or agent.",
+      "Shows a preview; confirm it in the Factory panel. --apply only marks the intent, it still needs the panel button.",
+    ],
+    examples: ["/factory labels", "/factory labels me/my-repo --apply"],
   },
 };
 
@@ -236,7 +253,7 @@ export type FactoryCommand =
   | { command: "status"; repo?: string }
   | { command: "scopes"; candidates: boolean }
   | { command: "cleanup"; plan: boolean; allowDestructive: boolean; allowIgnored: boolean; only?: string[] }
-  | { command: "plan"; repos: string[]; allowFork: boolean; slots?: string[] }
+  | { command: "plan"; repos: string[]; allowFork: boolean; slots?: string[]; adopt?: Record<string, string>; adoptScoped?: Record<string, Record<string, string>>; local?: string[]; hub?: string[]; checkout?: string; name?: string; subject?: string; main?: string; domain?: string; adoptWorker?: Record<string, string | null>; detach?: boolean; retitle?: boolean; renameProject?: string }
   | { command: "apply"; hash: string }
   | {
       command: "checkpoint";
@@ -257,7 +274,9 @@ export type FactoryCommand =
   | { command: "models" }
   | { command: "drain"; timeout?: string }
   | { command: "quota" }
+  | { command: "labels"; address?: string; apply: boolean }
   | ModelsCommand
+  | { command: "steerAdd"; slot?: string; spec?: string; thinking?: string; mode?: string; profile?: string; dryRun: boolean }
   | { command: "help"; topic?: string };
 
 interface ModelEdit {
@@ -294,9 +313,13 @@ function tokenize(args: string): string[] {
   let current = "";
   let quote: string | null = null;
   let escaped = false;
+  // An explicitly quoted empty string ("") is a real token: --domain "" clears
+  // the domain pointer. Unquoted empties never occur (whitespace only splits).
+  let quoted = false;
   const push = () => {
-    if (current !== "" || quote !== null) tokens.push(current);
+    if (current !== "" || quoted) tokens.push(current);
     current = "";
+    quoted = false;
   };
   for (const char of args.trim()) {
     if (escaped) {
@@ -306,8 +329,10 @@ function tokenize(args: string): string[] {
       escaped = true;
     } else if (quote !== null && char === quote) {
       quote = null;
+      quoted = true;
     } else if (quote === null && (char === '"' || char === "'")) {
       quote = char;
+      quoted = true;
     } else if (quote === null && /\s/.test(char)) {
       push();
     } else {
@@ -316,7 +341,7 @@ function tokenize(args: string): string[] {
   }
   if (quote !== null) fail("A quote is not closed. Put text with spaces in matching quotes, e.g. --task \"Fix login\".");
   push();
-  return tokens.filter((t) => t !== "");
+  return tokens;
 }
 
 interface ParsedFlags {
@@ -326,9 +351,9 @@ interface ParsedFlags {
   multis: Map<string, string[]>;
 }
 
-const REPEATABLE = new Set(["test", "blocker"]);
-const VALUE_FLAGS = new Set(["slots", "to", "task", "from-agent", "next", "test", "blocker", "agent", "thinking", "mode", "profile", "only", "timeout"]);
-const BOOL_FLAGS = new Set(["allow-fork", "apply", "candidates", "brief", "dry-run", "plan", "allow-destructive", "allow-ignored"]);
+const REPEATABLE = new Set(["test", "blocker", "adopt", "adopt-worker", "local", "hub"]);
+const VALUE_FLAGS = new Set(["slots", "to", "task", "from-agent", "next", "test", "blocker", "agent", "thinking", "mode", "profile", "only", "timeout", "adopt", "adopt-worker", "local", "hub", "checkout", "name", "subject", "main", "domain", "rename-project"]);
+const BOOL_FLAGS = new Set(["allow-fork", "apply", "candidates", "brief", "dry-run", "plan", "allow-destructive", "allow-ignored", "detach", "retitle"]);
 
 function parseFlags(tokens: string[]): ParsedFlags {
   const positionals: string[] = [];
@@ -355,9 +380,12 @@ function parseFlags(tokens: string[]): ParsedFlags {
       let value = inline;
       if (value === null) {
         i += 1;
-        value = tokens[i] ?? "";
+        // A missing token is never a value, even for --domain (only an explicit
+        // empty string clears the pointer).
+        if (i >= tokens.length) fail(`--${name} needs a value right after it; put text with spaces in quotes.`);
+        value = tokens[i];
       }
-      if (!value) fail(`--${name} needs a value right after it; put text with spaces in quotes.`);
+      if (!value && name !== "domain") fail(`--${name} needs a value right after it; put text with spaces in quotes.`);
       if (REPEATABLE.has(name)) {
         const list = multis.get(name) ?? [];
         list.push(value);
@@ -401,6 +429,239 @@ function checkTarget(value: string, sub: string): string {
   if (/^\d+$/.test(value) && Number(value) >= 1) return value;
   if (sub === "steer" && /^[A-Za-z]$/.test(value)) return value.toUpperCase();
   return fail(`${sub} expects ${sub === "steer" ? "a slot letter A-Z or a position 1, 2, …" : "a position 1, 2, …"}, got ${JSON.stringify(value)}.`);
+}
+
+/** Split --adopt input: legacy SLOT=<id> pairs and scoped <scope>:SLOT=<id> pairs. Slots are uppercase, scopes lowercase. */
+export interface PlanAdoptInput {
+  adopt: Record<string, string>;
+  adoptScoped: Record<string, Record<string, string>>;
+}
+
+function parseAdoptPair(pair: string, into: PlanAdoptInput): void {
+  const legacy = pair.match(/^([A-Z])=([0-9a-f-]{8,})$/i);
+  if (legacy) {
+    into.adopt[legacy[1].toUpperCase()] = legacy[2];
+    return;
+  }
+  const scoped = pair.match(/^(.+):([A-Z])=([0-9a-f-]{8,})$/i);
+  if (!scoped || !scoped[1].trim()) {
+    throw new Error(`--adopt expects SLOT=<agent-id> or <scope-id>:SLOT=<agent-id>, got ${pair}`);
+  }
+  const scope = scoped[1].trim().toLowerCase();
+  (into.adoptScoped[scope] ??= {})[scoped[2].toUpperCase()] = scoped[3];
+}
+
+/**
+ * Splits raw --adopt values (repeatable, each comma-separated) into legacy and
+ * scoped adoption, exactly like the CLI. Throws plain Errors with the CLI
+ * message; the parser re-raises them with usage via fail().
+ */
+export function splitAdoptPairs(values: string[]): PlanAdoptInput {
+  const into: PlanAdoptInput = { adopt: {}, adoptScoped: {} };
+  for (const pair of values.flatMap((v) => v.split(",")).filter(Boolean)) {
+    parseAdoptPair(pair, into);
+  }
+  return into;
+}
+
+/**
+ * Merges legacy and scoped adoption into the runner form (`'*'` is the
+ * single-entry fallback, one lowercase key per scope), exactly like the CLI.
+ * Structured input is re-validated pair by pair, so direct RPC callers get the
+ * same normalization as the slash command. Legacy adoption with anything but
+ * one entry is rejected, like the CLI.
+ */
+export function normalizePlanAdopt(
+  adopt: Record<string, string>,
+  adoptScoped: Record<string, Record<string, string>>,
+  entryCount: number,
+): Record<string, Record<string, string>> {
+  const pairs = [
+    ...Object.entries(adopt ?? {}).map(([slot, id]) => `${slot}=${id}`),
+    ...Object.entries(adoptScoped ?? {}).flatMap(([scope, map]) =>
+      Object.entries(map ?? {}).map(([slot, id]) => `${scope}:${slot}=${id}`),
+    ),
+  ];
+  const split: PlanAdoptInput = { adopt: {}, adoptScoped: {} };
+  for (const pair of pairs) {
+    parseAdoptPair(pair, split);
+  }
+  if (Object.keys(split.adopt).length && entryCount !== 1) {
+    throw new Error("--adopt SLOT=<agent-id> needs exactly one repository; use --adopt <scope-id>:SLOT=<agent-id> with several entries");
+  }
+  return { ...(Object.keys(split.adopt).length ? { "*": split.adopt } : {}), ...split.adoptScoped };
+}
+
+/**
+ * Attaches --checkout to the single plan entry, like the CLI: a bare address
+ * becomes { repo, checkout }, an object entry carries it alongside. Anything
+ * but one entry is rejected, like the CLI (without the --repos-file clause,
+ * which the plugin has no equivalent of).
+ */
+export function applyPlanCheckout(entries: unknown[], checkout: string): unknown[] {
+  if (entries.length !== 1) {
+    throw new Error("--checkout needs exactly one repository entry");
+  }
+  if (!checkout?.trim()) {
+    throw new Error("--checkout needs a checkout path");
+  }
+  const only = entries[0] as Record<string, unknown> | string;
+  if (only && typeof only === "object" && !Array.isArray(only)) {
+    if (only.checkout !== undefined) {
+      throw new Error('--checkout conflicts with the entry "checkout"; use one of them');
+    }
+    if (only.main !== undefined) {
+      throw new Error('--checkout conflicts with the entry "main"; use one of them');
+    }
+    return [{ ...only, checkout }];
+  }
+  return [{ repo: only, checkout }];
+}
+
+/**
+ * Attaches --name to the single plan entry, like the CLI: a bare address
+ * becomes { repo, name }, an object entry carries it alongside. Anything but
+ * one entry is rejected, like the CLI (without the --repos-file clause, which
+ * the plugin has no equivalent of). Content validation stays with discovery.
+ */
+export function applyPlanName(entries: unknown[], name: string): unknown[] {
+  if (entries.length !== 1) {
+    throw new Error("--name needs exactly one repository entry");
+  }
+  const only = entries[0] as Record<string, unknown> | string;
+  if (only && typeof only === "object" && !Array.isArray(only)) {
+    if (only.name !== undefined) {
+      throw new Error('--name conflicts with the entry "name"; use one of them');
+    }
+    return [{ ...only, name }];
+  }
+  return [{ repo: only, name }];
+}
+
+/**
+ * Attaches --subject to the single plan entry, like the CLI. Content
+ * validation stays with discovery.
+ */
+export function applyPlanSubject(entries: unknown[], subject: string): unknown[] {
+  if (entries.length !== 1) {
+    throw new Error("--subject needs exactly one repository entry");
+  }
+  const only = entries[0] as Record<string, unknown> | string;
+  if (only && typeof only === "object" && !Array.isArray(only)) {
+    if (only.subject !== undefined) {
+      throw new Error('--subject conflicts with the entry "subject"; use one of them');
+    }
+    return [{ ...only, subject }];
+  }
+  return [{ repo: only, subject }];
+}
+
+/**
+ * Attaches --main to the single plan entry, like the CLI. A blank workspace
+ * id and anything but one entry are rejected; --main and --checkout exclude
+ * each other, like the CLI.
+ */
+export function applyPlanMain(entries: unknown[], main: string): unknown[] {
+  if (entries.length !== 1) {
+    throw new Error("--main needs exactly one repository entry");
+  }
+  if (!main?.trim()) {
+    throw new Error("--main needs a workspace id (workspace:<id>)");
+  }
+  const only = entries[0] as Record<string, unknown> | string;
+  if (only && typeof only === "object" && !Array.isArray(only)) {
+    if (only.main !== undefined) {
+      throw new Error('--main conflicts with the entry "main"; use one of them');
+    }
+    if (only.checkout !== undefined) {
+      throw new Error('--main conflicts with the entry "checkout"; use one of them');
+    }
+    return [{ ...only, main }];
+  }
+  return [{ repo: only, main }];
+}
+
+/**
+ * Attaches --domain to the single plan entry, like the CLI. An explicit empty
+ * string clears the pointer; anything but one entry is rejected. Content
+ * validation stays with discovery.
+ */
+export function applyPlanDomain(entries: unknown[], domain: string): unknown[] {
+  if (entries.length !== 1) {
+    throw new Error("--domain needs exactly one repository entry");
+  }
+  const only = entries[0] as Record<string, unknown> | string;
+  if (only && typeof only === "object" && !Array.isArray(only)) {
+    if (only.domain !== undefined) {
+      throw new Error('--domain conflicts with the entry "domain"; use one of them');
+    }
+    return [{ ...only, domain }];
+  }
+  return [{ repo: only, domain }];
+}
+
+function parseAdoptWorkerPair(pair: string): [string, string | null] {
+  // Same shape as the CLI: <agent-id>[@<slot>], slot uppercase, no owner.
+  const match = pair.match(/^([0-9a-f-]{8,})(?:@([A-Za-z]))?$/);
+  if (!match) {
+    throw new Error(`--adopt-worker expects <agent-id>[@<slot>], got ${pair}`);
+  }
+  return [match[1], match[2] ? match[2].toUpperCase() : null];
+}
+
+/**
+ * Splits raw --adopt-worker values (repeatable, each comma-separated) into the
+ * planner form (agent id to owning slot or null), exactly like the CLI. Throws
+ * plain Errors with the CLI message; the parser re-raises them with usage via
+ * fail().
+ */
+export function splitAdoptWorkerPairs(values: string[]): Record<string, string | null> {
+  const out: Record<string, string | null> = {};
+  for (const pair of values.flatMap((v) => v.split(",")).map((s) => s.trim()).filter(Boolean)) {
+    const [id, slot] = parseAdoptWorkerPair(pair);
+    out[id] = slot;
+  }
+  return out;
+}
+
+/**
+ * Re-validates structured --adopt-worker input pair by pair, so direct RPC
+ * callers get the same normalization as the slash command (slots uppercase).
+ * A non-empty worker map with anything but one entry is rejected, like the
+ * CLI.
+ */
+export function normalizePlanAdoptWorker(
+  adoptWorker: Record<string, string | null>,
+  entryCount: number,
+): Record<string, string | null> {
+  const pairs = Object.entries(adoptWorker ?? {}).map(([id, slot]) =>
+    slot === null || slot === undefined ? id : `${id}@${slot}`,
+  );
+  const out: Record<string, string | null> = {};
+  for (const pair of pairs) {
+    const [id, slot] = parseAdoptWorkerPair(pair);
+    out[id] = slot;
+  }
+  if (Object.keys(out).length && entryCount !== 1) {
+    throw new Error("--adopt-worker needs exactly one repository entry; the worker is labelled for that scope");
+  }
+  return out;
+}
+
+/**
+ * Validates --rename-project, like the CLI: only with exactly one entry, and
+ * never blank. Returns the trimmed project name, or null when unset.
+ */
+export function checkedRenameProject(value: string | undefined, entryCount: number): string | null {
+  if (value === undefined) return null;
+  if (entryCount !== 1) {
+    throw new Error("--rename-project needs exactly one repository entry");
+  }
+  const name = value.trim();
+  if (!name) {
+    throw new Error("--rename-project needs a project name");
+  }
+  return name;
 }
 
 export function parseFactoryArgs(args: string): FactoryCommand {
@@ -449,7 +710,7 @@ export function parseFactoryArgs(args: string): FactoryCommand {
     };
   }
   if (sub === "plan") {
-    checkAllowed(flags, "plan", ["allow-fork", "slots"]);
+    checkAllowed(flags, "plan", ["allow-fork", "slots", "adopt", "adopt-worker", "local", "hub", "checkout", "name", "subject", "main", "domain", "detach", "retitle", "rename-project"]);
     // No address: the caller plans the scope of the current workspace.
     const slotsRaw = flags.singles.get("slots");
     let slots: string[] | undefined;
@@ -461,11 +722,70 @@ export function parseFactoryArgs(args: string): FactoryCommand {
         .map((s) => checkSlot(s, "--slots"));
       if (new Set(slots).size !== slots.length) fail("--slots contains duplicates.");
     }
+    const local = flags.multis.get("local");
+    const hub = flags.multis.get("hub");
+    const checkout = flags.singles.get("checkout");
+    const name = flags.singles.get("name");
+    const subject = flags.singles.get("subject");
+    const main = flags.singles.get("main");
+    const domain = flags.singles.get("domain");
+    const renameRaw = flags.singles.get("rename-project");
+    const entryCount = flags.positionals.length + (local?.length ?? 0) + (hub?.length ?? 0) || 1;
+    let split: PlanAdoptInput = { adopt: {}, adoptScoped: {} };
+    try {
+      split = splitAdoptPairs(flags.multis.get("adopt") ?? []);
+      normalizePlanAdopt(split.adopt, split.adoptScoped, entryCount);
+    } catch (error) {
+      fail(error instanceof Error ? error.message : String(error));
+    }
+    let adoptWorker: Record<string, string | null> = {};
+    try {
+      adoptWorker = splitAdoptWorkerPairs(flags.multis.get("adopt-worker") ?? []);
+      normalizePlanAdoptWorker(adoptWorker, entryCount);
+    } catch (error) {
+      fail(error instanceof Error ? error.message : String(error));
+    }
+    // Count and blank checks only, against dummy entries; the server attaches
+    // each single-entry option to the resolved entry with the same helper.
+    const singleEntryChecks: Array<[string | undefined, (entries: unknown[], value: string) => unknown[]]> = [
+      [checkout, applyPlanCheckout],
+      [name, applyPlanName],
+      [subject, applyPlanSubject],
+      [main, applyPlanMain],
+      [domain, applyPlanDomain],
+    ];
+    for (const [value, apply] of singleEntryChecks) {
+      if (value === undefined) continue;
+      try {
+        apply(new Array(entryCount).fill("scope"), value);
+      } catch (error) {
+        fail(error instanceof Error ? error.message : String(error));
+      }
+    }
+    let renameProject: string | null = null;
+    try {
+      renameProject = checkedRenameProject(renameRaw, entryCount);
+    } catch (error) {
+      fail(error instanceof Error ? error.message : String(error));
+    }
     return {
       command: "plan",
       repos: flags.positionals,
       allowFork: flags.bools.has("allow-fork"),
       ...(slots ? { slots } : {}),
+      ...(Object.keys(split.adopt).length ? { adopt: split.adopt } : {}),
+      ...(Object.keys(split.adoptScoped).length ? { adoptScoped: split.adoptScoped } : {}),
+      ...(local?.length ? { local: [...local] } : {}),
+      ...(hub?.length ? { hub: [...hub] } : {}),
+      ...(checkout !== undefined ? { checkout } : {}),
+      ...(name !== undefined ? { name } : {}),
+      ...(subject !== undefined ? { subject } : {}),
+      ...(main !== undefined ? { main } : {}),
+      ...(domain !== undefined ? { domain } : {}),
+      ...(Object.keys(adoptWorker).length ? { adoptWorker } : {}),
+      ...(flags.bools.has("detach") ? { detach: true as const } : {}),
+      ...(flags.bools.has("retitle") ? { retitle: true as const } : {}),
+      ...(renameProject ? { renameProject } : {}),
     };
   }
   if (sub === "apply") {
@@ -617,7 +937,40 @@ export function parseFactoryArgs(args: string): FactoryCommand {
         dryRun,
       };
     }
-    return fail(sub === "worker" ? `${sub} needs list, pick, set or rm.` : `${sub} needs list, set or rm.`);
+    if (action === "add") {
+      if (sub !== "steer") return fail("add is a steer command; workers have no add.");
+      checkAllowed(flags, "steer add", ["thinking", "mode", "profile", "dry-run"]);
+      if (args.length > 2) fail("steer add takes at most a slot and a profile or provider/model.");
+      let slot: string | undefined;
+      let spec: string | undefined;
+      if (args.length === 1) {
+        if (/^[A-Za-z]$/.test(args[0])) slot = args[0].toUpperCase();
+        else spec = args[0];
+      } else if (args.length === 2) {
+        if (!/^[A-Za-z]$/.test(args[0])) fail(`steer add expects a slot letter A-Z first, got ${JSON.stringify(args[0])}.`);
+        slot = args[0].toUpperCase();
+        spec = args[1];
+      }
+      const thinking = flags.singles.get("thinking");
+      const mode = flags.singles.get("mode");
+      const profile = flags.singles.get("profile");
+      if (spec !== undefined && !spec.includes("/") && (thinking !== undefined || mode !== undefined || profile !== undefined)) {
+        fail("--thinking, --mode and --profile only go with provider/model; a profile name is used as it is.");
+      }
+      if (spec === undefined && (thinking !== undefined || mode !== undefined || profile !== undefined)) {
+        fail("--thinking, --mode and --profile need a provider/model; without one the profile is picked automatically.");
+      }
+      return {
+        command: "steerAdd",
+        ...(slot !== undefined ? { slot } : {}),
+        ...(spec !== undefined ? { spec } : {}),
+        ...(thinking !== undefined ? { thinking } : {}),
+        ...(mode !== undefined ? { mode } : {}),
+        ...(profile !== undefined ? { profile } : {}),
+        dryRun,
+      };
+    }
+    return fail(sub === "worker" ? `${sub} needs list, pick, set or rm.` : `${sub} needs list, add, set or rm.`);
   }
   if (sub === "slot") {
     // Deprecated alias of `steer set|rm` (letters only, like the CLI).
@@ -674,6 +1027,15 @@ export function parseFactoryArgs(args: string): FactoryCommand {
     if (flags.positionals.length !== 3 || !spec) fail(`model ${flag} needs a profile or provider/model and on|off.`);
     if (state !== "on" && state !== "off") fail(`model ${flag} ends with on or off, got ${JSON.stringify(state)}.`);
     return { command: "model", flag, spec, on: state === "on", dryRun: flags.bools.has("dry-run") };
+  }
+  if (sub === "labels") {
+    checkAllowed(flags, "labels", ["apply"]);
+    if (flags.positionals.length > 1) fail("labels takes at most one scope or agent address; leave it out to audit every project.");
+    return {
+      command: "labels",
+      ...(flags.positionals.length === 1 ? { address: flags.positionals[0] } : {}),
+      apply: flags.bools.has("apply"),
+    };
   }
   return fail(`Unknown subcommand ${JSON.stringify(sub)}. Try one of the commands below.`);
 }

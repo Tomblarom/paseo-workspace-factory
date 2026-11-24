@@ -6,6 +6,8 @@ import type {
   factoryCheckpointPreview,
   factoryCleanup,
   factoryFreshPreview,
+  factoryLabels,
+  factoryLabelsPreview,
   factoryPlan,
   factoryQuota,
   factoryRelocatePreview,
@@ -14,6 +16,8 @@ import type {
   factoryScopes,
   factoryScopesCandidates,
   factoryStatus,
+  factorySteerAdd,
+  factorySteerAddPreview,
   factorySwitch,
   factorySwitchPreview,
 } from "../shared/factory.js";
@@ -31,6 +35,14 @@ export interface AssignPreviewInputs {
   tests: string[];
   blockers: string[];
   next?: string;
+}
+
+export interface SteerAddPreviewInputs {
+  slot?: string;
+  spec?: string;
+  thinking?: string;
+  mode?: string;
+  profile?: string;
 }
 
 export type FactoryPanelResult =
@@ -86,6 +98,33 @@ export type FactoryPanelResult =
       at: string;
       inputs: AssignPreviewInputs;
       preview: RpcOutput<typeof factoryAssignPreview>;
+    }
+  | {
+      kind: "labelsPreview";
+      address?: string;
+      requestedApply: boolean;
+      at: string;
+      preview: RpcOutput<typeof factoryLabelsPreview>;
+    }
+  | {
+      kind: "labelsApplied";
+      address?: string;
+      at: string;
+      applied: RpcOutput<typeof factoryLabels>;
+    }
+  | {
+      kind: "steerAddPreview";
+      repo?: string;
+      workspaceId: string;
+      at: string;
+      inputs: SteerAddPreviewInputs;
+      preview: RpcOutput<typeof factorySteerAddPreview>;
+    }
+  | {
+      kind: "steerAdded";
+      repo: string;
+      at: string;
+      added: RpcOutput<typeof factorySteerAdd>;
     }
   | { kind: "resume"; repo: string; at: string; resume: RpcOutput<typeof factoryResume> }
   | { kind: "resumePreview"; workspaceId: string; agentId: string; at: string }

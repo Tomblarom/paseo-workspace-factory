@@ -8,6 +8,7 @@ import {
   factoryCleanupPlan,
   factoryDrain,
   factoryFreshPreview,
+  factoryLabelsPreview,
   factoryModelsCatalog,
   factoryModelsList,
   factoryModelsSet,
@@ -20,6 +21,7 @@ import {
   factoryScopes,
   factoryScopesCandidates,
   factoryStatus,
+  factorySteerAddPreview,
   factorySwitchPreview,
   factoryWorkerPick,
   factoryWorkers,
@@ -74,6 +76,33 @@ export async function submitFactoryCommand(
   }
   if (parsed.command === "worker" || parsed.command === "steer" || parsed.command === "model") {
     return submitModels(parsed, ctx, at);
+  }
+  if (parsed.command === "steerAdd") {
+    const inputs = {
+      ...(parsed.slot !== undefined ? { slot: parsed.slot } : {}),
+      ...(parsed.spec !== undefined ? { spec: parsed.spec } : {}),
+      ...(parsed.thinking !== undefined ? { thinking: parsed.thinking } : {}),
+      ...(parsed.mode !== undefined ? { mode: parsed.mode } : {}),
+      ...(parsed.profile !== undefined ? { profile: parsed.profile } : {}),
+    };
+    const preview = await ctx.rpc(factorySteerAddPreview, {
+      workspaceId: ctx.workspaceId,
+      ...inputs,
+    });
+    if (parsed.dryRun) {
+      setFactoryResult({ kind: "info", at, text: preview.text });
+      return pill("Steer-Add");
+    }
+    // The preview stays on screen until the panel button confirms it; the
+    // confirm saves the slot/profile settings first, then creates the steer.
+    setFactoryResult({
+      kind: "steerAddPreview",
+      workspaceId: ctx.workspaceId,
+      at,
+      inputs,
+      preview,
+    });
+    return PANEL;
   }
   if (parsed.command === "status") {
     const status = await ctx.rpc(
@@ -211,11 +240,25 @@ export async function submitFactoryCommand(
   }
   if (parsed.command === "plan") {
     const plan = await ctx.rpc(factoryPlan, {
-      ...(parsed.repos.length ? { repos: parsed.repos } : { workspaceId: ctx.workspaceId }),
+      ...(parsed.repos.length || parsed.local?.length || parsed.hub?.length ? {} : { workspaceId: ctx.workspaceId }),
+      ...(parsed.repos.length ? { repos: parsed.repos } : {}),
       ...(parsed.allowFork ? { allowFork: true as const } : {}),
       ...(parsed.slots ? { slots: parsed.slots } : {}),
+      ...(parsed.adopt ? { adopt: parsed.adopt } : {}),
+      ...(parsed.adoptScoped ? { adoptScoped: parsed.adoptScoped } : {}),
+      ...(parsed.local?.length ? { local: parsed.local } : {}),
+      ...(parsed.hub?.length ? { hub: parsed.hub } : {}),
+      ...(parsed.checkout !== undefined ? { checkout: parsed.checkout } : {}),
+      ...(parsed.name !== undefined ? { name: parsed.name } : {}),
+      ...(parsed.subject !== undefined ? { subject: parsed.subject } : {}),
+      ...(parsed.main !== undefined ? { main: parsed.main } : {}),
+      ...(parsed.domain !== undefined ? { domain: parsed.domain } : {}),
+      ...(parsed.adoptWorker ? { adoptWorker: parsed.adoptWorker } : {}),
+      ...(parsed.detach ? { detach: true as const } : {}),
+      ...(parsed.retitle ? { retitle: true as const } : {}),
+      ...(parsed.renameProject !== undefined ? { renameProject: parsed.renameProject } : {}),
     });
-    setFactoryResult({ kind: "plan", repos: parsed.repos, at, plan });
+    setFactoryResult({ kind: "plan", repos: [...parsed.repos, ...(parsed.local ?? []), ...(parsed.hub ?? [])], at, plan });
     return PANEL;
   }
   if (parsed.command === "apply") {
@@ -239,6 +282,25 @@ export async function submitFactoryCommand(
       workspaceId: ctx.workspaceId,
       at,
       inputs,
+      preview,
+    });
+    return PANEL;
+  }
+  if (parsed.command === "labels") {
+    const preview = await ctx.rpc(
+      factoryLabelsPreview,
+      parsed.address ? { address: parsed.address } : {},
+    );
+    if (!preview.rows.length) {
+      setFactoryResult({ kind: "info", at, text: preview.text });
+      return pill("Labels");
+    }
+    // --apply only marks the intent; the write itself always needs the panel button.
+    setFactoryResult({
+      kind: "labelsPreview",
+      address: parsed.address,
+      requestedApply: parsed.apply,
+      at,
       preview,
     });
     return PANEL;

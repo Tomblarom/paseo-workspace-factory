@@ -7,6 +7,7 @@ import {
   switchFingerprint,
   checkpointFingerprint,
   freshFingerprint,
+  labelsFingerprint,
 } from "../shared/preview.ts";
 
 test("isPlanHash accepts 16 lowercase hex only", () => {
@@ -91,4 +92,22 @@ test("switch and checkpoint fingerprints live in separate domains", () => {
     next: null,
   });
   assert.notEqual(switched, checked);
+});
+
+test("labelsFingerprint binds the address and the exact rows", () => {
+  const rows = [{ agentId: "a1", labels: { "wsf.scope": "web" } }];
+  const id = { address: null, rows };
+  const base = labelsFingerprint(id);
+  assert.match(base, /^[0-9a-f]{16}$/);
+  assert.equal(labelsFingerprint({ address: null, rows: structuredClone(rows) }), base);
+  assert.notEqual(labelsFingerprint({ address: "web", rows }), base);
+  assert.notEqual(labelsFingerprint({ address: null, rows: [] }), base);
+  assert.notEqual(
+    labelsFingerprint({ address: null, rows: [{ agentId: "a1", labels: { "wsf.scope": "api" } }] }),
+    base,
+  );
+  assert.notEqual(
+    labelsFingerprint({ address: null, rows }),
+    switchFingerprint({ repo: "x", from: "A", to: "B", epoch: 1 }),
+  );
 });

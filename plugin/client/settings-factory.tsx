@@ -19,6 +19,7 @@ import { formatModelList, profileBadges } from "../shared/models-format.js";
 import { factoryConfigSettings, factorySidebarSettings } from "../shared/settings.js";
 import {
   validateFactorySettings,
+  validateHostSettings,
   validateProfilesAgainstCatalogLocal,
   validateQuotaSettings,
   type FactorySettingsValues,
@@ -33,7 +34,10 @@ const WORKERS_INFO =
   "Workers are helper agents a steer starts. The list is a priority: the first entry that is available is used, so a limit or outage on one provider falls through to the next. Advisor profiles cannot be workers.";
 
 const EFFECTIVE_INFO =
-  "These lists are what the factory uses right now. Saving steers, profiles or workers below replaces the steer slots and the worker list from the config file with these settings; a profile that only exists in the file stays available.";
+  "These lists are what the factory uses right now. Saving steers, profiles or workers below replaces the steer slots and the worker list from the config file with these settings; a profile that only exists in the file stays available. A GitHub owner or checkout root saved below replaces the matching file value.";
+
+const HOST_INFO =
+  "The host setup this plugin runs on. Both fields are optional while a config file exists: a saved value replaces the matching file value, an empty field keeps it. Without a config file both are required, and together with the steers, profiles and workers below they form the complete configuration.";
 
 const PROFILES_INFO =
   "A profile is a named choice of provider, model, thinking level and permission mode. Steers and workers refer to profiles by name, so you change a model in one place.";
@@ -177,6 +181,7 @@ export function FactorySettings({ theme, layout }: PluginSurfaceProps) {
   const changed = draft !== null && savedJson !== null && JSON.stringify(draft) !== savedJson;
   const errors = useMemo(() => (draft ? validateFactorySettings(draft) : []), [draft]);
   const quotaErrors = useMemo(() => (draft ? validateQuotaSettings(draft) : []), [draft]);
+  const hostErrors = useMemo(() => (draft ? validateHostSettings(draft) : []), [draft]);
   const usedProfiles = useMemo(
     () => (draft ? [...new Set([...Object.values(draft.slots), ...draft.workerPriority])] : []),
     [draft],
@@ -258,7 +263,7 @@ export function FactorySettings({ theme, layout }: PluginSurfaceProps) {
           <SettingsCard>
             <SettingsAction
               label="Defaults"
-              hint="Back to one steer (A) with the default profile."
+              hint="Back to one steer (A) with the default profile; clears the host setup."
               actionLabel="Reset to defaults"
               onPress={() => void reset()}
             />
@@ -293,6 +298,34 @@ export function FactorySettings({ theme, layout }: PluginSurfaceProps) {
               <Text style={styles.text}>{effective.text}</Text>
             )}
           </SettingsRow>
+        </SettingsCard>
+      </SettingsSection>
+
+      <SettingsSection title="Host" info={HOST_INFO}>
+        <SettingsCard>
+          <SettingsInput
+            key={`github-owner-${formKey}`}
+            label="GitHub owner"
+            hint="Account that owns the forks, e.g. octocat. Empty keeps the config file value."
+            placeholder="octocat"
+            initialValue={draft.githubOwner ?? ""}
+            onChangeText={(value) =>
+              updateDraft({ ...draft, githubOwner: value.trim() ? value.trim() : null })
+            }
+          />
+          <SettingsInput
+            key={`checkout-root-${formKey}`}
+            label="Checkout root"
+            hint="Absolute directory below which repositories are cloned, e.g. /home/you/projects. Empty keeps the config file value."
+            placeholder="/home/you/projects"
+            initialValue={draft.checkoutRoot ?? ""}
+            onChangeText={(value) =>
+              updateDraft({ ...draft, checkoutRoot: value.trim() ? value.trim() : null })
+            }
+          />
+          {hostErrors.map((message) => (
+            <SettingsRow key={message} label="Please fix" error={message} />
+          ))}
         </SettingsCard>
       </SettingsSection>
 
@@ -662,7 +695,7 @@ export function FactorySettings({ theme, layout }: PluginSurfaceProps) {
       <CleanupSettingsSection theme={theme} layout={layout} />
       <ResumeSettingsSection theme={theme} />
 
-      <SettingsSection title="Save steers and profiles">
+      <SettingsSection title="Save settings">
         <SettingsCard>
           {errors.map((message) => (
             <SettingsRow key={message} label="Please fix" error={message} />
@@ -682,7 +715,7 @@ export function FactorySettings({ theme, layout }: PluginSurfaceProps) {
           ) : null}
           <SettingsAction
             label="Save"
-            hint={changed ? "Saves steers and profiles." : "No unsaved changes."}
+            hint={changed ? "Saves these settings." : "No unsaved changes."}
             actionLabel={configState.saving ? "Saving…" : "Save"}
             disabled={!changed || configState.saving || errors.length > 0 || catalogBlockers > 0}
             onPress={() => void save()}
@@ -695,7 +728,7 @@ export function FactorySettings({ theme, layout }: PluginSurfaceProps) {
           />
           <SettingsAction
             label="Defaults"
-            hint="Back to one steer (A) with the default profile."
+            hint="Back to one steer (A) with the default profile; clears the host setup."
             actionLabel="Reset to defaults"
             onPress={() => void reset()}
           />

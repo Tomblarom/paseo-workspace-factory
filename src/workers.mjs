@@ -4,13 +4,54 @@
 // and ignored files are deleted without a dirty check, and commits that exist only
 // on a detached HEAD become unreachable. The factory therefore only previews
 // retirement; archiving is disabled until these checks are proven on real data.
-import { LABEL, parentOf } from './paseo.mjs';
-import { continuedFromId, inheritContinuationLabels, resolveContinuations } from './zerosub.mjs';
+import { LABEL, METADATA_KEY, parentOf } from './paseo.mjs';
+import { idempotencyKey, requestDigest } from './planner.mjs';
+import { ACCOUNT_METADATA_KEY, continuedFromId, inheritContinuationLabels, resolveContinuations } from './zerosub.mjs';
 
 export const LIFECYCLE_LABEL = 'wsf.lifecycle'; // "reusable" keeps a worker
 export const RETIREMENT_ENABLED = false;
 
 const BUSY = new Set(['running', 'initializing']);
+
+export async function startScopedWorker({ client, status, callerId, profile, accountId, prompt, title, apply = false }) {
+  const { state, workspace, repo, steers } = status;
+  const slot = state?.activeSteer;
+  const holders = steers.filter((steer) => steer.slot === slot && !steer.retired);
+  const parent = holders.length === 1 ? holders[0] : null;
+  if (!workspace?.id || state?.retired || !parent || parent.id !== callerId || parent.advisor || parent.parent || parent.workspaceId !== workspace.id) {
+    throw new Error('Only the active steer can start a worker in this scope');
+  }
+  if (!prompt?.trim()) throw new Error('worker start needs --task <text>');
+  const scopeId = state.scope?.id ?? repo;
+  const labels = { [LABEL.scope]: scopeId, [LABEL.role]: 'worker', [LABEL.owner]: slot };
+  const request = {
+    title: title?.trim() || 'Worker',
+    parent: parent.id,
+    prompt,
+    labels,
+    config: {
+      provider: `${profile.provider}/${profile.model}`,
+      ...(profile.mode ? { modeId: profile.mode } : {}),
+      ...(profile.thinking ? { thinkingOptionId: profile.thinking } : {}),
+    },
+    ...(accountId ? { metadata: { [ACCOUNT_METADATA_KEY]: accountId } } : {}),
+  };
+  const result = { scope: scopeId, workspaceId: workspace.id, parentId: parent.id, profile: profile.name, provider: request.config.provider, accountId: accountId ?? null };
+  if (!apply) return result;
+
+  const key = idempotencyKey(scopeId, 'worker', slot, `e${state.epoch}`, requestDigest({ parentId: parent.id, title: request.title, prompt }));
+  const workspaceHandle = client.workspaces.ref(workspace.id);
+  const current = (await workspaceHandle.refresh())?.metadata?.[METADATA_KEY];
+  if (current?.activeSteer !== slot || current?.epoch !== state.epoch || current?.retired) {
+    throw new Error('The active steer changed since discovery. Run worker start again from the active steer.');
+  }
+  const handle = await workspaceHandle.agents.create({ ...request, idempotencyKey: key });
+  const agent = (await handle.refresh())?.agent;
+  if (!agent || agent.workspaceId !== workspace.id || parentOf(agent) !== parent.id || (accountId && agent.metadata?.[ACCOUNT_METADATA_KEY] !== accountId)) {
+    throw new Error('Worker creation could not be verified');
+  }
+  return { ...result, agentId: agent.id };
+}
 
 /**
  * @param gitState { dirty, untracked, ignored, detached, ahead } from readGitState, or null if unknown

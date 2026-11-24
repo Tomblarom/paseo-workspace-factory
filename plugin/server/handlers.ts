@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { join, resolve } from "node:path";
 import type { RpcInput } from "@getpaseo/plugin";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import {
@@ -15,6 +15,8 @@ import {
   factoryFresh,
   factoryFreshPreview,
   factoryHistoryOpen,
+  factoryLabels,
+  factoryLabelsPreview,
   factoryModelsCatalog,
   factoryPlan,
   factoryRelocate,
@@ -27,6 +29,8 @@ import {
   factoryStatus,
   factorySwitch,
   factorySwitchPreview,
+  factorySteerAdd,
+  factorySteerAddPreview,
   factoryWorkerPick,
   factoryWorkers,
 } from "../shared/factory.js";
@@ -35,9 +39,21 @@ import {
   checkpointFingerprint,
   freshFingerprint,
   isPlanHash,
+  labelsFingerprint,
   relocateFingerprint,
+  steerAddFingerprint,
   switchFingerprint,
 } from "../shared/preview.js";
+import {
+  applyPlanCheckout,
+  applyPlanDomain,
+  applyPlanMain,
+  applyPlanName,
+  applyPlanSubject,
+  checkedRenameProject,
+  normalizePlanAdopt,
+  normalizePlanAdoptWorker,
+} from "../shared/factory-args.js";
 import {
   applyPlans,
   createAuthorization,
@@ -58,8 +74,10 @@ import { isAdvisorSlot, isSensitiveProfile, workerPriority } from "./factory/con
 import { DRAIN_DEFAULT_TIMEOUT_MS, drain, parseTimeout } from "./factory/drain.js";
 import { createRunner } from "./factory/factory.js";
 import { createGh } from "./factory/github.js";
+import { formatLabelFixes, planLabelFixes } from "./factory/labels.js";
 import { createGit } from "./factory/local.js";
-import { formatCatalog, paseoRunFlags, resolveProfile } from "./factory/models.js";
+import { formatCatalog, paseoRunFlags, resolveProfile, usedProfilesByLiveSteers } from "./factory/models.js";
+import { applySteerAdd, formatSteerAddPreview, planSteerAdd } from "./factory/steer-add.js";
 import { planHash } from "./factory/planner.js";
 import { relocateScope } from "./factory/relocate.js";
 import { formatWorkersText, readWorkers, workersReport } from "./factory/supervision.js";
@@ -77,7 +95,7 @@ import {
 import { daemonHost, runtime } from "./factory/runtime.js";
 import { applyResume } from "./resume-apply.js";
 import type { ResumeClearSettings } from "../shared/idle-cleanup.js";
-import { listScopes } from "./factory/scope.js";
+import { domainFirstPlanOrder, listScopes } from "./factory/scope.js";
 import { scopeCandidates, scopeRows } from "./factory/scopes-view.js";
 import { AGENTS_KEY } from "./factory/agent-state.js";
 import {
@@ -91,8 +109,10 @@ import {
   switchSteer,
   writeCheckpoint,
 } from "./factory/steer.js";
-import type { ConfigLoader } from "./config.js";
+import type { ConfigLoader, HostSettingsReader } from "./config.js";
 import { getQuotaSnapshot } from "./quota.js";
+import { settingsFromConfig, validateFactorySettings, type FactorySettingsValues } from "../shared/settings-validate.js";
+import { readZerosubStateSafe } from "./zerosub-runtime.js";
 
 /** Slot to configured provider/model, so the panel can show profile drift. */
 function expectedProfiles(config: any): Record<string, { profile: string; provider: string; model: string }> {
@@ -139,8 +159,8 @@ async function resolveEntryForAddress(
     if (ws) {
       const title = ws.title ?? ws.name ?? ws.id;
       const suggestion =
-        scopeCandidates(paseoState).find((c: any) => c.workspaceId === ws.id)?.suggestedPlan ??
-        `paseo-factory plan workspace:${ws.id}`;
+        scopeCandidates(paseoState, { factoryCmd: "/factory" }).find((c: any) => c.workspaceId === ws.id)?.suggestedPlan ??
+        `/factory plan workspace:${ws.id}`;
       throw new Error(
         `Workspace "${title}" is not managed by the factory yet. To set it up, preview a plan: ${suggestion}`,
       );
@@ -187,7 +207,7 @@ export async function getScopeCandidates(
   _input: RpcInput<typeof factoryScopesCandidates>,
   { paseo }: PluginHandlerContext,
 ): Promise<any> {
-  return { rows: scopeCandidates(await readPaseoState(paseo)) };
+  return { rows: scopeCandidates(await readPaseoState(paseo), { factoryCmd: "/factory" }) };
 }
 
 export async function getCleanup(
@@ -490,26 +510,74 @@ export async function getPlan(
 ): Promise<any> {
   const config = await loader.loadEffectiveConfig();
   const slots = checkedSlots(input.slots, config);
-  const adopt = input.adopt && Object.keys(input.adopt).length ? { "*": input.adopt } : {};
-  for (const slot of Object.keys(input.adopt ?? {})) {
-    if (!/^[A-Z]$/.test(slot.toUpperCase())) throw new Error(`adopt names slot ${JSON.stringify(slot)}, want A-Z`);
+  const localFlags = input.local ?? [];
+  for (const flag of localFlags) {
+    if (!flag?.trim()) throw new Error("--local needs a directory path");
+    const abs = resolve(flag);
+    try {
+      if (!statSync(abs).isDirectory()) throw new Error();
+    } catch {
+      throw new Error(`--local path ${flag} does not exist or is not a directory`);
+    }
   }
+  // --hub entries plan hub-kind scopes, like the CLI: a directory path or a
+  // worktree workspace id (workspace:<id>, worktree:<id> or bare wks_…).
+  const hubEntries = (input.hub ?? []).map((flag) => {
+    if (!flag?.trim()) throw new Error("--hub needs a directory path or workspace:<id>");
+    const trimmed = flag.trim();
+    const prefixed = trimmed.match(/^(?:workspace|worktree)\s*:\s*(.+)$/i);
+    if (prefixed) {
+      const workspace = prefixed[1].trim();
+      if (!workspace) throw new Error(`--hub needs a workspace id, got ${flag}`);
+      return { workspace, hub: true };
+    }
+    if (/^wks_[A-Za-z0-9]+$/.test(trimmed)) return { workspace: trimmed, hub: true };
+    const abs = resolve(trimmed);
+    try {
+      if (!statSync(abs).isDirectory()) throw new Error();
+    } catch {
+      throw new Error(`--hub path ${flag} does not exist or is not a directory`);
+    }
+    return { local: abs, hub: true };
+  });
   const repos = input.repos ?? [];
   // No address: plan the scope of the current workspace.
-  const entries: any[] = repos.length
-    ? repos
+  let entries: any[] = repos.length || localFlags.length || hubEntries.length
+    ? [...repos, ...localFlags.map((p) => ({ local: resolve(p) })), ...hubEntries]
     : [(await resolveEntryForAddress(paseo, undefined, input.workspaceId)).target];
+  // Single-entry options attach in CLI order (name, subject, checkout, main,
+  // domain); each helper re-validates count and conflicts for direct RPC
+  // callers, like the CLI does for scripted entries.
+  if (input.name !== undefined) entries = applyPlanName(entries, input.name) as any[];
+  if (input.subject !== undefined) entries = applyPlanSubject(entries, input.subject) as any[];
+  if (input.checkout !== undefined) entries = applyPlanCheckout(entries, input.checkout) as any[];
+  if (input.main !== undefined) entries = applyPlanMain(entries, input.main) as any[];
+  if (input.domain !== undefined) entries = applyPlanDomain(entries, input.domain) as any[];
+  const adopt = normalizePlanAdopt(input.adopt ?? {}, input.adoptScoped ?? {}, entries.length);
+  const adoptWorker = normalizePlanAdoptWorker(input.adoptWorker ?? {}, entries.length);
+  const renameProject = checkedRenameProject(input.renameProject, entries.length);
   const allowFork = input.allowFork ?? false;
+  const detach = input.detach ?? false;
+  const retitle = input.retitle ?? false;
   const runnerOptions: any = { config, client: paseo, gh: createGh(), git: createGit() };
   const runner = createRunner(runnerOptions);
-  const planOptions: any = { allowFork, adopt, ...(slots ? { slots } : {}) };
-  const plans = await runner.runPlans(entries, planOptions);
+  const planOptions: any = { allowFork, adopt, adoptWorker, detach, retitle, renameProject, ...(slots ? { slots } : {}) };
+  const unordered = await runner.runPlans(entries, planOptions);
+  // Domain scopes first, like the CLI: entries travel with their plans, apply
+  // pairs them by index, and the hash covers the ordered plans.
+  const order = (domainFirstPlanOrder as (plans: any[]) => number[])(unordered);
+  const plans = order.map((i) => unordered[i]);
+  const orderedEntries = order.map((i) => entries[i]);
   const hash = planHash(plans, config);
   if (plans.some((p: any) => p.ops.length)) {
     const authOptions: any = {
-      entries,
+      entries: orderedEntries,
       allowFork,
       adopt,
+      adoptWorker,
+      detach,
+      retitle,
+      renameProject,
       ...(slots ? { slots } : {}),
     };
     storeAuthorization(runtime().planDir, createAuthorization(plans, config, authOptions), config);
@@ -820,17 +888,26 @@ export async function pickWorker(
   const config = await loader.loadEffectiveConfig();
   let entries: any[];
   let repoPublic: boolean | null = null;
+  let profileHealth = null;
   if (input.repo || input.workspaceId) {
-    const { discovery } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
+    const { discovery, scope, runner } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
     entries = discovery.providers ?? [];
-    const priv = discovery.github?.fork?.repo?.private;
+    profileHealth = discovery.mainWorkspace?.metadata?.[METADATA_KEY]?.profileHealth ?? null;
+    let priv = discovery.github?.fork?.repo?.private;
+    const parent = scope?.parent ?? discovery.scope?.parent;
+    const parentRepo = parent?.kind === "github" ? parent.id : typeof parent === "string" ? parent : null;
+    if (priv === undefined && parentRepo) {
+      const [parentDiscovery] = await runner.discoverAll([parentRepo]).catch(() => []);
+      priv = parentDiscovery?.github?.fork?.repo?.private;
+    }
     repoPublic = priv === false ? true : priv === true ? false : null;
   } else {
     entries = ((await paseo.providers.snapshot()) as any)?.entries ?? [];
   }
-  const { profile, skipped } = (resolveProfile as any)(config, entries, (workerPriority as any)(config), {
+  const zerosub = await readZerosubStateSafe().catch(() => null);
+  const { profile, skipped, zerosubAccount } = (resolveProfile as any)(config, entries, (workerPriority as any)(config), {
     role: "worker",
-    repoPublic,
+    repoPublic, profileHealth, zerosub,
   });
   if (!profile) {
     const tried = skipped.length
@@ -840,7 +917,7 @@ export async function pickWorker(
   }
   const sensitive = (isSensitiveProfile as any)(config, profile.name);
   const text = [
-    `Worker pick: "${profile.name}" (${profile.provider}/${profile.model})${sensitive ? " [sensitive: give only sanitized technical tasks]" : ""}`,
+    `Worker pick: "${profile.name}" (${profile.provider}/${profile.model})${sensitive ? " [sensitive: give only sanitized technical tasks]" : ""}${zerosubAccount ? ` [account ${zerosubAccount}]` : ""}`,
     `paseo run ${(paseoRunFlags as any)(profile)}`,
     ...skipped.map((s: any) => `skipped "${s.name}": ${s.reason}`),
   ].join("\n");
@@ -851,6 +928,7 @@ export async function pickWorker(
     thinking: profile.thinking ?? null,
     mode: profile.mode ?? null,
     sensitive,
+    zerosubAccount,
     flags: (paseoRunFlags as any)(profile),
     skipped,
     text,
@@ -1081,4 +1159,197 @@ export async function planCleanup(
     void stored;
   }
   return { hash, plans, hints };
+}
+
+function labelsAddress(input: { address?: string }): string | undefined {
+  const address = input.address?.trim();
+  return address ? address : undefined;
+}
+
+export async function previewLabels(
+  input: RpcInput<typeof factoryLabelsPreview>,
+  { paseo }: PluginHandlerContext,
+): Promise<any> {
+  const address = labelsAddress(input);
+  const rows: any[] = (planLabelFixes as any)(
+    await readPaseoState(paseo),
+    address ? { address } : {},
+  );
+  const fixable = rows.filter((row) => Object.keys(row.labels).length);
+  return {
+    address: address ?? null,
+    rows,
+    fixable: fixable.length,
+    text: (formatLabelFixes as any)(rows),
+    fingerprint: labelsFingerprint({ address: address ?? null, rows }),
+  };
+}
+
+export async function applyLabels(
+  input: RpcInput<typeof factoryLabels>,
+  { paseo }: PluginHandlerContext,
+  loader: ConfigLoader,
+  extra?: { paseoCli?: (args: string[]) => unknown },
+): Promise<any> {
+  const config = await loader.loadEffectiveConfig();
+  const address = labelsAddress(input);
+  const paseoState: any = await readPaseoState(paseo);
+  const rows: any[] = (planLabelFixes as any)(paseoState, address ? { address } : {});
+  const fresh = labelsFingerprint({ address: address ?? null, rows });
+  if (fresh !== input.fingerprint) {
+    throw new Error(
+      "Something changed since the labels preview (for example an agent was relabelled). Run /factory labels again and confirm the new preview.",
+    );
+  }
+  const fixable = rows.filter((row) => Object.keys(row.labels).length);
+  const executeOptions: any = {
+    client: paseo,
+    gh: createGh(),
+    git: createGit(),
+    paseoCli: extra?.paseoCli ?? createPaseoCli(),
+  };
+  const execute: any = (createExecutors as any)(executeOptions);
+  const applied: { agentId: string; ok: boolean; error?: string }[] = [];
+  for (const row of fixable) {
+    try {
+      await execute(
+        {
+          key: `labels.${row.agentId}`,
+          kind: "labels.set",
+          summary: `Set ${Object.keys(row.labels).join(", ")} on agent ${row.agentId}`,
+          params: { agentId: row.agentId, labels: row.labels },
+        },
+        config,
+      );
+      applied.push({ agentId: row.agentId, ok: true });
+    } catch (error) {
+      applied.push({
+        agentId: row.agentId,
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  const failed = applied.filter((r) => !r.ok).length;
+  const skipped = rows.length - fixable.length;
+  const lines = applied.map((r) =>
+    r.ok ? `${r.agentId}: labels set` : `${r.agentId}: FAILED: ${r.error}`,
+  );
+  lines.push(
+    `Labels: ${applied.length - failed} agent(s) fixed${skipped ? `, ${skipped} reported without a fix` : ""}${failed ? `, ${failed} failed` : ""}.`,
+  );
+  return { address: address ?? null, rows, applied, text: lines.join("\n") };
+}
+
+export async function previewSteerAdd(
+  input: RpcInput<typeof factorySteerAddPreview>,
+  { paseo }: PluginHandlerContext,
+  loader: ConfigLoader,
+  hostSettings: HostSettingsReader | null,
+): Promise<any> {
+  if (!hostSettings) throw new Error("Factory settings are not available; edit the config file instead");
+  const state = await hostSettings.read();
+  if (state.status !== "ready") {
+    throw new Error(`Factory settings are ${state.status}: ${(state as any).error ?? "unreadable"}; open the settings page and save them again`);
+  }
+  const { discovery } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
+  const status: any = (steerStatus as any)(discovery);
+  if (!status.workspace || !status.state) {
+    throw new Error(
+      "This project is not set up by the factory yet (no main workspace with steers). Run /factory plan, then /factory apply <hash>.",
+    );
+  }
+  const config = await loader.loadEffectiveConfig();
+  if (status.state.retired) throw new Error("This scope is retired; choose an active scope.");
+  const liveSteers = (discovery.steers?.labelled ?? []).filter((a: any) => !a.archivedAt);
+  const scopeId = discovery.scope?.id ?? discovery.forkName;
+  const repo = discovery.forkName;
+  const workspaceId = status.workspace.id;
+  const used = (usedProfilesByLiveSteers as any)(config, liveSteers);
+  const quotaSnapshot = getQuotaSnapshot();
+  const profileHealth = discovery.mainWorkspace?.metadata?.[METADATA_KEY]?.profileHealth ?? null;
+  const zerosub = await readZerosubStateSafe().catch(() => null);
+  const plan: any = (planSteerAdd as any)(config, discovery.providers ?? [], liveSteers, {
+    slot: input.slot ?? null,
+    spec: input.spec ?? null,
+    thinking: input.thinking,
+    mode: input.mode,
+    profile: input.profile,
+    scopeId,
+    workspaceId,
+    repo,
+    usedProfiles: used,
+    quotaSnapshot,
+    profileHealth,
+    zerosub,
+  });
+  const values = (settingsFromConfig as any)(plan.config, state.values as FactorySettingsValues);
+  const errors = (validateFactorySettings as any)(values);
+  if (errors.length) throw new Error(`The change does not fit the settings:\n- ${errors.join("\n- ")}`);
+  const text = (formatSteerAddPreview as any)(plan, { scopeId });
+  return {
+    scope: scopeId,
+    repo,
+    workspaceId,
+    slot: plan.slot,
+    profile: plan.profileName,
+    provider: plan.profile?.provider ?? null,
+    model: plan.profile?.model ?? null,
+    advisor: plan.advisorSlot === true,
+    account: plan.zerosubAccount,
+    skipped: plan.skipped,
+    earliestReset: plan.earliestReset,
+    summary: plan.summary,
+    notes: plan.notes,
+    warnings: plan.warnings,
+    text,
+    fingerprint: plan.fingerprintInput ? (steerAddFingerprint as any)(plan.fingerprintInput) : null,
+    revision: (state as any).revision ?? "",
+    values,
+  };
+}
+
+export async function applySteerAddRpc(
+  input: RpcInput<typeof factorySteerAdd>,
+  { paseo }: PluginHandlerContext,
+  loader: ConfigLoader,
+): Promise<any> {
+  const { discovery } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
+  const status: any = (steerStatus as any)(discovery);
+  if (!status.workspace || !status.state) {
+    throw new Error(
+      "This project is not set up by the factory yet (no main workspace with steers). Run /factory plan, then /factory apply <hash>.",
+    );
+  }
+  const config = await loader.loadEffectiveConfig();
+  if (status.state.retired) throw new Error("This scope is retired; choose an active scope.");
+  const slot = input.slot?.trim().toUpperCase();
+  if (!slot || !config.steers.slots[slot]) {
+    throw new Error("The confirmed slot is not saved in the Factory settings. Run /factory steer add again and confirm it in the panel.");
+  }
+  const liveSteers = (discovery.steers?.labelled ?? []).filter((a: any) => !a.archivedAt);
+  const executeOptions: any = {
+    client: paseo,
+    gh: createGh(),
+    git: createGit(),
+    paseoCli: createPaseoCli(),
+  };
+  return (applySteerAdd as any)(config, discovery.providers ?? [], liveSteers, {
+    slot,
+    spec: input.spec ?? null,
+    thinking: input.thinking,
+    mode: input.mode,
+    profile: input.profile,
+    scopeId: discovery.scope?.id ?? discovery.forkName,
+    workspaceId: status.workspace.id,
+    repo: discovery.forkName,
+    fingerprint: input.fingerprint,
+    fingerprintOf: steerAddFingerprint,
+    usedProfiles: (usedProfilesByLiveSteers as any)(config, liveSteers),
+    quotaSnapshot: getQuotaSnapshot(),
+    profileHealth: discovery.mainWorkspace?.metadata?.[METADATA_KEY]?.profileHealth ?? null,
+    zerosub: await readZerosubStateSafe().catch(() => null),
+    lookupReceipt: lookupCreationReceipt,
+    execute: (createExecutors as any)(executeOptions),
+  });
 }

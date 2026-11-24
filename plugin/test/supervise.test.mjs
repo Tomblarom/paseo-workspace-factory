@@ -11,6 +11,7 @@ import { register } from "node:module";
 register("./ts-resolve-hooks.mjs", import.meta.url);
 
 const supervise = await import("../server/supervise.ts");
+const { LockBusy } = await import("../server/factory/lock.ts");
 import {
   DRAIN_METADATA_KEY,
   SUPERVISION_SETTINGS_DEFAULTS,
@@ -355,6 +356,27 @@ test("create.after registers steer-started agents as running with metadata", asy
   });
 });
 
+test("create.after retries a busy workspace lock and preserves a result captured before registration", async () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  const worker = addWorker(world, ws, { title: "Late registration" });
+  ws.metadata[WORKERS_KEY] = { [worker.id]: entry("done", "", { lastWakeAt: at(NOW) }) };
+  let attempts = 0;
+  const lock = async (name, fn) => {
+    if (++attempts === 1) throw new LockBusy("brief contention");
+    return noLock(name, fn);
+  };
+  const result = await supervise.runCreateAfter(fakeClient(world), {
+    id: worker.id, parentAgentId: steers.A.id,
+  }, depsOf({ lock }));
+  assert.equal(result.action, "registered");
+  assert.equal(attempts, 2);
+  const tracked = ws.metadata[WORKERS_KEY][worker.id];
+  assert.equal(tracked.state, "done");
+  assert.equal(tracked.lastWakeAt, at(NOW));
+  assert.equal(tracked.task, "Late registration");
+});
+
 test("create.after skips background agents and non-steer parents", async () => {
   const world = makeWorld();
   const { ws, steers } = provisioned(world);
@@ -434,22 +456,69 @@ test("turn end maps CHECKPOINT status, advisor requests, and failures", async ()
   }
 });
 
-test("workers without wsf labels are identified by their worker metadata", async () => {
+test("a worker registered through create.after wakes the active steer without wsf labels", async () => {
   const world = makeWorld();
-  const { ws } = provisioned(world);
-  // Steers start workers with only the native parent label; runCreateAfter
-  // wrote the worker metadata, which must be enough for the turn-end hook.
+  const { ws, steers } = provisioned(world);
+  const paseo = fakeClient(world);
   const worker = addWorker(world, ws, {
-    labels: { "paseo.parent-agent-id": "steer-a" },
-    metadata: { [WORKER_METADATA_KEY]: { scopeId: REPO, startedBy: "A", epoch: 3, task: "t" } },
+    labels: {},
+    parentAgentId: steers.A.id,
   });
-  world.workspaces[0].metadata[WORKERS_KEY] = { [worker.id]: entry("running", "t") };
+  await supervise.runCreateAfter(paseo, { id: worker.id, parentAgentId: steers.A.id }, depsOf());
+  assert.equal(worker.metadata[WORKER_METADATA_KEY].scopeId, REPO);
+  assert.deepEqual(worker.labels, {});
+  ws.metadata[METADATA_KEY].activeSteer = "B";
   const result = await turnedOut(world, worker, { assistant: checkpointOf("t", "done") });
   assert.equal(result.event, "checkpoint-done");
   assert.equal(result.state, "done");
-  assert.notEqual(result.reason, "not-worker");
+  assert.equal(result.action, "sent");
+  assert.equal(result.target, steers.B.id);
+  assert.ok(ws.metadata[WORKERS_KEY][worker.id].lastWakeAt);
+  assert.equal(ws.metadata[WORKERS_KEY][worker.id].pendingWake, null);
   const unlabelled = addWorker(world, ws, { labels: {} });
   assert.equal((await turnedOut(world, unlabelled, { assistant: checkpointOf("u", "done") })).reason, "not-worker");
+});
+
+test("a failed worker wake stays queued and flush delivers it after recovery", async () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  const worker = addWorker(world, ws);
+  ws.metadata[WORKERS_KEY] = { [worker.id]: entry("running", "t") };
+  setTimeline(world, worker.id, turnEntries("t1", "do it", checkpointOf("t", "done")));
+  const broken = fakeClient(world);
+  const ref = broken.agents.ref;
+  broken.agents.ref = (id) => ({ ...ref(id), send: async () => { throw new Error("temporarily unavailable"); } });
+  const outcome = await supervise.runWorkerTurnAfter(
+    broken,
+    { agent: { id: worker.id }, turnId: "t1", outcome: { kind: "completed" } },
+    depsOf(),
+  );
+  assert.equal(outcome.action, "queued");
+  assert.equal(outcome.reason, "send-failed");
+  assert.equal(ws.metadata[WORKERS_KEY][worker.id].pendingWake.state, "done");
+  supervise.resetSupervisionForTests();
+  const [result] = await supervise.flushAllScopes(fakeClient(world), depsOf());
+  assert.equal(result.target, steers.A.id);
+  assert.equal(ws.metadata[WORKERS_KEY][worker.id].pendingWake, null);
+  assert.ok(ws.metadata[WORKERS_KEY][worker.id].lastWakeAt);
+});
+
+test("worker completion waits for an active steer to finish its current turn", async () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  const worker = addWorker(world, ws);
+  ws.metadata[WORKERS_KEY] = { [worker.id]: entry("running", "t") };
+  steers.A.status = "running";
+  const outcome = await turnedOut(world, worker, { assistant: checkpointOf("t", "done") });
+  assert.equal(outcome.action, "queued");
+  assert.equal(outcome.reason, "target-busy");
+  assert.deepEqual(sendsTo(world, steers.A.id), []);
+  assert.equal(ws.metadata[WORKERS_KEY][worker.id].pendingWake.state, "done");
+  steers.A.status = "idle";
+  const [result] = await supervise.flushAllScopes(fakeClient(world), depsOf());
+  assert.equal(result.flushed, true);
+  assert.equal(sendsTo(world, steers.A.id).length, 1);
+  assert.equal(ws.metadata[WORKERS_KEY][worker.id].pendingWake, null);
 });
 
 test("all actionable outcomes wake immediately; simultaneous events debounce", async () => {

@@ -47,10 +47,14 @@ const defaultProfile = {
 };
 
 // Factory configuration subset owned by the plugin: steer slots (slot order =
-// priority), prepare list, start steer, prioritized worker list, and the
-// profiles they reference. v1 -> v2: workerDefault becomes workerPriority,
-// profiles gain advisor/sensitive (see migrateFactoryConfig above).
-// Defaults mirror the single-steer example config; {} parses into this document.
+// priority), prepare list, start steer, prioritized worker list, the profiles
+// they reference, and the optional host setup (GitHub owner, checkout root).
+// v1 -> v2: workerDefault becomes workerPriority, profiles gain
+// advisor/sensitive (see migrateFactoryConfig above).
+// Defaults mirror the single-steer example config; {} parses into this
+// document. Host fields default to null, which means "from the config file":
+// a saved value replaces the matching file value, and without a file both
+// are required to form the complete configuration.
 export const factoryConfigSettings = defineSettings({
   id: "factory-config",
   scope: "host",
@@ -67,6 +71,8 @@ export const factoryConfigSettings = defineSettings({
       warnPct: z.number().min(0).max(100).default(75),
     }).default({ exhaustedPct: 90, warnPct: 75 }),
     quotaSampleMinutes: z.number().int().min(10).default(10),
+    githubOwner: z.string().nullable().default(null),
+    checkoutRoot: z.string().nullable().default(null),
   }),
 });
 
@@ -89,7 +95,7 @@ export const factoryCleanupSettings = defineSettings({
   scope: "host",
   version: 1,
   schema: z.object({
-    mode: z.enum(["off", "clear", "compact-warm"]).default("off"),
+    mode: z.enum(["off", "clear", "compact-warm"]).default("clear"),
     idleMinutes: z.number().int().min(5).default(60),
     compactAtMinutes: z.number().int().min(5).default(50),
     minContextTokens: z.number().int().min(1000).default(60000),

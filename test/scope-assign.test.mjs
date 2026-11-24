@@ -124,7 +124,7 @@ test('apply records the report target and the packet names it before the real bl
   assert.equal(record.reportedAt, null);
   assert.equal(record.epoch, result.epoch);
   assert.match(result.packet, /the factory sends this block to the requester hub-agent-1 automatically/);
-  assert.match(result.packet, /- status: done \| partial \| blocked/);
+  assert.match(result.packet, /^status: done \| partial \| blocked$/m);
   // The rules' format example comes first: the last block is the real assignment.
   assert.equal(parseCheckpointBlock(result.packet).task, result.fields.task);
 });

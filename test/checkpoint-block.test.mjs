@@ -6,12 +6,12 @@ import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { buildAssignment } from '../src/assign.mjs';
 import {
-  buildHandoff, CHECKPOINT_KEY, formatCheckpointBlock, parseCheckpointBlock, switchSteer,
+  buildHandoff, CHECKPOINT_KEY, checkpointRules, formatCheckpointBlock, parseCheckpointBlock, switchSteer,
 } from '../src/steer.mjs';
 import { LABEL, METADATA_KEY } from '../src/paseo.mjs';
 
 const REPO = 'example-owner/example-repo';
-const FENCE = '```text\nCHECKPOINT\n- task: ';
+const FENCE = '```text\nCHECKPOINT\ntask: ';
 
 // ------------------------------------------------------------------- parser
 
@@ -68,13 +68,20 @@ test('parseCheckpointBlock reads the optional status line and stays compatible',
 test('formatCheckpointBlock renders the fixed fenced form', () => {
   assert.equal(
     formatCheckpointBlock({ task: 'Ship it', tests: ['npm test'], blockers: [], next: null }),
-    '```text\nCHECKPOINT\n- task: Ship it\n- tests: npm test\n- blockers: none\n- next: none\n```',
+    '```text\nCHECKPOINT\ntask: Ship it\ntests: npm test\nblockers: none\nnext: none\n```',
   );
   assert.equal(
     formatCheckpointBlock({ task: 'a\nb', tests: [], blockers: ['x\ny'], next: '' }).split('\n').length,
     7,
     'values stay single-line so the block parses back',
   );
+});
+
+test('checkpoint rules teach the same fenced format as the generated handoff', () => {
+  const rules = checkpointRules();
+  assert.ok(rules.includes(FENCE));
+  assert.match(rules, /^status: done \| partial \| blocked$/m);
+  assert.doesNotMatch(rules, /^- (task|tests|blockers|next|status):/m);
 });
 
 function handoffStatus(checkpoint) {
@@ -110,7 +117,7 @@ test('buildHandoff carries the fenced block in English and German', () => {
 test('buildHandoff without a task carries no block to check in', () => {
   const packet = buildHandoff(handoffStatus(null), HANDOFF_ARGS);
   assert.match(packet, /NONE RECORDED/);
-  assert.ok(!packet.includes('CHECKPOINT\n- task:'), 'no block without a task');
+  assert.ok(!packet.includes('\nCHECKPOINT\n'), 'no block without a task');
 });
 
 test('buildAssignment carries the fenced block and parses back', () => {
@@ -171,7 +178,7 @@ const readDoc = (name) => readFileSync(new URL(`../${name}`, import.meta.url), '
 test('instruction docs require and show the fenced block', () => {
   const instructions = readDoc('docs/steer-instructions.md');
   assert.ok(instructions.includes(FENCE), 'answer template shows the fenced block');
-  assert.ok(instructions.includes('- blockers: <open problems, or "none">'), 'all four dash lines shown');
+  assert.ok(instructions.includes('\nblockers: <open problems, or "none">'), 'field lines shown directly');
   const required = instructions.match(/fenced CHECKPOINT block/g) ?? [];
   assert.ok(required.length >= 3, `steer, worker and answer-format sections require it (${required.length})`);
   assert.match(readDoc('AGENTS.md'), /fenced CHECKPOINT block/, 'repo instructions require it');
@@ -179,7 +186,7 @@ test('instruction docs require and show the fenced block', () => {
 
 test('instruction docs document the status line and worker completion', () => {
   const instructions = readDoc('docs/steer-instructions.md');
-  assert.ok(instructions.includes('- status: done|partial|blocked'), 'optional status line documented');
+  assert.ok(instructions.includes('`status: done|partial|blocked`'), 'optional status line documented');
   assert.match(instructions, /worker without a CHECKPOINT block/i, 'unfinished without CHECKPOINT');
   assert.match(instructions, /interrupted/, 'interrupted counts as unfinished');
   assert.match(instructions, /paseo send/, 'resume via paseo send');

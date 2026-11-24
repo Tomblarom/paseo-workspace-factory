@@ -1,6 +1,6 @@
 import type { RpcOutput } from "@getpaseo/plugin";
 import type { PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
-import { useRpc } from "@getpaseo/plugin/client";
+import { useRpc, useSettings } from "@getpaseo/plugin/client";
 import { useMutation } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
@@ -14,6 +14,8 @@ import {
   factoryCleanup,
   factoryFresh,
   factoryFreshPreview,
+  factoryLabels,
+  factoryLabelsPreview,
   factoryPlan,
   factoryQuota,
   factoryRelocate,
@@ -23,9 +25,13 @@ import {
   factoryScopes,
   factoryScopesCandidates,
   factoryStatus,
+  factorySteerAdd,
+  factorySteerAddPreview,
   factorySwitch,
   factorySwitchPreview,
 } from "../shared/factory.js";
+import { factoryConfigSettings } from "../shared/settings.js";
+import type { FactorySettingsValues } from "../shared/settings-validate.js";
 import { factoryHelp } from "../shared/factory-args.js";
 import {
   getFactoryResult,
@@ -34,6 +40,7 @@ import {
   type AssignPreviewInputs,
   type CheckpointPreviewInputs,
   type FactoryPanelResult,
+  type SteerAddPreviewInputs,
 } from "./factory-store.js";
 
 function text(value: unknown): string {
@@ -78,7 +85,11 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
   const callFresh = useRpc(factoryFresh);
   const callRelocate = useRpc(factoryRelocate);
   const callAssign = useRpc(factoryAssign);
+  const callLabels = useRpc(factoryLabels);
   const callQuota = useRpc(factoryQuota);
+  const callSteerAdd = useRpc(factorySteerAdd);
+  const callSteerAddPreview = useRpc(factorySteerAddPreview);
+  const configState = useSettings(factoryConfigSettings);
   const [repo, setRepo] = useState("");
   const [result, setResult] = useState<FactoryPanelResult | null>(() => getFactoryResult());
   useEffect(() => subscribeFactoryResult(() => setResult(getFactoryResult())), []);
@@ -299,10 +310,64 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
       }),
     onError: fail,
   });
+  const labelsMutation = useMutation({
+    mutationFn: async (vars: { address?: string; fingerprint: string }) =>
+      vars.address
+        ? callLabels({ address: vars.address, fingerprint: vars.fingerprint })
+        : callLabels({ fingerprint: vars.fingerprint }),
+    onSuccess: (applied, vars) =>
+      setFactoryResult({
+        kind: "labelsApplied",
+        address: vars.address,
+        at: new Date().toISOString(),
+        applied,
+      }),
+    onError: fail,
+  });
   const quotaMutation = useMutation({
     mutationFn: async () => callQuota({}),
     onSuccess: (quota) =>
       setFactoryResult({ kind: "quota", at: new Date().toISOString(), quota }),
+    onError: fail,
+  });
+  const steerAddMutation = useMutation({
+    mutationFn: async (vars: {
+      repo?: string;
+      workspaceId: string;
+      fingerprint: string;
+      inputs: SteerAddPreviewInputs;
+    }) => {
+      if (configState.status !== "ready") {
+        throw new Error("Factory settings are not ready; open the settings page and save them again.");
+      }
+      const address = vars.repo ? { repo: vars.repo } : { workspaceId: vars.workspaceId };
+      const inputs = {
+        ...address,
+        // inputs.slot is the confirmed preview slot (confirmSteerAdd sets it),
+        // so the same slot is provisioned even when it was auto-suggested.
+        ...(vars.inputs.slot !== undefined ? { slot: vars.inputs.slot } : {}),
+        ...(vars.inputs.spec !== undefined ? { spec: vars.inputs.spec } : {}),
+        ...(vars.inputs.thinking !== undefined ? { thinking: vars.inputs.thinking } : {}),
+        ...(vars.inputs.mode !== undefined ? { mode: vars.inputs.mode } : {}),
+        ...(vars.inputs.profile !== undefined ? { profile: vars.inputs.profile } : {}),
+      };
+      const fresh = await callSteerAddPreview(inputs);
+      if (fresh.fingerprint !== vars.fingerprint) {
+        throw new Error("The steer-add preview changed. Run /factory steer add again and review the new preview.");
+      }
+      const saved = await configState.save(fresh.values as FactorySettingsValues, fresh.revision);
+      if (!saved) {
+        throw new Error(`Not saved: ${configState.saveError ?? "revision conflict"}. Run /factory steer add again.`);
+      }
+      return callSteerAdd({ ...inputs, fingerprint: vars.fingerprint });
+    },
+    onSuccess: (added, vars) =>
+      setFactoryResult({
+        kind: "steerAdded",
+        repo: vars.repo ?? "(current workspace)",
+        at: new Date().toISOString(),
+        added,
+      }),
     onError: fail,
   });
   const busy =
@@ -319,7 +384,9 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
     resumeApplyMutation.isPending ||
     freshMutation.isPending ||
     relocateMutation.isPending ||
-    assignMutation.isPending;
+    assignMutation.isPending ||
+    labelsMutation.isPending ||
+    steerAddMutation.isPending;
 
   const confirmCheckpoint = () => {
     if (result?.kind !== "checkpointPreview") return;
@@ -367,6 +434,25 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
       workspaceId: result.workspaceId,
       fingerprint: result.preview.fingerprint,
       inputs: result.inputs,
+    });
+  };
+  const confirmLabels = () => {
+    if (result?.kind !== "labelsPreview") return;
+    labelsMutation.mutate({
+      address: result.address,
+      fingerprint: result.preview.fingerprint,
+    });
+  };
+  const confirmSteerAdd = () => {
+    if (result?.kind !== "steerAddPreview") return;
+    if (!result.preview.fingerprint) return;
+    steerAddMutation.mutate({
+      repo: result.repo,
+      workspaceId: result.workspaceId,
+      fingerprint: result.preview.fingerprint,
+      // The confirmed preview slot: after the settings save the same slot
+      // must be provisioned even when it was auto-suggested.
+      inputs: { ...result.inputs, slot: result.preview.slot },
     });
   };
 
@@ -481,6 +567,8 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
           confirmFresh,
           confirmRelocate,
           confirmAssign,
+          confirmLabels,
+          confirmSteerAdd,
         }}
       />
       <Text style={styles.hint}>
@@ -512,6 +600,8 @@ export interface FactoryResultActions {
   confirmFresh: () => void;
   confirmRelocate: () => void;
   confirmAssign: () => void;
+  confirmLabels: () => void;
+  confirmSteerAdd: () => void;
 }
 
 type Styles = FactoryResultStyles;
@@ -594,6 +684,27 @@ export function ResultView({
   }
   if (result.kind === "assignPreview") {
     return <AssignPreviewView at={result.at} preview={result.preview} styles={styles} actions={actions} />;
+  }
+  if (result.kind === "labelsPreview") {
+    return (
+      <LabelsPreviewView
+        address={result.address}
+        requestedApply={result.requestedApply}
+        at={result.at}
+        preview={result.preview}
+        styles={styles}
+        actions={actions}
+      />
+    );
+  }
+  if (result.kind === "labelsApplied") {
+    return <LabelsAppliedView at={result.at} applied={result.applied} styles={styles} />;
+  }
+  if (result.kind === "steerAddPreview") {
+    return <SteerAddPreviewView at={result.at} preview={result.preview} styles={styles} actions={actions} />;
+  }
+  if (result.kind === "steerAdded") {
+    return <SteerAddedView at={result.at} added={result.added} styles={styles} />;
   }
   if (result.kind === "resume") {
     return <ResumeView repo={result.repo} at={result.at} resume={result.resume} styles={styles} />;
@@ -1283,6 +1394,136 @@ function AssignPreviewView({
       >
         <Text style={styles.buttonText}>Assign and deliver</Text>
       </Pressable>
+    </View>
+  );
+}
+
+function LabelsPreviewView({
+  address,
+  requestedApply,
+  at,
+  preview,
+  styles,
+  actions,
+}: {
+  address?: string;
+  requestedApply: boolean;
+  at: string;
+  preview: RpcOutput<typeof factoryLabelsPreview>;
+  styles: Styles;
+  actions: PanelActions;
+}) {
+  const rows = preview.rows.length;
+  return (
+    <View style={styles.card}>
+      <Text style={styles.body}>
+        Labels preview{address ? ` for ${address}` : ""}: {rows} agent(s) need attention (
+        {preview.fixable} fixable)
+      </Text>
+      <Text style={styles.label}>{at}</Text>
+      {requestedApply ? (
+        <Text style={styles.label}>You asked for --apply: review and confirm below.</Text>
+      ) : null}
+      <Text style={styles.body}>{preview.text}</Text>
+      {preview.fixable > 0 ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Confirm setting the previewed labels"
+          style={styles.button}
+          disabled={actions.busy}
+          onPress={actions.confirmLabels}
+        >
+          <Text style={styles.buttonText}>Set labels</Text>
+        </Pressable>
+      ) : (
+        <Text style={styles.label}>
+          Nothing to set: the rows above need manual fixes (see the notes).
+        </Text>
+      )}
+    </View>
+  );
+}
+
+function LabelsAppliedView({
+  at,
+  applied,
+  styles,
+}: {
+  at: string;
+  applied: RpcOutput<typeof factoryLabels>;
+  styles: Styles;
+}) {
+  const failed = asList(applied.applied).filter(
+    (row) => (row as { ok?: unknown }).ok === false,
+  ).length;
+  return (
+    <View style={styles.card}>
+      <Text style={failed ? styles.conflict : styles.ok}>
+        Labels {failed ? "partially applied" : "applied"}.
+      </Text>
+      <Text style={styles.label}>{at}</Text>
+      <Text style={styles.body}>{applied.text}</Text>
+    </View>
+  );
+}
+
+function SteerAddPreviewView({
+  at,
+  preview,
+  styles,
+  actions,
+}: {
+  at: string;
+  preview: RpcOutput<typeof factorySteerAddPreview>;
+  styles: Styles;
+  actions: PanelActions;
+}) {
+  const blocked = !preview.fingerprint;
+  return (
+    <View style={styles.card}>
+      <Text style={styles.body}>
+        Steer-add preview for {text(preview.scope)}: Steer {preview.slot}
+        {preview.profile ? ` · profile ${text(preview.profile)} (${text(preview.provider)}/${text(preview.model)})` : " · blocked"}
+        {preview.advisor ? " · advisor, never active" : ""}
+      </Text>
+      <Text style={styles.label}>{at}</Text>
+      <Text style={styles.body}>{preview.text}</Text>
+      {blocked ? (
+        <Text style={styles.label}>
+          Nothing to confirm: resolve the blockers above and preview again.
+        </Text>
+      ) : (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`Confirm adding Steer ${preview.slot}`}
+          style={styles.button}
+          disabled={actions.busy}
+          onPress={actions.confirmSteerAdd}
+        >
+          <Text style={styles.buttonText}>Save slot and create steer</Text>
+        </Pressable>
+      )}
+    </View>
+  );
+}
+
+function SteerAddedView({
+  at,
+  added,
+  styles,
+}: {
+  at: string;
+  added: RpcOutput<typeof factorySteerAdd>;
+  styles: Styles;
+}) {
+  return (
+    <View style={styles.card}>
+      <Text style={styles.ok}>
+        Steer {text(added.slot)} is live ({text(added.agentId)})
+        {added.reused ? " · reused after receipt" : ""}.
+      </Text>
+      <Text style={styles.label}>{at}</Text>
+      <Text style={styles.body}>{added.text}</Text>
     </View>
   );
 }
