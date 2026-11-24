@@ -54,6 +54,11 @@ test("cleanupIdentity accepts steers/workers incl. legacy labels", () => {
     cleanupIdentity({ "ari.wsf.scope": "s", "ari.wsf.role": "steer", "ari.wsf.slot": "B" }),
     { scopeId: "s", role: "steer", slot: "B" },
   );
+  // Older steers carry only the repo label (no wsf.scope): repo = scope id.
+  assert.deepEqual(
+    cleanupIdentity({ "ari.wsf.repo": "o/r", "wsf.repo": "o/r", "wsf.role": "steer", "wsf.slot": "D" }),
+    { scopeId: "o/r", role: "steer", slot: "D" },
+  );
   assert.equal(cleanupIdentity({ "wsf.scope": "s", "wsf.role": "advisor" }), null);
   assert.equal(cleanupIdentity({ "wsf.role": "steer" }), null);
   assert.equal(cleanupIdentity(null), null);

@@ -333,7 +333,7 @@ test('apply creates the new scope, retires the old one with movedTo, delivers ha
     const created = world.agents.find((a) => a.id === steer.to);
     assert.equal(created.workspaceId, result.toWorkspace);
     assert.equal(created.title, `Steer ${steer.slot}`);
-    assert.deepEqual(created.labels, { [LABEL.repo]: REPO, [LABEL.role]: 'steer', [LABEL.slot]: steer.slot });
+    assert.deepEqual(created.labels, { [LABEL.repo]: REPO, [LABEL.role]: 'steer', [LABEL.slot]: steer.slot, [LABEL.scope]: REPO });
     assert.ok(!created.labels['paseo.parent-agent-id']);
   }
   assert.equal(world.agents.find((a) => a.id === result.steers[0].to).provider, 'codex');

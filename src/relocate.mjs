@@ -166,7 +166,7 @@ export async function relocateScope({ client, discovery, config, to, apply = fal
       slot: holder.slot, from: holder.id, profile: profile.name, provider: profile.provider, model: profile.model,
       idempotencyKey: idempotencyKey(status.repo, 'relocate', 'steer', holder.slot, requestDigest({
         target: target.dir, title: `Steer ${holder.slot}`, config: agentConfig(profile),
-        labels: { [LABEL.repo]: status.repo, [LABEL.role]: 'steer', [LABEL.slot]: holder.slot },
+        labels: { [LABEL.repo]: status.repo, [LABEL.role]: 'steer', [LABEL.slot]: holder.slot, [LABEL.scope]: status.repo },
       })),
     };
   });
@@ -237,7 +237,7 @@ export async function relocateScope({ client, discovery, config, to, apply = fal
         key: `relocate.steer.${preview.slot}`, kind: 'paseo.agent.create', summary: `Create relocated Steer ${preview.slot} without prompt`,
         params: {
           workspaceId: newWsId, title: `Steer ${preview.slot}`, config: agentConfig(profile),
-          labels: { [LABEL.repo]: status.repo, [LABEL.role]: 'steer', [LABEL.slot]: preview.slot }, idempotencyKey: preview.idempotencyKey,
+          labels: { [LABEL.repo]: status.repo, [LABEL.role]: 'steer', [LABEL.slot]: preview.slot, [LABEL.scope]: status.repo }, idempotencyKey: preview.idempotencyKey,
         },
       };
       const receipt = await checkedReceipt(lookupReceipt, 'agent', preview.idempotencyKey, (r) => r.agentId);
