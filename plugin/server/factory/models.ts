@@ -5,7 +5,7 @@
 // check the planner runs (live catalog shape plus knownLimits).
 import { chmod, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { SLOT_PATTERN, isAdvisorProfile, isAdvisorSlot, isSensitiveProfile, slotOrder, validateConfig, validateProfilesAgainstCatalog, workerPriority } from './config.js';
-import { profileIsUnhealthy, quotaExhausted, profilePool } from './quota.js';
+import { profileIsUnhealthy, quotaExhausted, profilePool, profileFamily, familyAccounts, familyExhausted, bestFamilyAccount, earliestFamilyReset } from './quota.js';
 
 /** Split "<provider>/<model>" (model may itself contain "/"). */
 export function parseProviderModel(spec) {
@@ -86,9 +86,13 @@ export function usedProfilesByLiveSteers(config, steers) {
  * ones elsewhere; sensitive steer profiles are never blocked. Fallback
  * entries (past the first) already used by a live steer are skipped, so no
  * two steers share a model by accident. Returns
- * `{ profile: { name, ...settings } | null, skipped: [{ name, reason }] }`.
+ * `{ profile: { name, ...settings } | null, skipped: [{ name, reason }],
+ * zerosubAccount: <id|null> }`. With `zerosub` (normalized ZeroSub state), a
+ * profile whose family has accounts is judged by those accounts instead of the
+ * usage snapshot: all accounts exhausted skips it (reason names the earliest
+ * reset when known), otherwise the roomiest account id is reported.
  */
-export function resolveProfile(config, providerEntries, list, { role = 'worker', advisorSlot = false, usedProfiles = [], repoPublic = null, quotaSnapshot = null, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 90, profileHealth = null, now = Date.now() } = {}) {
+export function resolveProfile(config, providerEntries, list, { role = 'worker', advisorSlot = false, usedProfiles = [], repoPublic = null, quotaSnapshot = null, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 90, profileHealth = null, now = Date.now(), zerosub = null } = {}) {
   const skipped = [];
   const used = new Set(usedProfiles ?? []);
   const names = Array.isArray(list) ? list : [];
@@ -102,10 +106,19 @@ export function resolveProfile(config, providerEntries, list, { role = 'worker',
       skipped.push({ name, reason: `recently failed: ${profileHealth[name].class ?? 'other'}` });
       continue;
     }
-    const pool = profilePool(config.profiles[name]);
-    if (quotaExhausted(quotaSnapshot, pool, quotaExhaustedPct, now)) {
-      skipped.push({ name, reason: 'pool exhausted' });
-      continue;
+    const family = profileFamily(config.profiles[name]);
+    if (zerosub && familyAccounts(zerosub, family).length) {
+      if (familyExhausted(zerosub, family, { exhaustedPct: quotaExhaustedPct, now })) {
+        const reset = earliestFamilyReset(zerosub, family, { now });
+        skipped.push({ name, reason: reset ? `accounts exhausted, earliest reset ${reset}` : 'accounts exhausted' });
+        continue;
+      }
+    } else {
+      const pool = profilePool(config.profiles[name]);
+      if (quotaExhausted(quotaSnapshot, pool, quotaExhaustedPct, now)) {
+        skipped.push({ name, reason: 'pool exhausted' });
+        continue;
+      }
     }
     if (role === 'worker' && advisor) {
       skipped.push({ name, reason: `profile "${name}" is tagged as advisor` });
@@ -134,9 +147,10 @@ export function resolveProfile(config, providerEntries, list, { role = 'worker',
       skipped.push({ name, reason: problems[name].join('; ') });
       continue;
     }
-    return { profile: { name, ...config.profiles[name] }, skipped };
+    const account = zerosub ? bestFamilyAccount(zerosub, family, { exhaustedPct: quotaExhaustedPct, now }) : null;
+    return { profile: { name, ...config.profiles[name] }, skipped, zerosubAccount: account ? account.id : null };
   }
-  return { profile: null, skipped };
+  return { profile: null, skipped, zerosubAccount: null };
 }
 
 /** `paseo run` flags for a resolved profile. */

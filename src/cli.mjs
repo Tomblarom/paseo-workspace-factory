@@ -24,6 +24,7 @@ import { flagValue, formatCatalog, formatWorkerModel, parseProviderModel, paseoR
 import { scopeRows, scopeCandidates, formatScopeRows, formatScopeCandidates, formatStatus } from './scopes-view.mjs';
 import { validateProfilesAgainstCatalog } from './config.mjs';
 import { recordProfileFailure } from './quota.mjs';
+import { readZerosubState } from './zerosub.mjs';
 import { attachProjectArchivedAgents, collectCleanupCandidates, formatCandidate, formatLoss, planCleanupOps, selectApplyRunPlans } from './cleanup.mjs';
 import { relocateScope } from './relocate.mjs';
 
@@ -776,16 +777,17 @@ async function runModelCommand({ command, args, values, config, configPath, clie
         profileHealth = { ...(metadata.profileHealth ?? {}), [values.failed]: record };
         await client.workspaces.ref(discovery.mainWorkspace.id).setMetadata({ [METADATA_KEY]: { ...metadata, profileHealth } });
       }
-      const { profile, skipped } = resolveProfile(config, entries, workerPriority(config), { role: 'worker', repoPublic, profileHealth });
+      const zerosub = await readZerosubState().catch(() => null);
+      const { profile, skipped, zerosubAccount } = resolveProfile(config, entries, workerPriority(config), { role: 'worker', repoPublic, profileHealth, zerosub });
       if (!profile) {
         const tried = skipped.length ? skipped.map((s) => `"${s.name}" (${s.reason})`).join('; ') : 'no worker profiles configured';
         throw new Error(`No startable worker profile (tried ${tried})`);
       }
       if (values.json) {
-        return console.log(JSON.stringify({ profile: profile.name, provider: profile.provider, model: profile.model, thinking: profile.thinking ?? null, mode: profile.mode ?? null, sensitive: isSensitiveProfile(config, profile.name), flags: paseoRunFlags(profile), skipped, repoPublic }, null, 2));
+        return console.log(JSON.stringify({ profile: profile.name, provider: profile.provider, model: profile.model, thinking: profile.thinking ?? null, mode: profile.mode ?? null, sensitive: isSensitiveProfile(config, profile.name), flags: paseoRunFlags(profile), skipped, repoPublic, zerosubAccount: zerosubAccount ?? null }, null, 2));
       }
       const lines = [
-        `Worker pick: "${profile.name}" (${profile.provider}/${profile.model})${isSensitiveProfile(config, profile.name) ? ' [sensitive: give only sanitized technical tasks]' : ''}`,
+        `Worker pick: "${profile.name}" (${profile.provider}/${profile.model})${isSensitiveProfile(config, profile.name) ? ' [sensitive: give only sanitized technical tasks]' : ''}${zerosubAccount ? ` [account ${zerosubAccount}]` : ''}`,
         `paseo run ${paseoRunFlags(profile)}`,
         ...skipped.map((s) => `skipped "${s.name}": ${s.reason}`),
       ];

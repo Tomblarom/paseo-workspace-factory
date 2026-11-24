@@ -173,6 +173,8 @@ A profile with `"advisor": true` marks its model as a second-opinion candidate f
 
 Profiles belong to a quota pool named by `profiles.<name>.pool`, or by their provider when `pool` is omitted. A pool at `quota.exhaustedPct` is skipped by profile resolution. Briefs show a preferred different pool at `quota.warnPct`; configure at least two non-advisor steer pools to make that failover useful.
 
+When the ZeroSub daemon plugin is installed, families with ZeroSub accounts (matched by provider, e.g. `claude`) use account-based pools instead: real usage percents and `resetsAt` per account, judged against the same `quota.warnPct`/`quota.exhaustedPct`. Profile resolution reports the roomiest account of the picked family (`worker pick` shows it as `[account <id>]`); a family whose accounts are all exhausted is skipped with the earliest reset time. Steer failover drops candidates on the same exhausted account and prefers the account with the most room. The state is read best-effort via the internal `DaemonClient` plugin RPC `zerosub`/`zerosub.state` (the high-level client has no plugin RPC); any failure falls back to the usage snapshot, and account `email`/`organization`/`home` fields are never stored.
+
 The plugin samples quota in the background and shows it with `/factory quota` (Factory panel and result pill; the sidebar warns when a non-advisor steer's pool reaches the warn level). Thresholds live in Settings → Plugins → Factory → Quota: `warnPct` (default 75), `exhaustedPct` (default 90), and the sample cadence `quotaSampleMinutes` (whole minutes, at least 10).
 
 ## Managing models from the CLI

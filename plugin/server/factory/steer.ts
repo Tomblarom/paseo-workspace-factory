@@ -329,7 +329,7 @@ function ageAgo(when, now) {
  * the last turn had no CHECKPOINT) enable the heuristic restart guess; without
  * them only plugin-marked interruptions are shown.
  */
-export function buildResumeBrief(status, { agentId = null, agentState = null, git = null, scope = null, now = () => Date.now(), daemonStartedAt = null, lastTurnCheckpoints = null, config = null, workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75 } = {}) {
+export function buildResumeBrief(status, { agentId = null, agentState = null, git = null, scope = null, now = () => Date.now(), daemonStartedAt = null, lastTurnCheckpoints = null, config = null, workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, zerosub = null } = {}) {
   const id = scope?.id ?? status.repo;
   const kind = scope?.kind ?? 'unknown';
   const epoch = status.state?.epoch ?? '?';
@@ -345,7 +345,7 @@ export function buildResumeBrief(status, { agentId = null, agentState = null, gi
   else lines.push('Caller unknown; treat this brief as read-only context.');
   if (workerModel) lines.push(workerModel);
   const quotaPool = active ? profilePool(config?.profiles?.[config?.steers?.slots?.[active.slot]]) : null;
-  const quotaLine = formatQuotaLine(config, quotaSnapshot, { currentPool: quotaPool, warnPct: quotaWarnPct });
+  const quotaLine = formatQuotaLine(config, quotaSnapshot, { currentPool: quotaPool, warnPct: quotaWarnPct, zerosub });
   if (quotaLine) lines.push(quotaLine);
 
   const cp = status.checkpoint;
@@ -439,7 +439,7 @@ export function buildResumeBrief(status, { agentId = null, agentState = null, gi
  * receiving agent and the verify-git line. Without interruption this is
  * exactly buildHandoff.
  */
-function handoffWithBrief(status, args, { discovery, git, language, workerModel = null, quotaSnapshot = null, quotaWarnPct = 75 }) {
+function handoffWithBrief(status, args, { discovery, git, language, workerModel = null, quotaSnapshot = null, quotaWarnPct = 75, zerosub = null }) {
   const packet = buildHandoff(status, { ...args, workerModel });
   const at = status.checkpoint?.interrupted?.at ?? null;
   if (at === null && !status.checkpoint?.interrupted) return packet;
@@ -451,6 +451,7 @@ function handoffWithBrief(status, args, { discovery, git, language, workerModel 
     workerModel,
     quotaSnapshot,
     quotaWarnPct,
+    zerosub,
   });
   const line = language === 'de'
     ? `Der vorherige Steer wurde um ${at ?? 'unbekannter Zeit'} unterbrochen; Git-Stand vor dem Weitermachen prüfen.`
@@ -548,7 +549,7 @@ function refuseIfRetired(status) {
  * re-read, check the expected epoch and active steer, write, read back, release;
  * the handoff is delivered after the lock is released.
  */
-export async function switchSteer({ client, discovery, toSlot, apply = false, send = true, wait = false, waitTimeoutMs = 600_000, notifyPrevious = false, language = runtime().handoffLanguage, git, lock = withLock, now = () => new Date(), config = null, workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, callerId = process.env.PASEO_AGENT_ID, paseoCli = null }) {
+export async function switchSteer({ client, discovery, toSlot, apply = false, send = true, wait = false, waitTimeoutMs = 600_000, notifyPrevious = false, language = runtime().handoffLanguage, git, lock = withLock, now = () => new Date(), config = null, workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, zerosub = null, callerId = process.env.PASEO_AGENT_ID, paseoCli = null }) {
   const status = steerStatus(discovery);
   if (!status.workspace || !status.state) throw new SwitchRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
@@ -579,7 +580,7 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
   }
   const fromInfo = from ?? { slot: expected.activeSteer, id: 'unknown' };
   const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory) : null;
-  const packet = handoffWithBrief(status, { from: fromInfo, to, epoch: expected.epoch, git: gitSnapshot, lastMessage, language }, { discovery, git, language, workerModel, quotaSnapshot, quotaWarnPct });
+  const packet = handoffWithBrief(status, { from: fromInfo, to, epoch: expected.epoch, git: gitSnapshot, lastMessage, language }, { discovery, git, language, workerModel, quotaSnapshot, quotaWarnPct, zerosub });
   const result = {
     repo: status.repo, from: fromInfo.slot, to: toSlot, epoch: expected.epoch + 1, packet,
     packetChars: packet.length, checkpoint: Boolean(status.checkpoint?.task), applied: false, delivered: false, deliveryError: null, reply: null, previousNotified: false, selfTakeover, renameError: null,
@@ -640,7 +641,7 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
  * refuse it as ambiguous. The packet preview names a placeholder id; the applied
  * packet carries the real one.
  */
-export async function freshSteer({ client, discovery, config, apply = false, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, now = () => new Date(), workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 90, paseoCli = null }) {
+export async function freshSteer({ client, discovery, config, apply = false, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, now = () => new Date(), workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 90, zerosub = null, paseoCli = null }) {
   const status = steerStatus(discovery);
   if (!status.workspace || !status.state) throw new SwitchRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
@@ -656,7 +657,7 @@ export async function freshSteer({ client, discovery, config, apply = false, lan
   const used = usedProfilesByLiveSteers(config, status.steers.filter((s) => s.slot !== slot));
   const { profile, skipped } = resolveProfile(config, discovery.providers, steerFallbackList(config, slot), {
     role: 'steer', advisorSlot, usedProfiles: used,
-    quotaSnapshot, quotaExhaustedPct,
+    quotaSnapshot, quotaExhaustedPct, zerosub,
   });
   if (!profile) throw new SwitchRefused(`Profile "${profileName}" for Steer ${slot} is not startable${skipped[0] ? `: ${skipped[0].reason}` : ''} (no fallback available)`);
   const warnings = [];
@@ -684,7 +685,7 @@ export async function freshSteer({ client, discovery, config, apply = false, lan
   };
   if (!apply) {
     if (!single) throw new SwitchRefused(`Steer ${slot} has several live agents (${holders.map((s) => s.id).join(', ')}); if a previous fresh apply was interrupted, rerun with --apply to recover it, otherwise archive the retired one in Paseo`);
-    result.packet = handoffWithBrief(status, { from: single, to: { slot, id: 'new agent, created on apply' }, epoch: expected.epoch, git: gitSnapshot, lastMessage: await hintOf(client, single.id), language }, { discovery, git, language, workerModel, quotaSnapshot, quotaWarnPct });
+    result.packet = handoffWithBrief(status, { from: single, to: { slot, id: 'new agent, created on apply' }, epoch: expected.epoch, git: gitSnapshot, lastMessage: await hintOf(client, single.id), language }, { discovery, git, language, workerModel, quotaSnapshot, quotaWarnPct, zerosub });
     result.packetChars = result.packet.length;
     return result;
   }
@@ -749,7 +750,7 @@ export async function freshSteer({ client, discovery, config, apply = false, lan
     paseoCli, marker: activeMarker(config),
     mark: null, unmark: { id: from.id, title: from.title ?? null, slot },
   });
-  result.packet = handoffWithBrief(status, { from, to: { slot, id: freshId }, epoch: expected.epoch, git: gitSnapshot, lastMessage: await hintOf(client, from.id), language }, { discovery, git, language, workerModel, quotaSnapshot, quotaWarnPct });
+  result.packet = handoffWithBrief(status, { from, to: { slot, id: freshId }, epoch: expected.epoch, git: gitSnapshot, lastMessage: await hintOf(client, from.id), language }, { discovery, git, language, workerModel, quotaSnapshot, quotaWarnPct, zerosub });
   result.packetChars = result.packet.length;
   try {
     await client.agents.ref(freshId).send(result.packet);

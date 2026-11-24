@@ -41,6 +41,64 @@ export function profilePool(profile) {
     : (typeof profile?.provider === 'string' ? profile.provider : '');
 }
 
+/** ZeroSub family of a profile (its lower-cased provider, e.g. 'claude'). */
+export function profileFamily(profile) {
+  return typeof profile?.provider === 'string' ? profile.provider.toLowerCase() : '';
+}
+
+/** Normalized ZeroSub accounts of one family (case-insensitive); [] without state. */
+export function familyAccounts(zerosub, family) {
+  const want = String(family ?? '').toLowerCase();
+  if (!want) return [];
+  return (zerosub?.accounts ?? []).filter((account) => account && String(account.family ?? '').toLowerCase() === want);
+}
+
+/**
+ * Account exhaustion with real percents: the status-based limit flag, a
+ * future limitedUntil, or maxUsedPct at the exhausted threshold.
+ */
+export function accountExhausted(account, { exhaustedPct = QUOTA_DEFAULTS.exhaustedPct, now = Date.now() } = {}) {
+  if (!account || typeof account !== 'object') return false;
+  if (account.exhausted === true) return true;
+  const until = Date.parse(account.limitedUntil ?? '');
+  if (Number.isFinite(until) && until > now) return true;
+  return Number.isFinite(account.maxUsedPct) && account.maxUsedPct >= exhaustedPct;
+}
+
+/** True when the family has accounts and every one of them is exhausted. */
+export function familyExhausted(zerosub, family, opts = {}) {
+  const accounts = familyAccounts(zerosub, family);
+  return accounts.length > 0 && accounts.every((account) => accountExhausted(account, opts));
+}
+
+/**
+ * Non-exhausted account with the most room (lowest maxUsedPct, unknown last,
+ * ties by id), or null when the family has no usable account.
+ */
+export function bestFamilyAccount(zerosub, family, opts = {}) {
+  const open = familyAccounts(zerosub, family).filter((account) => !accountExhausted(account, opts));
+  if (!open.length) return null;
+  const room = (account) => (Number.isFinite(account.maxUsedPct) ? account.maxUsedPct : Infinity);
+  return open.slice().sort((a, b) => room(a) - room(b) || String(a.id).localeCompare(String(b.id)))[0];
+}
+
+/** Earliest future resetsAt/limitedUntil across the family accounts, or null. */
+export function earliestFamilyReset(zerosub, family, { now = Date.now() } = {}) {
+  let best = null;
+  let bestMs = Infinity;
+  for (const account of familyAccounts(zerosub, family)) {
+    const stamps = [account.limitedUntil, ...(account.windows ?? []).map((window) => window?.resetsAt)];
+    for (const stamp of stamps) {
+      const ms = Date.parse(stamp ?? '');
+      if (Number.isFinite(ms) && ms > now && ms < bestMs) {
+        bestMs = ms;
+        best = stamp;
+      }
+    }
+  }
+  return best;
+}
+
 function entries(snapshot) {
   if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return {};
   if (snapshot.pools && typeof snapshot.pools === 'object' && !Array.isArray(snapshot.pools)) return snapshot.pools;
@@ -86,12 +144,22 @@ export function preferredQuotaPool(config, currentPool, snapshot = null) {
   return available ?? pools[0];
 }
 
-export function formatQuotaLine(config, snapshot, { currentPool = null, warnPct = QUOTA_DEFAULTS.warnPct } = {}) {
-  if (!snapshot) return null;
+export function formatQuotaLine(config, snapshot, { currentPool = null, warnPct = QUOTA_DEFAULTS.warnPct, zerosub = null } = {}) {
+  if (!snapshot && !zerosub) return null;
   const pool = currentPool || quotaPools(config, { includeAdvisors: false })[0];
+  if (!pool) return null;
+  const accounts = zerosub ? familyAccounts(zerosub, pool) : [];
+  if (accounts.length) {
+    const pcts = accounts.map((account) => account.maxUsedPct).filter((pct) => Number.isFinite(pct));
+    const worst = pcts.length ? Math.max(...pcts) : null;
+    if (worst === null || worst < warnPct) return null;
+    const best = bestFamilyAccount(zerosub, pool);
+    return `Quota: ${pool} ${worst}% (5h) — prefer ${best ? best.id : 'none'}`;
+  }
+  if (!snapshot) return null;
   const entry = quotaEntry(snapshot, pool);
   const pct = quotaPct(entry);
-  if (!pool || pct === null || pct < warnPct) return null;
+  if (pct === null || pct < warnPct) return null;
   const next = preferredQuotaPool(config, pool, snapshot);
   return `Quota: ${pool} ${pct}% (5h) — prefer ${next ?? 'none'}`;
 }

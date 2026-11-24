@@ -6,6 +6,7 @@
 // writes go through the workspace lock like checkpoints (see agent-state.mjs).
 import { isDeepStrictEqual } from 'node:util';
 import { LABEL, METADATA_KEY } from './paseo.js';
+import { accountExhausted } from './quota.js';
 import { withLock, workspaceLockName } from './lock.js';
 
 export const WORKERS_KEY = `${METADATA_KEY}.workers`;
@@ -304,9 +305,12 @@ export function isStaleWake(wakeEpoch, currentEpoch) {
  * the scope in slot order (circular after the failed active slot, skipping
  * retired/archived/interrupted/advisor ones), then the domain steer, then the
  * hub steer. Domain/hub entries are { steerId, scopeId } or null when absent;
- * an advisor on domain or hub level is skipped like any advisor id.
+ * an advisor on domain or hub level is skipped like any advisor id. With
+ * `zerosub` (normalized ZeroSub state), candidates on the exhausted failing
+ * account are dropped and the rest prefer the account with the most room;
+ * without it the order is unchanged.
  */
-export function failoverChain({ steers = [], activeSlot = null, retiredIds = [], interruptedIds = [], advisorIds = [], domainSteer = null, hubSteer = null, failingPool = null } = {}) {
+export function failoverChain({ steers = [], activeSlot = null, retiredIds = [], interruptedIds = [], advisorIds = [], domainSteer = null, hubSteer = null, failingPool = null, zerosub = null, failingAccountId = null, exhaustedPct = 90, now = Date.now() } = {}) {
   const retired = new Set(retiredIds ?? []);
   const interrupted = new Set(interruptedIds ?? []);
   const advisors = new Set(advisorIds ?? []);
@@ -322,6 +326,23 @@ export function failoverChain({ steers = [], activeSlot = null, retiredIds = [],
     if (differentPool.length) ordered.splice(0, ordered.length, ...differentPool, ...samePool);
     ordered.sort((a, b) => Number((a.pool ?? a.provider) === failingPool) - Number((b.pool ?? b.provider) === failingPool)
       || String(a.slot).localeCompare(String(b.slot)));
+  }
+  if (zerosub) {
+    const byId = new Map((zerosub.accounts ?? []).map((account) => [account?.id, account]));
+    const accountOf = (candidate) => candidate?.accountId ?? zerosub.agentAccount?.[candidate?.id] ?? zerosub.agentAccount?.[candidate?.steerId] ?? null;
+    const failing = failingAccountId ? byId.get(failingAccountId) : null;
+    let kept = ordered;
+    if (failing && accountExhausted(failing, { exhaustedPct, now })) {
+      kept = ordered.filter((candidate) => accountOf(candidate) !== failingAccountId);
+    }
+    const room = (candidate) => {
+      const pct = byId.get(accountOf(candidate))?.maxUsedPct;
+      return Number.isFinite(pct) ? pct : Infinity;
+    };
+    kept = kept.map((candidate, index) => [candidate, index])
+      .sort((a, b) => room(a[0]) - room(b[0]) || a[1] - b[1])
+      .map(([candidate]) => candidate);
+    ordered.splice(0, ordered.length, ...kept);
   }
   const chain = ordered.map((s) => ({ kind: 'steer', slot: s.slot, steerId: s.id }));
   if (domainSteer?.steerId && !advisors.has(domainSteer.steerId)) chain.push({ kind: 'domain', steerId: domainSteer.steerId, scopeId: domainSteer.scopeId ?? null });
