@@ -278,6 +278,7 @@ export function checkpointRules({ reportTo = null } = {}) {
     '- next: <next step, or none>',
     '```',
     'Do not replace it with a heading such as "## CHECKPOINT" or prose; the factory parses this block.',
+    'Tell every worker you start to end its answer with the same block (status included), and archive a worker once you have accepted its result.',
     ...(reportTo ? [`When the status is done or blocked, the factory sends this block to the requester ${reportTo} automatically; do not message it yourself.`] : []),
   ].join('\n');
 }
