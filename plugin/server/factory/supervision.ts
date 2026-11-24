@@ -6,7 +6,7 @@
 // writes go through the workspace lock like checkpoints (see agent-state.mjs).
 import { isDeepStrictEqual } from 'node:util';
 import { LABEL, METADATA_KEY } from './paseo.js';
-import { accountExhausted } from './quota.js';
+import { QUOTA_DEFAULTS, accountExhausted, allAccountsExhausted, earliestFamilyReset, earliestReset, familyExhausted } from './quota.js';
 import { withLock, workspaceLockName } from './lock.js';
 
 export const WORKERS_KEY = `${METADATA_KEY}.workers`;
@@ -14,7 +14,7 @@ export const WORKER_STATES = ['running', 'done', 'partial', 'blocked', 'interrup
 export const WORKER_EVENTS = ['created', 'adopted', 'checkpoint-done', 'checkpoint-none', 'checkpoint-partial', 'checkpoint-blocked', 'advisor-request', 'turn-no-checkpoint', 'turn-failed', 'turn-canceled', 'restart-daemon', 'restart-planned', 'stale', 'reassigned', 'archived'];
 export const TASK_MAX = 300;
 export const WORKERS_MAX = 100;
-export const SUPERVISION_DEFAULTS = { batchMinutes: 0, wakeDebounceSeconds: 20, watchdogMinutes: 15, staleMinutes: 60, answerMinutes: 10, maxAutoResumes: 2 };
+export const SUPERVISION_DEFAULTS = { batchMinutes: 0, wakeDebounceSeconds: 20, watchdogMinutes: 15, staleMinutes: 60, answerMinutes: 10, maxAutoResumes: 2, zerosubPendingMinutes: 10 };
 
 /** State transition table from docs/supervision-design.md; `archived` removes the entry (null). `stale` is handled in nextWorkerState (running only). */
 const TRANSITIONS = {
@@ -265,15 +265,72 @@ export function isQuietPeriod({ draining = false, bootCheckDone = true } = {}) {
 
 /**
  * One wake decision: `immediate` (window due), `defer` (inside the debounce
- * window) or `skip` (ineligible/quiet). Pure; the
- * caller resolves the target at send time and delivers the text.
+ * window, or while ZeroSub moves the agent to another account) or `skip`
+ * (ineligible/quiet). Pure; the caller resolves the target at send time and
+ * delivers the text. With `zerosub` (normalized ZeroSub state), a pending
+ * account move for the woken agent defers as `wait-zerosub` until the route
+ * clears or `zerosubPendingMinutes` pass; without it the order is unchanged.
  */
-export function planWake({ agent, newState, nowMs = Date.now(), lastWakeAt = null, batchMinutes = SUPERVISION_DEFAULTS.batchMinutes, wakeDebounceSeconds = SUPERVISION_DEFAULTS.wakeDebounceSeconds, draining = false, bootCheckDone = true } = {}) {
+export function planWake({ agent, newState, nowMs = Date.now(), lastWakeAt = null, batchMinutes = SUPERVISION_DEFAULTS.batchMinutes, wakeDebounceSeconds = SUPERVISION_DEFAULTS.wakeDebounceSeconds, draining = false, bootCheckDone = true, zerosub = null, zerosubPendingSince = null, zerosubPendingMinutes = SUPERVISION_DEFAULTS.zerosubPendingMinutes } = {}) {
   if (!canWakeAgent(agent)) return { action: 'skip', reason: 'ineligible' };
   if (isQuietPeriod({ draining, bootCheckDone })) return { action: 'skip', reason: draining === true ? 'drain' : 'boot' };
   if (!isImmediateWakeState(newState)) return { action: 'skip', reason: 'not-actionable' };
+  if (zerosub && zerosubMoveDecision({ zerosub, agentId: agent?.id ?? null, pendingSince: zerosubPendingSince, nowMs, zerosubPendingMinutes }).decision === 'wait-zerosub') {
+    return { action: 'defer', reason: 'wait-zerosub' };
+  }
   if (isBatchDue({ nowMs, lastWakeAt, batchMinutes, wakeDebounceSeconds })) return { action: 'immediate', reason: newState };
   return { action: 'defer', reason: 'debounce-window' };
+}
+
+/** Pending ZeroSub account-move target of an agent, or null when no move is in flight. */
+export function zerosubPendingTarget(zerosub, agentId) {
+  const target = typeof agentId === 'string' ? zerosub?.pending?.[agentId] : null;
+  return typeof target === 'string' && target ? target : null;
+}
+
+function stampMs(value) {
+  if (Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value) {
+    const ms = Date.parse(value);
+    if (Number.isFinite(ms)) return ms;
+  }
+  return null;
+}
+
+/**
+ * ZeroSub coexistence: while a route carries `pendingAccountId` for the agent,
+ * ZeroSub itself is moving the agent to another account, so supervision
+ * wake/failover waits (`wait-zerosub`) instead of reacting to the exhausted
+ * old account. `pendingSince` (ms or ISO stamp of the first sighting) starts
+ * the window; unknown counts as just seen. After `zerosubPendingMinutes`
+ * (default 10) the move is assumed stuck and supervision proceeds
+ * (`zerosub-timeout`). Pure; failover callers consult this before stepping the
+ * chain, exactly like planWake does for wakes. Returns
+ * { decision: 'wait-zerosub'|'proceed', pending, reason?, waitUntilMs? }.
+ */
+export function zerosubMoveDecision({ zerosub = null, agentId = null, pendingSince = null, nowMs = Date.now(), zerosubPendingMinutes = SUPERVISION_DEFAULTS.zerosubPendingMinutes } = {}) {
+  const pending = zerosubPendingTarget(zerosub, agentId);
+  if (!pending) return { decision: 'proceed', pending: null, reason: 'no-pending-move' };
+  const minutes = Number.isFinite(zerosubPendingMinutes) && zerosubPendingMinutes >= 0 ? zerosubPendingMinutes : SUPERVISION_DEFAULTS.zerosubPendingMinutes;
+  const now = stampMs(nowMs) ?? Date.now();
+  const since = stampMs(pendingSince) ?? now;
+  if (now - since >= minutes * 60_000) return { decision: 'proceed', pending, reason: 'zerosub-timeout' };
+  return { decision: 'wait-zerosub', pending, waitUntilMs: since + minutes * 60_000 };
+}
+
+/**
+ * Exhausted-quota wake: when every account is exhausted (one `family`, or all
+ * accounts without it), supervision wakes at the earliest future resetsAt
+ * (`wait-reset` with `wakeAt`) instead of polling. `proceed` keeps the legacy
+ * behavior: room left, no ZeroSub state, or no future reset known. Pure.
+ */
+export function exhaustedWakeDecision({ zerosub = null, family = null, now = Date.now(), exhaustedPct = QUOTA_DEFAULTS.exhaustedPct } = {}) {
+  if (!zerosub?.accounts?.length) return { decision: 'proceed', reason: 'no-zerosub', wakeAt: null };
+  const exhausted = family ? familyExhausted(zerosub, family, { exhaustedPct, now }) : allAccountsExhausted(zerosub, { exhaustedPct, now });
+  if (!exhausted) return { decision: 'proceed', reason: 'has-room', wakeAt: null };
+  const wakeAt = family ? earliestFamilyReset(zerosub, family, { now }) : earliestReset(zerosub, { now });
+  if (!wakeAt) return { decision: 'proceed', reason: 'no-reset-known', wakeAt: null };
+  return { decision: 'wait-reset', reason: family ? `family-exhausted:${family}` : 'all-accounts-exhausted', wakeAt };
 }
 
 /**

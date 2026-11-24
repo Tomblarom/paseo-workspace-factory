@@ -69,6 +69,19 @@ export function familyExhausted(zerosub, family, opts = {}) {
   return accounts.length > 0 && accounts.every((account) => accountExhausted(account, opts));
 }
 
+/** True when ZeroSub state has accounts and every one of them is exhausted. */
+export function allAccountsExhausted(zerosub, opts = {}) {
+  const accounts = zerosub?.accounts ?? [];
+  return accounts.length > 0 && accounts.every((account) => accountExhausted(account, opts));
+}
+
+/** The normalized ZeroSub account an agent currently routes to, or null. */
+export function accountForAgent(zerosub, agentId) {
+  const accountId = typeof agentId === 'string' ? zerosub?.agentAccount?.[agentId] ?? null : null;
+  if (!accountId) return null;
+  return (zerosub?.accounts ?? []).find((account) => account?.id === accountId) ?? null;
+}
+
 /**
  * Non-exhausted account with the most room (lowest maxUsedPct, unknown last,
  * ties by id), or null when the family has no usable account.
@@ -80,12 +93,12 @@ export function bestFamilyAccount(zerosub, family, opts = {}) {
   return open.slice().sort((a, b) => room(a) - room(b) || String(a.id).localeCompare(String(b.id)))[0];
 }
 
-/** Earliest future resetsAt/limitedUntil across the family accounts, or null. */
-export function earliestFamilyReset(zerosub, family, { now = Date.now() } = {}) {
+/** Earliest future resetsAt/limitedUntil across the given accounts, or null. */
+export function earliestResetOf(accounts, { now = Date.now() } = {}) {
   let best = null;
   let bestMs = Infinity;
-  for (const account of familyAccounts(zerosub, family)) {
-    const stamps = [account.limitedUntil, ...(account.windows ?? []).map((window) => window?.resetsAt)];
+  for (const account of accounts ?? []) {
+    const stamps = [account?.limitedUntil, ...(account?.windows ?? []).map((window) => window?.resetsAt)];
     for (const stamp of stamps) {
       const ms = Date.parse(stamp ?? '');
       if (Number.isFinite(ms) && ms > now && ms < bestMs) {
@@ -95,6 +108,16 @@ export function earliestFamilyReset(zerosub, family, { now = Date.now() } = {}) 
     }
   }
   return best;
+}
+
+/** Earliest future resetsAt/limitedUntil across ALL ZeroSub accounts, or null. */
+export function earliestReset(zerosub, opts = {}) {
+  return earliestResetOf(zerosub?.accounts ?? [], opts);
+}
+
+/** Earliest future resetsAt/limitedUntil across the family accounts, or null. */
+export function earliestFamilyReset(zerosub, family, opts = {}) {
+  return earliestResetOf(familyAccounts(zerosub, family), opts);
 }
 
 function entries(snapshot) {
