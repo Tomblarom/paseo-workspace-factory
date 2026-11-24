@@ -12,6 +12,7 @@ register("./ts-resolve-hooks.mjs", import.meta.url);
 
 const supervise = await import("../server/supervise.ts");
 import {
+  DRAIN_METADATA_KEY,
   SUPERVISION_SETTINGS_DEFAULTS,
   WORKER_METADATA_KEY,
   archiveHintLine,
@@ -21,6 +22,7 @@ import {
   formatScopeTakeover,
   formatSteerTakeover,
   hasAdvisorRequest,
+  isDrainMarkerActive,
   isWorkerMetadata,
   maxStampMs,
   scopeLastWakeAt,
@@ -184,6 +186,8 @@ const entry = (state, task = "do it", extra = {}) => ({
   task, startedBy: "A", startedAt: at(NOW - 30 * MIN), epoch: 3, state, status: null, resumes: 0, lastWakeAt: null, pendingWake: null, ...extra,
 });
 
+const drainMarker = (timeoutAt, extra = {}) => ({ startedAt: at(NOW - MIN), timeoutAt, pid: 123, ...extra });
+
 // ---------------------------------------------------------------------------
 // Shared decisions (pure, no imports).
 // ---------------------------------------------------------------------------
@@ -297,6 +301,18 @@ test("scopeLastWakeAt and maxStampMs pick the latest valid stamp", () => {
   assert.equal(scopeLastWakeAt(null), null);
   assert.equal(maxStampMs(at(NOW - 2 * MIN), at(NOW - MIN), null, "nope"), NOW - MIN);
   assert.equal(maxStampMs(null, undefined, 7), null);
+});
+
+test("isDrainMarkerActive honors timeoutAt plus a minute of grace", () => {
+  assert.equal(DRAIN_METADATA_KEY, "wsf.drain");
+  const live = drainMarker(at(NOW + MIN));
+  assert.equal(isDrainMarkerActive(live, NOW), true);
+  assert.equal(isDrainMarkerActive(live, NOW + 2 * MIN), true, "timeoutAt + 1 min still quiet");
+  assert.equal(isDrainMarkerActive(live, NOW + 2 * MIN + 1), false, "past the grace the marker is ignored");
+  for (const bad of [null, undefined, "x", 42, [], {}, { timeoutAt: "not-a-date" }, { startedAt: at(NOW) }]) {
+    assert.equal(isDrainMarkerActive(bad, NOW), false, `ignored: ${JSON.stringify(bad)}`);
+  }
+  assert.equal(isDrainMarkerActive(live, Number.NaN), false);
 });
 
 test("supervision settings: host scope, enabled by default", () => {
@@ -483,6 +499,73 @@ test("quiet periods queue instead of sending; flush sends after the window", asy
   assert.equal(texts.length, 1);
   assert.match(texts[0], new RegExp(`worker ${duringBoot.id} blocked`));
   assert.match(texts[0], new RegExp(`worker ${duringDrain.id} done`));
+});
+
+test("drain marker quiets wakes like the drain flag; stale markers are ignored", async () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  const mk = (task) => {
+    const w = addWorker(world, ws);
+    world.workspaces[0].metadata[WORKERS_KEY] = { ...(world.workspaces[0].metadata[WORKERS_KEY] ?? {}), [w.id]: entry("running", task) };
+    return w;
+  };
+  const marked = mk("marked task");
+  world.workspaces[0].metadata[DRAIN_METADATA_KEY] = drainMarker(at(NOW + 10 * MIN));
+  const queued = await turnedOut(world, marked, { assistant: checkpointOf("m", "done") });
+  assert.equal(queued.action, "queued");
+  assert.equal(queued.reason, "drain");
+  assert.equal(world.calls.filter((c) => c[0] === "agent.send").length, 0);
+  // Stale marker (past timeoutAt + 1 min): the wake goes out.
+  world.workspaces[0].metadata[DRAIN_METADATA_KEY] = drainMarker(at(NOW - 2 * MIN));
+  const stale = mk("stale task");
+  const sent = await turnedOut(world, stale, { assistant: checkpointOf("s", "done") });
+  assert.equal(sent.action, "sent");
+  assert.equal(sendsTo(world, steers.A.id).length, 1);
+});
+
+test("flush honors the drain marker and ignores stale ones", async () => {
+  const world = makeWorld();
+  const { ws } = provisioned(world);
+  const paseo = fakeClient(world);
+  const scope = { id: REPO, workspaceId: ws.id };
+  const worker = addWorker(world, ws);
+  world.workspaces[0].metadata[WORKERS_KEY] = {
+    [worker.id]: entry("done", "t", { lastWakeAt: at(NOW - 2 * MIN), pendingWake: { state: "done", queuedAt: at(NOW - 2 * MIN) } }),
+  };
+  world.workspaces[0].metadata[DRAIN_METADATA_KEY] = drainMarker(at(NOW + 10 * MIN));
+  assert.equal((await supervise.flushScope(paseo, scope, depsOf())).reason, "drain");
+  world.workspaces[0].metadata[DRAIN_METADATA_KEY] = drainMarker(at(NOW - 2 * MIN));
+  const flushed = await supervise.flushScope(paseo, scope, depsOf());
+  assert.equal(flushed.flushed, true);
+});
+
+test("boot finished queues post-boot wakes while the drain marker is live", async () => {
+  const world = makeWorld();
+  const { ws } = provisioned(world);
+  const worker = addWorker(world, ws);
+  world.workspaces[0].metadata[WORKERS_KEY] = { [worker.id]: entry("running", "t") };
+  world.workspaces[0].metadata[DRAIN_METADATA_KEY] = drainMarker(at(NOW + 10 * MIN));
+  const result = await supervise.runBootFinished(
+    fakeClient(world),
+    [{ agentId: worker.id, scopeId: REPO }],
+    depsOf(),
+  );
+  assert.deepEqual(result.marked, [worker.id]);
+  assert.equal(result.wakes.length, 1);
+  assert.equal(result.wakes[0].sent, false);
+  assert.equal(result.wakes[0].reason, "drain");
+  assert.ok(world.workspaces[0].metadata[WORKERS_KEY][worker.id].pendingWake, "interrupted news queued");
+});
+
+test("watchdog skips failover while the drain marker is live", async () => {
+  const { world, steers } = unansweredWorld();
+  world.workspaces[0].metadata[DRAIN_METADATA_KEY] = drainMarker(at(NOW + 10 * MIN));
+  const quiet = await supervise.watchdogScan(fakeClient(world), depsOf());
+  assert.equal(quiet.failovers.length, 0);
+  assert.equal(sendsTo(world, steers.B.id).length, 0);
+  world.workspaces[0].metadata[DRAIN_METADATA_KEY] = drainMarker(at(NOW - 2 * MIN));
+  const loud = await supervise.watchdogScan(fakeClient(world), depsOf());
+  assert.equal(loud.failovers.length, 1);
 });
 
 test("flush respects the batch window and sends nothing when empty", async () => {
@@ -940,7 +1023,7 @@ test("supervise.ts reuses the core and never archives or wakes blindly", () => {
     "updateWorkerEntry", "registerWorker", "removeWorker", "collectPendingWakes", "queuePendingWake",
     "markWakeSent", "shouldMarkStale", "openWorkers", "eventForRestartReason", "readWorkers",
     "steerWakeResponse", "hasAdvisorRequest", "formatSteerTakeover", "formatScopeTakeover",
-    "escalationHintLine",
+    "escalationHintLine", "isDrainMarkerActive",
   ]) {
     assert.ok(superviseServer.includes(name), `supervise.ts uses ${name}`);
   }

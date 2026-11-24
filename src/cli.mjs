@@ -2,6 +2,7 @@
 // Paseo Workspace Factory. Dry-run is the default; every write needs --apply.
 import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { loadConfig, defaultConfigPath, workerPriority, isAdvisorProfile, isAdvisorSlot, isSensitiveProfile, isSensitiveSlot, slotOrder } from './config.mjs';
 import { configureRuntime, runtime } from './runtime.mjs';
@@ -13,7 +14,7 @@ import { planHash } from './planner.mjs';
 import { applyPlans, createExecutors, createAuthorization, storeAuthorization, fileProgress, withApplyLock } from './apply.mjs';
 import { CHECKPOINT_KEY, restartInterruptions, steerStatus, switchSteer, freshSteer, writeCheckpoint, parseCheckpointBlock, lastAssistantText, resolveTargetEntry, buildResumeBrief, readGitBrief } from './steer.mjs';
 import { AGENTS_KEY } from './agent-state.mjs';
-import { listScopes } from './scope.mjs';
+import { listScopes, resolveScope } from './scope.mjs';
 import { DRAIN_DEFAULT_TIMEOUT_MS, drain, parseTimeout } from './drain.mjs';
 import { assessWorker, readGitState } from './workers.mjs';
 import { formatWorkersText, readWorkers, workersReport } from './supervision.mjs';
@@ -81,6 +82,31 @@ async function defaultResumeEntry(client, command = 'resume') {
     if (workspaceId) return `workspace:${workspaceId}`;
   }
   throw new Error(`${command} needs a scope (or run it inside a factory agent or workspace)`);
+}
+
+/**
+ * Default scope address for bare `worker pick`, like `resume`: the calling
+ * agent's scope label first, else the calling workspace, else the workspace
+ * of the current directory. Only live scopes count (ambiguous or unknown
+ * addresses fall through); null means the catalog-only pick without repo
+ * visibility. Pure over the state, env/cwd injectable for tests.
+ */
+export function defaultPickAddress(paseoState, { agentId = process.env.PASEO_AGENT_ID, workspaceId = process.env.PASEO_WORKSPACE_ID, cwd = process.cwd() } = {}) {
+  const liveScope = (address) => {
+    try {
+      return resolveScope(address, paseoState);
+    } catch {
+      return null;
+    }
+  };
+  if (agentId) {
+    const scopeId = paseoState.agents.find((a) => a.id === agentId)?.labels?.[LABEL.scope];
+    if (typeof scopeId === 'string' && scopeId && liveScope(scopeId)) return scopeId;
+  }
+  if (workspaceId && liveScope(`workspace:${workspaceId}`)) return `workspace:${workspaceId}`;
+  const cwdScope = cwd ? liveScope(cwd) : null;
+  if (cwdScope) return cwdScope.id;
+  return null;
 }
 
 /**
@@ -687,8 +713,15 @@ async function runModelCommand({ command, args, values, config, configPath, clie
       let entries;
       let repoPublic = null;
       let discovery = null;
-      if (scopeArg) {
-        const { entry: target } = resolveTargetEntry(scopeArg, await readPaseoState(client));
+      let scopeAddress = scopeArg ?? null;
+      let paseoState = null;
+      if (!scopeAddress) {
+        paseoState = await readPaseoState(client);
+        scopeAddress = defaultPickAddress(paseoState);
+      }
+      if (scopeAddress) {
+        paseoState ??= await readPaseoState(client);
+        const { entry: target } = resolveTargetEntry(scopeAddress, paseoState);
         [discovery] = await runner.discoverAll([target]);
         entries = discovery.providers ?? [];
         const priv = discovery.github?.fork?.repo?.private;
@@ -810,7 +843,11 @@ function formatDrain(result) {
   return lines.join('\n');
 }
 
-main().catch((error) => {
-  console.error(error.message);
-  process.exitCode = 1;
-});
+// Importable for tests (defaultPickAddress); only run when executed directly.
+const invokedAsMain = typeof process.argv[1] === 'string' && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (invokedAsMain) {
+  main().catch((error) => {
+    console.error(error.message);
+    process.exitCode = 1;
+  });
+}

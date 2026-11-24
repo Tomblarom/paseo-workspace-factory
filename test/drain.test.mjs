@@ -2,7 +2,7 @@
 // real waiting: the clock and sleep are injected.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { DRAIN_DEFAULT_TIMEOUT_MS, drain, factoryRunningAgents, isRunningAgent, markPlannedRestart, parseTimeout } from '../src/drain.mjs';
+import { DRAIN_DEFAULT_TIMEOUT_MS, DRAIN_GRACE_MS, DRAIN_KEY, buildDrainMarker, clearDrainMarker, drain, factoryRunningAgents, isDrainMarkerActive, isRunningAgent, markPlannedRestart, parseTimeout, setDrainMarker } from '../src/drain.mjs';
 import { AGENTS_KEY } from '../src/agent-state.mjs';
 import { CHECKPOINT_KEY } from '../src/steer.mjs';
 import { LABEL, METADATA_KEY } from '../src/paseo.mjs';
@@ -152,4 +152,88 @@ test('drain timeout marks leftovers and reports unclean', async () => {
   assert.equal(result.running.length, 1);
   assert.deepEqual(result.marked, [{ agentId: 'stuck', scopeId: SCOPE }]);
   assert.equal(world.workspaces[0].metadata[AGENTS_KEY].stuck.interrupted.reason, 'planned-restart');
+});
+
+test('isDrainMarkerActive honors timeoutAt plus a minute of grace', () => {
+  const at = (ms) => new Date(ms).toISOString();
+  const marker = buildDrainMarker({ startedAt: at(0), timeoutAt: at(60_000), pid: 1 });
+  assert.deepEqual(marker, { startedAt: at(0), timeoutAt: at(60_000), pid: 1 });
+  assert.equal(DRAIN_KEY, 'wsf.drain');
+  assert.equal(DRAIN_GRACE_MS, 60_000);
+  assert.equal(isDrainMarkerActive(marker, 59_999), true);
+  assert.equal(isDrainMarkerActive(marker, 60_000), true);
+  assert.equal(isDrainMarkerActive(marker, 120_000), true, 'timeoutAt + 1 min still quiet');
+  assert.equal(isDrainMarkerActive(marker, 120_001), false, 'past the grace the marker is ignored');
+  for (const bad of [null, undefined, 'x', 42, [], {}, { timeoutAt: 'not-a-date' }, { startedAt: at(0) }]) {
+    assert.equal(isDrainMarkerActive(bad, 0), false, `ignored: ${JSON.stringify(bad)}`);
+  }
+  assert.equal(isDrainMarkerActive(marker, Number.NaN), false);
+});
+
+test('drain markers round-trip under the lock and keep foreign markers', async () => {
+  const world = { workspaces: [workspaceWith({})], calls: [] };
+  const client = fakeClient(world);
+  const own = buildDrainMarker({ startedAt: '2026-11-24T12:00:00.000Z', timeoutAt: '2026-11-24T12:10:00.000Z', pid: 11 });
+  const foreign = buildDrainMarker({ startedAt: '2026-11-24T11:00:00.000Z', timeoutAt: '2026-11-24T11:10:00.000Z', pid: 12 });
+  assert.deepEqual(await setDrainMarker({ client, workspaceId: 'wks_main', marker: own, lock: noLock }), own);
+  assert.equal(await clearDrainMarker({ client, workspaceId: 'wks_main', marker: foreign, lock: noLock }), false);
+  assert.deepEqual(world.workspaces[0].metadata[DRAIN_KEY], own, 'a foreign clear leaves our marker alone');
+  assert.equal(await clearDrainMarker({ client, workspaceId: 'wks_main', marker: own, lock: noLock }), true);
+  assert.equal(world.workspaces[0].metadata[DRAIN_KEY], null);
+  assert.equal(await clearDrainMarker({ client, workspaceId: 'wks_main', marker: own, lock: noLock }), false, 'nothing left to clear');
+  await assert.rejects(setDrainMarker({ client, workspaceId: '', marker: own, lock: noLock }), /needs a workspaceId/);
+  await assert.rejects(clearDrainMarker({ client, workspaceId: '', lock: noLock }), /needs a workspaceId/);
+});
+
+test('drain writes the marker while waiting and clears it after', async () => {
+  let time = 0;
+  const world = { workspaces: [workspaceWith({})], calls: [] };
+  const running = { agents: [agent('a', { status: 'running' })], workspaces: world.workspaces };
+  const idle = { agents: [agent('a', { status: 'idle' })], workspaces: world.workspaces };
+  let reads = 0;
+  let seenDuringWait = 'unset';
+  const result = await drain({
+    client: fakeClient(world), timeoutMs: 1000, pollMs: 100, now: () => time,
+    sleep: async (ms) => { time += ms; },
+    readState: async () => {
+      reads += 1;
+      if (reads === 2) seenDuringWait = structuredClone(world.workspaces[0].metadata[DRAIN_KEY] ?? null);
+      return reads === 1 ? running : idle;
+    },
+    lock: noLock, pid: 4242,
+  });
+  assert.equal(result.clean, true);
+  assert.equal(seenDuringWait?.pid, 4242);
+  assert.equal(seenDuringWait?.startedAt, new Date(0).toISOString());
+  assert.equal(seenDuringWait?.timeoutAt, new Date(1000).toISOString());
+  assert.equal(world.workspaces[0].metadata[DRAIN_KEY] ?? null, null);
+});
+
+test('drain clears the marker when it times out', async () => {
+  let time = 0;
+  const world = { workspaces: [workspaceWith({})], calls: [] };
+  const state = { agents: [agent('stuck', { status: 'running' })], workspaces: world.workspaces };
+  const result = await drain({
+    client: fakeClient(world), timeoutMs: 50, pollMs: 10, now: () => time,
+    sleep: async (ms) => { time += ms; },
+    readState: async () => state,
+    readExcerpt: async () => 'tail', readGit: () => null, lock: noLock, pid: 7,
+  });
+  assert.equal(result.clean, false);
+  assert.equal(world.workspaces[0].metadata[DRAIN_KEY] ?? null, null);
+});
+
+test('drain without scopes writes no markers', async () => {
+  let time = 0;
+  let reads = 0;
+  const running = { agents: [agent('a', { status: 'running' })], workspaces: [] };
+  const idle = { agents: [agent('a', { status: 'idle' })], workspaces: [] };
+  const explodingLock = () => { throw new Error('no lock expected without scopes'); };
+  const result = await drain({
+    client: fakeClient({ workspaces: [], calls: [] }),
+    timeoutMs: 1000, pollMs: 100, now: () => time, sleep: async (ms) => { time += ms; },
+    readState: async () => (++reads === 1 ? running : idle),
+    lock: explodingLock,
+  });
+  assert.equal(result.clean, true);
 });

@@ -57,6 +57,7 @@ import { factoryIdentity } from "../shared/auto-checkpoint.js";
 import { getQuotaSnapshot } from "./quota.js";
 import { formatQuotaLine, profilePool, quotaExhausted } from "./factory/quota.js";
 import {
+  DRAIN_METADATA_KEY,
   WORKER_METADATA_KEY,
   buildWorkerMetadata,
   escalationHintLine,
@@ -64,6 +65,7 @@ import {
   formatScopeTakeover,
   formatSteerTakeover,
   hasAdvisorRequest,
+  isDrainMarkerActive,
   isWorkerMetadata,
   maxStampMs,
   scopeLastWakeAt,
@@ -143,9 +145,10 @@ export function isDraining(): boolean {
 }
 
 /**
- * Arms the drain quiet period. The CLI drain does not signal the plugin yet,
- * so production stays false until a drain marker exists; tests set it
- * directly (see the drain limitation in docs/plugin-design.md).
+ * Arms the drain quiet period explicitly (tests, manual quiet). Production
+ * quiet also engages via the wsf.drain marker the CLI/plugin drain writes in
+ * every scope's main workspace; every quiet check ORs the flag with the
+ * scope's marker (stale markers past timeoutAt + 1 min are ignored).
  */
 export function setDraining(value: boolean): void {
   draining = value;
@@ -716,6 +719,7 @@ export async function runWorkerTurnAfter(
   meta = await refreshWorkspaceMeta(paseo, mainId);
   register = readWorkers(meta);
   const { nowMs } = stampsOf(deps);
+  const draining = (deps.draining ?? isDraining()) || isDrainMarkerActive(meta[DRAIN_METADATA_KEY], nowMs);
   const plan = planWake({
     agent,
     newState,
@@ -723,7 +727,7 @@ export async function runWorkerTurnAfter(
     lastWakeAt: scopeLastWakeAt(register),
     batchMinutes: settings.batchMinutes,
     wakeDebounceSeconds: settings.wakeDebounceSeconds,
-    draining: deps.draining ?? isDraining(),
+    draining,
     bootCheckDone: deps.bootCheckDone ?? isBootCheckDone(),
   });
   if (plan.action === "skip") {
@@ -786,10 +790,13 @@ export async function flushScope(
 ): Promise<FlushResult> {
   const settings = await resolveSettings(deps);
   if (!settings || !settings.enabled) return { flushed: false, reason: "disabled" };
-  if (deps.draining ?? isDraining()) return { flushed: false, reason: "drain" };
-  if (!(deps.bootCheckDone ?? isBootCheckDone())) return { flushed: false, reason: "boot" };
   const { nowMs } = stampsOf(deps);
-  const register = readWorkers(await refreshWorkspaceMeta(paseo, scope.workspaceId));
+  const flushedMeta = await refreshWorkspaceMeta(paseo, scope.workspaceId);
+  if ((deps.draining ?? isDraining()) || isDrainMarkerActive(flushedMeta[DRAIN_METADATA_KEY], nowMs)) {
+    return { flushed: false, reason: "drain" };
+  }
+  if (!(deps.bootCheckDone ?? isBootCheckDone())) return { flushed: false, reason: "boot" };
+  const register = readWorkers(flushedMeta);
   const pending = collectPendingWakes(register);
   if (!pending.length) return { flushed: false, reason: "none" };
   if (!isBatchDue({
@@ -889,16 +896,18 @@ export async function runBootFinished(
       log(`[factory] supervise: boot mark failed (${error instanceof Error ? error.message : String(error)})`);
     }
   }
-  const drainingNow = deps.draining ?? isDraining();
+  const drainingFlag = deps.draining ?? isDraining();
+  const { nowMs } = stampsOf(deps);
   const wakes: { scopeId: string; sent: boolean; reason?: string }[] = [];
   for (const scope of scopes) {
     try {
-      const register = readWorkers(await refreshWorkspaceMeta(paseo, scope.workspaceId));
+      const bootMeta = await refreshWorkspaceMeta(paseo, scope.workspaceId);
+      const register = readWorkers(bootMeta);
       const events = workersReport(register)
         .filter((entry: any) => entry && entry.state === "interrupted")
         .map((entry: any) => ({ workerId: entry.id, state: entry.state as string }));
       if (!events.length) continue;
-      if (drainingNow) {
+      if (drainingFlag || isDrainMarkerActive(bootMeta[DRAIN_METADATA_KEY], nowMs)) {
         for (const event of events) {
           const current = register[event.workerId];
           if (current) await queueWake(paseo, scope.workspaceId, event.workerId, current, event.state, deps);
@@ -1144,7 +1153,8 @@ export async function watchdogScan(paseo: any, deps: SuperviseDeps & { state?: a
   const paseoState = deps.state ?? ((await readPaseoState(paseo)) as any);
   const scopes = listScopes(paseoState);
   const result: WatchdogResult = { ran: true, backfilled: [], removed: [], reconciled: [], stale: [], failovers: [] };
-  const quiet = (deps.draining ?? isDraining()) || !(deps.bootCheckDone ?? isBootCheckDone());
+  const drainingFlag = deps.draining ?? isDraining();
+  const bootDone = deps.bootCheckDone ?? isBootCheckDone();
   for (const scope of scopes) {
     try {
       const mainId: string = scope.workspaceId;
@@ -1224,6 +1234,7 @@ export async function watchdogScan(paseo: any, deps: SuperviseDeps & { state?: a
           }
         }
       }
+      const quiet = drainingFlag || !bootDone || isDrainMarkerActive(meta[DRAIN_METADATA_KEY], nowMs);
       if (!quiet) {
         const check = await runFailoverCheck(
           paseo,

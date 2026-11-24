@@ -3,12 +3,16 @@
 // (transitions, wake planning, failover chain, escalation) live in
 // src/supervision.mjs; server/supervise.ts uses them through the synced factory
 // copy. This module only holds what the core does not: worker metadata, the
-// ADVISOR-REQUEST scan, the first-turn excerpt, wake text extras (archive hint,
-// takeover requests), the answered/busy/unanswered classification, and the
-// settings mirror.
+// ADVISOR-REQUEST scan, the first-turn excerpt, the drain-marker quiet check,
+// wake text extras (archive hint, takeover requests), the
+// answered/busy/unanswered classification, and the settings mirror.
 
 /** Agent metadata key carrying the immutable worker facts (plugin-owned). */
 export const WORKER_METADATA_KEY = "wsf.worker";
+/** Workspace metadata key carrying the live drain marker; mirrors DRAIN_KEY in core drain.mjs. */
+export const DRAIN_METADATA_KEY = "wsf.drain";
+/** Stale-marker grace; mirrors DRAIN_GRACE_MS in core drain.mjs. */
+export const DRAIN_GRACE_MS = 60_000;
 /** Task excerpt bound; mirrors TASK_MAX in core supervision.mjs. */
 export const TASK_EXCERPT_MAX = 300;
 /** Wake text lists at most this many worker ids, then "+N more". */
@@ -262,6 +266,20 @@ export function scopeLastWakeAt(
     }
   }
   return best;
+}
+
+/**
+ * True while a drain marker claims a live drain (now <= timeoutAt + 1 min).
+ * Malformed or expired markers are ignored (no quiet), so a crashed drain
+ * self-expires. Mirrors isDrainMarkerActive in core drain.mjs.
+ */
+export function isDrainMarkerActive(marker: unknown, nowMs: number): boolean {
+  if (!marker || typeof marker !== "object" || Array.isArray(marker)) return false;
+  const timeoutAt = (marker as Record<string, unknown>).timeoutAt;
+  const timeoutMs = typeof timeoutAt === "string" ? Date.parse(timeoutAt) : NaN;
+  if (!Number.isFinite(timeoutMs)) return false;
+  if (!Number.isFinite(nowMs)) return false;
+  return nowMs <= timeoutMs + DRAIN_GRACE_MS;
 }
 
 /** Latest of several ISO stamps, or null when none parses. */

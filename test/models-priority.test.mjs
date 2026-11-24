@@ -10,6 +10,8 @@ import {
   formatWorkerModel, paseoRunFlags, planSteerRemove, planSteerSet, planWorkerRemove,
   planWorkerSet, resolveProfile, resolveSteerTarget, steerFallbackList,
 } from '../src/models.mjs';
+import { defaultPickAddress } from '../src/cli.mjs';
+import { LABEL, METADATA_KEY } from '../src/paseo.mjs';
 
 const CONFIG = {
   version: 1,
@@ -222,6 +224,62 @@ test('planSteerRemove drops the slot by letter or position', () => {
   const single = structuredClone(CONFIG);
   single.steers = { slots: { A: 'sol' }, prepare: ['A'], initialActive: 'A' };
   assert.throws(() => planSteerRemove(single, 'A'), /at least one slot must remain/);
+});
+
+test('defaultPickAddress derives the scope like resume: agent label, workspace, cwd', () => {
+  const state = {
+    agents: [
+      { id: 'steer-a', labels: { [LABEL.role]: 'steer', [LABEL.slot]: 'A', [LABEL.scope]: 'example/web' } },
+      { id: 'stale-steer', labels: { [LABEL.role]: 'steer', [LABEL.slot]: 'B', [LABEL.scope]: 'gone/repo' } },
+      { id: 'labelless', labels: {} },
+    ],
+    workspaces: [
+      { id: 'wks_main', workspaceDirectory: '/p/web', metadata: { [METADATA_KEY]: { main: true, scope: { id: 'example/web', kind: 'github', locator: 'example/web' } } } },
+      { id: 'wks_docs', workspaceDirectory: '/p/docs', metadata: { [METADATA_KEY]: { main: true, scope: { id: 'docs', kind: 'dir', locator: '/p/docs' } } } },
+    ],
+  };
+  assert.equal(defaultPickAddress(state, { agentId: 'steer-a', workspaceId: null, cwd: '/elsewhere' }), 'example/web');
+  assert.equal(defaultPickAddress(state, { agentId: 'labelless', workspaceId: 'wks_docs', cwd: '/elsewhere' }), 'workspace:wks_docs');
+  assert.equal(defaultPickAddress(state, { agentId: null, workspaceId: null, cwd: '/p/docs' }), 'docs');
+  assert.equal(defaultPickAddress(state, { agentId: null, workspaceId: null, cwd: '/elsewhere' }), null);
+  // Stale sources fall through to the next one.
+  assert.equal(defaultPickAddress(state, { agentId: 'ghost', workspaceId: 'wks_docs', cwd: '/elsewhere' }), 'workspace:wks_docs');
+  assert.equal(defaultPickAddress(state, { agentId: 'stale-steer', workspaceId: null, cwd: '/p/web' }), 'example/web');
+  assert.equal(defaultPickAddress(state, { agentId: null, workspaceId: 'wks_missing', cwd: '/elsewhere' }), null);
+});
+
+test('defaultPickAddress reads the agent and workspace env by default', () => {
+  const state = {
+    agents: [{ id: 'steer-a', labels: { [LABEL.scope]: 'example/web' } }],
+    workspaces: [
+      { id: 'wks_main', workspaceDirectory: '/p/web', metadata: { [METADATA_KEY]: { main: true, scope: { id: 'example/web', kind: 'github', locator: 'example/web' } } } },
+    ],
+  };
+  const savedAgent = process.env.PASEO_AGENT_ID;
+  const savedWs = process.env.PASEO_WORKSPACE_ID;
+  try {
+    process.env.PASEO_AGENT_ID = 'steer-a';
+    delete process.env.PASEO_WORKSPACE_ID;
+    assert.equal(defaultPickAddress(state, { cwd: '/elsewhere' }), 'example/web');
+    delete process.env.PASEO_AGENT_ID;
+    process.env.PASEO_WORKSPACE_ID = 'wks_main';
+    assert.equal(defaultPickAddress(state, { cwd: '/elsewhere' }), 'workspace:wks_main');
+  } finally {
+    if (savedAgent === undefined) delete process.env.PASEO_AGENT_ID; else process.env.PASEO_AGENT_ID = savedAgent;
+    if (savedWs === undefined) delete process.env.PASEO_WORKSPACE_ID; else process.env.PASEO_WORKSPACE_ID = savedWs;
+  }
+});
+
+test('defaultPickAddress falls through on ambiguous scope ids', () => {
+  const dupe = (id, dir) => ({
+    id, workspaceDirectory: dir,
+    metadata: { [METADATA_KEY]: { main: true, scope: { id: 'dupe/repo', kind: 'github', locator: 'dupe/repo' } } },
+  });
+  const state = {
+    agents: [{ id: 'a', labels: { [LABEL.scope]: 'dupe/repo' } }],
+    workspaces: [dupe('wks_1', '/p/one'), dupe('wks_2', '/p/two')],
+  };
+  assert.equal(defaultPickAddress(state, { agentId: 'a', workspaceId: null, cwd: '/elsewhere' }), null);
 });
 
 test('advisor/sensitive slot helpers resolve live from the config', () => {
