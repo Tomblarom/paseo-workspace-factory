@@ -20,70 +20,42 @@ Starting a new agent by hand means explaining the whole task again, or letting t
 4. **Switching** hands the work to another steer with a message built from the checkpoint and the git state, without replaying the chat and without a model call.
 5. Every change is shown as a preview first and only runs after you confirm it.
 
-## Ten-minute quickstart
+## Quickstart in Paseo
 
 You need Linux with Node.js 22 or later, git, the GitHub CLI `gh` (logged in), `flock`, and a running Paseo daemon with its `paseo` CLI.
 
-**1. Install and configure (2 minutes).**
+**1. Install the plugin on the Paseo host.** From the repository checkout, build a snapshot.
 
 ```sh
 clear
-git clone <this repo> && cd paseo-workspace-factory
-mkdir -p ~/.config/paseo-workspace-factory
-cp config.example.json ~/.config/paseo-workspace-factory/config.json
+npm ci --prefix plugin
+npm run build-snapshot
 ```
 
-Open the config file and set at least `github.owner` (your GitHub user), `checkoutRoot` (where checkouts go) and one entry under `profiles` (which provider and model a steer uses). Every field is explained in [configuration](configuration.md#fields).
+Use the install command printed for the snapshot. For updates and rollback, follow the [snapshot update procedure](design/plugin-design.md#update-flow). Open a regular agent tab and type `/factory help` in the composer to verify the plugin loaded.
 
-**2. Preview the setup (1 minute).** Nothing is written yet:
+For first-time setup, open **Settings → Plugins → Factory** in Paseo. Under **Host**, enter your GitHub owner and an absolute checkout root on the Paseo host. Choose a profile for the first steer and save. Advanced host configuration is available in the [configuration reference](configuration.md#fields).
 
-```sh
-clear
-node src/cli.mjs plan https://github.com/<you>/<repo>
-```
+**2. Preview the setup.** Type `/factory plan <you>/<repo>` in the composer. The panel lists the planned checkout, Paseo project, workspace, and steers, along with a plan hash. Add `--allow-fork` if you want the plan to create your GitHub fork.
 
-The plan lists every step (fork, clone, Paseo project, workspace, steers) and ends with a short code, the **plan hash**.
+**3. Apply the plan.** Confirm it in the panel or use `/factory apply <hash>`. If a step fails, you can apply the same hash again. The factory skips steps it already completed.
 
-Already have agents named like `Steer A` or `Steer A [kn]` in that workspace? The plan stops and names them; confirm one with `--adopt A=<agent-id>` to take it over instead of creating a new steer. Several local checkouts of the same repository? The plan asks you to pick one with `--checkout <path>`.
+**4. Start work.** Open the new workspace and run `/factory status`. It shows the active steer and the current checkpoint. Give the active steer its task as a regular chat message.
 
-**3. Run it (2 minutes).**
+**5. Hand over to another steer.** To create a second steer, run `/factory steer add B` in the project's workspace. Inspect the chosen profile and account, then select **Save slot and create steer**. Ask the active steer to leave a CHECKPOINT block. Run `/factory checkpoint --from-agent <steer-id>` and confirm it, then run `/factory switch --to B` and confirm the handoff. B becomes active and receives the checkpoint in its tab. [Steer instructions](steer-instructions.md)
 
-```sh
-clear
-node src/cli.mjs apply --confirm <hash>
-```
-
-Only the plan you just saw runs. If something fails halfway, run the same command again; finished steps are skipped.
-
-**4. Look at it (1 minute).**
-
-```sh
-clear
-node src/cli.mjs status <you>/<repo>
-```
-
-You see the active steer, its checkpoint and all helpers. In Paseo you now have a workspace with a tab "Steer A". Give that steer its task as usual.
-
-**5. Hand over (4 minutes).** When Steer A should stop, ask it to end its answer with a CHECKPOINT block (the [steer instructions](steer-instructions.md) make this automatic), store it and switch:
-
-```sh
-clear
-node src/cli.mjs checkpoint <you>/<repo> --from-agent <steer-a-id>
-node src/cli.mjs switch <you>/<repo> --to B             # preview the handover
-node src/cli.mjs switch <you>/<repo> --to B --apply     # do it
-```
-
-Steer B receives one compact message and continues. No local project? Use `plan --local <path>` instead of a GitHub URL (see [local mode](configuration.md#local-mode)).
-
-### The same inside Paseo (plugin)
-
-With the plugin installed, type `/factory help` in any steer chat. Normal use goes through `/factory`; the `node src/cli.mjs` commands in this guide stay as reference (same names, same previews, `--apply` instead of the panel button).
+## Composer commands
 
 | You want to … | Type |
 |---|---|
 | see who is active and what the task is | `/factory status` |
 | see all projects at a glance | `/factory scopes` |
 | preview setting up a project | `/factory plan <you>/<repo>` |
+| adopt an existing steer tab | `/factory plan --adopt B=<agent-id>`, then confirm the plan |
+| create a steer in this scope | `/factory steer add [slot] [profile]`, then confirm the preview |
+| plan a local directory or a hub | `/factory plan --local <absolute-path>` or `/factory plan --hub <absolute-path>` |
+| assign a scope to a domain | `/factory plan --domain <domain-id>`, then confirm the plan |
+| register an existing worker | `/factory plan --adopt-worker <agent-id>`, then confirm the plan |
 | run a previewed plan | `/factory apply <hash>` |
 | hand over to Steer B | `/factory switch --to B`, then confirm in the panel |
 | save the checkpoint from the last answer | `/factory checkpoint --from-agent <id>`, then confirm in the panel |
@@ -98,11 +70,12 @@ With the plugin installed, type `/factory help` in any steer chat. Normal use go
 | see quota pools and who uses them | `/factory quota` |
 | wait until nothing runs (safe restart) | `/factory drain` |
 | tidy up leftovers | `/factory cleanup`, or `/factory cleanup --plan` then `/factory apply <hash>` |
+| audit and repair Factory labels | `/factory labels <scope-or-agent-id>`, then select **Set labels** to apply the previewed fixes |
 | manage the worker model priority | `/factory worker list`, `/factory worker set 1 <model>`, `/factory worker pick` |
 | manage steer slots and models | `/factory steer list`, `/factory steer set B <model>` |
 | mark a model as advisor-only or sensitive | `/factory model advisor <profile> on`, `/factory model sensitive <profile> on` |
 
-Without a project name, commands use the workspace you are in. Every change shows a preview in the Factory panel with a confirm button. Settings live under Settings → Plugins → Factory.
+Without a project name, commands use the workspace you are in. The Factory panel shows previews for setup, checkpoints, and handoffs. Settings live under Settings → Plugins → Factory.
 
 ## Glossary in plain words
 
@@ -128,22 +101,28 @@ Without a project name, commands use the workspace you are in. Every change show
 
 ## Typical workflows
 
-**Start a new project.** `plan <repo>` → read the preview → `apply --confirm <hash>` → give Steer A its task.
+**Start a new project.** Run `/factory plan <repo>`, review the preview, then run `/factory apply <hash>` and give the active steer its task.
 
-**Provider limit reached.** Store the checkpoint → `switch --to B --apply`. Step by step: [provider limit workflow](workflow-provider-limit.md).
+**Provider limit reached.** Save the checkpoint, run `/factory switch --to B`, and confirm the handoff. [Provider limit workflow](workflow-provider-limit.md)
 
-**Chat got too long.** `checkpoint` → `fresh <repo> --apply`: a new agent of the same slot takes over; the old tab stays. Tips to keep chats short: [saving context](saving-context.md).
+**Chat got too long.** Save the checkpoint, run `/factory fresh`, and confirm. A new agent in the same slot takes over and the old tab stays available. [Saving context](saving-context.md)
 
-**Back after a break.** In the steer's own tab, `/factory resume` is the way back after a restart, crash, or limit: it saves the checkpoint, clears the chat, and then shows the task and next step without reading the old chat. A "Resume nötig" pill on the steer asks you to do this when needed. `resume` on the CLI (or `/factory resume --brief`) only reads the same report and never clears anything. The plugin can also tidy up idle agents automatically; see [cold context](cold-context-resume.md).
+**Back after a break.** In the steer's own tab, `/factory resume` is the way back after a restart, crash, or limit: it saves the checkpoint, clears the chat, and then shows the task and next step without reading the old chat. A "Resume nötig" pill on the steer asks you to do this when needed. `resume` on the CLI (or `/factory resume --brief`) only reads the same report and never clears anything. The plugin can also tidy up idle agents automatically; see [cold context](design/cold-context-resume.md).
 
-**Many projects.** `scopes` shows one line per project; a hub hands out work with `assign`. Related projects can be grouped under a domain (`plan <project> --domain <domain-id>`), whose steer coordinates them. See [scopes and the hub](scopes-design.md) and [domains](configuration.md#domains).
+**Many projects.** `/factory scopes` shows one line per project. A hub hands out work with `/factory assign <scope> --task "…"`. [Scopes and the hub](design/scopes-design.md)
 
-**Tidy up.** `cleanup` lists leftovers (test scopes, missing folders, empty projects) and what would be lost; it only reads.
+**Tidy up.** `/factory cleanup` lists leftovers such as test scopes, missing folders, and empty projects, and shows what would be lost.
 
 ## Safety at a glance
 
-- `plan`, `status`, `scopes`, `resume` and `cleanup` only read.
+- `/factory status`, `/factory scopes`, and `/factory resume --brief` show the current state. `/factory plan` saves a preview and `/factory cleanup` shows potential cleanup candidates.
 - Writes need a confirmation that matches the preview you saw; if the state changed in between, the factory refuses and asks you to preview again.
 - Nothing is deleted or archived unless you explicitly allow it.
 
 Details: [concepts and safety model](concepts.md).
+
+## Troubleshooting
+
+- **Work has stopped after an interruption.** Open the active steer and use `/factory resume --brief` and `/factory workers` to check the saved next step and see which workers finished. If you want that steer to resume, use `/factory resume` in its own tab.
+- **A worker result is missing.** Find the worker by ID in `/factory workers` and check its last answer. A completed worker needs a CHECKPOINT with `task:`, `tests:`, `blockers:` and `next:` inside a fenced code block. [Checkpoint format](steer-instructions.md#answer-format)
+- **A confirmation is refused.** Refresh the preview and inspect the current state. Factory checks the preview against the current scope or labels before it applies the change.

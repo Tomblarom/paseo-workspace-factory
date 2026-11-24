@@ -35,7 +35,11 @@
 - `/factory resume` as the restart path: clears the steer's context and delivers the resume brief; a "Resume nötig" pill marks affected steers, and resuming on a non-active steer takes over coordination.
 - Priority model lists: `worker list/set/rm/pick` and `steer list/set/rm` manage ordered profiles with availability fallback (`slot set/rm`, `worker-default` deprecated); `model advisor/sensitive` flip the flags; advisor profiles never coordinate, sensitive profiles only get sanitized tasks on provably public repositories.
 - Quota pools and profile health: profiles share a quota pool (`pool`, `quota.warnPct/exhaustedPct`); exhausted pools are skipped with failover to another pool; `worker pick <scope> --failed <profile> --reason <text>` marks a profile unhealthy for 10 minutes.
-- Full `/factory` slash coverage: every CLI function is a `/factory` subcommand (`scopes`, `workers`, `models`, `drain`, `retire`, `worker|steer|model` …) with inline results and panel previews; plugin settings for model lists, cleanup, resume and supervision.
+- Composer workflows for configuring a host, adopting steers and workers, setting up scopes and domains, and reviewing label repairs. Script-specific CLI options remain available.
+- Worker supervision accepts registered workers identified by metadata, persists delivery retries, and waits for a busy steer before delivering a wake. Interrupted handoffs show the receiving steer and epoch.
+- CHECKPOINT output uses plain field lines inside the code fence. Readers also accept earlier field lines with dashes.
+- The active steer can launch a worker through the native SDK with the account selected by ZeroSub.
+- `/factory steer add` previews and creates a steer for the current scope, with quota-aware profile selection and receipt-based recovery.
 - Domain follow-ups: `relocate` carries the scope's domain pointer (shown in the preview), and `plan` can create a domain scope and its child in the same run (domain first).
 - Plugin release snapshots: `npm run build-snapshot` verifies the factory mirror, typecheck and plugin tests, builds the content-hashed snapshot, and prints the install/rollback commands (install and prune deletion only with `--confirm`).
 

@@ -1,8 +1,8 @@
 # Scopes and the hub — design draft
 
-New to the factory? Start with [Getting started](getting-started.md); this page is the detailed reference.
+New to the factory? Start with [Getting started](../getting-started.md); this page is the detailed reference.
 
-Status: accepted (2026-11-23), implementation in progress. Decisions and checklist live in [TODO.md](../TODO.md#8-freie-arbeit-scopes-und-hub).
+The scope types and core workflows described here are implemented. See [Working with scopes](../configuration.md#scopes) for current command syntax.
 
 ## Problem
 
@@ -83,8 +83,8 @@ Neutral prefix `wsf.*` for labels and metadata; `ari.wsf.*` is still read and a 
 
 ## Decision 7 — domains between hub and scope
 
-Some scopes belong together (one product, several repositories) and need a coordinator below the hub. A domain is a role on an existing scope, not a new kind: child scopes store a logical pointer `scope.domain=<id>` (set with `plan --domain`, epoch-checked), never a Paseo parent. Work flows Hub → Domain → Child through `assign`; escalations flow back as `domain:` (to the domain steer) and `hub:` (to the hub) blockers. Lifecycle stays with the hub. Details: [configuration](configuration.md#domains).
+Some scopes belong together (one product, several repositories) and need a coordinator below the hub. A domain is a role on an existing scope, not a new kind: child scopes store a logical pointer `scope.domain=<id>` (set with `plan --domain`, epoch-checked), never a Paseo parent. Work flows Hub → Domain → Child through `assign`; escalations flow back as `domain:` (to the domain steer) and `hub:` (to the hub) blockers. Lifecycle stays with the hub. Details: [configuration](../configuration.md#domains).
 
 ## Implementation steps
 
-See the checklist in [TODO.md §8](../TODO.md#8-freie-arbeit-scopes-und-hub). S1–S2 are the foundation; S3/S4/S8 and the read-only part of S9 can then run in parallel.
+See [Configuration](../configuration.md#scopes) for scope setup and [Getting started](../getting-started.md) for the composer commands.

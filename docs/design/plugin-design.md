@@ -1,6 +1,6 @@
 # Factory Paseo plugin — design
 
-New to the factory? Start with [Getting started](getting-started.md); this page is the detailed reference.
+New to the factory? Start with [Getting started](../getting-started.md); this page is the detailed reference.
 
 Status: implemented in `plugin/` (built, typechecked, installed as a snapshot).
 
@@ -43,7 +43,7 @@ Design: register one `factory` command (single name, minimal collision surface) 
 - `/factory apply <hash>` (or a Confirm button in the preview panel) → `rpc(factory.apply, { hash })`; the server executes only the stored authorization for that hash, mirroring `apply --confirm <hash>`.
 - `/factory checkpoint …`, `/factory switch --to B [--apply]` map to the same RPC pairs: preview RPC first, mutating RPC second.
 
-This preserves the factory safety model (dry-run first, confirmed plan only; see [docs/concepts.md](concepts.md)): the hash is the confirmation token, and stage two never runs without stage one's stored artifact.
+This preserves the factory safety model (dry-run first, confirmed plan only; see [docs/concepts.md](../concepts.md)): the hash is the confirmation token, and stage two never runs without stage one's stored artifact.
 
 Implemented: inline output instead of the panel (E6). `onSubmit` opens the panel only when `args` is empty. For subcommands, errors are thrown and appear as error toasts (the only toast path in `onSubmit`; already used by the worker guard), while success appears as a short transient composer pill "Factory: \<one-liner\>" on the calling agent, with a popover for details (rendered from the existing `setFactoryResult` store, so the same renderers as the panel). The pill disappears after 60 s or on the next `/factory`. `resume` shows no success of its own; it becomes visible through the brief arriving in the timeline. Previews that need confirmation (`plan`, `switch --apply`, `checkpoint`, `fresh`, `apply`) still open the panel, because a button is needed. An agent answer as output (timeline renderer) is rejected: it would cost tokens in the agent context. `/factory resume` (clear plus brief, steers only) and `/factory resume --brief` (read-only brief, the old path) share this output model.
 

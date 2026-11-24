@@ -1,12 +1,14 @@
 # Worker supervision that survives interruptions — design
 
-New to the factory? Start with [Getting started](getting-started.md); this page is the detailed reference.
+New to the factory? Start with [Getting started](../getting-started.md); this page is the detailed reference.
 
-Status: accepted (decisions F1–F4 below), implemented as packages S-A, S-B, S-C. Builds on restart detection and `drain` ([configuration](configuration.md#planned-restarts)) and on the cold-context work ([cold context](cold-context-resume.md)).
+Status: accepted (decisions F1–F4 below), implemented as packages S-A, S-B, S-C. Builds on restart detection and `drain` ([configuration](../configuration.md#planned-restarts)) and on the cold-context work ([cold context](cold-context-resume.md)).
 
 ## Principle
 
 Supervising workers must survive an interruption: a daemon restart, a cleared or compacted context, or a steer that fails (provider limit, errors, no answer). Workers belong to the scope, not to the steer that started them; the active steer supervises every open worker of its scope. A steer that starts workers does not simply go idle: the factory wakes it when something happens and when nothing happens for too long. If the active steer cannot respond, the next ready steer takes over on its own. The user is asked only when the steer, an advisor and the next higher steer (domain, hub) are all stuck.
+
+While the steer is working through a backlog, it stays in the turn, checks the worker register, and takes another actionable item when one is blocked. A shell watcher can report completion to that turn. Factory wakes provide recovery after an interruption.
 
 ## Decisions
 
@@ -61,7 +63,7 @@ State transitions:
 
 The plugin wakes the steer that is active **when the wake is sent**, read from the scope state — never the worker's parent. Every wake carries the scope id, the epoch and the worker ids; a steer ignores a wake whose epoch is older than the current one.
 
-- Immediately: a worker becomes `blocked` or `interrupted`.
+- Every actionable worker outcome queues a wake before delivery. The timer tries again after a failed send or when the active steer finishes its current turn.
 - Debounced: simultaneous actionable events are collected and sent together within `wakeDebounceSeconds`; there is no 10-minute batch.
 - Watchdog: a plugin timer (every 15 minutes) marks `running` workers that are idle beyond `staleMinutes` as `stale` and wakes the steer; it also re-sends a wake that got no answer (see Failover).
 - Quiet periods: no wakes while `drain` runs, and none before the boot check after a restart has finished; then one combined wake lists every interrupted worker.

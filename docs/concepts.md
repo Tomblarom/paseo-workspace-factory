@@ -1,61 +1,70 @@
 # Concepts and safety model
 
-New to the factory? Start with [Getting started](getting-started.md); this page is the detailed reference.
+New to the factory? Start with [Getting started](getting-started.md); this page is the short mental model behind those workflows.
 
-## Building blocks
+```mermaid
+flowchart TD
+    Hub --> Domain --> Scope
+    Scope --> Active[active steer]
+    Active --> Worker[workers]
+    Active --> Checkpoint[checkpoint]
+    Checkpoint --> Handoff[handoff]
+    Handoff --> Next[next steer]
+```
 
-| Term | Meaning |
-|---|---|
-| Scope | The unit of coordination: exactly one main workspace with factory metadata, its steers (slots A–Z), epoch, checkpoint and workers. Kinds: `github` (`owner/repo`), `dir` (plain directory), `workspace` (adopted existing workspace), `hub` (coordinator, at most one per host). The scope id lives in `wsf.scope`; steers carry it as label `wsf.scope`. |
-| Main workspace | The scope's home workspace (any kind), holding the steers and the factory state in its metadata. Its title follows the `workspaceTitle` template. |
-| Steer | Top-level coordinating agent (no parent), identified by labels `wsf.scope`, `wsf.role=steer`, `wsf.slot=<A..Z>` (`wsf.repo` kept for compatibility). The role is independent of provider and model. |
-| Advisor steer | A steer slot whose profile carries `"advisor": true`, resolved live from the config. It answers explicit questions only and never coordinates, takes over, or receives supervision wakes. |
-| Hub | A scope of kind `hub` whose steers coordinate other scopes (provisioning, lifecycle, models, adoption, priorities); see Roles below. |
-| Domain | A role, not a kind: a scope whose steers coordinate a group of child scopes (e.g. one product made of several repositories). Children point to it with `scope.domain`; see [domains](configuration.md#domains). |
-| Active steer | The one steer that coordinates now; stored as `wsf.activeSteer` in the workspace metadata. |
-| Epoch | Counter in `wsf.epoch`, increased by every switch. |
-| Checkpoint | Short task state in `wsf.checkpoint`: `task`, `tests`, `blockers`, `next`, `epoch`, `updatedAt`, plus `source` (`agent`/`auto`/`manual`/`assign`), `capturedAt`, and an `interrupted` flag when the last turn died. |
-| Handoff | Message to the new steer, built deterministically from workspace, epoch, git (branch, SHA, changes), workers and the checkpoint, plus the resume brief when the checkpoint is interrupted. The previous steer's last answer is added only as a shortened, unverified hint. |
-| Worker | Agent doing one bounded task: either created by a steer (parent = that steer) or adopted by label (`wsf.role=worker`, `wsf.owner=<slot>`), staying in its own workspace either way. Workers keep their parent after a switch and are reused by id. |
+## Work in one scope
 
-No separate registry exists: everything else is read live from Paseo.
+A **scope** is one coordinated unit, usually one repository: its home workspace, its steers (slots A–Z), one checkpoint and its workers. Kinds: `github` (`owner/repo`), `dir`, `workspace` (adopted), `hub` (at most one per host). State lives in the home workspace metadata; agents carry `wsf.*` labels.
 
-## Scopes and roles
+The **active steer** coordinates your task. It can delegate bounded pieces to **workers** in parallel and records a **checkpoint** (`task`, `tests`, `blockers`, `next`) after each package. Workers stay where they are across handovers and are reused by ID.
 
-| Role | Responsible for | Not responsible for |
-|---|---|---|
-| Hub steer | provisioning and lifecycle plans for any scope, slot/model assignment, adoption, priorities across scopes, cleanup | content work inside a scope that has an active steer |
-| Domain steer | tasks across its child scopes, handing work down with `assign`, answering `domain:` blockers | lifecycle (create/archive/delete) of scopes, which stays with the hub |
-| Scope steer | tasks of its scope, its workers, its CHECKPOINT | other scopes, destructive lifecycle ops |
-| Worker | one bounded task | coordination |
+Typical flow: `/factory plan <repo>` once, confirm `/factory apply <hash>`, then talk to the active steer. `/factory status` shows who is active and what the checkpoint says.
 
-Relations stay logical (metadata/labels), never `parent`: steers stay parent-free. Hub → scope: `assign <scope> --task … --next …` writes the scope checkpoint (epoch-checked, preview first) and delivers it to the active scope steer. Scope → hub: the CHECKPOINT block; blockers prefixed `hub:` are escalations. With a domain the chain is Hub → Domain → Child: `domain:` blockers go to the domain steer, `hub:` blockers further to the hub.
+## Hand over without losing context
+
+When a provider limit hits, the chat gets long, or another model fits better, the checkpoint moves — never the chat. A **handoff** is built from the checkpoint plus git state (branch, SHA, changes) and open workers; the previous steer's last answer travels only as a shortened, unverified hint.
+
+- `/factory switch --to B`: another steer takes over.
+- `/factory fresh`: a new agent in the same slot starts with an empty chat.
+- `/factory resume`: the way back after a break, restart, or cleared chat.
+
+Every switch raises the **epoch** counter, which invalidates older previews. Details: [provider limit](workflow-provider-limit.md), [saving context](saving-context.md).
+
+## Coordinate many scopes
+
+A **hub** scope coordinates other scopes: provisioning and lifecycle plans, slot/model assignment, priorities, cleanup. It never does content work inside a scope that has an active steer. A **domain** is a role, not a kind: any non-hub scope coordinating a group of child scopes (one product of several repos).
+
+The chain is Hub → Domain → Child. Work flows down with `assign <scope> --task … --next …` (epoch-checked preview, then apply); blockers flow up as `domain:` (to the domain steer) and `hub:` (to the hub). Relations stay logical (metadata/labels); steers stay parent-free. See [domains](configuration.md#domains).
 
 ## Advisor steers and priority
 
-Steer priority is the slot order: A first, then B, C, … (`steer set 2 X` is `steer set B X`). The failover chain runs in the same order, so priority and failover always agree. Worker priority is the `workers.priority` list, highest first. When a model is unavailable, the factory falls back to the next entry — but only when creating (`plan`, `fresh`, `relocate`, `worker pick`); a running agent never changes its model, and a failed steer is taken over by the next slot instead.
+Steer priority starts with A, then B, C, and so on. During failover, available quota can affect which candidate the factory wakes. Worker priority comes from `workers.priority`. Profile fallback applies when choosing a model for a new agent.
 
-An advisor steer (slot profile with `"advisor": true`) is planned only when it is in `prepare`, is never made active (`initialActive` must not be an advisor, `switch --to` refuses it), is skipped by failover, and gets no supervision wakes. `status`/`scopes` tag it `[advisor]`. Details: [managing models](configuration.md#managing-models-from-the-cli).
+An advisor steer (slot profile with `"advisor": true`) answers explicit questions only: it is never made active, is skipped by failover, and gets no supervision wakes. `status`/`scopes` tag it `[advisor]`. Details: [managing models](configuration.md#managing-models-from-the-cli).
 
-A profile with `"sensitive": true` only gets sanitized technical tasks; its workers are skipped on private or unknown-visibility repositories, and `status`/`scopes` tag them `[sensitive]`. Details: [privacy](configuration.md#privacy-sensitive-profiles).
+A profile with `"sensitive": true` only gets sanitized technical tasks, and its workers are skipped on private or unknown-visibility repositories. Details: [privacy](configuration.md#privacy-sensitive-profiles).
 
 ## Supervision survives interruptions
 
-Workers belong to the scope, not to the steer that started them; the active steer supervises every open worker of its scope. The supervision state lives in the main workspace, so a steer that was cleared, restarted or replaced continues from `resume`. A steer that starts workers does not simply go idle: the factory wakes the active steer immediately for every actionable worker outcome, with only a tiny debounce, and a watchdog wakes it when nothing happens. If the active steer does not answer, is advisor-flagged, or its quota pool is exhausted, the next ready steer from a different pool takes over on its own with an epoch-checked `switch`. A steer never ends its turn with open TODO items unless a worker or watcher is running; after each accepted result it starts the next package, using 2–3 non-conflicting workers in parallel. Escalation runs worker → steer → advisor → domain/hub steer; the user is asked only with a `user:` blocker, when all of these are stuck. An agent is ignored only when it is archived or has no scope assignment; `closed` never means done. Design: [supervision](supervision-design.md).
+Workers belong to the scope, not to the steer that started them, so the active steer supervises every open worker even after a restart or replacement. The factory wakes the active steer for every actionable worker outcome (with only a tiny debounce) plus a watchdog when nothing happens. If the active steer does not answer, is advisor-flagged, or its quota pool is exhausted, the next ready steer from a different pool takes over on its own with an epoch-checked `switch`.
 
-## Label and metadata prefix
+During a TODO run, the steer stays active, handles worker results as they arrive, and works on independent items while it waits. Escalation runs from worker to steer, then to an advisor or the domain or hub steer. The user is asked when the remaining work needs their input. [Supervision design](design/supervision-design.md)
 
-Factory labels and metadata keys use the neutral `wsf.*` prefix. Records created by the pilot still carry `ari.wsf.*`: they are read transparently (the new prefix wins when both are present) and marked `legacyPrefix`, and a normal `plan` proposes one `labels.migrate` op per workspace and agent to rewrite them through the usual hash-confirmed apply. Workspace metadata is fully rewritten (old keys removed); agent labels only gain the new keys — neither the SDK nor `paseo agent update` can remove agent labels, so the old ones linger and stay readable. After the apply a fresh plan is clean.
+## Quota pools and ZeroSub accounts
+
+Profiles share a quota pool (named by `profiles.<name>.pool`, else the provider). A pool at `quota.exhaustedPct` is skipped; configure at least two non-advisor steer pools so failover has somewhere to go. See `/factory quota` and [quota pools](configuration.md#quota-pools).
+
+ZeroSub accounts are optional: when its daemon plugin is installed, families with ZeroSub accounts use per-account usage percents and `resetsAt` instead of the pool snapshot, judged against the same thresholds. Picks prefer the account with the most room; an exhausted family is skipped with its earliest reset time. Reads are best-effort with fallback to the usage snapshot, and account `email`/`organization`/`home` fields are never stored.
 
 ## Provisioning safety
 
 - **Dry-run first.** `plan` never writes to GitHub, git or Paseo. It stores the complete plan as an authorization (`plans/<hash>.json`, never overwritten).
-- **Confirmed plan only.** `apply --confirm <hash>` executes only operations of that stored plan. After each step it rediscovers the state; the next operation must match the authorized one in every effect-relevant parameter, otherwise it stops and asks for a new dry-run.
-- **Idempotent creation.** Workspaces and steers are created with daemon idempotency keys. If a create was sent but its result was lost, apply reads the daemon receipt for that key before anything else and either recovers the id, allows one first execution (no receipt, nothing observed) or stops.
-- **Parent-free steers.** Steers are created through the SDK without `parent` and without a prompt; the parent label is verified after creation. CLI calls run without `PASEO_AGENT_ID`.
-- **Paths.** Clone targets must stay below `checkoutRoot` without symlink components; the target directory's parent identity is re-checked right before cloning.
-- **One apply at a time.** A kernel `flock` held by the factory process serializes `apply` runs on the host; switches and checkpoints use a per-workspace lock.
-- **Conflicts are reported, never resolved automatically**: ambiguous checkouts, occupied targets, a different `upstream`, steers with a parent, duplicate main workspaces, profiles the provider cannot start, unconfirmed adoption of unlabelled "Steer X" agents (`--adopt X=<id>`).
+- **Confirmed plan only.** `apply --confirm <hash>` runs only that stored plan. After each step it rediscovers the state; the next operation must match the authorized one in every effect-relevant parameter, otherwise it stops and asks for a new dry-run.
+- **Idempotent creation.** Workspaces and steers are created with daemon idempotency keys, with receipt recovery before anything else: recover the id, allow one first execution, or stop.
+- **Parent-free steers.** Steers are created without `parent` and without a prompt; the parent label is verified after creation. CLI calls run without `PASEO_AGENT_ID`.
+- **Paths.** Clone targets must stay below `checkoutRoot` without symlink components; the target's parent identity is re-checked right before cloning.
+- **One apply at a time.** A kernel `flock` serializes `apply` runs on the host; switches and checkpoints use a per-workspace lock.
+- **Conflicts are reported, never resolved automatically**: ambiguous checkouts, occupied targets, a different `upstream`, steers with a parent, duplicate main workspaces, unstartable profiles, unconfirmed adoption of unlabelled agents.
 
 ## Limits
 

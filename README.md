@@ -1,16 +1,14 @@
 # paseo-workspace-factory (working title)
 
-Turn GitHub repositories into standardized [Paseo](https://paseo.sh) development environments, and hand coordination from one agent to another without replaying chat history.
+Workspace Factory sets up [Paseo](https://paseo.sh) projects, workspaces, and coordinating agents from a plan you review and confirm. One **steer** coordinates the project at a time and delegates bounded tasks to workers. When a provider reaches its limit or a chat grows too long, another steer can pick up the task from a compact **checkpoint**.
 
-For each repository the factory sets up, idempotently and only after you confirm a dry-run:
-
-- your fork (reused, or created with `--allow-fork`), a local checkout with an `upstream` remote,
-- the Paseo project and a local workspace **Main**,
-- several equal, top-level coordinating agents — **steers** A, B, C … — each on its own provider/model, none of them a child of another agent.
-
-Exactly one steer coordinates at a time. When a provider limit is reached, the context grows too large or another model fits better, you record a short **checkpoint** and **switch** to another steer. The handoff message is built from Paseo and git state without a model call; workers stay where they are and are reused by agent id.
-
-A coordinating level reads one line per scope with `scopes` (active steer, epoch, checkpoint age, `hub:` escalations, context use); `scopes --candidates` lists unadopted workspaces with a plan suggestion. See [Scopes and the hub](docs/scopes-design.md).
+```mermaid
+flowchart LR
+    Plan[Preview and confirm] --> A[Active steer]
+    A --> Work[Workers]
+    A --> Checkpoint[Checkpoint]
+    Checkpoint --> B[Next steer]
+```
 
 > Status: private preview. Not yet published; see [TODO.md](TODO.md) for what is missing before a release.
 
@@ -21,24 +19,17 @@ A coordinating level reads one line per scope with `scopes` (active steer, epoch
 
 ## Quickstart
 
-```sh
-git clone <this repo> && cd paseo-workspace-factory
-mkdir -p ~/.config/paseo-workspace-factory
-cp config.example.json ~/.config/paseo-workspace-factory/config.json   # set github.owner, checkoutRoot, profiles
+Follow [Getting started](docs/getting-started.md) to install and configure the plugin. Then open a regular agent tab in Paseo and use the composer.
 
-node src/cli.mjs plan https://github.com/<you>/<repo>        # dry-run; prints and stores the plan hash
-node src/cli.mjs apply --confirm <hash>                      # executes exactly that plan
-node src/cli.mjs status <you>/<repo>                         # active steer, epoch, checkpoint, steers, workers
-```
-
-Daily steering:
-
-```sh
-node src/cli.mjs checkpoint <you>/<repo> --task "…" --test "…" --blocker "…" --next "…"
-node src/cli.mjs checkpoint <you>/<repo> --from-agent <steer-id>     # take the CHECKPOINT block of its last answer
-node src/cli.mjs switch <you>/<repo> --to B                          # preview the handoff
-node src/cli.mjs switch <you>/<repo> --to B --apply --wait           # switch, deliver, show the new steer's reply
-```
+| To | Type |
+|---|---|
+| Preview project setup | `/factory plan <you>/<repo>` |
+| Apply the reviewed plan | `/factory apply <hash>` |
+| See the active steer and its checkpoint | `/factory status` |
+| Save a steer’s last checkpoint | `/factory checkpoint --from-agent <steer-id>` and confirm |
+| Hand off to Steer B | `/factory switch --to B` and confirm |
+| Recover an interrupted steer | `/factory resume` in its tab |
+| See all commands | `/factory help` |
 
 `npm test` runs the offline suite (simulated daemon, real processes and filesystem). Live tests against a daemon are opt-in, see [docs/configuration.md](docs/configuration.md#live-tests).
 
@@ -47,4 +38,5 @@ node src/cli.mjs switch <you>/<repo> --to B --apply --wait           # switch, d
 - [Concepts and safety model](docs/concepts.md)
 - [Configuration](docs/configuration.md)
 - [Steer instructions and task/answer template](docs/steer-instructions.md)
-- [Scopes and the hub](docs/scopes-design.md)
+- [Optional TODO workflow](docs/todo-workflow.md)
+- [All documentation](docs/README.md)

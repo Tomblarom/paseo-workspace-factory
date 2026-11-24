@@ -29,11 +29,11 @@ Exactly one steer coordinates at a time.
   switch/fresh starts clean; delegate routine work to a cheap worker.
 - Batch tool calls, filter big outputs, write big artifacts to files and paste
   only summary + path. If status marks your agent id as retired, stop coordinating.
-- Never end a turn with open TODO items unless a worker or watcher is running.
-  After accepting a worker result, start the next package immediately; run 2–3
-  workers in parallel when their files do not conflict. After starting workers,
-  end your turn; the factory wakes you. On a wake-up run
-  `<factory> resume` first. A worker without a CHECKPOINT is not done: continue it
+- Keep working through the actionable TODO items. While workers run or an item
+  is blocked, work on independent items or wait briefly for the first result.
+  Stay in the turn until the work is done or every remaining item needs user
+  input. On a wake-up run `<factory> resume` and check the worker register.
+  A worker without a CHECKPOINT is not done: continue it
   once or twice with the brief, then ask an advisor, then escalate with a
   `domain:` or `hub:` blocker. Use a `user:` blocker only as the last step.
 - A takeover request after a failed steer: run
@@ -46,7 +46,7 @@ Exactly one steer coordinates at a time.
 
 ## Supervision
 
-The two supervision lines in the block above implement the principle in [concepts](concepts.md#supervision-survives-interruptions): workers belong to the scope, the active steer is woken instead of waiting, and a ready steer takes over a failed one. Without the plugin, create a heartbeat while workers run (`paseo heartbeat create --cron "*/20 * * * *" "Check your workers with <factory> resume"`) and delete it when none are open. Archive each worker (`paseo archive <id>`) as soon as you have accepted its result against the task; never one that is running, blocked or interrupted. This is the standing exception to the no-archive rule above, for your own accepted workers only. Details: [supervision design](supervision-design.md).
+The two supervision lines in the block above implement the principle in [concepts](concepts.md#supervision-survives-interruptions): workers belong to the scope, the active steer is woken instead of waiting, and a ready steer takes over a failed one. Without the plugin, create a heartbeat while workers run (`paseo heartbeat create --cron "*/20 * * * *" "Check your workers with <factory> resume"`) and delete it when none are open. Archive each worker (`paseo archive <id>`) as soon as you have accepted its result against the task; never one that is running, blocked or interrupted. This is the standing exception to the no-archive rule above, for your own accepted workers only. Details: [supervision design](design/supervision-design.md).
 
 
 Assigning to another scope (`assign <scope> --apply`) records you as requester; the factory reports that steer's `done`/`blocked` CHECKPOINT back to you automatically. Do not unset `PASEO_AGENT_ID` for `assign`, or pass `--report-to <your-agent-id>`. Until the report arrives, keep a background watcher on that steer like on a worker.
@@ -55,7 +55,7 @@ Assigning to another scope (`assign <scope> --apply`) records you as requester; 
 
 The resume rule in the block above is the fallback every steer and worker follows after a cleared or compacted context. Optionally, a Claude Code SessionStart hook can print the brief automatically (see [configuration](configuration.md#resume-brief)); the factory never changes host settings itself.
 
-In Paseo with the plugin, `/factory resume` typed in the steer's own tab is the way back after a restart, crash, or limit: it saves the checkpoint, clears the context, and then delivers the brief (details: [cold context](cold-context-resume.md#r--factory-resume-as-the-restart-path)). A "Resume nötig" pill on the steer (reason: restart, limit, or error) with a "Resume jetzt" button asks for it; the pill stays until the resume. Every recently active steer of the scope shows the reminder; a non-active steer shows "Zuletzt steuerte Steer X …" instead, and resuming there also takes over coordination. The CLI `resume` stays the read-only letter: it never clears and never writes.
+In Paseo with the plugin, `/factory resume` typed in the steer's own tab is the way back after a restart, crash, or limit: it saves the checkpoint, clears the context, and then delivers the brief (details: [cold context](design/cold-context-resume.md#r--factory-resume-as-the-restart-path)). A "Resume nötig" pill on the steer (reason: restart, limit, or error) with a "Resume jetzt" button asks for it; the pill stays until the resume. Every recently active steer of the scope shows the reminder; a non-active steer shows "Zuletzt steuerte Steer X …" instead, and resuming there also takes over coordination. The CLI `resume` stays the read-only letter: it never clears and never writes.
 
 ## Hub instructions
 
@@ -108,6 +108,8 @@ You are a worker for this repository: do the assigned task, do not coordinate.
 
 Start workers only with the model from `<factory> worker pick` (scope optional: bare `worker pick` derives the scope like `resume` — the calling agent's scope, else the workspace of the current directory — and it already applies priority, availability and privacy rules); never hard-code a model. The command prints the chosen `workers.priority` entry plus the matching `paseo run` flags, and the resume brief repeats it as `Worker model: …`, so no extra turn is needed. Change the list with `/factory worker set <n> <model>`: inserting moves the others down and removes duplicates. Running workers keep their model. Advisor-tagged profiles are never picked. Give workers of a sensitive profile only sanitized technical tasks (no personal data, accounts, credentials, full chats, or private logs).
 
+From the active steer, `<factory> worker start --title "…" --task "…"` previews the worker selected by the same rules. Add `--apply` to start it as the steer's native subagent. If ZeroSub provides an account, the factory includes that account in the creation metadata.
+
 If a worker fails with a capacity/quota/limit error, record it with `<factory> worker pick [scope] --failed <profile> --reason "<error text>"`; the command marks that profile unhealthy for 10 minutes and returns the next profile. Restart the worker with that profile and pass the brief.
 
 ## Worker completion
@@ -132,14 +134,14 @@ The CHECKPOINT block is a real Markdown code block (triple backticks). Every fac
 
 ```text
 CHECKPOINT
-- task: <current task state in one sentence>
-- tests: <commands or checks that apply, or "none">
-- blockers: <open problems, or "none">
-- next: <the next step for whoever continues>
+task: <current task state in one sentence>
+tests: <commands or checks that apply, or "none">
+blockers: <open problems, or "none">
+next: <the next step for whoever continues>
 ```
 ````
 
-Field names stay fixed English; an optional `- workers:` line is allowed and ignored, as is an optional `- status: done|partial|blocked` line. Readers (`checkpoint --from-agent`, the auto-checkpoint feeding `resume`) also accept the bare form without a fence.
+Field names stay in English. You can add an informational `workers:` line and a `status: done|partial|blocked` line. Readers (`checkpoint --from-agent` and the auto-checkpoint feeding `resume`) also accept older blocks with leading dashes or without a fence.
 
 `<factory> checkpoint <owner>/<repo> --from-agent <steer-id>` stores this block as the checkpoint, so the next `switch` hands it over unchanged.
 

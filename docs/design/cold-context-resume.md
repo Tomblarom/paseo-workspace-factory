@@ -1,10 +1,10 @@
 # Cold context and interrupted agents — detailed plan
 
-For the provider-by-provider manual validation matrix, see [Provider live checks](provider-live-check.md).
+For the provider-by-provider manual validation matrix, see [Provider live checks](../provider-live-check.md).
 
-New to the factory? Start with [Getting started](getting-started.md); this page is the detailed reference.
+New to the factory? Start with [Getting started](../getting-started.md); this page is the detailed reference.
 
-Status: C2–C6 and R implemented (see TODO §12); C1/C7 live checks still pending (need user approval for scratch agents). "resume" below always means the **factory resume brief** (`paseo-factory resume`, `/factory resume --brief`), never Claude's own session resume (`claude --resume`, `/resume`). Section R adds `/factory resume` as the restart path: same brief, but the steer context is cleared first (claude).
+Status: C2–C6 and R are implemented. The remaining [C1 and C7 live checks](#c1--c7-checks-live-scratch-agent-only) use approved scratch agents. The factory resume brief is available from `paseo-factory resume` and `/factory resume --brief`. Section R covers `/factory resume`, which can clear a Claude steer's context before delivering the brief.
 
 ## Goal
 
@@ -96,8 +96,8 @@ Plugin server interval every 5 minutes (cleared in cleanup). All conditions must
 
 | Mode | Action | Cost |
 |---|---|---|
-| `off` (default until C7) | nothing; C6 hint only | 0 |
-| `clear` | send `/clear`; optional `seedAfterClear` sends a one-line "context was cleared, run resume before the next task" | 0 (seed: one small turn) |
+| `off` | nothing; C6 hint only | 0 |
+| `clear` (default) | send `/clear`; optional `seedAfterClear` sends a one-line "context was cleared, run resume before the next task" | 0 (seed: one small turn) |
 | `compact-warm` | at `compactAtMinutes` (default 50, before a 1 h TTL expires) send `/compact Keep: task, decisions, open ids, next step.` | one turn on cached context, also when nobody returns |
 
 Automatic `fresh` (new agent) is not offered: creating agents stays behind plan → confirm. Safety: per-agent cooldown (one action per idle period), daily cap per host, every action logged (`paseo plugin logs`) and recorded in `wsf.agents`. Settings (host scope): `mode`, `idleMinutes`, `compactAtMinutes`, `minContextTokens`, `providers`, `roles`, `seedAfterClear`.
