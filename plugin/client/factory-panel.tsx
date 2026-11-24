@@ -15,6 +15,7 @@ import {
   factoryFresh,
   factoryFreshPreview,
   factoryPlan,
+  factoryQuota,
   factoryRelocate,
   factoryRelocatePreview,
   factoryResume,
@@ -77,6 +78,7 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
   const callFresh = useRpc(factoryFresh);
   const callRelocate = useRpc(factoryRelocate);
   const callAssign = useRpc(factoryAssign);
+  const callQuota = useRpc(factoryQuota);
   const [repo, setRepo] = useState("");
   const [result, setResult] = useState<FactoryPanelResult | null>(() => getFactoryResult());
   useEffect(() => subscribeFactoryResult(() => setResult(getFactoryResult())), []);
@@ -297,8 +299,15 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
       }),
     onError: fail,
   });
+  const quotaMutation = useMutation({
+    mutationFn: async () => callQuota({}),
+    onSuccess: (quota) =>
+      setFactoryResult({ kind: "quota", at: new Date().toISOString(), quota }),
+    onError: fail,
+  });
   const busy =
     statusMutation.isPending ||
+    quotaMutation.isPending ||
     planMutation.isPending ||
     applyMutation.isPending ||
     checkpointMutation.isPending ||
@@ -440,6 +449,15 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
         </Pressable>
         <Pressable
           accessibilityRole="button"
+          accessibilityLabel="Show provider quota pools"
+          style={styles.button}
+          disabled={busy}
+          onPress={() => quotaMutation.mutate()}
+        >
+          <Text style={styles.buttonText}>Quota</Text>
+        </Pressable>
+        <Pressable
+          accessibilityRole="button"
           accessibilityLabel="Show the /factory commands with examples"
           style={styles.button}
           disabled={busy}
@@ -531,6 +549,9 @@ export function ResultView({
   }
   if (result.kind === "cleanup") {
     return <CleanupView at={result.at} cleanup={result.cleanup} styles={styles} />;
+  }
+  if (result.kind === "quota") {
+    return <QuotaView at={result.at} quota={result.quota} styles={styles} />;
   }
   if (result.kind === "plan") {
     return <PlanView at={result.at} plan={result.plan} styles={styles} actions={actions} />;
@@ -864,6 +885,55 @@ function CleanupView({
           </Text>
         );
       })}
+    </View>
+  );
+}
+
+function QuotaView({
+  at,
+  quota,
+  styles,
+}: {
+  at: string;
+  quota: RpcOutput<typeof factoryQuota>;
+  styles: Styles;
+}) {
+  const pools = [...quota.pools].sort((a, b) => a.pool.localeCompare(b.pool));
+  const stateStyle = (state: string) =>
+    state === "exhausted" ? styles.error : state === "warn" ? styles.conflict : styles.body;
+  const pctText = (value: number | null | undefined) =>
+    typeof value === "number" ? `${value}%` : "-";
+  return (
+    <View style={styles.card}>
+      <Text style={styles.body}>
+        Quota (warn at {text(quota.warnPct)}%, exhausted at {text(quota.exhaustedPct)}%)
+      </Text>
+      <Text style={styles.label}>
+        {at} · sampled {quota.sampledAt ? text(quota.sampledAt) : "never"}
+      </Text>
+      {pools.length === 0 ? (
+        <Text style={styles.label}>
+          No quota sample yet. The plugin samples in the background; try again in a minute.
+        </Text>
+      ) : null}
+      {pools.map((pool) => (
+        <Text key={pool.pool} style={stateStyle(pool.state)}>
+          {text(pool.pool)} · session {pctText(pool.sessionPct)}
+          {typeof pool.weeklyPct === "number" ? ` · week ${pctText(pool.weeklyPct)}` : ""}
+          {pool.resetAt ? ` · resets ${text(pool.resetAt)}` : ""} · {text(pool.state)}
+        </Text>
+      ))}
+      {quota.steers.map((steer) => (
+        <Text key={`steer-${steer.slot}`} style={styles.label}>
+          Steer {text(steer.slot)} ({text(steer.profile)} → {text(steer.pool) || "?"})
+          {steer.advisor ? " · advisor" : ""}
+        </Text>
+      ))}
+      {quota.workers.map((worker) => (
+        <Text key={`worker-${worker.position}`} style={styles.label}>
+          Worker {text(worker.position)}. {text(worker.profile)} → {text(worker.pool) || "?"}
+        </Text>
+      ))}
     </View>
   );
 }

@@ -95,6 +95,7 @@ With the plugin installed, type `/factory help` in any steer chat. Normal use go
 | see the helper agents of a project | `/factory workers` |
 | check whether an agent could be archived | `/factory retire <agent-id>` (preview only) |
 | list providers and models | `/factory models` |
+| see quota pools and who uses them | `/factory quota` |
 | wait until nothing runs (safe restart) | `/factory drain` |
 | tidy up leftovers | `/factory cleanup`, or `/factory cleanup --plan` then `/factory apply <hash>` |
 | manage the worker model priority | `/factory worker list`, `/factory worker set 1 <model>`, `/factory worker pick` |

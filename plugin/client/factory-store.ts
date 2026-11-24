@@ -7,6 +7,7 @@ import type {
   factoryCleanup,
   factoryFreshPreview,
   factoryPlan,
+  factoryQuota,
   factoryRelocatePreview,
   factoryResume,
   factoryResumeApply,
@@ -95,6 +96,7 @@ export type FactoryPanelResult =
       at: string;
       applied: RpcOutput<typeof factoryResumeApply>;
     }
+  | { kind: "quota"; at: string; quota: RpcOutput<typeof factoryQuota> }
   | { kind: "info"; at: string; text: string }
   | { kind: "error"; at: string; message: string };
 

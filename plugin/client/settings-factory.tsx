@@ -20,6 +20,7 @@ import { factoryConfigSettings, factorySidebarSettings } from "../shared/setting
 import {
   validateFactorySettings,
   validateProfilesAgainstCatalogLocal,
+  validateQuotaSettings,
   type FactorySettingsValues,
   type ProviderEntry,
 } from "../shared/settings-validate.js";
@@ -36,6 +37,9 @@ const EFFECTIVE_INFO =
 
 const PROFILES_INFO =
   "A profile is a named choice of provider, model, thinking level and permission mode. Steers and workers refer to profiles by name, so you change a model in one place.";
+
+const QUOTA_INFO =
+  "The plugin samples provider quota in the background and shows it with /factory quota. At the warn level a pool counts as tight (the sidebar warns and briefs prefer another pool); at the exhausted level the pool is skipped when a profile is picked. Sampling runs at most every few minutes.";
 
 function clone(values: FactorySettingsValues): FactorySettingsValues {
   return JSON.parse(JSON.stringify(values)) as FactorySettingsValues;
@@ -172,6 +176,7 @@ export function FactorySettings({ theme, layout }: PluginSurfaceProps) {
     configState.status === "ready" ? JSON.stringify(configState.values) : null;
   const changed = draft !== null && savedJson !== null && JSON.stringify(draft) !== savedJson;
   const errors = useMemo(() => (draft ? validateFactorySettings(draft) : []), [draft]);
+  const quotaErrors = useMemo(() => (draft ? validateQuotaSettings(draft) : []), [draft]);
   const usedProfiles = useMemo(
     () => (draft ? [...new Set([...Object.values(draft.slots), ...draft.workerPriority])] : []),
     [draft],
@@ -610,6 +615,47 @@ export function FactorySettings({ theme, layout }: PluginSurfaceProps) {
               if (value) updateDraft({ ...draft, workerPriority: [...draft.workerPriority, value] });
             }}
           />
+        </SettingsCard>
+      </SettingsSection>
+
+      <SettingsSection title="Quota" info={QUOTA_INFO}>
+        <SettingsCard>
+          <SettingsInput
+            key={`warn-${formKey}`}
+            label="Warn at (percent)"
+            hint="A pool at or above this session usage counts as tight. Default 75."
+            initialValue={String(draft.quota?.warnPct ?? 75)}
+            onChangeText={(value) =>
+              updateDraft({
+                ...draft,
+                quota: { ...(draft.quota ?? { exhaustedPct: 90, warnPct: 75 }), warnPct: Number(value.trim()) },
+              })
+            }
+          />
+          <SettingsInput
+            key={`exhausted-${formKey}`}
+            label="Exhausted at (percent)"
+            hint="A pool at or above this session usage is skipped when a profile is picked. Default 90."
+            initialValue={String(draft.quota?.exhaustedPct ?? 90)}
+            onChangeText={(value) =>
+              updateDraft({
+                ...draft,
+                quota: { ...(draft.quota ?? { exhaustedPct: 90, warnPct: 75 }), exhaustedPct: Number(value.trim()) },
+              })
+            }
+          />
+          <SettingsInput
+            key={`sample-${formKey}`}
+            label="Sample at most every (minutes)"
+            hint="How often the plugin may ask Paseo for fresh quota numbers. Whole minutes, at least 10. Default 10."
+            initialValue={String(draft.quotaSampleMinutes ?? 10)}
+            onChangeText={(value) =>
+              updateDraft({ ...draft, quotaSampleMinutes: Number.parseInt(value.trim(), 10) })
+            }
+          />
+          {quotaErrors.map((message) => (
+            <SettingsRow key={message} label="Please fix" error={message} />
+          ))}
         </SettingsCard>
       </SettingsSection>
 

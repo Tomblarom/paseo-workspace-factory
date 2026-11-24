@@ -92,6 +92,14 @@ export const FACTORY_COMMANDS: Record<string, CommandHelp> = {
     ],
     examples: ["/factory drain", "/factory drain --timeout 5m"],
   },
+  quota: {
+    usage: "/factory quota",
+    summary: "Show provider quota pools and which steer or worker uses each.",
+    details: [
+      "Read-only. Warn and exhausted states use the quota thresholds from the Factory settings.",
+    ],
+    examples: ["/factory quota"],
+  },
   plan: {
     usage: "/factory plan [scope…] [--allow-fork] [--slots A,B]",
     summary: "Preview setting up or updating a project. Writes nothing.",
@@ -248,6 +256,7 @@ export type FactoryCommand =
   | { command: "retire"; agentId: string }
   | { command: "models" }
   | { command: "drain"; timeout?: string }
+  | { command: "quota" }
   | ModelsCommand
   | { command: "help"; topic?: string };
 
@@ -559,6 +568,11 @@ export function parseFactoryArgs(args: string): FactoryCommand {
     if (flags.positionals.length) fail("drain takes no scope address; it waits for the whole instance.");
     const timeout = flags.singles.get("timeout");
     return timeout === undefined ? { command: "drain" } : { command: "drain", timeout };
+  }
+  if (sub === "quota") {
+    checkNoFlags(flags, "quota");
+    if (flags.positionals.length) fail("quota takes no arguments.");
+    return { command: "quota" };
   }
   if (sub === "worker" || sub === "steer") {
     const [action, ...args] = flags.positionals;

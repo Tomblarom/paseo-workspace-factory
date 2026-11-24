@@ -543,3 +543,40 @@ export const factoryCleanupPlan = defineRpc({
     hints: z.array(z.unknown()),
   }),
 });
+
+const quotaPool = z.looseObject({
+  pool: z.string(),
+  sessionPct: z.number().nullable(),
+  weeklyPct: z.number().nullable().optional(),
+  resetAt: z.string().nullable().optional(),
+  state: z.enum(["ok", "warn", "exhausted"]),
+  sampledAt: z.string().nullable(),
+});
+
+// Current quota snapshot per pool plus the pool of each steer slot and each
+// worker priority entry. Read-only; states use the effective quota thresholds.
+export const factoryQuota = defineRpc({
+  name: "factory.quota",
+  input: z.object({}),
+  output: z.looseObject({
+    sampledAt: z.string().nullable(),
+    warnPct: z.number(),
+    exhaustedPct: z.number(),
+    pools: z.array(quotaPool),
+    steers: z.array(
+      z.looseObject({
+        slot: z.string(),
+        profile: z.string(),
+        pool: z.string(),
+        advisor: z.boolean(),
+      }),
+    ),
+    workers: z.array(
+      z.looseObject({
+        position: z.number(),
+        profile: z.string(),
+        pool: z.string(),
+      }),
+    ),
+  }),
+});

@@ -12,6 +12,7 @@ import {
   factoryModelsList,
   factoryModelsSet,
   factoryPlan,
+  factoryQuota,
   factoryRelocatePreview,
   factoryResume,
   factoryResumeApply,
@@ -132,6 +133,11 @@ export async function submitFactoryCommand(
     );
     setFactoryResult({ kind: "info", at, text: drain.text });
     return PANEL;
+  }
+  if (parsed.command === "quota") {
+    const quota = await ctx.rpc(factoryQuota, {});
+    setFactoryResult({ kind: "quota", at, quota });
+    return pill("Quota");
   }
   if (parsed.command === "fresh") {
     const address = parsed.repo ? { repo: parsed.repo } : { workspaceId: ctx.workspaceId };

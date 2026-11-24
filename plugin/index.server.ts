@@ -48,6 +48,7 @@ import {
   startSupervisionTimer,
 } from "./server/supervise.js";
 import { startQuotaTimer } from "./server/quota.js";
+import { getQuota } from "./server/quota-rpc.js";
 import {
   factoryApply,
   factoryAssign,
@@ -67,6 +68,7 @@ import {
   factoryModelsSet,
   factoryPing,
   factoryPlan,
+  factoryQuota,
   factoryRelocate,
   factoryRelocatePreview,
   factoryResume,
@@ -157,6 +159,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(factoryModelsCatalog, getModelsCatalog);
   server.handle(factoryWorkerPick, (input, ctx) => pickWorker(input, ctx, loader));
   server.handle(factoryDrain, runDrain);
+  server.handle(factoryQuota, (input, ctx) => getQuota(input, ctx, loader));
   server.handle(factoryAssignPreview, (input, ctx) => previewAssign(input, ctx, loader));
   server.handle(factoryAssign, (input, ctx) => applyAssign(input, ctx, loader));
   server.handle(factoryRelocatePreview, (input, ctx) => previewRelocate(input, ctx, loader));

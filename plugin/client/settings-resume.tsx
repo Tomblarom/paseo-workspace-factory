@@ -44,6 +44,9 @@ export function ResumeSettingsSection({ theme }: Pick<PluginSurfaceProps, "theme
           initialValue={String(stored)}
           onChangeText={setHours}
         />
+        {!valid ? (
+          <SettingsRow label="Please fix" error="Enter a whole number of hours, at least 1." />
+        ) : null}
         {notice ? (
           <SettingsRow label="Status">
             <Text style={{ color: theme.colors.foreground, fontSize: 14 }}>{notice}</Text>

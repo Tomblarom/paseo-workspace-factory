@@ -16,6 +16,11 @@ export function getQuotaSnapshot(): Record<string, any> | null {
   return quotaSnapshot;
 }
 
+/** Epoch milliseconds of the last successful sample, or null when never sampled. */
+export function getQuotaSampledAt(): number | null {
+  return lastSampleAt > 0 ? lastSampleAt : null;
+}
+
 export function resetQuotaForTests(): void {
   quotaSnapshot = null;
   lastSampleAt = 0;
