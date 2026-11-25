@@ -25,6 +25,7 @@ import type {
 export interface CheckpointPreviewInputs {
   task?: string;
   fromAgent?: string;
+  fromSteer?: string;
   tests: string[];
   blockers: string[];
   next?: string;

@@ -119,8 +119,8 @@ test("checkpoint needs task or from-agent, plus repeatable lists", () => {
     blockers: [],
     next: "n",
   });
-  assert.throws(() => parseFactoryArgs("checkpoint a/b"), /either --task or --from-agent/);
-  assert.throws(() => parseFactoryArgs("checkpoint a/b --task x --from-agent y"), /either --task or --from-agent/);
+  assert.throws(() => parseFactoryArgs("checkpoint a/b"), /exactly one of --task, --from-steer or --from-agent/);
+  assert.throws(() => parseFactoryArgs("checkpoint a/b --task x --from-agent y"), /exactly one of --task, --from-steer or --from-agent/);
   assert.throws(() => parseFactoryArgs("checkpoint a/b --task"), /needs a value/);
   assert.throws(() => parseFactoryArgs("checkpoint a/b --task x --allow-fork"), /Unknown flag/);
   assert.deepEqual(parseFactoryArgs('checkpoint --task "do it"'), {
@@ -130,7 +130,7 @@ test("checkpoint needs task or from-agent, plus repeatable lists", () => {
     blockers: [],
   });
   assert.throws(() => parseFactoryArgs("checkpoint a b --task x"), /at most one scope address/);
-  assert.throws(() => parseFactoryArgs("checkpoint"), /either --task or --from-agent/);
+  assert.throws(() => parseFactoryArgs("checkpoint"), /exactly one of --task, --from-steer or --from-agent/);
 });
 
 test("switch needs a target slot", () => {
@@ -279,6 +279,12 @@ test("worker and steer reject bad input with usage", () => {
   assert.throws(() => parseFactoryArgs("steer rm AB"), /slot letter/);
   assert.throws(() => parseFactoryArgs("worker set 1 a/b --to A"), /Unknown flag/);
   assert.throws(() => parseFactoryArgs("status --dry-run"), /takes no flags/);
+});
+
+test("checkpoint accepts --from-steer as a slot letter", () => {
+  assert.deepEqual(parseFactoryArgs("checkpoint --from-steer d"), { command: "checkpoint", fromSteer: "D", tests: [], blockers: [] });
+  assert.throws(() => parseFactoryArgs("checkpoint --from-steer dd"), /one steer letter/);
+  assert.throws(() => parseFactoryArgs("checkpoint --from-steer D --task x"), /exactly one of/);
 });
 
 test("fresh, workers, models and drain parse", () => {

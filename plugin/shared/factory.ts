@@ -180,6 +180,7 @@ const checkpointArgs = {
   workspaceId: z.string().min(1).optional(),
   task: z.string().optional(),
   fromAgent: z.string().optional(),
+  fromSteer: z.string().regex(/^[A-Za-z]$/).optional(),
   tests: z.array(z.string()).optional(),
   blockers: z.array(z.string()).optional(),
   next: z.string().optional(),

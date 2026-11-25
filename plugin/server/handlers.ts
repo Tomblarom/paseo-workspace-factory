@@ -662,6 +662,7 @@ export async function applySwitch(
 interface CheckpointArgs {
   task?: string;
   fromAgent?: string;
+  fromSteer?: string;
   tests?: string[];
   blockers?: string[];
   next?: string;
@@ -675,13 +676,22 @@ async function resolveCheckpointFields(
 ): Promise<{ task: string; tests: string[]; blockers: string[]; next: string | null }> {
   const hasTask = typeof input.task === "string" && input.task.trim() !== "";
   const hasAgent = typeof input.fromAgent === "string" && input.fromAgent.trim() !== "";
-  if ((hasTask ? 1 : 0) + (hasAgent ? 1 : 0) !== 1) {
-    throw new Error("checkpoint needs either a task or --from-agent, not both");
+  const hasSteer = typeof input.fromSteer === "string" && input.fromSteer.trim() !== "";
+  if ((hasTask ? 1 : 0) + (hasAgent ? 1 : 0) + (hasSteer ? 1 : 0) !== 1) {
+    throw new Error("checkpoint needs exactly one of a task, --from-steer or --from-agent");
   }
-  if (hasAgent) {
-    const ref = (input.fromAgent as string).trim();
-    const steer = status.steers.find((s: any) => s.id === ref || s.id.startsWith(ref));
-    if (!steer) throw new Error(`${ref} is not a steer of ${discovery.forkName}`);
+  if (hasAgent || hasSteer) {
+    let steer: any;
+    if (hasSteer) {
+      const slot = (input.fromSteer as string).trim().toUpperCase();
+      steer = status.steers.find((s: any) => s.slot === slot && s.superseded !== true)
+        ?? status.steers.find((s: any) => s.slot === slot);
+      if (!steer) throw new Error(`Steer ${slot} is not a live steer of ${discovery.forkName}`);
+    } else {
+      const ref = (input.fromAgent as string).trim();
+      steer = status.steers.find((s: any) => s.id === ref || s.id.startsWith(ref));
+      if (!steer) throw new Error(`${ref} is not a steer of ${discovery.forkName}`);
+    }
     const text = lastAssistantText(
       await paseo.agents.ref(steer.id).timeline.refetch({ direction: "tail", limit: 20 }),
     );

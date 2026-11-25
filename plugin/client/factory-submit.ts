@@ -270,6 +270,7 @@ export async function submitFactoryCommand(
     const inputs = {
       ...(parsed.task ? { task: parsed.task } : {}),
       ...(parsed.fromAgent ? { fromAgent: parsed.fromAgent } : {}),
+      ...(parsed.fromSteer ? { fromSteer: parsed.fromSteer } : {}),
       tests: parsed.tests,
       blockers: parsed.blockers,
       ...(parsed.next ? { next: parsed.next } : {}),

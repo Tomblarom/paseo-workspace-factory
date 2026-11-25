@@ -864,7 +864,7 @@ function StatusView({
       ) : (
         <Text style={styles.label}>
           No checkpoint yet: ask the active steer to end its answer with a CHECKPOINT block, then
-          /factory checkpoint --from-agent &lt;its id&gt;.
+          /factory checkpoint --from-steer &lt;slot&gt;.
         </Text>
       )}
       {steers.map((s) => {
@@ -1162,8 +1162,10 @@ function CheckpointPreviewView({
         </Text>
       ) : null}
       <Text style={styles.label}>{at}</Text>
-      {inputs.fromAgent ? (
-        <Text style={styles.label}>Parsed from the last answer of {inputs.fromAgent}.</Text>
+      {inputs.fromAgent || inputs.fromSteer ? (
+        <Text style={styles.label}>
+          Parsed from the last answer of {inputs.fromSteer ? `Steer ${inputs.fromSteer}` : inputs.fromAgent}.
+        </Text>
       ) : null}
       <Text style={styles.body}>Task: {fields.task}</Text>
       <Text style={styles.body}>

@@ -127,16 +127,16 @@ export const FACTORY_COMMANDS: Record<string, CommandHelp> = {
   },
   checkpoint: {
     usage:
-      "/factory checkpoint [scope] (--task <text> | --from-agent <id>) [--test <text>]… [--blocker <text>]… [--next <text>]",
+      "/factory checkpoint [scope] (--task <text> | --from-steer <slot> | --from-agent <id>) [--test <text>]… [--blocker <text>]… [--next <text>]",
     summary: "Save where the work stands (task, tests, blockers, next step).",
     details: [
       "Shows a preview; confirm it in the Factory panel.",
-      "--from-agent takes the CHECKPOINT block from that steer's last answer.",
+      "--from-steer <slot> (or --from-agent <id>) takes the CHECKPOINT block from that steer's last answer.",
       "Put text with spaces in quotes.",
     ],
     examples: [
       '/factory checkpoint --task "Add login form" --next "Write tests"',
-      "/factory checkpoint --from-agent <steer-agent-id>",
+      "/factory checkpoint --from-steer D",
     ],
   },
   switch: {
@@ -260,6 +260,7 @@ export type FactoryCommand =
       repo?: string;
       task?: string;
       fromAgent?: string;
+      fromSteer?: string;
       tests: string[];
       blockers: string[];
       next?: string;
@@ -352,7 +353,7 @@ interface ParsedFlags {
 }
 
 const REPEATABLE = new Set(["test", "blocker", "adopt", "adopt-worker", "local", "hub"]);
-const VALUE_FLAGS = new Set(["slots", "slot", "to", "task", "from-agent", "next", "test", "blocker", "agent", "thinking", "mode", "profile", "only", "timeout", "adopt", "adopt-worker", "local", "hub", "checkout", "name", "subject", "main", "domain", "rename-project"]);
+const VALUE_FLAGS = new Set(["slots", "slot", "to", "task", "from-agent", "from-steer", "next", "test", "blocker", "agent", "thinking", "mode", "profile", "only", "timeout", "adopt", "adopt-worker", "local", "hub", "checkout", "name", "subject", "main", "domain", "rename-project"]);
 const BOOL_FLAGS = new Set(["allow-fork", "apply", "candidates", "brief", "dry-run", "plan", "allow-destructive", "allow-ignored", "detach", "retitle"]);
 
 function parseFlags(tokens: string[]): ParsedFlags {
@@ -796,16 +797,19 @@ export function parseFactoryArgs(args: string): FactoryCommand {
     return { command: "apply", hash };
   }
   if (sub === "checkpoint") {
-    checkAllowed(flags, "checkpoint", ["task", "from-agent", "test", "blocker", "next"]);
+    checkAllowed(flags, "checkpoint", ["task", "from-agent", "from-steer", "test", "blocker", "next"]);
     if (flags.positionals.length > 1) fail("checkpoint takes at most one scope address.");
     const task = flags.singles.get("task");
     const fromAgent = flags.singles.get("from-agent");
-    if ((task ? 1 : 0) + (fromAgent ? 1 : 0) !== 1) fail('checkpoint needs either --task or --from-agent: write the task yourself with --task "…", or take it from a steer\'s last answer with --from-agent <agent-id>.');
+    const fromSteer = flags.singles.get("from-steer");
+    if (fromSteer !== undefined && !/^[A-Za-z]$/.test(fromSteer)) fail("--from-steer needs one steer letter, e.g. --from-steer D.");
+    if ((task ? 1 : 0) + (fromAgent ? 1 : 0) + (fromSteer ? 1 : 0) !== 1) fail('checkpoint needs exactly one of --task, --from-steer or --from-agent: write the task yourself with --task "…", or take it from a steer\'s last answer with --from-steer <slot> (or --from-agent <agent-id>).');
     return {
       command: "checkpoint",
       ...(flags.positionals.length === 1 ? { repo: flags.positionals[0] } : {}),
       ...(task ? { task } : {}),
       ...(fromAgent ? { fromAgent } : {}),
+      ...(fromSteer ? { fromSteer: fromSteer.toUpperCase() } : {}),
       tests: flags.multis.get("test") ?? [],
       blockers: flags.multis.get("blocker") ?? [],
       ...(flags.singles.get("next") ? { next: flags.singles.get("next") as string } : {}),
