@@ -5,18 +5,19 @@
 // discovery pagination, and the offline-testable aria/rendering contract.
 //
 // Manual checks (need a running Paseo host with the factory installed):
-// - Keyboard: Tab reaches the steer pill, Enter/Space opens the popover, Tab
-//   moves through Close, Escape closes, focus returns to the composer.
-// - Screen reader: the pill announces slot, role, state, context and quota
-//   ("Steer A · Active · Warm …"); the popover header reads as a heading.
-// - Compact layout: narrow window keeps face and popover readable with no
-//   clipped quota rows; long content scrolls.
-// - Light/dark: face and popover follow the host theme in both appearances.
-// - Desktop host popover with the ZeroSub pill visible: no overlap, overflow
+// - Keyboard: Tab reaches the steer pill, Enter/Space opens the menu, arrows
+//   move through items and the handover submenu, Enter opens a preview
+//   popover, Tab moves through Close, Escape closes, focus returns.
+// - Screen reader: the pill announces slot, role and state
+//   ("Steer A · Active · warm …"); menu items name their action.
+// - Compact layout: narrow window keeps face and menu readable; long
+//   popover content scrolls.
+// - Light/dark: face and menu follow the host theme in both appearances.
+// - Desktop host menu with the ZeroSub pill visible: no overlap, overflow
 //   handled; steer, worker-attention and result pills coexist.
-// - Countdown: quota "resets in …" ticks locally; an open preview stays
-//   mounted and unchanged across ticks (full check lands with step-3 actions).
-// - Reconnect: restart the daemon; pills show Unknown, then restore.
+// - Copies: no German strings, state words lowercase, hover titles break
+//   after the state.
+// - Reconnect: restart the daemon; pills show unknown, then restore.
 // - History-only tab (no composer): no pill, the Factory panel still opens.
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -46,6 +47,8 @@ function row(agentId, over = {}) {
     liveStatus: "idle",
     advisor: false,
     active: true,
+    permissionNeeded: false,
+    stagedBrief: false,
     successor: null,
     state: "warm",
     warmth: "warm",
@@ -60,12 +63,23 @@ function row(agentId, over = {}) {
     primaryAction: "focus",
     detail: "Cache warm · cooling in 20m",
     nextBoundaryAt: null,
+    thinking: null,
+    speed: null,
+    sessionId: null,
+    baseline: null,
+    confirmed: null,
+    settingsLocked: false,
+    settingsLockReason: null,
     ...over,
   };
 }
 
-function Content() {
-  return null;
+/** Stable menu builder stub: one key per agent and warning flag. */
+function stubMenu(row, _rows, observed) {
+  return {
+    behavior: { kind: "menu", items: [] },
+    menuKey: `${row.agentId}:${observed.changed ? "changed" : "clean"}`,
+  };
 }
 
 function fakeClient(fail = {}) {
@@ -149,6 +163,33 @@ test("steerRowsOf falls back on invalid state, action and quota shapes", () => {
   assert.equal(parsed.tokens, null);
 });
 
+test("steerRowsOf parses settings baseline and lock flags", () => {
+  const [parsed] = pill.steerRowsOf({
+    steers: [{
+      agentId: "a1",
+      workspaceId: "w1",
+      thinking: "high",
+      speed: "flex",
+      sessionId: "sess-1",
+      baseline: { provider: "codex", model: "gpt-6.2-sol", thinking: "high", speed: "flex", sessionId: "sess-1" },
+      confirmed: { provider: "codex", model: "gpt-6.2-sol" },
+      settingsLocked: true,
+      settingsLockReason: "Maximum efficiency protects this warm context. Use Refresh.",
+    }],
+  });
+  assert.equal(parsed.thinking, "high");
+  assert.equal(parsed.speed, "flex");
+  assert.equal(parsed.sessionId, "sess-1");
+  assert.deepEqual(parsed.baseline, { provider: "codex", model: "gpt-6.2-sol", thinking: "high", speed: "flex", sessionId: "sess-1" });
+  assert.equal(parsed.confirmed.model, "gpt-6.2-sol");
+  assert.equal(parsed.settingsLocked, true);
+  assert.match(parsed.settingsLockReason, /Maximum efficiency/);
+  const [fallback] = pill.steerRowsOf({ steers: [{ agentId: "a1", workspaceId: "w1" }] });
+  assert.equal(fallback.thinking, null);
+  assert.equal(fallback.baseline, null);
+  assert.equal(fallback.settingsLocked, false);
+});
+
 test("steerAgentIds collects covered tabs for the attention filter", () => {
   assert.deepEqual(
     [...pill.steerAgentIds([row("a1"), row("a2", { slot: "B" })])].sort(),
@@ -162,22 +203,22 @@ test("steerAgentIds collects covered tabs for the attention filter", () => {
 
 test("collapsed face shows slot and state with role, context and quota", () => {
   const face = pill.faceFor(row("a1"));
-  assert.equal(face.label, "A · Warm");
-  assert.equal(face.title, "Steer A · Active · Warm · 5,000 tokens");
+  assert.equal(face.label, "A · warm");
+  assert.equal(face.title, "Steer A · Active · warm\n5,000 tokens");
   assert.equal(face.icon, "Flame");
-  assert.equal(face.accessibilityLabel, face.title);
+  assert.equal(face.accessibilityLabel, "Steer A · Active · warm · 5,000 tokens");
 });
 
 test("face title covers limited, awaiting and percent quota states", () => {
   const limited = pill.faceFor(
     row("b", { slot: "B", active: false, state: "limited", tokens: null, limited: true }),
   );
-  assert.equal(limited.label, "B · Limited");
-  assert.equal(limited.title, "Steer B · Standby · Limited · Limited");
+  assert.equal(limited.label, "B · limited");
+  assert.equal(limited.title, "Steer B · Standby · limited");
   assert.equal(limited.icon, "Gauge");
   assert.equal(
     pill.faceFor(row("c", { awaitingUpdate: true, tokens: null })).title,
-    "Steer A · Active · Warm · Awaiting quota update",
+    "Steer A · Active · warm\nAwaiting quota update",
   );
   assert.equal(
     pill.faceFor(
@@ -189,17 +230,31 @@ test("face title covers limited, awaiting and percent quota states", () => {
         ],
       }),
     ).title,
-    "Steer A · Active · Warm · 54% used",
+    "Steer A · Active · warm\n54% used",
+  );
+  assert.equal(
+    pill.faceFor(row("e", { tokens: 42117, quotaRows: [{ id: "5h", scope: "account", usedPct: 12, resetsAt: null, stale: false }] })).title,
+    "Steer A · Active · warm\n42,117 tokens · 12% used",
   );
 });
 
 test("face falls back for missing slot and unknown state", () => {
   const face = pill.faceFor(row("x", { slot: null, state: "unknown", tokens: null }));
-  assert.equal(face.label, "? · Unknown");
-  assert.equal(face.title, "Steer ? · Active · Unknown");
+  assert.equal(face.label, "? · unknown");
+  assert.equal(face.title, "Steer ? · Active · unknown");
   assert.equal(face.icon, "CircleHelp");
   assert.equal(pill.sameFace(face, pill.faceFor(row("x", { slot: null, state: "unknown", tokens: null }))), true);
   assert.equal(pill.sameFace(face, pill.faceFor(row("x"))), false);
+});
+
+test("the observed-change warning takes over the label", () => {
+  const face = pill.faceFor(row("c", { slot: "C" }), { settingsChanged: true });
+  assert.equal(face.label, "C · settings changed");
+  assert.equal(face.title, "Steer C · Active · settings changed\n5,000 tokens");
+  assert.equal(face.icon, "TriangleAlert");
+  assert.equal(face.accessibilityLabel, "Steer C · Active · settings changed · 5,000 tokens");
+  assert.equal(pill.pillStateWord("needs-resume"), "needs resume");
+  assert.equal(pill.pillStateWord("waiting"), "waiting");
 });
 
 test("face icons pin one Lucide name per state-table row", () => {
@@ -270,10 +325,10 @@ test("role and header title name Active, Advisor, Standby and Retired", () => {
 // Stable registration
 // ---------------------------------------------------------------------------
 
-test("sync adds one pill per row with a stable popover component", () => {
+test("sync adds one pill per row with the native menu behavior", () => {
   const client = fakeClient();
   const pills = new Map();
-  pill.syncSteerPills(client, pills, [row("a1"), row("a2", { slot: "B" })], Content);
+  pill.syncSteerPills(client, pills, [row("a1"), row("a2", { slot: "B" })], stubMenu);
   assert.deepEqual(client.calls, [
     ["add", "factory-steer-a1", "a1"],
     ["add", "factory-steer-a2", "a2"],
@@ -282,48 +337,62 @@ test("sync adds one pill per row with a stable popover component", () => {
   for (const agentId of ["a1", "a2"]) {
     const contribution = client.regs.get(agentId).contribution;
     assert.equal(contribution.workspaceId, "wks_main");
-    assert.equal(contribution.button.behavior.kind, "popover");
-    assert.equal(contribution.button.behavior.Content, Content);
+    assert.equal(contribution.button.behavior.kind, "menu");
   }
+  assert.equal(pills.get("a1").menuKey, "a1:clean");
 });
 
-test("sync patches the face only when it changes, never the behavior", () => {
+test("sync patches the face and the menu only when each changes", () => {
   const client = fakeClient();
   const pills = new Map();
   const first = [row("a1")];
-  pill.syncSteerPills(client, pills, first, Content);
+  pill.syncSteerPills(client, pills, first, stubMenu);
   assert.deepEqual(kinds(client.calls), ["add"]);
   // Identical event: no churn.
-  pill.syncSteerPills(client, pills, [row("a1")], Content);
+  pill.syncSteerPills(client, pills, [row("a1")], stubMenu);
   assert.deepEqual(kinds(client.calls), ["add"]);
   // Detail-only change: face unchanged, row refreshed, no update call.
-  pill.syncSteerPills(client, pills, [row("a1", { detail: "Cache warm · cooling in 19m" })], Content);
+  pill.syncSteerPills(client, pills, [row("a1", { detail: "Cache warm · cooling in 19m" })], stubMenu);
   assert.deepEqual(kinds(client.calls), ["add"]);
   assert.equal(pills.get("a1").row.detail, "Cache warm · cooling in 19m");
-  // State change: one in-place patch without a behavior replacement.
-  pill.syncSteerPills(client, pills, [row("a1", { state: "cold", warmth: "cold" })], Content);
+  // State change: one in-place face patch without a behavior replacement.
+  pill.syncSteerPills(client, pills, [row("a1", { state: "cold", warmth: "cold" })], stubMenu);
   assert.deepEqual(kinds(client.calls), ["add", "update"]);
   const patch = client.calls.at(-1)[2];
   assert.deepEqual(Object.keys(patch).sort(), ["icon", "label", "title"]);
-  assert.equal(patch.label, "A · Cold");
+  assert.equal(patch.label, "A · cold");
   // Second identical event after the change: quiet again.
-  pill.syncSteerPills(client, pills, [row("a1", { state: "cold", warmth: "cold" })], Content);
+  pill.syncSteerPills(client, pills, [row("a1", { state: "cold", warmth: "cold" })], stubMenu);
   assert.deepEqual(kinds(client.calls), ["add", "update"]);
+});
+
+test("sync patches the menu behavior only when its key changes", () => {
+  const client = fakeClient();
+  const pills = new Map();
+  let key = "v1";
+  const builder = (entry) => ({ behavior: { kind: "menu", items: [] }, menuKey: key });
+  pill.syncSteerPills(client, pills, [row("a1")], builder);
+  pill.syncSteerPills(client, pills, [row("a1")], builder);
+  assert.deepEqual(kinds(client.calls), ["add"]);
+  key = "v2";
+  pill.syncSteerPills(client, pills, [row("a1")], builder);
+  assert.deepEqual(kinds(client.calls), ["add", "update"]);
+  assert.deepEqual(Object.keys(client.calls.at(-1)[2]), ["behavior"]);
 });
 
 test("sync removes authoritatively missing rows and retries missing composers", () => {
   const client = fakeClient();
   client.addThrows.add("ghost");
   const pills = new Map();
-  pill.syncSteerPills(client, pills, [row("a1"), row("ghost", { slot: "B" })], Content);
+  pill.syncSteerPills(client, pills, [row("a1"), row("ghost", { slot: "B" })], stubMenu);
   assert.equal(pills.size, 1);
   assert.deepEqual(kinds(client.calls), ["add", "add"]);
   // The ghost tab gets a composer later; the gone tab is removed.
   client.addThrows.delete("ghost");
-  pill.syncSteerPills(client, pills, [row("a1"), row("ghost", { slot: "B" })], Content);
+  pill.syncSteerPills(client, pills, [row("a1"), row("ghost", { slot: "B" })], stubMenu);
   assert.equal(pills.size, 2);
   assert.deepEqual(kinds(client.calls), ["add", "add", "add"]);
-  pill.syncSteerPills(client, pills, [row("ghost", { slot: "B" })], Content);
+  pill.syncSteerPills(client, pills, [row("ghost", { slot: "B" })], stubMenu);
   assert.deepEqual(kinds(client.calls), ["add", "add", "add", "remove"]);
   assert.equal(pills.has("a1"), false);
 });
@@ -331,46 +400,72 @@ test("sync removes authoritatively missing rows and retries missing composers", 
 test("sync drops a pill whose update throws and re-adds it on the next event", () => {
   const client = fakeClient({ updateThrowsFor: new Set(["a1"]) });
   const pills = new Map();
-  pill.syncSteerPills(client, pills, [row("a1")], Content);
-  pill.syncSteerPills(client, pills, [row("a1", { state: "cold", warmth: "cold" })], Content);
+  pill.syncSteerPills(client, pills, [row("a1")], stubMenu);
+  pill.syncSteerPills(client, pills, [row("a1", { state: "cold", warmth: "cold" })], stubMenu);
   assert.equal(pills.size, 0);
   const healed = fakeClient();
-  pill.syncSteerPills(healed, pills, [row("a1", { state: "cold", warmth: "cold" })], Content);
+  pill.syncSteerPills(healed, pills, [row("a1", { state: "cold", warmth: "cold" })], stubMenu);
   assert.equal(pills.size, 1);
-  assert.equal(pills.get("a1").face.label, "A · Cold");
+  assert.equal(pills.get("a1").face.label, "A · cold");
+});
+
+test("sync retains the observed tuple and warns until the baseline matches", () => {
+  const client = fakeClient();
+  const pills = new Map();
+  const baseline = { provider: "codex", model: "gpt-6.2-sol", thinking: null, speed: null, sessionId: "sess-1" };
+  const live = (thinking) => row("a1", {
+    thinking,
+    sessionId: "sess-1",
+    baseline,
+    model: "gpt-6.2-sol",
+    provider: "codex",
+  });
+  pill.syncSteerPills(client, pills, [live("high")], stubMenu);
+  assert.equal(pills.get("a1").face.label, "A · settings changed");
+  assert.equal(pills.get("a1").menuKey, "a1:changed");
+  // A newer change keeps the first observed tuple for the revert guard.
+  pill.syncSteerPills(client, pills, [live("low")], stubMenu);
+  assert.deepEqual(pills.get("a1").observed.observed.thinking, "high");
+  assert.equal(pills.get("a1").face.label, "A · settings changed");
+  // Back to the baseline clears the warning.
+  pill.syncSteerPills(client, pills, [live(null)], stubMenu);
+  assert.equal(pills.get("a1").face.label, "A · warm");
+  assert.equal(pills.get("a1").observed.observed, null);
 });
 
 // ---------------------------------------------------------------------------
 // Reconnect and teardown
 // ---------------------------------------------------------------------------
 
-test("disconnect keeps pills as Unknown and reconnect restores faces", () => {
+test("disconnect keeps pills as unknown and reconnect restores faces", () => {
   const client = fakeClient();
   const pills = new Map();
-  pill.syncSteerPills(client, pills, [row("a1"), row("a2", { slot: "B" })], Content);
+  pill.syncSteerPills(client, pills, [row("a1"), row("a2", { slot: "B" })], stubMenu);
   pill.markSteerPillsDisconnected(pills);
   assert.equal(pills.size, 2);
   assert.deepEqual(kinds(client.calls), ["add", "add", "update", "update"]);
   for (const entry of pills.values()) {
-    assert.match(entry.face.label, /Unknown/);
-    assert.match(entry.face.title, /Host disconnected/);
+    assert.match(entry.face.label, /unknown/);
+    assert.match(entry.face.title, /host disconnected/);
   }
+  assert.equal(pills.get("a1").face.title, "Steer A · Active · unknown\nhost disconnected");
+  assert.equal(pills.get("a1").face.accessibilityLabel, "Steer A · Active · unknown · host disconnected");
   // Marking twice is quiet.
   pill.markSteerPillsDisconnected(pills);
   assert.deepEqual(kinds(client.calls), ["add", "add", "update", "update"]);
   // The next connected event restores faces without re-adding pills.
-  pill.syncSteerPills(client, pills, [row("a1"), row("a2", { slot: "B" })], Content);
+  pill.syncSteerPills(client, pills, [row("a1"), row("a2", { slot: "B" })], stubMenu);
   assert.deepEqual(kinds(client.calls), ["add", "add", "update", "update", "update", "update"]);
-  assert.equal(pills.get("a1").face.label, "A · Warm");
+  assert.equal(pills.get("a1").face.label, "A · warm");
 });
 
 test("disconnect keeps pills whose update throws; teardown removes everything", () => {
   const client = fakeClient({ updateThrowsFor: new Set(["a1"]) });
   const pills = new Map();
-  pill.syncSteerPills(client, pills, [row("a1")], Content);
+  pill.syncSteerPills(client, pills, [row("a1")], stubMenu);
   pill.markSteerPillsDisconnected(pills);
   assert.equal(pills.size, 1);
-  assert.equal(pills.get("a1").face.label, "A · Warm");
+  assert.equal(pills.get("a1").face.label, "A · warm");
   const failing = fakeClient({ removeThrowsFor: new Set(["a1", "a2"]) });
   const doomed = new Map([
     ["a1", { registration: failing.addComposerPill({ id: "x", workspaceId: "w", agentId: "a1", button: {} }), face: pill.faceFor(row("a1")), row: row("a1") }],
@@ -468,9 +563,9 @@ test("sync, disconnect and teardown never touch foreign pills", () => {
   assert.equal(foreign.length, 2);
   client.calls.length = 0;
   const pills = new Map();
-  pill.syncSteerPills(client, pills, [row("steer-a", { slot: "A" })], Content);
+  pill.syncSteerPills(client, pills, [row("steer-a", { slot: "A" })], stubMenu);
   pill.markSteerPillsDisconnected(pills);
-  pill.syncSteerPills(client, pills, [row("steer-a", { slot: "A" })], Content);
+  pill.syncSteerPills(client, pills, [row("steer-a", { slot: "A" })], stubMenu);
   pill.teardownSteerPills(pills);
   for (const call of client.calls) {
     const agentId = call[0] === "add" ? call[2] : call[1];
@@ -524,7 +619,7 @@ test("steers on later daemon pages get feed rows and pills", async () => {
   assert.deepEqual(feed.map((entry) => entry.agentId).sort(), ["steer-a", "steer-b"]);
   const client = fakeClient();
   const pills = new Map();
-  pill.syncSteerPills(client, pills, pill.steerRowsOf({ steers: feed }), Content);
+  pill.syncSteerPills(client, pills, pill.steerRowsOf({ steers: feed }), stubMenu);
   assert.equal(pills.size, 2);
   assert.deepEqual([...pills.keys()].sort(), ["steer-a", "steer-b"]);
 });
@@ -536,10 +631,10 @@ test("bulk sync registers hundreds of tabs without churn on repeat", () => {
   );
   const client = fakeClient();
   const pills = new Map();
-  pill.syncSteerPills(client, pills, rows, Content);
+  pill.syncSteerPills(client, pills, rows, stubMenu);
   assert.equal(pills.size, 250);
   assert.equal(client.calls.length, 250);
-  pill.syncSteerPills(client, pills, rows.map((entry) => ({ ...entry })), Content);
+  pill.syncSteerPills(client, pills, rows.map((entry) => ({ ...entry })), stubMenu);
   assert.equal(client.calls.length, 250);
 });
 
@@ -548,14 +643,14 @@ test("bulk sync registers hundreds of tabs without churn on repeat", () => {
 // ---------------------------------------------------------------------------
 
 const entrySource = readFileSync(new URL("../index.client.tsx", import.meta.url), "utf8");
-const popoverSource = readFileSync(new URL("../client/steer-pill-content.tsx", import.meta.url), "utf8");
+const menuSource = readFileSync(new URL("../client/steer-menu-content.tsx", import.meta.url), "utf8");
 const logicSource = readFileSync(new URL("../client/steer-pill.ts", import.meta.url), "utf8");
 const submitSource = readFileSync(new URL("../client/factory-submit.ts", import.meta.url), "utf8");
 
 test("entry subscribes to factory.steers and keeps attention worker-only", () => {
   for (const token of [
     "factorySteers",
-    "FactorySteerPillContent",
+    "buildSteerMenuBehavior",
     "syncSteerPills",
     "markSteerPillsDisconnected",
     "teardownSteerPills",
@@ -566,29 +661,25 @@ test("entry subscribes to factory.steers and keeps attention worker-only", () =>
   }
 });
 
-test("popover is keyboard/screen-reader labelled and theme driven", () => {
+test("popovers are keyboard/screen-reader labelled and theme driven", () => {
   for (const token of [
     'accessibilityRole="button"',
     'accessibilityLabel="Close steer menu"',
-    'accessibilityRole="header"',
     "useSubscription(factorySteers",
-    "useComposers({ agentId })",
     "theme.colors.",
     "compact",
-    "nextTickDelayMs",
-    "ResultView",
-    "READONLY_FACTORY_RESULT_ACTIONS",
+    "initialAction",
   ]) {
-    assert.ok(popoverSource.includes(token), `steer-pill-content.tsx contains ${token}`);
+    assert.ok(menuSource.includes(token), `steer-menu-content.tsx contains ${token}`);
   }
-  assert.equal(/#[0-9a-fA-F]{3,8}\b/.test(popoverSource), false, "no hardcoded hex colors");
+  assert.equal(/#[0-9a-fA-F]{3,8}\b/.test(menuSource), false, "no hardcoded hex colors");
   assert.equal(/#[0-9a-fA-F]{3,8}\b/.test(logicSource), false, "logic carries no colors");
   assert.ok(
     pill.faceFor(row("a1")).accessibilityLabel.includes("Steer A"),
     "accessible title names the slot",
   );
   assert.ok(
-    pill.faceFor(row("a1")).accessibilityLabel.includes("Warm"),
+    pill.faceFor(row("a1")).accessibilityLabel.includes("warm"),
     "accessible title names the state",
   );
 });
@@ -597,7 +688,7 @@ test("new UI text and pill summaries are English", () => {
   for (const value of Object.values(pill.STEER_PRIMARY_ACTION_LABELS)) {
     assert.match(value, /^[\x20-\x7E]+$/, `action label is English: ${value}`);
   }
-  for (const file of [logicSource, popoverSource, submitSource]) {
+  for (const file of [logicSource, menuSource, submitSource]) {
     for (const german of [
       "Hilfe",
       "Kandidaten",

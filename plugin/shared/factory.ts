@@ -403,6 +403,117 @@ export const factoryHistoryOpen = defineRpc({
   }),
 });
 
+const settingsTuple = z.looseObject({
+  provider: z.string().nullable(),
+  model: z.string().nullable(),
+  thinking: z.string().nullable(),
+  speed: z.string().nullable(),
+});
+
+// Catalog-backed settings preview for one steer (step 4, same provider
+// only): the current tuple, the requested tuple, the supported model /
+// thinking / speed choices, and the route (Apply here vs Refresh). Writes
+// nothing. Access mode, other provider options, account policy and role are
+// preserved and are not part of the preview.
+export const factorySteerSettingsPreview = defineRpc({
+  name: "factory.steer.settings.preview",
+  input: z.object({
+    workspaceId: z.string().min(1),
+    agentId: z.string().min(1),
+    /** Requested model id; omitted keeps the current model. */
+    model: z.string().min(1).optional(),
+    /** Requested thinking option id; null resets to the provider default. */
+    thinking: z.string().nullable().optional(),
+    /** Requested speed id ("fast"/"standard"/tier); null resets to default. */
+    speed: z.string().nullable().optional(),
+  }),
+  output: z.looseObject({
+    workspaceId: z.string(),
+    agentId: z.string(),
+    slot: z.string().nullable(),
+    epoch: z.number().nullable(),
+    sessionId: z.string().nullable(),
+    provider: z.string().nullable(),
+    current: settingsTuple,
+    requested: settingsTuple,
+    models: z.array(z.string()),
+    thinkingOptions: z.array(z.string()),
+    speeds: z.array(z.string()),
+    noop: z.boolean(),
+    route: z.enum(["apply-here", "refresh"]),
+    routeReason: z.string(),
+    cacheRisk: z.boolean(),
+    efficiencyLocked: z.boolean(),
+    lockReason: z.string().nullable(),
+    warnings: z.array(z.string()),
+    fingerprint: z.string(),
+  }),
+});
+
+// Applies a previewed settings change (step 4). "apply-here" writes the
+// tuple in place (small cold contexts and no-ops only); "refresh" rewinds
+// the tab on a bound route (no silent fallback to a new agent), then
+// applies and verifies the settings, then delivers or stages the brief per
+// the Initialize new steer setting. The server rechecks quota, pending
+// permissions and busy state under the scope lock.
+export const factorySteerSettings = defineRpc({
+  name: "factory.steer.settings",
+  input: z.object({
+    workspaceId: z.string().min(1),
+    agentId: z.string().min(1),
+    fingerprint: z.string().min(1),
+    route: z.enum(["apply-here", "refresh"]),
+    /** Requested tuple (must match the preview fingerprint); omitted keeps current. */
+    model: z.string().min(1).optional(),
+    thinking: z.string().nullable().optional(),
+    speed: z.string().nullable().optional(),
+    /** "stage" applies without sending; the packet is staged for later delivery. */
+    deliver: z.enum(["send", "stage"]).optional(),
+  }),
+  output: z.looseObject({
+    workspaceId: z.string(),
+    agentId: z.string(),
+    applied: z.boolean(),
+    route: z.string(),
+    verified: z.boolean(),
+    current: settingsTuple,
+    noop: z.boolean().optional(),
+    delivered: z.boolean().optional(),
+    staged: z.boolean().optional(),
+    stagedTo: z.string().nullable().optional(),
+    packet: z.string().optional(),
+    packetChars: z.number().optional(),
+    deliveryError: z.unknown().optional(),
+    detail: z.string(),
+  }),
+});
+
+// Restores the turn-end baseline after an observed external change (step 4).
+// Refuses when the tab is busy, when nothing is staged to revert, or when
+// the live tuple no longer equals the observed change (a newer change
+// needs review first). Verifies the restored tuple after the write.
+export const factorySteerSettingsRevert = defineRpc({
+  name: "factory.steer.settings.revert",
+  input: z.object({
+    workspaceId: z.string().min(1),
+    agentId: z.string().min(1),
+    observed: z.looseObject({
+      provider: z.string().nullable().optional(),
+      model: z.string().nullable().optional(),
+      thinking: z.string().nullable().optional(),
+      speed: z.string().nullable().optional(),
+      sessionId: z.string().nullable().optional(),
+    }),
+  }),
+  output: z.looseObject({
+    agentId: z.string(),
+    applied: z.boolean(),
+    verified: z.boolean(),
+    restored: settingsTuple,
+    detail: z.string(),
+  }),
+});
+
 const modelRow = z.looseObject({
   position: z.number(),
   profile: z.string(),
@@ -764,6 +875,14 @@ const steerQuotaRow = z.looseObject({
 
 // One steer tab's projected face state (shared/steer-state.ts), pushed
 // host-wide for the persistent composer pill (design step 2 subscribes).
+const settingsTupleRow = z.looseObject({
+  provider: z.string().nullable().optional(),
+  model: z.string().nullable().optional(),
+  thinking: z.string().nullable().optional(),
+  speed: z.string().nullable().optional(),
+  sessionId: z.string().nullable().optional(),
+});
+
 const steerStateRow = z.looseObject({
   scopeId: z.string(),
   workspaceId: z.string(),
@@ -779,6 +898,20 @@ const steerStateRow = z.looseObject({
   permissionNeeded: z.boolean().optional(),
   /** A brief is staged for this tab (initialize it from the steer menu). */
   stagedBrief: z.boolean().optional(),
+  /** Live effective thinking option id (step 4), null for the provider default. */
+  thinking: z.string().nullable().optional(),
+  /** Live normalized speed id (step 4), null when the route reports none. */
+  speed: z.string().nullable().optional(),
+  /** Live provider session id (step 4), null when unknown. */
+  sessionId: z.string().nullable().optional(),
+  /** Turn-end settings baseline from wsf.agents (step 4), null when none. */
+  baseline: settingsTupleRow.nullable().optional(),
+  /** Last Factory-confirmed settings tuple (step 4), null when none. */
+  confirmed: settingsTupleRow.nullable().optional(),
+  /** Maximum efficiency locks settings changes on this steer (step 4). */
+  settingsLocked: z.boolean().optional(),
+  /** Short reason when locked, null otherwise. */
+  settingsLockReason: z.string().nullable().optional(),
   /** Live continuation or current slot holder for a superseded tab. */
   successor: z.string().nullable().optional(),
   state: z.enum([

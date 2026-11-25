@@ -955,9 +955,11 @@ async function runTabRewind({ client, workspaceId, agentId, packet, checkpoint, 
  * Same-tab rewind for the ACTIVE steer: no takeover, no epoch change, the
  * agent keeps its tab, id and labels. Returns the fresh result (preview,
  * applied, or idempotent double-click), or `{ fallback }` when the caller
- * must continue with the new-agent path.
+ * must continue with the new-agent path. With `requireRefreshMode: 'rewind'`
+ * a failed rewind throws instead of falling back (the packet travels on the
+ * error for the caller to keep); the preview path still reports fallback.
  */
-async function tryActiveRewind({ client, discovery, status, expected, slot, from, apply, send = true, language, git, lock, now, workerModel, rewindClient, promptOptions }) {
+async function tryActiveRewind({ client, discovery, status, expected, slot, from, apply, send = true, language, git, lock, now, workerModel, rewindClient, requireRefreshMode = null, promptOptions }) {
   const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;
   const entry = agentState?.[from.id] ?? null;
   const previousBriefId = entry?.refreshed?.briefMessageId;
@@ -995,7 +997,15 @@ async function tryActiveRewind({ client, discovery, status, expected, slot, from
     lastMessage: await hintOf(client, from.id), language, workerModel, rewound: true, promptOptions,
   });
   const { outcome } = await runTabRewind({ client, workspaceId: status.workspace.id, agentId: from.id, packet, checkpoint: status.checkpoint, lock, now, rewindClient, previousBriefId, send });
-  if (outcome.status !== 'rewound') return { fallback: outcome.status };
+  if (outcome.status !== 'rewound') {
+    if (requireRefreshMode === 'rewind') {
+      const error = new SwitchRefused(`Bound rewind route failed (${outcome.status}${outcome.error ? `: ${outcome.error}` : ''}); nothing sent, nothing recorded, no new agent created. The brief is kept.`);
+      error.packet = packet;
+      error.refreshMode = 'rewind';
+      throw error;
+    }
+    return { fallback: outcome.status };
+  }
   return {
     repo: status.repo, slot, kind: 'steer', from: from.id, to: from.id, epoch: expected.epoch, epochBumped: false, profile: null,
     provider: from.provider, model: from.model, idempotencyKey: null, packet, packetChars: packet.length,
@@ -1027,12 +1037,14 @@ async function tryActiveRewind({ client, discovery, status, expected, slot, from
  * With an injected `rewindClient` (DaemonClient factory) every path tries a
  * same-tab rewind first and only falls back to a new agent when no rewind
  * point exists or the provider lacks rewind; the preview names `rewind` vs
- * `new agent` in `refreshMode`.
+ * `new agent` in `refreshMode`. With `requireRefreshMode: 'rewind'` the
+ * apply binds the previewed rewind route and throws instead of falling back
+ * (the packet travels on the error for the caller to keep).
  * `send: false` stages the packet instead of delivering it (the caller sends
  * or stages it, e.g. into the composer); `notifyPrevious: false` skips the
  * notice to the retired agent (the efficient path shows a UI notice instead).
  */
-export async function freshSteer({ client, discovery, config, apply = false, send = true, notifyPrevious = true, slot: slotArg = null, workerId = null, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, now = () => new Date(), workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 95, zerosub = null, paseoCli = null, rewindClient = null, promptOptions }) {
+export async function freshSteer({ client, discovery, config, apply = false, send = true, notifyPrevious = true, slot: slotArg = null, workerId = null, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, now = () => new Date(), workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 95, zerosub = null, paseoCli = null, rewindClient = null, requireRefreshMode = null, promptOptions }) {
   const status = steerStatus(discovery);
   if (!status.workspace || !status.state) throw new SwitchRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
@@ -1041,12 +1053,12 @@ export async function freshSteer({ client, discovery, config, apply = false, sen
   const wantWorker = workerId !== null && workerId !== undefined && String(workerId).trim() !== '';
   if (wantSlot && wantWorker) throw new SwitchRefused('fresh takes either --slot or --worker, not both');
   if (wantWorker) {
-    return freshWorkerAgent({ client, discovery, status, expected, workerId: String(workerId).trim(), config, apply, send, notifyPrevious, language, git, lookupReceipt, execute, workerModel, lock, now, rewindClient, promptOptions });
+    return freshWorkerAgent({ client, discovery, status, expected, workerId: String(workerId).trim(), config, apply, send, notifyPrevious, language, git, lookupReceipt, execute, workerModel, lock, now, rewindClient, requireRefreshMode, promptOptions });
   }
   const target = wantSlot ? String(slotArg).trim().toUpperCase() : expected.activeSteer;
   if (!/^[A-Z]$/.test(target ?? '')) throw new SwitchRefused(`Not a steer slot: ${JSON.stringify(slotArg)}`);
   if (target !== expected.activeSteer) {
-    return freshNonActiveSteer({ client, discovery, status, expected, slot: target, config, apply, send, notifyPrevious, language, git, lookupReceipt, execute, workerModel, quotaSnapshot, quotaExhaustedPct, zerosub, lock, now, rewindClient, promptOptions });
+    return freshNonActiveSteer({ client, discovery, status, expected, slot: target, config, apply, send, notifyPrevious, language, git, lookupReceipt, execute, workerModel, quotaSnapshot, quotaExhaustedPct, zerosub, lock, now, rewindClient, requireRefreshMode, promptOptions });
   }
   const slot = expected.activeSteer;
   const holders = status.steers.filter((s) => s.slot === slot);
@@ -1064,9 +1076,11 @@ export async function freshSteer({ client, discovery, config, apply = false, sen
   // fallback when no rewind point exists or the provider lacks rewind.
   let rewindFallback = null;
   if (typeof rewindClient === 'function' && single) {
-    const rewound = await tryActiveRewind({ client, discovery, status, expected, slot, from: single, config, apply, send, language, git, lock, now, workerModel, rewindClient, promptOptions });
+    const rewound = await tryActiveRewind({ client, discovery, status, expected, slot, from: single, config, apply, send, language, git, lock, now, workerModel, rewindClient, requireRefreshMode, promptOptions });
     if (rewound && !rewound.fallback) return rewound;
     if (rewound?.fallback) rewindFallback = rewound.fallback;
+  } else if (apply === true && requireRefreshMode === 'rewind' && single && typeof rewindClient !== 'function') {
+    throw new SwitchRefused('Bound rewind route needs a rewind client; refusing to create a new agent instead. The brief is kept.');
   }
   const profileName = config?.steers?.slots?.[slot];
   if (!profileName || !config.profiles?.[profileName]) throw new SwitchRefused(`Steer slot ${slot} references unknown profile "${profileName}"`);
@@ -1196,7 +1210,7 @@ export async function freshSteer({ client, discovery, config, apply = false, sen
  * must continue with the new-agent path. `packetArgs` carries the
  * kind-specific buildRefreshPacket fields (slot or owner/title).
  */
-async function tryTabRewind({ client, discovery, status, expected, from, kind, packetArgs, apply, send = true, language, git, lock, now, workerModel, rewindClient, resultBase, promptOptions }) {
+async function tryTabRewind({ client, discovery, status, expected, from, kind, packetArgs, apply, send = true, language, git, lock, now, workerModel, rewindClient, requireRefreshMode = null, resultBase, promptOptions }) {
   const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;
   const entry = agentState?.[from.id] ?? null;
   const previousBriefId = entry?.refreshed?.briefMessageId;
@@ -1232,7 +1246,15 @@ async function tryTabRewind({ client, discovery, status, expected, from, kind, p
   }
   const packet = await packetOf();
   const { outcome } = await runTabRewind({ client, workspaceId: status.workspace.id, agentId: from.id, packet, checkpoint: status.checkpoint, lock, now, rewindClient, previousBriefId, send });
-  if (outcome.status !== 'rewound') return { fallback: outcome.status };
+  if (outcome.status !== 'rewound') {
+    if (requireRefreshMode === 'rewind') {
+      const error = new SwitchRefused(`Bound rewind route failed (${outcome.status}${outcome.error ? `: ${outcome.error}` : ''}); nothing sent, nothing recorded, no new agent created. The brief is kept.`);
+      error.packet = packet;
+      error.refreshMode = 'rewind';
+      throw error;
+    }
+    return { fallback: outcome.status };
+  }
   return {
     ...resultBase, from: from.id, to: from.id, epoch: expected.epoch, epochBumped: false, profile: null,
     provider: from.provider, model: from.model, idempotencyKey: null, packet, packetChars: packet.length,
@@ -1250,7 +1272,7 @@ async function tryTabRewind({ client, discovery, status, expected, from, kind, p
  * agent id, so retries reuse the receipt while later refreshes get a new
  * key. The new agent is created without the active marker and parent-free.
  */
-async function freshNonActiveSteer({ client, discovery, status, expected, slot, config, apply, send = true, notifyPrevious = true, language, git, lookupReceipt, execute, workerModel, quotaSnapshot, quotaExhaustedPct, zerosub, lock = withLock, now = () => new Date(), rewindClient = null, promptOptions }) {
+async function freshNonActiveSteer({ client, discovery, status, expected, slot, config, apply, send = true, notifyPrevious = true, language, git, lookupReceipt, execute, workerModel, quotaSnapshot, quotaExhaustedPct, zerosub, lock = withLock, now = () => new Date(), rewindClient = null, requireRefreshMode = null, promptOptions }) {
   const holders = status.steers.filter((s) => s.slot === slot);
   if (!holders.length) throw new SwitchRefused(`No live Steer ${slot} to refresh for ${status.repo}; plan and apply one first`);
   const live = holders.filter((h) => !h.superseded);
@@ -1258,9 +1280,11 @@ async function freshNonActiveSteer({ client, discovery, status, expected, slot, 
   if (single && BUSY.has(single.status)) throw new SwitchRefused(`Steer ${slot} is ${single.status}; stop it or wait for its turn to end first`);
   let rewindFallback = null;
   if (typeof rewindClient === 'function' && single) {
-    const rewound = await tryTabRewind({ client, discovery, status, expected, from: single, kind: 'steer', packetArgs: { slot }, apply, send, language, git, lock, now, workerModel, rewindClient, promptOptions, resultBase: { repo: status.repo, slot, kind: 'steer' } });
+    const rewound = await tryTabRewind({ client, discovery, status, expected, from: single, kind: 'steer', packetArgs: { slot }, apply, send, language, git, lock, now, workerModel, rewindClient, requireRefreshMode, promptOptions, resultBase: { repo: status.repo, slot, kind: 'steer' } });
     if (rewound && !rewound.fallback) return rewound;
     if (rewound?.fallback) rewindFallback = rewound.fallback;
+  } else if (apply === true && requireRefreshMode === 'rewind' && single && typeof rewindClient !== 'function') {
+    throw new SwitchRefused('Bound rewind route needs a rewind client; refusing to create a new agent instead. The brief is kept.');
   }
   const profileName = config?.steers?.slots?.[slot];
   if (!profileName || !config.profiles?.[profileName]) throw new SwitchRefused(`Steer slot ${slot} references unknown profile "${profileName}"`);
@@ -1378,7 +1402,7 @@ async function freshNonActiveSteer({ client, discovery, status, expected, slot, 
  * otherwise the provider defaults apply. The new worker keeps the
  * previous parent (the owning steer), never the calling agent.
  */
-async function freshWorkerAgent({ client, discovery, status, expected, workerId, config, apply, send = true, notifyPrevious = true, language, git, lookupReceipt, execute, workerModel, lock = withLock, now = () => new Date(), rewindClient = null, promptOptions }) {
+async function freshWorkerAgent({ client, discovery, status, expected, workerId, config, apply, send = true, notifyPrevious = true, language, git, lookupReceipt, execute, workerModel, lock = withLock, now = () => new Date(), rewindClient = null, requireRefreshMode = null, promptOptions }) {
   const matches = (status.workers ?? []).filter((w) => w.id === workerId || w.id.startsWith(workerId));
   if (!matches.length) throw new SwitchRefused(`${workerId} is not a live worker of ${status.repo}`);
   if (matches.length > 1) throw new SwitchRefused(`Worker ${JSON.stringify(workerId)} is ambiguous (${matches.map((w) => w.id).join(', ')}); pass the full agent id`);
@@ -1388,9 +1412,11 @@ async function freshWorkerAgent({ client, discovery, status, expected, workerId,
   const title = from.title ?? 'Worker';
   let rewindFallback = null;
   if (typeof rewindClient === 'function') {
-    const rewound = await tryTabRewind({ client, discovery, status, expected, from, kind: 'worker', packetArgs: { owner, title }, apply, send, language, git, lock, now, workerModel, rewindClient, promptOptions, resultBase: { repo: status.repo, kind: 'worker', workerId: from.id, owner } });
+    const rewound = await tryTabRewind({ client, discovery, status, expected, from, kind: 'worker', packetArgs: { owner, title }, apply, send, language, git, lock, now, workerModel, rewindClient, requireRefreshMode, promptOptions, resultBase: { repo: status.repo, kind: 'worker', workerId: from.id, owner } });
     if (rewound && !rewound.fallback) return rewound;
     if (rewound?.fallback) rewindFallback = rewound.fallback;
+  } else if (apply === true && requireRefreshMode === 'rewind' && typeof rewindClient !== 'function') {
+    throw new SwitchRefused('Bound rewind route needs a rewind client; refusing to create a new agent instead. The brief is kept.');
   }
   const parentId = from.parent ?? null;
   const scopeId = discovery.scope?.id ?? status.repo;

@@ -1,5 +1,8 @@
 import type {
   PluginAgentCommandContext,
+  PluginButtonBehavior,
+  PluginButtonContentProps,
+  PluginButtonMenuEntry,
   PluginButtonRegistration,
   PluginClientContext,
   PluginWorkspaceCommandContext,
@@ -19,10 +22,13 @@ import { FactorySidebarItem } from "./client/factory-sidebar-item.js";
 import { submitFactoryCommand } from "./client/factory-submit.js";
 import { dismissFactoryResultPill, showFactoryResultPill } from "./client/result-pill.js";
 import { FactorySettings } from "./client/settings-factory.js";
-import { getFactoryResult } from "./client/factory-store.js";
-import { subscribeOpenFactory } from "./client/steer-nav.js";
-import { currentSteerHost, setSteerResult } from "./client/steer-results.js";
-import { FactorySteerPillContent } from "./client/steer-pill-content.js";
+import { requestOpenFactory, subscribeOpenFactory } from "./client/steer-nav.js";
+import { SteerMenu, type SteerMenuAction } from "./client/steer-menu-content.js";
+import {
+  describeSteerMenu,
+  menuKeyFor,
+  type SteerMenuEntryDescriptor,
+} from "./client/steer-menu.js";
 import {
   attentionPillId,
   markSteerPillsDisconnected,
@@ -30,7 +36,9 @@ import {
   steerRowsOf,
   syncSteerPills,
   teardownSteerPills,
+  type SteerObservedState,
   type SteerPillMap,
+  type SteerPillRow,
 } from "./client/steer-pill.js";
 import { assertSteerContext } from "./shared/agent-guard.js";
 import { attentionStatus } from "./shared/context-continuation.js";
@@ -44,6 +52,96 @@ function guardAgent(agent: PluginAgentCommandContext["agent"], what: string): vo
 
 function openFactory({ openPanel }: PluginWorkspaceCommandContext | PluginAgentCommandContext): void {
   openPanel("factory");
+}
+
+/** One steer action as a popover: the menu item opens only its own flow. */
+function steerActionPopover(
+  action: SteerMenuAction,
+  extra?: {
+    targetSlot?: string;
+    targetAgentId?: string;
+    observed?: {
+      provider: string | null;
+      model: string | null;
+      thinking: string | null;
+      speed: string | null;
+      sessionId: string | null;
+    } | null;
+  },
+) {
+  return function SteerActionContent(props: PluginButtonContentProps) {
+    if (props.context !== "agent") return null;
+    return (
+      <SteerMenu
+        key={`${props.agentId}-${action}`}
+        agentId={props.agentId}
+        workspaceId={props.workspaceId}
+        theme={props.theme}
+        compact={props.layout.compact}
+        close={props.close}
+        initialAction={action}
+        initialSlot={extra?.targetSlot}
+        initialAgentId={extra?.targetAgentId}
+        observed={extra?.observed ?? null}
+      />
+    );
+  };
+}
+
+function toMenuEntries(
+  descriptor: SteerMenuEntryDescriptor[],
+  ctx: { row: SteerPillRow; observed: SteerObservedState },
+): PluginButtonMenuEntry[] {
+  return descriptor.map((entry): PluginButtonMenuEntry => {
+    if (entry.kind === "separator") return { kind: "separator", id: entry.id };
+    if (entry.disabled === true) {
+      return { kind: "item", id: entry.id, title: entry.title, icon: entry.icon, disabled: true, behavior: { kind: "action", onPress: () => {} } };
+    }
+    if (entry.submenu) {
+      return { kind: "item", id: entry.id, title: entry.title, icon: entry.icon, behavior: { kind: "menu", items: toMenuEntries(entry.submenu, ctx) } };
+    }
+    switch (entry.action) {
+      case "create":
+        return { kind: "item", id: entry.id, title: entry.title, icon: entry.icon, behavior: { kind: "popover", Content: steerActionPopover("create") } };
+      case "handover-target":
+        return { kind: "item", id: entry.id, title: entry.title, icon: entry.icon, behavior: { kind: "popover", Content: steerActionPopover("handover", { targetSlot: entry.targetSlot, targetAgentId: entry.targetAgentId }) } };
+      case "refresh":
+      case "fresh-context":
+        return { kind: "item", id: entry.id, title: entry.title, icon: entry.icon, behavior: { kind: "popover", Content: steerActionPopover(entry.action === "fresh-context" ? "fresh-context" : "refresh") } };
+      case "settings":
+        return { kind: "item", id: entry.id, title: entry.title, icon: entry.icon, behavior: { kind: "popover", Content: steerActionPopover("settings") } };
+      case "revert": {
+        const seen = ctx.observed.tracker.observed;
+        return { kind: "item", id: entry.id, title: entry.title, icon: entry.icon, behavior: { kind: "popover", Content: steerActionPopover("revert", { observed: seen ? { ...seen, sessionId: ctx.row.sessionId } : null }) } };
+      }
+      case "staged-brief":
+        return { kind: "item", id: entry.id, title: entry.title, icon: entry.icon, behavior: { kind: "popover", Content: steerActionPopover("staged") } };
+      case "open-factory":
+        return { kind: "item", id: entry.id, title: entry.title, icon: entry.icon, behavior: { kind: "action", onPress: () => requestOpenFactory({ workspaceId: ctx.row.workspaceId, agentId: ctx.row.agentId }) } };
+      default:
+        return { kind: "item", id: entry.id, title: entry.title, icon: entry.icon, disabled: true, behavior: { kind: "action", onPress: () => {} } };
+    }
+  });
+}
+
+/**
+ * Native menu behavior for one steer tab. Keep-chat-history only switches
+ * between the resume and fresh routes inside the Refresh popover (both are
+ * enabled menu items), so the descriptor builds with a fixed value and the
+ * popover reads the live setting.
+ */
+function buildSteerMenuBehavior(
+  row: SteerPillRow,
+  rows: SteerPillRow[],
+  observed: SteerObservedState,
+): { behavior: PluginButtonBehavior; menuKey: string } {
+  const descriptor = describeSteerMenu(row, rows, {
+    keepChatHistory: false,
+    observedChanged: observed.changed,
+    revertAllowed: observed.revertAllowed,
+    revertReason: observed.revertReason,
+  });
+  return { behavior: { kind: "menu", items: toMenuEntries(descriptor, { row, observed }) }, menuKey: menuKeyFor(descriptor) };
 }
 
 export default function contribute(client: PluginClientContext) {
@@ -76,9 +174,6 @@ export default function contribute(client: PluginClientContext) {
         workspaceId: workspace.id,
         agentId: agent.id,
       });
-      // The originating steer keeps its own result for its pill menu.
-      const own = getFactoryResult();
-      if (own) setSteerResult(currentSteerHost(), agent.id, own);
       if (outcome.openPanel) {
         openPanel("factory");
       } else if (outcome.pill) {
@@ -147,6 +242,7 @@ export default function contribute(client: PluginClientContext) {
     },
   );
   // One persistent pill per steer tab, kept in sync with the host-wide feed.
+  // The pill shows the native action menu; previews open as popovers.
   // Paseo re-subscribes after a reconnect; the close handler keeps the last
   // verified pills as Unknown until the next event refreshes them.
   const steerFeed = client.subscribe(
@@ -155,7 +251,7 @@ export default function contribute(client: PluginClientContext) {
     (event) => {
       const rows = steerRowsOf(event);
       steerIds = steerAgentIds(rows);
-      syncSteerPills(client, steerPills, rows, FactorySteerPillContent);
+      syncSteerPills(client, steerPills, rows, buildSteerMenuBehavior);
       // A steer row that arrived here replaces its attention pill, if any.
       for (const [id, pill] of attentionPills) {
         if (!steerIds.has(id)) continue;

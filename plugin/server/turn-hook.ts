@@ -8,7 +8,8 @@ import {
   parseCheckpointBlock,
   readGitSnapshot,
 } from "./factory/steer.js";
-import { updateAgentEntry } from "./factory/agent-state.js";
+import { buildSettingsBaseline, updateAgentEntry } from "./factory/agent-state.js";
+import { speedOfLiveOptions } from "../shared/steer-settings.js";
 import { captureSweepPaseo, noteEffectFailure } from "./cold-sweep.js";
 import {
   RESUME_PENDING_REASON,
@@ -385,6 +386,26 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
     if (flagged) needsResumePatch = { needsResume: flagged };
   }
 
+  // Step-4 settings baseline: the live provider/model/thinking/speed tuple
+  // plus the session id at turn end. Without a session id nothing comparable
+  // is stored and the previous baseline (if any) is kept.
+  const liveProvider = typeof agent.provider === "string" ? agent.provider : null;
+  const liveModel = typeof agent.model === "string" ? agent.model : null;
+  const liveThinking = typeof agent.effectiveThinkingOptionId === "string"
+    ? agent.effectiveThinkingOptionId
+    : (typeof agent.thinkingOptionId === "string" ? agent.thinkingOptionId : null);
+  const liveSpeed = speedOfLiveOptions(liveProvider, liveModel, agent.options ?? null);
+  const liveSessionId = typeof agent?.persistence?.sessionId === "string" ? agent.persistence.sessionId : null;
+  const settingsBaseline = (buildSettingsBaseline as unknown as (args: any) => any)({
+    provider: liveProvider,
+    model: liveModel,
+    thinking: liveThinking,
+    speed: liveSpeed,
+    sessionId: liveSessionId,
+    turnId: payload.turnId ?? null,
+    at: new Date().toISOString(),
+  });
+
   // Proactive ZeroSub switch hint for completed steer turns (computed before
   // the write so its debounce stamp merges into the same agent entry; the
   // text goes out after the write below).
@@ -430,6 +451,7 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
       ...(needsResumePatch ?? {}),
       ...(proactiveHint?.patch ?? {}),
       ...(turnUsage ? { usage: mergeTurnUsage(prev.usage, turnUsage) } : {}),
+      ...(settingsBaseline ? { settingsBaseline } : {}),
     };
     if (decision.resolvePending) merged.pendingAction = null;
     const patch: Record<string, unknown> = { [AGENTS_KEY]: { ...freshAgents, [agentId]: merged } };

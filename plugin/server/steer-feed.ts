@@ -19,6 +19,15 @@ import {
   type CleanupSettings,
 } from "../shared/idle-cleanup.js";
 import { projectSteer, type SteerMembership } from "../shared/steer-state.js";
+import {
+  efficiencySettingsLock,
+  normalizeModel,
+  normalizeProvider,
+  normalizeThinking,
+  speedOfLiveOptions,
+  tupleFromLive,
+  tuplesEqual,
+} from "../shared/steer-settings.js";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -44,6 +53,14 @@ function isAdvisorSlotOf(config: unknown, slot: string): boolean {
 
 function finiteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+export interface SettingsTupleRow {
+  provider: string | null;
+  model: string | null;
+  thinking: string | null;
+  speed: string | null;
+  sessionId?: string | null;
 }
 
 export interface SteerFeedRow {
@@ -80,6 +97,20 @@ export interface SteerFeedRow {
   primaryAction: string;
   detail: string;
   nextBoundaryAt: string | null;
+  /** Live effective thinking option id (step 4), null for the provider default. */
+  thinking: string | null;
+  /** Live normalized speed id (step 4), null when the route reports none. */
+  speed: string | null;
+  /** Live provider session id (step 4), null when unknown. */
+  sessionId: string | null;
+  /** Turn-end settings baseline from wsf.agents (step 4), null when none. */
+  baseline: SettingsTupleRow | null;
+  /** Last Factory-confirmed settings tuple (step 4), null when none. */
+  confirmed: SettingsTupleRow | null;
+  /** Maximum efficiency locks settings changes on this steer (step 4). */
+  settingsLocked: boolean;
+  /** Short reason when locked, null otherwise. */
+  settingsLockReason: string | null;
 }
 
 export interface SteerFeedDeps {
@@ -210,12 +241,55 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
     const cleanedAfter = clearedAt !== null && (lastEnd === null || clearedAt >= lastEnd);
     const pendingOperation = entry?.pendingAction !== null && entry?.pendingAction !== undefined;
     const openTurn = entry?.openTurnId !== null && entry?.openTurnId !== undefined;
-    // No stored model/session baseline exists in v1, so prefix-break
-    // detection (model/config changes) stays false; reopen, clear, rewind,
-    // account and config invalidations land with the observed-change work.
     const baselineValid = lastEnd !== null && !cleanedAfter && !pendingOperation;
     const provider = typeof agent.provider === "string" && agent.provider ? agent.provider : null;
     const model = typeof agent.model === "string" && agent.model ? agent.model : null;
+    // Step-4 live tuple and turn-end baseline for prefix-break detection and
+    // the observed-change warning. Without a stored baseline the projection
+    // keeps its v1 behavior (prefix break stays false).
+    const liveThinkingRaw = typeof agent.effectiveThinkingOptionId === "string"
+      ? agent.effectiveThinkingOptionId
+      : (typeof agent.thinkingOptionId === "string" ? agent.thinkingOptionId : null);
+    const liveThinking = normalizeThinking(liveThinkingRaw);
+    const liveSpeed = speedOfLiveOptions(provider, model, agent.options ?? null);
+    const liveSessionId = typeof agent?.persistence?.sessionId === "string" && agent.persistence.sessionId
+      ? agent.persistence.sessionId
+      : null;
+    const liveTuple = tupleFromLive({ provider, model, thinking: liveThinking, speed: liveSpeed });
+    const baselineRaw = asRecord(entry?.settingsBaseline);
+    const baselineSession = typeof baselineRaw?.sessionId === "string" && baselineRaw.sessionId
+      ? baselineRaw.sessionId
+      : null;
+    const baseline = baselineRaw && baselineSession
+      ? {
+        provider: normalizeProvider(baselineRaw.provider),
+        model: normalizeModel(baselineRaw.model),
+        thinking: normalizeThinking(baselineRaw.thinking),
+        speed: typeof baselineRaw.speed === "string" && baselineRaw.speed.trim()
+          ? baselineRaw.speed.trim().toLowerCase()
+          : null,
+        sessionId: baselineSession,
+      }
+      : null;
+    const confirmedRaw = asRecord(entry?.settingsConfirmed);
+    const confirmed = confirmedRaw &&
+        (typeof confirmedRaw.provider === "string" || typeof confirmedRaw.model === "string")
+      ? {
+        provider: normalizeProvider(confirmedRaw.provider),
+        model: normalizeModel(confirmedRaw.model),
+        thinking: normalizeThinking(confirmedRaw.thinking),
+        speed: typeof confirmedRaw.speed === "string" && confirmedRaw.speed.trim()
+          ? confirmedRaw.speed.trim().toLowerCase()
+          : null,
+      }
+      : null;
+    const comparable = baseline !== null && liveSessionId !== null && baseline.sessionId === liveSessionId;
+    const prefixBreakRetained = comparable && baseline !== null && !tuplesEqual(liveTuple, {
+      provider: baseline.provider,
+      model: baseline.model,
+      thinking: baseline.thinking,
+      speed: baseline.speed,
+    });
     const storedTokens = finiteNumber(entry?.contextTokens);
     const needsResume = isNeedsResumeReason(asRecord(entry?.needsResume)?.reason)
       ? ((asRecord(entry?.needsResume)?.reason as "daemon-restart" | "limit" | "failed" | "cold"))
@@ -237,6 +311,7 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
       model,
       lastTurnEndedAt,
       baselineValid,
+      prefixBreakRetained,
       liveUsedTokens: usedTokensOf(agent),
       storedTokens,
       storedSameSession: baselineValid,
@@ -259,6 +334,13 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
       quotaSampleMinutes: deps.quotaSampleMinutes,
       warnPct,
       exhaustedPct,
+    });
+    const settingsLock = efficiencySettingsLock({
+      profile: settings.profile,
+      warmth: projection.warmth,
+      state: projection.state,
+      liveStatus: status,
+      openTurn,
     });
     rows.push({
       scopeId: identity.scopeId,
@@ -289,6 +371,13 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
       primaryAction: projection.primaryAction,
       detail: projection.detail,
       nextBoundaryAt: projection.nextBoundaryAt,
+      thinking: liveThinking,
+      speed: liveSpeed,
+      sessionId: liveSessionId,
+      baseline,
+      confirmed,
+      settingsLocked: settingsLock.locked,
+      settingsLockReason: settingsLock.reason,
     });
   }
   rows.sort((a, b) =>

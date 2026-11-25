@@ -9,6 +9,7 @@ import {
   applyRelocate,
   applyResumeRpc,
   applySteerAddRpc,
+  applySteerSettingsRpc,
   applySwitch,
   createResumeBriefBuilder,
   deliverSteerBriefRpc,
@@ -30,7 +31,9 @@ import {
   previewLabels,
   previewRelocate,
   previewSteerAdd,
+  previewSteerSettingsRpc,
   previewSwitch,
+  revertSteerSettingsRpc,
   runDrain,
   writeCheckpointRpc,
 } from "./server/handlers.js";
@@ -90,6 +93,9 @@ import {
   factorySteerAdd,
   factorySteerAddPreview,
   factorySteerBrief,
+  factorySteerSettings,
+  factorySteerSettingsPreview,
+  factorySteerSettingsRevert,
   factorySteers,
   factorySwitch,
   factorySwitchPreview,
@@ -192,6 +198,15 @@ export default function contribute(server: PluginServerContext) {
   server.handle(factorySteerAddPreview, (input, ctx) => previewSteerAdd(input, ctx, loader, hostSettings));
   server.handle(factorySteerAdd, (input, ctx) => applySteerAddRpc(input, ctx, loader));
   server.handle(factorySteerBrief, deliverSteerBriefRpc);
+  const steerSettingsExtra = {
+    getCleanupSettings: readSettings,
+    getSupervisionSettings: readSupervision,
+    buildBrief: buildResumeBrief,
+    getZerosub,
+  };
+  server.handle(factorySteerSettingsPreview, (input, ctx) => previewSteerSettingsRpc(input, ctx, loader, steerSettingsExtra));
+  server.handle(factorySteerSettings, (input, ctx) => applySteerSettingsRpc(input, ctx, loader, steerSettingsExtra));
+  server.handle(factorySteerSettingsRevert, (input, ctx) => revertSteerSettingsRpc(input, ctx, loader, steerSettingsExtra));
   server.handle(factoryResumeApply, (input, ctx) => {
     bootOnce(ctx.paseo);
     return applyResumeRpc(input, ctx, loader, {

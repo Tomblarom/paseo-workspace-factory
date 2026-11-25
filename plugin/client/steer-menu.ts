@@ -1,7 +1,9 @@
-// Steer menu actions (docs/design/steer-menu.md, step 3): pure, testable
-// client logic. The React menu lives in steer-menu-content.tsx (plain
-// node:test cannot import .tsx); planning and apply stay server-side in the
-// /factory RPCs, the menu only calls them. All UI text is English.
+// Steer menu actions (docs/design/steer-menu.md, steps 3-4): pure, testable
+// client logic. The pill uses the native menu behavior with one action per
+// item; previews and confirmations open as popovers (steer-menu-content.tsx,
+// which plain node:test cannot import). Planning and apply stay server-side
+// in the /factory RPCs, the menu only calls them. All UI text is English.
+// State words are lowercase, the way Paseo writes them.
 import { STEER_STATE_LABELS, type SteerFaceState } from "../shared/steer-state.js";
 import type { SteerPillRow } from "./steer-pill.js";
 
@@ -12,6 +14,10 @@ import type { SteerPillRow } from "./steer-pill.js";
 export const STEER_MENU_LABELS = {
   create: "Create steer…",
   handover: "Hand over to…",
+  changeSettings: "Change settings…",
+  revertSettings: "Revert settings",
+  freshContext: "Continue with fresh context…",
+  stagedBrief: "Initialize staged brief…",
   openFactory: "Open Factory",
   back: "Back",
   cancel: "Cancel",
@@ -20,12 +26,19 @@ export const STEER_MENU_LABELS = {
   confirmHandover: "Confirm handover",
   confirmRefresh: "Confirm refresh",
   confirmResume: "Confirm resume",
+  confirmSettings: "Apply settings",
+  confirmRevert: "Revert settings",
   retryDelivery: "Retry delivery",
   initializeNow: "Initialize now",
   dismissBrief: "Dismiss brief",
   resumeAndHandover: "Resume and hand over…",
   openSavedChat: "Open saved chat in new tab",
 } as const;
+
+/** Lowercase state word for pill labels, titles and menu items. */
+export function stateWord(state: SteerFaceState): string {
+  return (STEER_STATE_LABELS[state] ?? "Unknown").toLowerCase();
+}
 
 /** "Resume…" for a tab that needs recovery, else "Refresh context…". */
 export function resumeActionLabel(state: SteerFaceState): string {
@@ -103,7 +116,7 @@ function handoverReason(
   if (row.advisor) {
     return { eligible: false, reason: "Advisor steers never coordinate", needsRecovery: false };
   }
-  if (row.state === "retired") return { eligible: false, reason: "Retired", needsRecovery: false };
+  if (row.state === "retired") return { eligible: false, reason: "retired", needsRecovery: false };
   if (opts.ambiguousSlot || row.state === "unknown") {
     const detail = row.detail && row.detail !== "Not enough data" ? ` (${row.detail})` : "";
     return { eligible: false, reason: `Ambiguous membership${detail}`, needsRecovery: false };
@@ -157,7 +170,7 @@ export function handoffTargets(
       provider: row.provider,
       model: row.model,
       state: row.state,
-      stateLabel: STEER_STATE_LABELS[row.state] ?? "Unknown",
+      stateLabel: stateWord(row.state),
       eligible: verdict.eligible,
       reason: verdict.reason,
       needsRecovery: verdict.needsRecovery,
@@ -276,4 +289,188 @@ export function needsDeliveryRetry(outcome: DeliveryOutcome): boolean {
 /** Result key per host and agent, so one steer's result never replaces another's. */
 export function steerResultKey(hostId: string, agentId: string): string {
   return `${hostId}::${agentId}`;
+}
+
+// ---------------------------------------------------------------------------
+// Native menu descriptor (step 4 + pill scope change)
+// ---------------------------------------------------------------------------
+
+export type SteerMenuAction =
+  | "create"
+  | "handover-target"
+  | "refresh"
+  | "settings"
+  | "revert"
+  | "fresh-context"
+  | "staged-brief"
+  | "open-factory"
+  | "noop";
+
+export type SteerMenuEntryDescriptor =
+  | { kind: "separator"; id: string }
+  | {
+    kind: "item";
+    id: string;
+    title: string;
+    icon: string;
+    disabled?: boolean;
+    action: SteerMenuAction;
+    targetSlot?: string;
+    targetAgentId?: string;
+    submenu?: SteerMenuEntryDescriptor[];
+  };
+
+export interface SteerMenuDescriptorOpts {
+  keepChatHistory: boolean;
+  /** True while the observed-change warning is active for this tab. */
+  observedChanged: boolean;
+  /** Revert availability for the retained observed tuple. */
+  revertAllowed: boolean;
+  /** Full revert reason from canRevertObserved (shortened for the title). */
+  revertReason?: string | null;
+}
+
+function shortRevertReason(reason: string | null | undefined): string {
+  if (!reason) return "unavailable";
+  if (/turn is running/i.test(reason)) return "turn running";
+  if (/changed again/i.test(reason)) return "changed again";
+  return "unavailable";
+}
+
+function shortRefreshBlock(reason: string): string {
+  if (/running/i.test(reason)) return "turn running";
+  if (/permission/i.test(reason)) return "permission pending";
+  if (/replaced/i.test(reason)) return "replaced";
+  if (/unknown/i.test(reason)) return "status unknown";
+  if (/Busy/i.test(reason)) return "busy";
+  return "unavailable";
+}
+
+function shortLockReason(reason: string | null): string {
+  if (!reason) return "locked";
+  if (/turn is running/i.test(reason)) return "turn running";
+  if (/Maximum efficiency/i.test(reason)) return "maximum efficiency";
+  return "locked";
+}
+
+function handoverItemTitle(target: HandoffTarget): string {
+  const head = `Steer ${target.slot} · ${target.stateLabel}`;
+  if (target.eligible) return head;
+  return `${head} — ${target.reason ?? "unavailable"}`;
+}
+
+/**
+ * Native menu items for one steer tab: nothing but a list of actions.
+ * Warning items (Revert, Continue with fresh context) come first while the
+ * observed-change warning is active, then Create, Hand over to (submenu
+ * with disabled holders carrying the short reason), Refresh/Resume, Change
+ * settings (disabled with a short reason under Maximum efficiency), an
+ * optional staged-brief item, a separator, and Open Factory.
+ */
+export function describeSteerMenu(
+  self: SteerPillRow,
+  rows: SteerPillRow[],
+  opts: SteerMenuDescriptorOpts,
+): SteerMenuEntryDescriptor[] {
+  const items: SteerMenuEntryDescriptor[] = [];
+  if (opts.observedChanged) {
+    items.push({
+      kind: "item",
+      id: "revert-settings",
+      title: opts.revertAllowed
+        ? STEER_MENU_LABELS.revertSettings
+        : `${STEER_MENU_LABELS.revertSettings} (${shortRevertReason(opts.revertReason)})`,
+      icon: "Undo2",
+      disabled: !opts.revertAllowed,
+      action: "revert",
+    });
+    items.push({
+      kind: "item",
+      id: "fresh-context",
+      title: STEER_MENU_LABELS.freshContext,
+      icon: "RefreshCw",
+      action: "fresh-context",
+    });
+    items.push({ kind: "separator", id: "sep-warning" });
+  }
+  items.push({ kind: "item", id: "create", title: STEER_MENU_LABELS.create, icon: "Plus", action: "create" });
+
+  const targets = handoffTargets(rows, self.agentId);
+  if (targets.length === 0) {
+    items.push({
+      kind: "item",
+      id: "handover",
+      title: `${STEER_MENU_LABELS.handover} (no other holders)`,
+      icon: "ArrowRightLeft",
+      disabled: true,
+      action: "noop",
+    });
+  } else {
+    items.push({
+      kind: "item",
+      id: "handover",
+      title: STEER_MENU_LABELS.handover,
+      icon: "ArrowRightLeft",
+      action: "noop",
+      submenu: targets.map((target) => ({
+        kind: "item" as const,
+        id: `handover-${target.agentId}`,
+        title: handoverItemTitle(target),
+        icon: "ArrowRight",
+        disabled: !target.eligible,
+        action: "handover-target" as const,
+        targetSlot: target.slot,
+        targetAgentId: target.agentId,
+      })),
+    });
+  }
+
+  const refreshLabel = resumeActionLabel(self.state);
+  const route = resumeRouteFor(self, { keepChatHistory: opts.keepChatHistory });
+  if (route.kind === "blocked") {
+    items.push({
+      kind: "item",
+      id: "refresh",
+      title: `${refreshLabel} (${shortRefreshBlock(route.reason)})`,
+      icon: "RefreshCw",
+      disabled: true,
+      action: "noop",
+    });
+  } else if (route.kind === "reset-details") {
+    items.push({
+      kind: "item",
+      id: "refresh",
+      title: `${refreshLabel} (quota depleted)`,
+      icon: "RefreshCw",
+      disabled: true,
+      action: "noop",
+    });
+  } else {
+    items.push({ kind: "item", id: "refresh", title: refreshLabel, icon: "RefreshCw", action: "refresh" });
+  }
+
+  if (self.settingsLocked) {
+    items.push({
+      kind: "item",
+      id: "settings",
+      title: `${STEER_MENU_LABELS.changeSettings} (${shortLockReason(self.settingsLockReason)})`,
+      icon: "Settings2",
+      disabled: true,
+      action: "noop",
+    });
+  } else {
+    items.push({ kind: "item", id: "settings", title: STEER_MENU_LABELS.changeSettings, icon: "Settings2", action: "settings" });
+  }
+
+  if (self.stagedBrief) {
+    items.push({ kind: "item", id: "staged", title: STEER_MENU_LABELS.stagedBrief, icon: "Send", action: "staged-brief" });
+  }
+  items.push({ kind: "separator", id: "sep-open" });
+  items.push({ kind: "item", id: "open-factory", title: STEER_MENU_LABELS.openFactory, icon: "Factory", action: "open-factory" });
+  return items;
+}
+
+/** Stable key for a descriptor; the pill patches its behavior only on change. */
+export function menuKeyFor(entries: SteerMenuEntryDescriptor[]): string {
+  return JSON.stringify(entries);
 }

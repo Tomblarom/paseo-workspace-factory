@@ -12,6 +12,8 @@
 //   contextTokens, note, noteAt,
 //   interrupted: { at, outcome, error, excerpt, git, reason } | null,
 //   cleared, pendingAction, lastActionFailed, previousSessions, actionVerified
+//   settingsBaseline: { provider, model, thinking, speed, sessionId, turnId, at } | null
+//   settingsConfirmed: { provider, model, thinking, speed, fingerprint, at } | null
 // interrupted.reason is "daemon-restart" | "planned-restart" for restart
 // markings (P1/P3); failed/canceled turns (C2) carry no reason.
 import { isDeepStrictEqual } from 'node:util';
@@ -26,6 +28,8 @@ export const NOTE_MAX = 1500;
 export const EXCERPT_MAX = 1500;
 export const ERROR_MAX = 300;
 const FRESH_HINT_REASON_MAX = 300;
+/** Settings baseline ids (provider/model/thinking/speed/session) are clipped, never rejected. */
+export const SETTINGS_ID_MAX = 200;
 
 export function clipText(value, max) {
   if (typeof value !== 'string') return value;
@@ -50,7 +54,52 @@ function clipEntry(entry) {
     if (typeof clipped.interrupted.excerpt === 'string') clipped.interrupted.excerpt = clipText(clipped.interrupted.excerpt, EXCERPT_MAX);
     if (typeof clipped.interrupted.error === 'string') clipped.interrupted.error = clipText(clipped.interrupted.error, ERROR_MAX);
   }
+  for (const key of ['settingsBaseline', 'settingsConfirmed', 'settingsObserved']) {
+    const baseline = clipped[key];
+    if (baseline && typeof baseline === 'object') {
+      const next = { ...baseline };
+      for (const field of ['provider', 'model', 'thinking', 'speed', 'sessionId', 'fingerprint']) {
+        if (typeof next[field] === 'string') next[field] = clipText(next[field], SETTINGS_ID_MAX);
+      }
+      clipped[key] = next;
+    }
+  }
   return clipped;
+}
+
+/**
+ * Builds one settings baseline for `wsf.agents` (step 4): the live
+ * provider/model/thinking/speed tuple plus the session id at turn end.
+ * Values are normalized to trimmed strings or null and clipped; `at` defaults
+ * to now, `turnId` may be null. Returns null without a session id (nothing
+ * comparable to store).
+ */
+export function buildSettingsBaseline({ provider = null, model = null, thinking = null, speed = null, sessionId = null, turnId = null, at = null, now = () => new Date() } = {}) {
+  const clean = (value) => (typeof value === 'string' && value.trim() ? clipText(value.trim(), SETTINGS_ID_MAX) : null);
+  const session = clean(sessionId);
+  if (!session) return null;
+  const stamp = typeof at === 'string' && at ? at : (typeof now === 'function' ? now() : now)?.toISOString?.() ?? new Date().toISOString();
+  return {
+    provider: clean(provider)?.toLowerCase() ?? null,
+    model: clean(model),
+    thinking: clean(thinking),
+    speed: clean(speed)?.toLowerCase() ?? null,
+    sessionId: session,
+    turnId: clean(turnId),
+    at: stamp,
+  };
+}
+
+/**
+ * True when the stored baseline is comparable to the live session: both
+ * carry the same non-empty session id. A session change (reopen, clear,
+ * rewind) or a missing baseline is Unknown, never a warning.
+ */
+export function isComparableBaseline(baseline, liveSessionId) {
+  const stored = baseline?.sessionId;
+  if (typeof stored !== 'string' || !stored) return false;
+  if (typeof liveSessionId !== 'string' || !liveSessionId) return false;
+  return stored === liveSessionId;
 }
 
 /**

@@ -1,20 +1,28 @@
-// Persistent steer composer pill (docs/design/steer-menu.md, step 2): pure,
-// testable client logic. The React popover lives in steer-pill-content.tsx
-// (plain node:test cannot import .tsx), the registration call sites live in
-// index.client.tsx. All UI text is English.
+// Persistent steer composer pill (docs/design/steer-menu.md, steps 2+4): pure,
+// testable client logic. The pill shows the native action menu (one item per
+// action); previews open as popovers in steer-menu-content.tsx (plain
+// node:test cannot import .tsx). Registration and the menu builder live in
+// index.client.tsx. All UI text is English; state words are lowercase.
 import type {
-  PluginButtonContentProps,
+  PluginButtonBehavior,
   PluginButtonRegistration,
   PluginClientContext,
   PluginHostProps,
 } from "@getpaseo/plugin/client";
-import type { ComponentType } from "react";
 import {
   STEER_STATE_LABELS,
   formatCountdown,
   type SteerFaceState,
   type SteerPrimaryAction,
 } from "../shared/steer-state.js";
+import {
+  canRevertObserved,
+  detectObservedChange,
+  tupleFromLive,
+  updateObservedTracker,
+  type ObservedTracker,
+  type SettingsTuple,
+} from "../shared/steer-settings.js";
 
 /** Pill id prefixes; each family owns its prefix so pills coexist. */
 export const STEER_PILL_ID_PREFIX = "factory-steer-";
@@ -45,6 +53,14 @@ export interface SteerQuotaRowView {
   stale: boolean;
 }
 
+export interface SteerSettingsTupleView {
+  provider: string | null;
+  model: string | null;
+  thinking: string | null;
+  speed: string | null;
+  sessionId?: string | null;
+}
+
 export interface SteerPillRow {
   agentId: string;
   workspaceId: string;
@@ -72,6 +88,13 @@ export interface SteerPillRow {
   primaryAction: SteerPrimaryAction;
   detail: string;
   nextBoundaryAt: string | null;
+  thinking: string | null;
+  speed: string | null;
+  sessionId: string | null;
+  baseline: SteerSettingsTupleView | null;
+  confirmed: SteerSettingsTupleView | null;
+  settingsLocked: boolean;
+  settingsLockReason: string | null;
 }
 
 function isSteerState(value: unknown): value is SteerFaceState {
@@ -119,6 +142,22 @@ function quotaRowsOf(value: unknown): SteerQuotaRowView[] {
   return rows;
 }
 
+function tupleOrNull(value: unknown): SteerSettingsTupleView | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  const hasAny = ["provider", "model", "thinking", "speed", "sessionId"].some(
+    (key) => typeof row[key] === "string" && (row[key] as string) !== "",
+  );
+  if (!hasAny) return null;
+  return {
+    provider: textOrNull(row.provider),
+    model: textOrNull(row.model),
+    thinking: textOrNull(row.thinking),
+    speed: textOrNull(row.speed),
+    sessionId: textOrNull(row.sessionId),
+  };
+}
+
 /** Reads the factory.steers feed, skipping entries without an agent target. */
 export function steerRowsOf(event: unknown): SteerPillRow[] {
   const record = event as { steers?: unknown } | null;
@@ -157,6 +196,13 @@ export function steerRowsOf(event: unknown): SteerPillRow[] {
       primaryAction: isPrimaryAction(row.primaryAction) ? row.primaryAction : "reload-or-open",
       detail: typeof row.detail === "string" && row.detail !== "" ? row.detail : "Not enough data",
       nextBoundaryAt: textOrNull(row.nextBoundaryAt),
+      thinking: textOrNull(row.thinking),
+      speed: textOrNull(row.speed),
+      sessionId: textOrNull(row.sessionId),
+      baseline: tupleOrNull(row.baseline),
+      confirmed: tupleOrNull(row.confirmed),
+      settingsLocked: row.settingsLocked === true,
+      settingsLockReason: textOrNull(row.settingsLockReason),
     });
   }
   return rows;
@@ -186,13 +232,26 @@ export const STEER_PILL_ICONS: Record<SteerFaceState, string> = {
 };
 
 export interface SteerPillFace {
-  /** Visible collapsed text, e.g. "A · Warm". */
+  /** Visible collapsed text, e.g. "A · warm". State words are lowercase. */
   label: string;
-  /** Tooltip and accessible title: slot, role, state, context size, quota. */
+  /**
+   * Hover title: first line slot, role and state, second line tokens and
+   * quota facts ("Steer A · Active · warm\n5,000 tokens · 54% used"). The
+   * second line is omitted when empty.
+   */
   title: string;
   icon: string;
+  /** Single-line accessible label (the title joined with " · "). */
   accessibilityLabel: string;
 }
+
+/** Lowercase state word for pill labels and titles. */
+export function pillStateWord(state: SteerFaceState): string {
+  return (STEER_STATE_LABELS[state] ?? "Unknown").toLowerCase();
+}
+
+/** Collapsed label while the observed-change warning is active. */
+export const SETTINGS_CHANGED_WORD = "settings changed";
 
 /** Role word for the face title and header. */
 export function steerRole(row: Pick<SteerPillRow, "active" | "advisor" | "state">): string {
@@ -219,24 +278,90 @@ export function quotaFaceSummary(row: SteerPillRow): string {
   return max === null ? "" : ` · ${Math.round(max)}% used`;
 }
 
-export function faceFor(row: SteerPillRow): SteerPillFace {
+/** Second title line: tokens and quota facts, "" when nothing is known. */
+function secondTitleLine(row: SteerPillRow): string {
+  const parts: string[] = [];
+  if (row.tokens !== null) parts.push(`${row.tokens.toLocaleString("en-US")} tokens`);
+  const quota = quotaFaceSummary(row).replace(/^ · /, "");
+  // The Limited face already names the state; do not repeat it below.
+  if (quota !== "" && !(row.state === "limited" && quota === "Limited")) parts.push(quota);
+  return parts.join(" · ");
+}
+
+export function faceFor(row: SteerPillRow, opts?: { settingsChanged?: boolean }): SteerPillFace {
   const slot = row.slot ?? "?";
-  const stateLabel = STEER_STATE_LABELS[row.state] ?? "Unknown";
-  const context = row.tokens === null ? "" : ` · ${row.tokens.toLocaleString("en-US")} tokens`;
-  const title = `Steer ${slot} · ${steerRole(row)} · ${stateLabel}${context}${quotaFaceSummary(row)}`;
+  const changed = opts?.settingsChanged === true;
+  const word = changed ? SETTINGS_CHANGED_WORD : pillStateWord(row.state);
+  const first = `Steer ${slot} · ${steerRole(row)} · ${word}`;
+  const second = secondTitleLine(row);
+  const title = second ? `${first}\n${second}` : first;
   return {
-    label: `${slot} · ${stateLabel}`,
+    label: `${slot} · ${changed ? SETTINGS_CHANGED_WORD : pillStateWord(row.state)}`,
     title,
-    icon: STEER_PILL_ICONS[row.state] ?? "CircleHelp",
-    accessibilityLabel: title,
+    icon: changed ? "TriangleAlert" : (STEER_PILL_ICONS[row.state] ?? "CircleHelp"),
+    accessibilityLabel: second ? `${first} · ${second}` : first,
   };
 }
 
 /** Face shown while the host is disconnected (membership is kept). */
 export function disconnectedFace(row: SteerPillRow): SteerPillFace {
   const slot = row.slot ?? "?";
-  const title = `Steer ${slot} · ${steerRole(row)} · Unknown · Host disconnected`;
-  return { label: `${slot} · Unknown`, title, icon: "CircleHelp", accessibilityLabel: title };
+  const first = `Steer ${slot} · ${steerRole(row)} · unknown`;
+  const title = `${first}\nhost disconnected`;
+  return {
+    label: `${slot} · unknown`,
+    title,
+    icon: "CircleHelp",
+    accessibilityLabel: `${first} · host disconnected`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Observed-change tracking (step 4)
+// ---------------------------------------------------------------------------
+
+export interface SteerObservedState {
+  tracker: ObservedTracker;
+  /** True while the warning is active (pill shows "settings changed"). */
+  changed: boolean;
+  revertAllowed: boolean;
+  revertReason: string | null;
+  live: SettingsTuple;
+}
+
+/** Live tuple from a feed row (provider/model/thinking/speed). */
+export function liveTupleOfRow(row: SteerPillRow): SettingsTuple {
+  return tupleFromLive({ provider: row.provider, model: row.model, thinking: row.thinking, speed: row.speed });
+}
+
+/**
+ * Observed-change state for one row: detect against the turn-end baseline
+ * (no warning for a confirmed Factory transition, Unknown without a
+ * comparable baseline), retain the first observed tuple, and check revert
+ * eligibility (idle and live still equal to the observed change).
+ */
+export function observedStateFor(
+  row: SteerPillRow,
+  prev: ObservedTracker | null,
+): SteerObservedState {
+  const live = liveTupleOfRow(row);
+  const verdict = detectObservedChange({
+    live,
+    liveSessionId: row.sessionId,
+    baseline: row.baseline ? { ...row.baseline, sessionId: row.baseline.sessionId ?? null } : null,
+    confirmed: row.confirmed,
+  });
+  const tracker = updateObservedTracker(prev, verdict);
+  const changed = tracker.state === "changed" && tracker.observed !== null;
+  const revert = changed
+    ? canRevertObserved({
+      live,
+      observed: tracker.observed,
+      liveStatus: row.liveStatus,
+      openTurn: row.state === "running",
+    })
+    : { allowed: false as const, reason: "No observed change to revert." };
+  return { tracker, changed, revertAllowed: revert.allowed, revertReason: revert.reason, live };
 }
 
 export function sameFace(a: SteerPillFace, b: SteerPillFace): boolean {
@@ -279,34 +404,57 @@ export interface SteerPillEntry {
   registration: PluginButtonRegistration;
   face: SteerPillFace;
   row: SteerPillRow;
+  /** Stable key of the last menu behavior; behavior patches only on change. */
+  menuKey: string;
+  /** Retained observed-change tuple while the warning is active. */
+  observed: ObservedTracker | null;
 }
 
 export type SteerPillMap = Map<string, SteerPillEntry>;
 
+/** Builds the native menu behavior for one steer tab. */
+export type SteerMenuBuilder = (
+  row: SteerPillRow,
+  rows: SteerPillRow[],
+  observed: SteerObservedState,
+) => { behavior: PluginButtonBehavior; menuKey: string };
+
 /**
  * Syncs one persistent pill per steer row. Faces patch in place and only
- * when they change (no re-register churn); the behavior/Content reference is
- * never replaced, so an open popover stays mounted across quota ticks.
- * Unknown agents (no composer, e.g. history-only tabs) are skipped until the
- * next event; rows missing from a connected event are authoritatively removed.
+ * when they change (no re-register churn); the menu behavior patches only
+ * when its key changes, so an open menu stays mounted across quota ticks
+ * (the menu holds actions only, no countdown text). Unknown agents (no
+ * composer, e.g. history-only tabs) are skipped until the next event; rows
+ * missing from a connected event are authoritatively removed.
  */
 export function syncSteerPills(
   client: Pick<PluginClientContext, "addComposerPill">,
   pills: SteerPillMap,
   rows: SteerPillRow[],
-  Content: ComponentType<PluginButtonContentProps>,
+  buildMenu: SteerMenuBuilder,
 ): void {
   const seen = new Set<string>();
   for (const row of rows) {
     seen.add(row.agentId);
-    const face = faceFor(row);
     const known = pills.get(row.agentId);
+    const observed = observedStateFor(row, known?.observed ?? null);
+    const face = faceFor(row, { settingsChanged: observed.changed });
+    const built = buildMenu(row, rows, observed);
     if (known) {
       known.row = row;
-      if (sameFace(known.face, face)) continue;
+      known.observed = observed.tracker;
+      const patch: { title?: string; label?: string; icon?: string; behavior?: PluginButtonBehavior } = {};
+      if (!sameFace(known.face, face)) {
+        patch.title = face.title;
+        patch.label = face.label;
+        patch.icon = face.icon;
+      }
+      if (known.menuKey !== built.menuKey) patch.behavior = built.behavior;
+      if (Object.keys(patch).length === 0) continue;
       try {
-        known.registration.update({ title: face.title, label: face.label, icon: face.icon });
+        known.registration.update(patch);
         known.face = face;
+        known.menuKey = built.menuKey;
       } catch {
         // The composer went away; the next event re-adds the pill.
         pills.delete(row.agentId);
@@ -323,11 +471,13 @@ export function syncSteerPills(
             title: face.title,
             label: face.label,
             icon: face.icon,
-            behavior: { kind: "popover", Content },
+            behavior: built.behavior,
           },
         }),
         face,
         row,
+        menuKey: built.menuKey,
+        observed: observed.tracker,
       });
     } catch {
       // No composer for this agent (history-only tab) — retry on next event.
@@ -375,8 +525,11 @@ export function teardownSteerPills(pills: SteerPillMap): void {
 }
 
 // ---------------------------------------------------------------------------
-// Expanded content helpers
+// Shared formatting (quota rows, route words, countdowns)
 // ---------------------------------------------------------------------------
+// The pill menu itself holds actions only; these helpers format the same
+// facts for popovers and tests. Face and title helpers above are the only
+// ones the collapsed pill needs.
 
 /** Expanded header, e.g. "Steer A · Active". */
 export function steerHeaderTitle(row: SteerPillRow): string {

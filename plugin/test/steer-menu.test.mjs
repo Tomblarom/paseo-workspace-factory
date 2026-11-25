@@ -80,7 +80,7 @@ test("handover lists holders in slot order with state, provider and model", () =
   );
   assert.deepEqual(targets.map((t) => t.slot), ["A", "B", "C"]);
   assert.deepEqual(targets.map((t) => t.eligible), [false, true, true]);
-  assert.equal(targets[1].stateLabel, "Warm");
+  assert.equal(targets[1].stateLabel, "warm");
   assert.equal(targets[2].provider, "claude");
   assert.equal(targets[2].model, "m");
 });
@@ -110,7 +110,7 @@ test("handover reasons cover active, advisor, retired and ambiguous rows", () =>
   const byId = Object.fromEntries(targets.map((t) => [t.agentId, t]));
   assert.equal(byId["steer-a"].reason, "Already active");
   assert.equal(byId["steer-b"].reason, "Advisor steers never coordinate");
-  assert.equal(byId["steer-c"].reason, "Retired");
+  assert.equal(byId["steer-c"].reason, "retired");
   assert.match(byId["steer-d1"].reason, /Ambiguous/);
   assert.match(byId["steer-d2"].reason, /Ambiguous/);
   assert.match(byId["steer-e"].reason, /Ambiguous membership \(Membership ambiguous\)/);
@@ -396,6 +396,115 @@ test("steerRowsOf parses permission and staged-brief flags", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Native menu descriptor
+// ---------------------------------------------------------------------------
+
+test("state words are lowercase in labels and titles", () => {
+  assert.equal(menu.stateWord("waiting"), "waiting");
+  assert.equal(menu.stateWord("needs-resume"), "needs resume");
+  assert.equal(menu.stateWord("warm"), "warm");
+  assert.equal(menu.stateWord("unknown"), "unknown");
+});
+
+test("the menu lists actions with a handover submenu and a settings item", () => {
+  const items = menu.describeSteerMenu(
+    self(),
+    [self(), row("steer-b", { slot: "B", state: "warm" }), row("steer-c", { slot: "C", state: "cooling" })],
+    { keepChatHistory: false, observedChanged: false, revertAllowed: false },
+  );
+  const ids = items.map((entry) => entry.id);
+  assert.deepEqual(ids, ["create", "handover", "refresh", "settings", "sep-open", "open-factory"]);
+  const handover = items.find((entry) => entry.id === "handover");
+  assert.equal(handover.kind, "item");
+  assert.deepEqual(
+    handover.submenu.map((entry) => entry.title),
+    ["Steer A · warm — Already active", "Steer B · warm", "Steer C · cooling"],
+  );
+  assert.deepEqual(handover.submenu.map((entry) => entry.disabled), [true, false, false]);
+  const refresh = items.find((entry) => entry.id === "refresh");
+  assert.equal(refresh.title, "Refresh context…");
+  assert.equal(refresh.disabled, undefined);
+  const settingsItem = items.find((entry) => entry.id === "settings");
+  assert.equal(settingsItem.title, "Change settings…");
+});
+
+test("unavailable handover holders carry the short reason in the title", () => {
+  const items = menu.describeSteerMenu(
+    self(),
+    [
+      self(),
+      row("steer-b", { slot: "B", state: "running", liveStatus: "running" }),
+      row("steer-c", { slot: "C", state: "limited", limited: true, resetUnknown: true }),
+    ],
+    { keepChatHistory: false, observedChanged: false, revertAllowed: false },
+  );
+  const handover = items.find((entry) => entry.id === "handover");
+  assert.deepEqual(
+    handover.submenu.map((entry) => entry.title),
+    [
+      "Steer A · warm — Already active",
+      "Steer B · running — Busy (turn running)",
+      "Steer C · limited — Quota depleted (reset unknown)",
+    ],
+  );
+});
+
+test("settings changes disable with a short reason under Maximum efficiency", () => {
+  const locked = menu.describeSteerMenu(
+    row("steer-a", { slot: "A", active: true, settingsLocked: true, settingsLockReason: "Maximum efficiency protects this warm context. Use Refresh." }),
+    [row("steer-a", { slot: "A", active: true })],
+    { keepChatHistory: false, observedChanged: false, revertAllowed: false },
+  );
+  const settingsItem = locked.find((entry) => entry.id === "settings");
+  assert.equal(settingsItem.disabled, true);
+  assert.equal(settingsItem.title, "Change settings… (maximum efficiency)");
+});
+
+test("the warning adds revert and fresh-context items first", () => {
+  const items = menu.describeSteerMenu(
+    self(),
+    [self()],
+    { keepChatHistory: false, observedChanged: true, revertAllowed: true },
+  );
+  assert.deepEqual(items.slice(0, 3).map((entry) => entry.id), ["revert-settings", "fresh-context", "sep-warning"]);
+  assert.equal(items[0].disabled, false);
+  const blocked = menu.describeSteerMenu(
+    self(),
+    [self()],
+    { keepChatHistory: false, observedChanged: true, revertAllowed: false, revertReason: "Settings changed again. Review before reverting." },
+  );
+  assert.equal(blocked[0].disabled, true);
+  assert.equal(blocked[0].title, "Revert settings (changed again)");
+});
+
+test("a staged brief adds its own item, refresh disables while busy", () => {
+  const staged = menu.describeSteerMenu(
+    row("steer-a", { slot: "A", active: true, stagedBrief: true }),
+    [row("steer-a", { slot: "A", active: true, stagedBrief: true })],
+    { keepChatHistory: false, observedChanged: false, revertAllowed: false },
+  );
+  assert.ok(staged.some((entry) => entry.id === "staged"));
+  const busy = menu.describeSteerMenu(
+    row("steer-a", { slot: "A", active: true, state: "running", liveStatus: "running" }),
+    [row("steer-a", { slot: "A", active: true })],
+    { keepChatHistory: false, observedChanged: false, revertAllowed: false },
+  );
+  const refresh = busy.find((entry) => entry.id === "refresh");
+  assert.equal(refresh.disabled, true);
+  assert.match(refresh.title, /turn running/);
+});
+
+test("menu keys stay stable for identical descriptors", () => {
+  const opts = { keepChatHistory: false, observedChanged: false, revertAllowed: false };
+  const rows = [self(), row("steer-b", { slot: "B" })];
+  assert.equal(menu.menuKeyFor(menu.describeSteerMenu(self(), rows, opts)), menu.menuKeyFor(menu.describeSteerMenu(self(), rows, opts)));
+  assert.notEqual(
+    menu.menuKeyFor(menu.describeSteerMenu(self(), rows, opts)),
+    menu.menuKeyFor(menu.describeSteerMenu(self(), rows, { ...opts, observedChanged: true, revertAllowed: true })),
+  );
+});
+
+// ---------------------------------------------------------------------------
 // Wiring (static)
 // ---------------------------------------------------------------------------
 
@@ -414,25 +523,31 @@ test("the menu calls the /factory preview/apply RPCs and stages efficiently", ()
     "factoryFresh",
     "factorySteerBrief",
     "factoryHistoryOpen",
+    "factorySteerSettingsPreview",
+    "factorySteerSettings",
+    "factorySteerSettingsRevert",
     "notifyPrevious: false",
     "deliver",
     "isExpiredPreviewError",
     "useComposers({ agentId:",
     "setPrompt",
     "insertText",
-    "requestOpenFactory",
+    "initialAction",
     "resumeRouteFor",
-    "handoffTargets",
   ]) {
     assert.ok(menuSource.includes(token), `steer-menu-content.tsx contains ${token}`);
   }
 });
 
-test("the entry opens the Factory panel on request and keeps per-agent results", () => {
+test("the entry builds the native menu and opens the Factory panel on request", () => {
   for (const token of [
     "subscribeOpenFactory",
+    "requestOpenFactory",
     'client.openPanel("factory"',
-    "setSteerResult(currentSteerHost(), agent.id, own)",
+    "buildSteerMenuBehavior",
+    "describeSteerMenu",
+    'kind: "menu"',
+    'kind: "popover"',
   ]) {
     assert.ok(entrySource.includes(token), `index.client.tsx contains ${token}`);
   }

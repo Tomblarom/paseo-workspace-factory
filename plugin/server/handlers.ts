@@ -32,6 +32,9 @@ import {
   factorySwitchPreview,
   factorySteerAdd,
   factorySteerAddPreview,
+  factorySteerSettings,
+  factorySteerSettingsPreview,
+  factorySteerSettingsRevert,
   factoryWorkerPick,
   factoryWorkers,
 } from "../shared/factory.js";
@@ -113,9 +116,11 @@ import {
   writeCheckpoint,
 } from "./factory/steer.js";
 import type { ConfigLoader, HostSettingsReader } from "./config.js";
-import { getQuotaSnapshot } from "./quota.js";
+import { getQuotaSampledAt, getQuotaSnapshot } from "./quota.js";
 import { settingsFromConfig, validateFactorySettings, type FactorySettingsValues } from "../shared/settings-validate.js";
 import { readZerosubStateSafe } from "./zerosub-runtime.js";
+import { loadCatalog } from "./models-rpc.js";
+import { applySteerSettings, previewSteerSettings, revertSteerSettings } from "./steer-settings.js";
 
 /** Slot to configured provider/model, so the panel can show profile drift. */
 function expectedProfiles(config: any): Record<string, { profile: string; provider: string; model: string }> {
@@ -505,8 +510,28 @@ export async function applyFresh(
     execute: createExecutors(executeOptions),
     paseoCli: createPaseoCli(),
     rewindClient: defaultCreateRewindClient,
+    // Step 4 binds the previewed rewind route: no silent fallback to a new
+    // agent at apply time. A bound failure keeps the brief (staged below).
+    ...(dry.refreshMode === "rewind" ? { requireRefreshMode: "rewind" } : {}),
   };
-  const applied: any = await freshSteer(applyOptions);
+  let applied: any;
+  try {
+    applied = await freshSteer(applyOptions);
+  } catch (error) {
+    const packet = (error as { packet?: unknown } | null)?.packet;
+    const from = typeof dry.from === "string" && dry.from ? dry.from : null;
+    const workspaceId = typeof dry.workspaceId === "string" && dry.workspaceId ? dry.workspaceId : null;
+    if (typeof packet === "string" && packet.trim() && from && workspaceId) {
+      try {
+        await stageSteerBrief(paseo, { workspaceId, agentId: from, packet, kind: "fresh" });
+      } catch {
+        // Staging is best-effort; the message below still keeps the brief.
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`${message} The brief is staged for this tab; retry from the steer menu.`);
+    }
+    throw error;
+  }
   if (!applied.applied) return applied;
   const destination = typeof applied.to === "string" && applied.to ? applied.to : applied.from;
   return {
@@ -530,6 +555,100 @@ export async function deliverSteerBriefRpc(
     workspaceId: input.workspaceId,
     agentId: input.agentId,
     action: input.action,
+  });
+}
+
+export interface SteerSettingsHandlerExtra {
+  getCleanupSettings?: () => Promise<any>;
+  getSupervisionSettings?: () => Promise<any>;
+  buildBrief?: (paseo: any, workspaceId: string, agentId: string) => Promise<string>;
+  getZerosub?: () => Promise<any>;
+}
+
+async function steerSettingsDeps(
+  loader: ConfigLoader,
+  extra?: SteerSettingsHandlerExtra,
+): Promise<{
+  loadCatalog: (paseo: any) => Promise<any[]>;
+  getCleanupSettings?: () => Promise<any>;
+  getConfig: () => Promise<any>;
+  getZerosub: () => Promise<any>;
+  quotaSnapshot: Record<string, any> | null;
+  poolSampledAtMs: number | null;
+  quotaSampleMinutes?: number;
+}> {
+  const supervision = extra?.getSupervisionSettings ? await extra.getSupervisionSettings().catch(() => null) : null;
+  const sampleMinutes = typeof supervision?.quotaSampleMinutes === "number" ? supervision.quotaSampleMinutes : undefined;
+  return {
+    loadCatalog: (paseo: any) => loadCatalog(paseo),
+    ...(extra?.getCleanupSettings ? { getCleanupSettings: extra.getCleanupSettings } : {}),
+    getConfig: () => loader.loadEffectiveConfig(),
+    getZerosub: extra?.getZerosub ?? readZerosubStateSafe,
+    quotaSnapshot: getQuotaSnapshot(),
+    poolSampledAtMs: getQuotaSampledAt(),
+    ...(sampleMinutes !== undefined ? { quotaSampleMinutes: sampleMinutes } : {}),
+  };
+}
+
+export async function previewSteerSettingsRpc(
+  input: RpcInput<typeof factorySteerSettingsPreview>,
+  { paseo }: PluginHandlerContext,
+  loader: ConfigLoader,
+  extra?: SteerSettingsHandlerExtra,
+): Promise<any> {
+  return previewSteerSettings(paseo, {
+    workspaceId: input.workspaceId,
+    agentId: input.agentId,
+    ...(input.model !== undefined ? { model: input.model } : {}),
+    ...(input.thinking !== undefined ? { thinking: input.thinking } : {}),
+    ...(input.speed !== undefined ? { speed: input.speed } : {}),
+  }, await steerSettingsDeps(loader, extra));
+}
+
+export async function applySteerSettingsRpc(
+  input: RpcInput<typeof factorySteerSettings>,
+  { paseo }: PluginHandlerContext,
+  loader: ConfigLoader,
+  extra?: SteerSettingsHandlerExtra,
+): Promise<any> {
+  const deps = await steerSettingsDeps(loader, extra);
+  return applySteerSettings(paseo, {
+    workspaceId: input.workspaceId,
+    agentId: input.agentId,
+    fingerprint: input.fingerprint,
+    route: input.route,
+    ...(input.model !== undefined ? { model: input.model } : {}),
+    ...(input.thinking !== undefined ? { thinking: input.thinking } : {}),
+    ...(input.speed !== undefined ? { speed: input.speed } : {}),
+    ...(input.deliver !== undefined ? { deliver: input.deliver } : {}),
+  }, {
+    ...deps,
+    buildBrief: extra?.buildBrief ?? createResumeBriefBuilder(loader),
+    rewindClient: defaultCreateRewindClient,
+    configClient: defaultCreateRewindClient,
+  });
+}
+
+export async function revertSteerSettingsRpc(
+  input: RpcInput<typeof factorySteerSettingsRevert>,
+  { paseo }: PluginHandlerContext,
+  loader: ConfigLoader,
+  extra?: SteerSettingsHandlerExtra,
+): Promise<any> {
+  const deps = await steerSettingsDeps(loader, extra);
+  return revertSteerSettings(paseo, {
+    workspaceId: input.workspaceId,
+    agentId: input.agentId,
+    observed: {
+      provider: input.observed?.provider ?? null,
+      model: input.observed?.model ?? null,
+      thinking: input.observed?.thinking ?? null,
+      speed: input.observed?.speed ?? null,
+      sessionId: input.observed?.sessionId ?? null,
+    },
+  }, {
+    ...deps,
+    configClient: defaultCreateRewindClient,
   });
 }
 

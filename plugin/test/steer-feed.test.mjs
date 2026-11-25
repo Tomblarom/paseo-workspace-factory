@@ -85,6 +85,13 @@ test("a live steer projects a warm row with identity and flags", () => {
     primaryAction: "focus",
     detail: "Cache warm · cooling in 20m",
     nextBoundaryAt: iso(NOW + 20 * MIN),
+    thinking: null,
+    speed: null,
+    sessionId: null,
+    baseline: null,
+    confirmed: null,
+    settingsLocked: false,
+    settingsLockReason: null,
   });
 });
 
@@ -235,6 +242,85 @@ test("the feed exposes pending permissions and staged briefs", () => {
     }),
   );
   assert.equal(empty[0].stagedBrief, false);
+});
+
+test("the feed exposes live thinking, speed, session and baseline", () => {
+  const rows = feed(
+    paseoState(
+      [agent("steer-a", {
+        thinkingOptionId: "high",
+        effectiveThinkingOptionId: "high",
+        options: { service_tier: "flex" },
+        persistence: { sessionId: "sess-1" },
+      })],
+      {
+        entries: {
+          "steer-a": {
+            ...TURN,
+            settingsBaseline: {
+              provider: "codex",
+              model: "gpt-6.2-sol",
+              thinking: "high",
+              speed: "flex",
+              sessionId: "sess-1",
+              turnId: "t-1",
+              at: iso(NOW - 5 * MIN),
+            },
+          },
+        },
+      },
+    ),
+  );
+  assert.equal(rows[0].thinking, "high");
+  assert.equal(rows[0].speed, "flex");
+  assert.equal(rows[0].sessionId, "sess-1");
+  assert.deepEqual(rows[0].baseline, {
+    provider: "codex",
+    model: "gpt-6.2-sol",
+    thinking: "high",
+    speed: "flex",
+    sessionId: "sess-1",
+  });
+  assert.equal(rows[0].state, "warm");
+});
+
+test("a live tuple that differs from a comparable baseline is a prefix break", () => {
+  const rows = feed(
+    paseoState([agent("steer-a", { model: "gpt-5.5", persistence: { sessionId: "sess-1" } })], {
+      entries: {
+        "steer-a": {
+          ...TURN,
+          settingsBaseline: {
+            provider: "codex",
+            model: "gpt-6.2-sol",
+            thinking: null,
+            speed: null,
+            sessionId: "sess-1",
+            turnId: "t-1",
+            at: iso(NOW - 5 * MIN),
+          },
+        },
+      },
+    }),
+  );
+  assert.equal(rows[0].warmth, "cold");
+  assert.equal(rows[0].state, "cold");
+  assert.match(rows[0].detail, /Settings changed/);
+});
+
+test("the feed flags the efficiency lock for warm steers", () => {
+  const rows = feed(
+    paseoState([agent("steer-a")], { entries: { "steer-a": { ...TURN } } }),
+    { settings: { ...CLEANUP_DEFAULTS, profile: "efficiency" } },
+  );
+  assert.equal(rows[0].settingsLocked, true);
+  assert.match(rows[0].settingsLockReason, /Maximum efficiency/);
+  const cold = feed(
+    paseoState([agent("steer-a")], { entries: { "steer-a": { lastTurnEndedAt: iso(NOW - 120 * MIN) } } }),
+    { settings: { ...CLEANUP_DEFAULTS, profile: "efficiency" } },
+  );
+  assert.equal(cold[0].settingsLocked, false);
+  assert.equal(cold[0].settingsLockReason, null);
 });
 
 test("rows sort by scope, slot and agent", () => {

@@ -142,3 +142,17 @@ export interface SteerAddPreviewIdentity {
 export function steerAddFingerprint(identity: SteerAddPreviewIdentity): string {
   return fingerprintOf({ kind: "factory.steer.add", ...identity });
 }
+
+export interface SettingsPreviewIdentity {
+  workspaceId: string;
+  agentId: string;
+  epoch: number | null;
+  sessionId: string | null;
+  current: { provider: string | null; model: string | null; thinking: string | null; speed: string | null };
+  requested: { provider: string | null; model: string | null; thinking: string | null; speed: string | null };
+  route: string;
+}
+
+export function settingsFingerprint(identity: SettingsPreviewIdentity): string {
+  return fingerprintOf({ kind: "factory.steer.settings", ...identity });
+}
