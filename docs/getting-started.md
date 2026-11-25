@@ -100,13 +100,13 @@ For first-time setup, open **Settings → Plugins → Factory** in Paseo. Under 
 | restart your steer after a break | `/factory resume` (saves the checkpoint and shows the brief, clearing the context where supported) |
 | only read the status report | `/factory resume --brief` |
 | refresh the active steer's context | `/factory fresh`, then confirm in the panel |
-| move a project to another checkout | `/factory relocate --to <path>`, then confirm in the panel |
+| move a project to another checkout | create a new scope at the target (`/factory plan`), then switch |
 | send a task to a project's steer (hub/domain) | `/factory assign --task "…"`, then confirm in the panel |
 | see the helper agents of a project | `/factory workers` |
 | list providers and models | `/factory models` |
 | see quota pools and who uses them | `/factory quota` |
 | wait until nothing runs (safe restart) | `/factory drain` |
-| tidy up leftovers | `/factory cleanup`, or `/factory cleanup --plan` then `/factory apply <hash>` |
+| tidy up leftovers | `/factory cleanup`, then archive natively (`paseo archive`, `paseo workspace archive`, `paseo project delete`) |
 | audit and repair Factory labels | `/factory labels <scope-or-agent-id>`, then select **Set labels** to apply the previewed fixes |
 | manage the worker model priority | `/factory worker list`, `/factory worker set 1 <model>`, `/factory worker pick` |
 | manage steer slots and models | `/factory steer list`, `/factory steer set B <model>` |

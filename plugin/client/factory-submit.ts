@@ -5,7 +5,6 @@ import {
   factoryAssignPreview,
   factoryCheckpointPreview,
   factoryCleanup,
-  factoryCleanupPlan,
   factoryDrain,
   factoryFreshPreview,
   factoryLabelsPreview,
@@ -14,7 +13,6 @@ import {
   factoryModelsSet,
   factoryPlan,
   factoryQuota,
-  factoryRelocatePreview,
   factoryResume,
   factoryResumeApply,
   factoryScopes,
@@ -122,16 +120,6 @@ export async function submitFactoryCommand(
     return pill("Projects");
   }
   if (parsed.command === "cleanup") {
-    if (parsed.plan) {
-      const plan = await ctx.rpc(factoryCleanupPlan, {
-        ...(parsed.allowDestructive ? { allowDestructive: true as const } : {}),
-        ...(parsed.allowIgnored ? { allowIgnored: true as const } : {}),
-        ...(parsed.only ? { only: parsed.only } : {}),
-      });
-      // A cleanup plan applies through the same hash the plan view confirms.
-      setFactoryResult({ kind: "plan", repos: ["cleanup"], at, plan: plan as never });
-      return PANEL;
-    }
     const cleanup = await ctx.rpc(factoryCleanup, {});
     setFactoryResult({ kind: "cleanup", at, cleanup });
     return pill("Cleanup");
@@ -169,19 +157,6 @@ export async function submitFactoryCommand(
       kind: "freshPreview",
       repo: parsed.repo,
       workspaceId: ctx.workspaceId,
-      at,
-      preview,
-    });
-    return PANEL;
-  }
-  if (parsed.command === "relocate") {
-    const address = parsed.repo ? { repo: parsed.repo } : { workspaceId: ctx.workspaceId };
-    const preview = await ctx.rpc(factoryRelocatePreview, { ...address, to: parsed.to });
-    setFactoryResult({
-      kind: "relocatePreview",
-      repo: parsed.repo,
-      workspaceId: ctx.workspaceId,
-      to: parsed.to,
       at,
       preview,
     });

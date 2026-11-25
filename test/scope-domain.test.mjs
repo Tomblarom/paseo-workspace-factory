@@ -450,7 +450,7 @@ test('domainFirstPlanOrder: identity without edges, domain first, cycles termina
   assert.deepEqual(domainFirstPlanOrder([a, b]).sort(), [0, 1], 'cycles terminate with every plan kept');
 });
 
-test('scopes and status show the domain for the retired scope and its relocated successor', async () => {
+test('scopes and status show the domain for the retired scope and its successor', async () => {
   const world = makeWorld();
   provisionDir(world, { path: '/p/team-a', id: 'team-a' });
   const old = provisionDir(world, { path: '/p/demo', id: 'web', domain: 'team-a', epoch: 4 });
@@ -462,7 +462,7 @@ test('scopes and status show the domain for the retired scope and its relocated 
   const rows = scopeRows(state);
   assert.equal(rows.filter((r) => r.id === 'web').length, 2);
   const lines = formatScopeRows(rows).split('\n').filter((l) => l.startsWith('web '));
-  assert.equal(lines.length, 2, 'both the retired and the relocated row print');
+  assert.equal(lines.length, 2, 'both the retired and the successor row print');
   assert.ok(lines.every((l) => l.includes('domain team-a')), lines.join('\n'));
   const runner = runnerFor(world);
   const [fresh] = await runner.discoverAll([{ local: '/p/moved' }]);

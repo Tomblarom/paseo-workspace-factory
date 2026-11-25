@@ -6,7 +6,6 @@ import {
   applyFresh,
   applyLabels,
   applyPlan,
-  applyRelocate,
   applyResumeRpc,
   applySteerAddRpc,
   applySteerSettingsRpc,
@@ -23,12 +22,10 @@ import {
   getWorkers,
   openHistory,
   pickWorker,
-  planCleanup,
   previewAssign,
   previewCheckpoint,
   previewFresh,
   previewLabels,
-  previewRelocate,
   previewSteerAdd,
   previewSteerSettingsRpc,
   previewSwitch,
@@ -69,7 +66,6 @@ import {
   factoryCheckpoint,
   factoryCheckpointPreview,
   factoryCleanup,
-  factoryCleanupPlan,
   factoryCold,
   factoryDrain,
   factoryFresh,
@@ -82,8 +78,6 @@ import {
   factoryModelsSet,
   factoryPlan,
   factoryQuota,
-  factoryRelocate,
-  factoryRelocatePreview,
   factoryResume,
   factoryResumeApply,
   factoryScopes,
@@ -192,9 +186,6 @@ export default function contribute(server: PluginServerContext) {
   server.handle(factoryQuota, (input, ctx) => getQuota(input, ctx, loader, { getZerosub }));
   server.handle(factoryAssignPreview, (input, ctx) => previewAssign(input, ctx, loader));
   server.handle(factoryAssign, (input, ctx) => applyAssign(input, ctx, loader));
-  server.handle(factoryRelocatePreview, (input, ctx) => previewRelocate(input, ctx, loader));
-  server.handle(factoryRelocate, (input, ctx) => applyRelocate(input, ctx, loader));
-  server.handle(factoryCleanupPlan, (input, ctx) => planCleanup(input, ctx, loader));
   server.handle(factoryLabelsPreview, previewLabels);
   server.handle(factoryLabels, (input, ctx) => applyLabels(input, ctx, loader));
   server.handle(factoryModelsList, (input, ctx) => listModels(input, ctx, loader, hostSettings));

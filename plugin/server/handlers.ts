@@ -10,7 +10,6 @@ import {
   factoryCheckpoint,
   factoryCheckpointPreview,
   factoryCleanup,
-  factoryCleanupPlan,
   factoryDrain,
   factoryFresh,
   factoryFreshPreview,
@@ -19,8 +18,6 @@ import {
   factoryLabelsPreview,
   factoryModelsCatalog,
   factoryPlan,
-  factoryRelocate,
-  factoryRelocatePreview,
   factoryResume,
   factoryResumeApply,
   factoryScopes,
@@ -43,7 +40,6 @@ import {
   freshFingerprint,
   isPlanHash,
   labelsFingerprint,
-  relocateFingerprint,
   steerAddFingerprint,
   switchFingerprint,
 } from "../shared/preview.js";
@@ -70,9 +66,6 @@ import { liveSlotHolders } from "./factory/discovery.js";
 import {
   attachProjectArchivedAgents,
   collectCleanupCandidates,
-  formatLoss,
-  planCleanupOps,
-  selectApplyRunPlans,
 } from "./factory/cleanup.js";
 import { isAdvisorSlot, isSensitiveProfile, workerPriority } from "./factory/config.js";
 import { DRAIN_DEFAULT_TIMEOUT_MS, drain, parseTimeout } from "./factory/drain.js";
@@ -86,7 +79,6 @@ import { applySteerAdd, formatSteerAddPreview, planSteerAdd } from "./factory/st
 import { planHash } from "./factory/planner.js";
 import { defaultCreateRewindClient } from "./factory/rewind.js";
 import { deliverSteerBrief, stageSteerBrief } from "./steer-brief.js";
-import { relocateScope } from "./factory/relocate.js";
 import { formatWorkersText, readWorkers, workersReport } from "./factory/supervision.js";
 import {
   LABEL,
@@ -1055,6 +1047,11 @@ export async function applyPlan(
         `No saved plan with hash ${input.hash}. Run /factory plan, check the preview, then apply the hash it shows.`,
       );
     }
+    if (authorization?.kind === "cleanup") {
+      throw new Error(
+        "This is a stored cleanup plan, and cleanup plans are no longer applied; use the read-only cleanup report and archive natively (paseo archive, paseo workspace archive, paseo project delete).",
+      );
+    }
     mkdirSync(journalDir, { recursive: true, mode: 0o700 });
     const journalFile = join(journalDir, `${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`);
     const executeOptions: any = {
@@ -1070,15 +1067,10 @@ export async function applyPlan(
       lookupReceipt: lookupCreationReceipt,
       progress: fileProgress(join(planDir, `${input.hash}.progress.json`)),
       guard: () => held.verify(),
-      // Cleanup authorizations re-plan from the stored filter, like the CLI.
-      runPlans: (selectApplyRunPlans as any)(authorization, {
-        repoRunPlans: (list: any, options: any) => {
-          const runnerOptions: any = { config, client: paseo, gh: createGh(), git: createGit() };
-          return createRunner(runnerOptions).runPlans(list, options);
-        },
-        client: paseo,
-        git: createGit(),
-      }),
+      runPlans: (list: any, options: any) => {
+        const runnerOptions: any = { config, client: paseo, gh: createGh(), git: createGit() };
+        return createRunner(runnerOptions).runPlans(list, options);
+      },
       execute: createExecutors(executeOptions),
       journal: (event: any) => {
         held.verify();
@@ -1287,129 +1279,6 @@ export async function applyAssign(
     assignedBy: null,
   });
   return applied;
-}
-
-export async function previewRelocate(
-  input: RpcInput<typeof factoryRelocatePreview>,
-  { paseo }: PluginHandlerContext,
-  loader: ConfigLoader,
-): Promise<any> {
-  const { config, discovery, scope } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
-  void scope;
-  const dry: any = await (relocateScope as any)({
-    client: paseo,
-    discovery,
-    promptOptions: await loader.loadPromptOptions(paseo),
-    config,
-    to: input.to,
-    apply: false,
-    git: createGit(),
-  });
-  return {
-    scope: dry.scope,
-    fromWorkspace: dry.fromWorkspace,
-    toDir: dry.toDir,
-    toWorkspace: dry.toWorkspace,
-    adoptedWorkspace: dry.adoptedWorkspace,
-    movedTo: dry.movedTo,
-    checkpoint: dry.checkpoint,
-    notes: dry.notes,
-    steers: dry.steers,
-    packets: dry.packets,
-    fingerprint: relocateFingerprint({
-      scope: dry.scope,
-      fromWorkspace: dry.fromWorkspace,
-      toDir: dry.toDir,
-      steers: dry.steers.map((s: any) => `${s.slot}:${s.profile}`),
-      checkpoint: dry.checkpoint,
-    }),
-  };
-}
-
-export async function applyRelocate(
-  input: RpcInput<typeof factoryRelocate>,
-  { paseo }: PluginHandlerContext,
-  loader: ConfigLoader,
-): Promise<any> {
-  const { config, discovery } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
-  const git = createGit();
-  const promptOptions = await loader.loadPromptOptions(paseo);
-  const dry: any = await (relocateScope as any)({
-    client: paseo,
-    discovery,
-    promptOptions,
-    config,
-    to: input.to,
-    apply: false,
-    git,
-  });
-  const fresh = relocateFingerprint({
-    scope: dry.scope,
-    fromWorkspace: dry.fromWorkspace,
-    toDir: dry.toDir,
-    steers: dry.steers.map((s: any) => `${s.slot}:${s.profile}`),
-    checkpoint: dry.checkpoint,
-  });
-  if (fresh !== input.fingerprint) {
-    throw new Error(
-      "Something changed since the relocate preview (for example another relocate). Run /factory relocate again and confirm the new preview.",
-    );
-  }
-  const executeOptions: any = { client: paseo, gh: createGh(), git, paseoCli: createPaseoCli() };
-  const applied: any = await (relocateScope as any)({
-    client: paseo,
-    discovery,
-    promptOptions,
-    config,
-    to: input.to,
-    apply: true,
-    git,
-    lookupReceipt: lookupCreationReceipt,
-    execute: createExecutors(executeOptions),
-  });
-  return applied;
-}
-
-export async function planCleanup(
-  input: RpcInput<typeof factoryCleanupPlan>,
-  { paseo }: PluginHandlerContext,
-  loader: ConfigLoader,
-): Promise<any> {
-  const config = await loader.loadEffectiveConfig();
-  const only = input.only?.length ? [...input.only] : null;
-  const paseoState: any = await (attachProjectArchivedAgents as any)(await readPaseoState(paseo), paseo);
-  const { ops, hints } = (planCleanupOps as any)(paseoState, {
-    allowDestructive: input.allowDestructive ?? false,
-    allowIgnored: input.allowIgnored ?? false,
-    only,
-    git: createGit(),
-  });
-  const plans = [
-    {
-      repo: "cleanup",
-      input: "cleanup",
-      status: ops.length ? "pending" : "complete",
-      ops,
-      conflicts: [],
-      notes: [
-        ...hints.map((h: any) => `hint ${h.id}: ${h.reason}`),
-        ...ops
-          .filter((op: any) => op.kind !== "scope.retire" && op.loss)
-          .map((op: any) => `DESTRUCTIVE ${op.key}: loss ${(formatLoss as any)(op.loss)}`),
-      ],
-      observed: {},
-    },
-  ];
-  const hash = planHash(plans, config);
-  if (ops.length) {
-    const stored = storeAuthorization(
-      runtime().planDir,
-      { ...(createAuthorization as any)(plans, config, { entries: [{ cleanup: { allowDestructive: input.allowDestructive ?? false, allowIgnored: input.allowIgnored ?? false, only } }] }), kind: "cleanup" },
-      config,
-    );
-    void stored;
-  }
-  return { hash, plans, hints };
 }
 
 function labelsAddress(input: { address?: string }): string | undefined {

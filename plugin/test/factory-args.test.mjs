@@ -32,30 +32,12 @@ test("status takes an optional scope and no flags", () => {
 test("scopes and cleanup take no address", () => {
   assert.deepEqual(parseFactoryArgs("scopes"), { command: "scopes", candidates: false });
   assert.deepEqual(parseFactoryArgs("scopes --candidates"), { command: "scopes", candidates: true });
-  assert.deepEqual(parseFactoryArgs("cleanup"), { command: "cleanup", plan: false, allowDestructive: false, allowIgnored: false });
+  assert.deepEqual(parseFactoryArgs("cleanup"), { command: "cleanup" });
   assert.throws(() => parseFactoryArgs("scopes a/b"), /takes no scope address/);
   assert.throws(() => parseFactoryArgs("scopes --slots A"), /Unknown flag/);
   assert.throws(() => parseFactoryArgs("cleanup a/b"), /whole instance/);
-  assert.throws(() => parseFactoryArgs("cleanup --candidates"), /Unknown flag/);
-});
-
-test("cleanup --plan previews deletion with filters", () => {
-  assert.deepEqual(parseFactoryArgs("cleanup --plan"), {
-    command: "cleanup",
-    plan: true,
-    allowDestructive: false,
-    allowIgnored: false,
-  });
-  assert.deepEqual(parseFactoryArgs("cleanup --plan --allow-destructive --allow-ignored --only a,b"), {
-    command: "cleanup",
-    plan: true,
-    allowDestructive: true,
-    allowIgnored: true,
-    only: ["a", "b"],
-  });
-  assert.throws(() => parseFactoryArgs("cleanup --allow-destructive"), /need --plan/);
-  assert.throws(() => parseFactoryArgs("cleanup --only a"), /need --plan/);
-  assert.throws(() => parseFactoryArgs("cleanup --plan --only"), /needs a value/);
+  assert.throws(() => parseFactoryArgs("cleanup --candidates"), /takes no flags/);
+  assert.throws(() => parseFactoryArgs("cleanup --plan"), /Unknown flag/);
 });
 
 test("plan takes repos, allow-fork and slots", () => {
@@ -306,15 +288,8 @@ test("fresh, workers, models and drain parse", () => {
   assert.throws(() => parseFactoryArgs("retire agent-9"), /Unknown subcommand/);
 });
 
-test("relocate needs a target, assign needs a task", () => {
-  assert.deepEqual(parseFactoryArgs("relocate --to /data/new"), { command: "relocate", to: "/data/new" });
-  assert.deepEqual(parseFactoryArgs("relocate a/b --to other-project"), {
-    command: "relocate",
-    repo: "a/b",
-    to: "other-project",
-  });
-  assert.throws(() => parseFactoryArgs("relocate"), /needs --to/);
-  assert.throws(() => parseFactoryArgs("relocate a b --to x"), /at most one scope address/);
+test("relocate is gone, assign needs a task", () => {
+  assert.throws(() => parseFactoryArgs("relocate --to /data/new"), /Unknown subcommand/);
   assert.deepEqual(parseFactoryArgs('assign --task "ship it"'), {
     command: "assign",
     task: "ship it",

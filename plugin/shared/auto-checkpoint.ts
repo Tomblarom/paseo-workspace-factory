@@ -20,7 +20,7 @@ const SCOPE_KEY = "wsf.scope";
 const ROLE_KEY = "wsf.role";
 const SLOT_KEY = "wsf.slot";
 const LEGACY_SCOPE_KEY = "ari.wsf.scope";
-// Steers created before wsf.scope (or by relocate) carry only the repo label;
+// Steers created before wsf.scope carry only the repo label;
 // for steers the repo label is the scope id, as in core discovery.
 const REPO_KEY = "wsf.repo";
 const LEGACY_REPO_KEY = "ari.wsf.repo";

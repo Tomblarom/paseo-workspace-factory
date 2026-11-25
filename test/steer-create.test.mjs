@@ -1,7 +1,7 @@
 // One steer request builder + one placement verifier (K9): shared request,
 // key and placement construction, placement checks for created/observed
 // agents, and the fail-closed receipt lookup/validation/confirmation used by
-// plan, steer add, fresh and relocate. Fake state only; no daemon.
+// plan, steer add and fresh. Fake state only; no daemon.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { LABEL, PARENT_LABEL } from '../src/paseo.mjs';
@@ -67,14 +67,14 @@ test('buildSteerCreate honors title, metadata pin and digest overrides', () => {
   assert.equal(plain.request.metadata, undefined);
   assert.equal(plain.expected.accountId, undefined);
 
-  // Relocate previews digest the target directory: the workspace id is
-  // unknown until apply, so the key must not depend on the request.
+  // A caller whose workspace id is unknown until apply digests its stable
+  // inputs instead, so the key must not depend on the request.
   const preview = buildSteerCreate({
     keyScope: 'r', repo: 'r', scopeId: 'r', slot: 'A', workspaceId: null,
-    profile: { provider: 'p', model: 'm' }, keyParts: ['relocate', 'steer', 'A'],
+    profile: { provider: 'p', model: 'm' }, keyParts: ['steer', 'A', 'preview'],
     digestInput: { target: '/p/moved', title: 'Steer A' },
   });
-  assert.equal(preview.idempotencyKey, steerCreateKey('r', ['relocate', 'steer', 'A'], { target: '/p/moved', title: 'Steer A' }));
+  assert.equal(preview.idempotencyKey, steerCreateKey('r', ['steer', 'A', 'preview'], { target: '/p/moved', title: 'Steer A' }));
 });
 
 test('key helpers lowercase the scope and shorten holder ids', () => {

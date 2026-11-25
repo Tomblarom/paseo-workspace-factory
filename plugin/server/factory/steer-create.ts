@@ -1,7 +1,7 @@
 // @ts-nocheck
 // GENERATED from src/steer-create.mjs by npm run plugin:sync. Do not edit.
 // One request builder + one placement verifier for every steer creation.
-// Plan, steer add, fresh (active/inactive) and relocate build the same
+// Plan, steer add and fresh (active/inactive) build the same
 // top-level agent.create request through buildSteerCreate; the executor and
 // the recovery paths verify the created or observed agent against the same
 // expected placement through verifySteerPlacement. Worker creates keep their
@@ -52,8 +52,8 @@ export function steerCreateKey(keyScope, keyParts, digestInput) {
  * One steer create request. `keyParts` is the operation's stable identity
  * (e.g. `['steer', slot, 'g1']`); the digest binds the exact request, so a
  * changed request never reuses the key silently. `digestInput` overrides what
- * the digest covers (relocate previews digest the target directory: the
- * workspace id is unknown until apply). `metadata` pins the agent (e.g. the
+ * the digest covers (callers whose workspace id is unknown until apply pass
+ * the stable inputs instead). `metadata` pins the agent (e.g. the
  * ZeroSub account); `accountId` adds the pin to the expected placement.
  * Returns `{ request, idempotencyKey, expected }`.
  */

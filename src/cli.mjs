@@ -28,8 +28,7 @@ import { validateProfilesAgainstCatalog } from './config.mjs';
 import { readProfileHealth, storeProfileFailure } from './quota.mjs';
 import { readZerosubState } from './zerosub.mjs';
 import { defaultCreateRewindClient } from './rewind.mjs';
-import { attachProjectArchivedAgents, collectCleanupCandidates, formatCandidate, formatLoss, planCleanupOps, selectApplyRunPlans } from './cleanup.mjs';
-import { relocateScope } from './relocate.mjs';
+import { attachProjectArchivedAgents, collectCleanupCandidates, formatCandidate } from './cleanup.mjs';
 import { FACTORY_PLUGIN_ID, PROMPT_SETTINGS_RPC, findFactoryCheckout } from './findings.mjs';
 
 export async function readCliPromptOptions({ createClient = connectPluginRpc } = {}) {
@@ -74,13 +73,11 @@ const USAGE = `Usage: paseo-factory <command> [options]
   checkpoint <repo> --from-agent <steer-id> [--next <text>]   take the CHECKPOINT block of its last answer
   switch <repo> --to <slot> [--apply] [--no-send] [--wait] [--notify-previous] [--language en|de]
   fresh <repo> [--slot <S>|--worker <id>] [--apply]   same-tab rewind first, else a new agent (active steer: takeover); --slot/--worker refresh without takeover
-  relocate <scope> --to <path|project> [--apply]
   assign <scope> --task <text> [--test <text>]... [--blocker <text>]... [--next <text>] [--report-to <agent-id>] [--apply] [--no-send]   (report-to defaults to the calling agent)
   resume [scope] [--agent <id>] [--json]   cold-start brief: task, next step, git, workers
   resume [scope] --agent <worker> --apply   continue an interrupted worker via the plugin
   workers [scope] [--prune] [--apply] [--json]   print the worker register (task, state, resumes); --prune removes entries whose agent is gone
-  cleanup [--json]                   read-only cleanup report over the whole instance
-  cleanup --plan [--allow-destructive] [--allow-ignored] [--only <id,...>] [--json]
+  cleanup [--json]                   read-only scope health report over the whole instance
   models [--json]                    list the live provider catalog
   worker list [scope] [--json]         worker priority with availability; → marks what worker pick returns
   worker set <n> <profile|provider/model> [--thinking X] [--mode Y] [--profile name] [--dry-run]
@@ -269,18 +266,6 @@ function printPlans(plans, hash) {
   if (writes) console.log(`Stored for review. Apply: paseo-factory apply --confirm ${hash}`);
 }
 
-function printCleanupPlan(plan, hints, hash) {
-  console.log(`\n${plan.repo}  [${plan.status}]`);
-  for (const h of hints) console.log(`  ~ ${h.id}  ${h.reason}`);
-  for (const op of plan.ops.filter((o) => o.kind === 'scope.retire')) console.log(`  + ${op.key.padEnd(26)} ${op.summary}`);
-  for (const op of plan.ops.filter((o) => o.kind !== 'scope.retire')) {
-    console.log(`  ! DESTRUCTIVE ${op.key}  ${op.summary}`);
-    if (op.loss) console.log(`    loss: ${formatLoss(op.loss)}`);
-  }
-  const writes = plan.ops.length;
-  console.log(`\nPlan hash ${hash} · ${writes} write operation(s) · dry-run, nothing changed`);
-}
-
 async function main() {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
@@ -296,7 +281,7 @@ async function main() {
       'adopt-worker': { type: 'string', multiple: true }, detach: { type: 'boolean' }, agent: { type: 'string' }, checkout: { type: 'string' },
       main: { type: 'string' }, domain: { type: 'string' },
       thinking: { type: 'string' }, mode: { type: 'string' }, profile: { type: 'string' }, 'dry-run': { type: 'boolean' },
-      candidates: { type: 'boolean' }, plan: { type: 'boolean' }, 'allow-destructive': { type: 'boolean' }, 'allow-ignored': { type: 'boolean' }, only: { type: 'string' },
+      candidates: { type: 'boolean' },
       timeout: { type: 'string' }, title: { type: 'string' },
       failed: { type: 'string' }, reason: { type: 'string' },
       slot: { type: 'string' }, worker: { type: 'string' }, prune: { type: 'boolean' },
@@ -532,6 +517,9 @@ async function main() {
       // progress/journal writes and the final report all happen inside the lock.
       const result = await withApplyLock(async (held) => {
         const authorization = JSON.parse(readFileSync(join(PLAN_DIR, `${values.confirm}.json`), 'utf8'));
+        if (authorization?.kind === 'cleanup') {
+          throw new Error('This is a stored cleanup plan, and cleanup plans are no longer applied; use the read-only cleanup report and archive natively (`paseo archive`, `paseo workspace archive`, `paseo project delete`)');
+        }
         if (entries.length && JSON.stringify(entries) !== JSON.stringify(authorization.entries)) throw new Error('Repositories differ from the stored plan; omit them or run a new dry-run');
         mkdirSync(JOURNAL_DIR, { recursive: true, mode: 0o700 });
         const journalFile = join(JOURNAL_DIR, `${new Date().toISOString().replace(/[:.]/g, '-')}.jsonl`);
@@ -539,7 +527,7 @@ async function main() {
           authorization, config, confirm: values.confirm, lookupReceipt: lookupCreationReceipt,
           progress: fileProgress(join(PLAN_DIR, `${values.confirm}.progress.json`)),
           guard: () => held.verify(),
-          runPlans: selectApplyRunPlans(authorization, { repoRunPlans: (list, options) => runner.runPlans(list, options), client, git }),
+          runPlans: (list, options) => runner.runPlans(list, options),
           execute: createExecutors({ client, gh, git, paseoCli: createPaseoCli() }),
           journal: (event) => {
             held.verify();
@@ -739,50 +727,13 @@ async function main() {
       return console.log(formatWorkersText(scopeId, epoch, report));
     }
 
-    if (command === 'relocate') {
-      if (entries.length !== 1) throw new Error('relocate needs exactly one scope');
-      if (!values.to) throw new Error('relocate needs --to <path|project>');
-      const raw = entries[0];
-      const shared = await readPaseoState(client);
-      const { entry: target, scope, deprecatedAlias } = resolveTargetEntry(raw, shared);
-      if (scope && deprecatedAlias) {
-        const typed = typeof raw === 'string' ? raw : JSON.stringify(raw);
-        console.error(`Note: ${JSON.stringify(typed)} is a legacy alias for scope ${JSON.stringify(scope.id)} (${scope.kind}); prefer the scope id.`);
-      }
-      const [discovery] = await runner.discoverAll([target], { state: shared });
-      const result = await relocateScope({
-        client, discovery, config, to: values.to, apply: Boolean(values.apply), git,
-        lookupReceipt: lookupCreationReceipt, language: runtime().handoffLanguage,
-        workerModel: workerModelLine(config, discovery),
-        promptOptions: await readCliPromptOptions(),
-      });
-      console.log(`${result.applied ? 'Relocated' : 'Dry-run'}: ${result.scope} ${result.fromWorkspace} → ${result.toDir} (${result.toWorkspace ?? 'new workspace'}) · ${result.steers.length} steer(s) · epoch 1 · movedTo ${result.movedTo}${result.domain ? ` · domain ${result.domain}` : ''}${result.checkpoint ? '' : ' · NO task checkpoint'}${result.delivered.length ? ` · handoffs delivered to ${result.delivered.length}` : ''}${result.previousNotified.length ? ` · ${result.previousNotified.length} previous steer(s) notified` : ''}${result.deliveryErrors.map((d) => ` · delivery failed: ${d.error}`).join('')}${result.notifyErrors.map((d) => ` · notify failed: ${d.error}`).join('')}${(result.notes ?? []).map((n) => `\nNote: ${n}`).join('')}\nNote: the retired scope ${result.fromWorkspace} keeps its agents; archive it via \`cleanup --plan\` (never automatic). Until then, address the new scope by workspace id or path.`);
-      for (const packet of result.packets) console.log(`--- Steer ${packet.slot} → ${packet.to ?? '(new agent)'}\n${packet.packet}`);
-      return;
-    }
-
     if (command === 'cleanup') {
       if (entries.length) throw new Error('cleanup takes no repository; it reports on the whole instance');
       const paseo = await attachProjectArchivedAgents(await readPaseoState(client), client);
-      if (!values.plan) {
-        const candidates = collectCleanupCandidates(paseo, { git });
-        if (values.json) return console.log(JSON.stringify({ candidates }, null, 2));
-        if (!candidates.length) return console.log('No cleanup candidates.');
-        return console.log(candidates.map(formatCandidate).join('\n'));
-      }
-      const only = values.only ? values.only.split(',').map((s) => s.trim()).filter(Boolean) : null;
-      if (values.only !== undefined && !only.length) throw new Error('--only needs at least one candidate id');
-      const allowDestructive = Boolean(values['allow-destructive']);
-      const allowIgnored = Boolean(values['allow-ignored']);
-      const { ops, hints } = planCleanupOps(paseo, { allowDestructive, allowIgnored, only, git });
-      const plans = [{ repo: 'cleanup', input: 'cleanup', status: ops.length ? 'pending' : 'complete', ops, conflicts: [], notes: hints.map((h) => `hint ${h.id}: ${h.reason}`), observed: {} }];
-      const hash = planHash(plans, config);
-      if (values.json) return console.log(JSON.stringify({ hash, plans, hints }, null, 2));
-      printCleanupPlan(plans[0], hints, hash);
-      if (!ops.length) return console.log('Nothing to store: no ops planned.');
-      const stored = storeAuthorization(PLAN_DIR, { ...createAuthorization(plans, config, { entries: [{ cleanup: { allowDestructive, allowIgnored, only } }] }), kind: 'cleanup' }, config);
-      if (stored.status === 'kept') console.log(`Existing authorization kept (created ${stored.authorization.createdAt}).`);
-      return console.log(`Stored for review. Apply: paseo-factory apply --confirm ${hash}`);
+      const candidates = collectCleanupCandidates(paseo, { git });
+      if (values.json) return console.log(JSON.stringify({ candidates }, null, 2));
+      if (!candidates.length) return console.log('No cleanup candidates.');
+      return console.log(candidates.map(formatCandidate).join('\n'));
     }
     throw new Error(`Unknown command ${command}\n${USAGE}`);
   } finally {

@@ -29,13 +29,12 @@ export const FACTORY_COMMANDS: Record<string, CommandHelp> = {
     examples: ["/factory scopes", "/factory scopes --candidates"],
   },
   cleanup: {
-    usage: "/factory cleanup [--plan [--allow-destructive] [--allow-ignored] [--only <id,…>]]",
+    usage: "/factory cleanup",
     summary: "Report leftovers (test scopes, missing folders, empty projects).",
     details: [
-      "Read-only. Shows what would be lost for each candidate; nothing is deleted.",
-      "--plan previews deleting them and ends with a plan hash; run it with /factory apply <hash>.",
+      "Read-only. Shows what would be lost for each candidate and the native Paseo command that archives it; nothing is deleted.",
     ],
-    examples: ["/factory cleanup", "/factory cleanup --plan"],
+    examples: ["/factory cleanup"],
   },
   fresh: {
     usage: "/factory fresh [scope]",
@@ -45,15 +44,6 @@ export const FACTORY_COMMANDS: Record<string, CommandHelp> = {
       "The old agent keeps its tab; archive it in Paseo when done.",
     ],
     examples: ["/factory fresh", "/factory fresh me/my-repo"],
-  },
-  relocate: {
-    usage: "/factory relocate [scope] --to <path|project>",
-    summary: "Move a project to another checkout directory or project.",
-    details: [
-      "Shows a preview; confirm it in the Factory panel.",
-      "The old scope is retired and keeps its agents; archive it via /factory cleanup --plan.",
-    ],
-    examples: ["/factory relocate --to /data/new-checkout", "/factory relocate me/my-repo --to other-project"],
   },
   assign: {
     usage: "/factory assign [scope] --task <text> [--test <text>]… [--blocker <text>]… [--next <text>]",
@@ -246,7 +236,7 @@ export function factoryHelp(topic?: string): string {
 export type FactoryCommand =
   | { command: "status"; repo?: string }
   | { command: "scopes"; candidates: boolean }
-  | { command: "cleanup"; plan: boolean; allowDestructive: boolean; allowIgnored: boolean; only?: string[] }
+  | { command: "cleanup" }
   | { command: "plan"; repos: string[]; allowFork: boolean; slots?: string[]; adopt?: Record<string, string>; adoptScoped?: Record<string, Record<string, string>>; local?: string[]; hub?: string[]; checkout?: string; name?: string; subject?: string; main?: string; domain?: string; adoptWorker?: Record<string, string | null>; detach?: boolean; retitle?: boolean; renameProject?: string }
   | { command: "apply"; hash: string }
   | {
@@ -262,7 +252,6 @@ export type FactoryCommand =
   | { command: "switch"; repo?: string; to: string; apply: boolean }
   | { command: "resume"; repo?: string; agentId?: string; brief: boolean }
   | { command: "fresh"; repo?: string; slot?: string }
-  | { command: "relocate"; repo?: string; to: string }
   | { command: "assign"; repo?: string; task: string; tests: string[]; blockers: string[]; next?: string }
   | { command: "workers"; repo?: string }
   | { command: "models" }
@@ -344,8 +333,8 @@ interface ParsedFlags {
 }
 
 const REPEATABLE = new Set(["test", "blocker", "adopt", "adopt-worker", "local", "hub"]);
-const VALUE_FLAGS = new Set(["slots", "slot", "to", "task", "from-agent", "from-steer", "next", "test", "blocker", "agent", "thinking", "mode", "profile", "only", "timeout", "adopt", "adopt-worker", "local", "hub", "checkout", "name", "subject", "main", "domain", "rename-project"]);
-const BOOL_FLAGS = new Set(["allow-fork", "apply", "candidates", "brief", "dry-run", "plan", "allow-destructive", "allow-ignored", "detach", "retitle"]);
+const VALUE_FLAGS = new Set(["slots", "slot", "to", "task", "from-agent", "from-steer", "next", "test", "blocker", "agent", "thinking", "mode", "profile", "timeout", "adopt", "adopt-worker", "local", "hub", "checkout", "name", "subject", "main", "domain", "rename-project"]);
+const BOOL_FLAGS = new Set(["allow-fork", "apply", "candidates", "brief", "dry-run", "detach", "retitle"]);
 
 function parseFlags(tokens: string[]): ParsedFlags {
   const positionals: string[] = [];
@@ -684,22 +673,9 @@ export function parseFactoryArgs(args: string): FactoryCommand {
     return { command: "scopes", candidates: flags.bools.has("candidates") };
   }
   if (sub === "cleanup") {
-    checkAllowed(flags, "cleanup", ["plan", "allow-destructive", "allow-ignored", "only"]);
+    checkNoFlags(flags, "cleanup");
     if (flags.positionals.length) fail("cleanup takes no scope address; it reports on the whole instance.");
-    const plan = flags.bools.has("plan");
-    const onlyRaw = flags.singles.get("only");
-    if (!plan && (flags.bools.has("allow-destructive") || flags.bools.has("allow-ignored") || onlyRaw !== undefined)) {
-      fail("--allow-destructive, --allow-ignored and --only need --plan.");
-    }
-    const only = onlyRaw === undefined ? undefined : onlyRaw.split(",").map((s) => s.trim()).filter(Boolean);
-    if (only !== undefined && !only.length) fail("--only needs at least one candidate id.");
-    return {
-      command: "cleanup",
-      plan,
-      allowDestructive: flags.bools.has("allow-destructive"),
-      allowIgnored: flags.bools.has("allow-ignored"),
-      ...(only ? { only } : {}),
-    };
+    return { command: "cleanup" };
   }
   if (sub === "plan") {
     checkAllowed(flags, "plan", ["allow-fork", "slots", "adopt", "adopt-worker", "local", "hub", "checkout", "name", "subject", "main", "domain", "detach", "retitle", "rename-project"]);
@@ -838,17 +814,6 @@ export function parseFactoryArgs(args: string): FactoryCommand {
       command: "fresh",
       ...(flags.positionals.length === 1 ? { repo: flags.positionals[0] } : {}),
       ...(slot ? { slot: slot.toUpperCase() } : {}),
-    };
-  }
-  if (sub === "relocate") {
-    checkAllowed(flags, "relocate", ["to"]);
-    if (flags.positionals.length > 1) fail("relocate takes at most one scope address.");
-    const to = flags.singles.get("to");
-    if (!to) fail("relocate needs --to <path|project>: the checkout directory or project that takes over, e.g. --to /data/new.");
-    return {
-      command: "relocate",
-      ...(flags.positionals.length === 1 ? { repo: flags.positionals[0] } : {}),
-      to,
     };
   }
   if (sub === "assign") {

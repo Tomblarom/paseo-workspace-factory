@@ -23,7 +23,6 @@ export const READONLY_FACTORY_RESULT_ACTIONS: FactoryResultActions = {
   confirmSwitch: () => {},
   confirmResume: () => {},
   confirmFresh: () => {},
-  confirmRelocate: () => {},
   confirmAssign: () => {},
   confirmLabels: () => {},
   confirmSteerAdd: () => {},

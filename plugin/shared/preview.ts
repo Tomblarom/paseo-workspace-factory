@@ -107,18 +107,6 @@ export function assignFingerprint(identity: AssignPreviewIdentity): string {
   return fingerprintOf({ kind: "factory.assign", ...identity });
 }
 
-export interface RelocatePreviewIdentity {
-  scope: string;
-  fromWorkspace: string;
-  toDir: string;
-  steers: string[];
-  checkpoint: boolean;
-}
-
-export function relocateFingerprint(identity: RelocatePreviewIdentity): string {
-  return fingerprintOf({ kind: "factory.relocate", ...identity });
-}
-
 export interface LabelsPreviewIdentity {
   address: string | null;
   rows: unknown;

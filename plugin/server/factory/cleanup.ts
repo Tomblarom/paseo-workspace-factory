@@ -1,12 +1,11 @@
 // @ts-nocheck
 // GENERATED from src/cleanup.mjs by npm run plugin:sync. Do not edit.
-// Read-only cleanup report (S9a) and confirmable cleanup plans (S9b).
-// Collects candidate scopes, workspaces and projects with a loss inventory
-// each. Planning only builds ops and hints; execution happens through the
-// hash-confirmed apply loop with the `workspace.archive`, `project.delete`
-// and `scope.retire` executors.
+// Read-only scope health report (S9a): candidate scopes, workspaces and
+// projects with a loss inventory each. It never writes; every suggested
+// action names the native Paseo command that performs it (`paseo archive`,
+// `paseo workspace archive`, `paseo project delete`).
 import { statSync } from 'node:fs';
-import { METADATA_KEY, readPaseoState } from './paseo.js';
+import { METADATA_KEY } from './paseo.js';
 import { listScopes } from './scope.js';
 import { isWorktreeWorkspace } from './discovery.js';
 import { readGitState } from './workers.js';
@@ -143,7 +142,7 @@ export function collectCleanupCandidates(paseoState, { git = null, existsDir = d
       candidates.push({
         kind: 'scratch', id: agent.id, title: agent.title ?? null, path: null,
         detail: `scratch agent in unknown workspace ${agent.workspaceId ?? '(none)'}`,
-        action: 'archive scratch agent',
+        action: 'archive the scratch agent natively (`paseo archive <agent-id>`)',
         loss: { agents: live ? 1 : 0, running: live && BUSY.has(agent.status) ? 1 : 0, worktree: false, git: null },
       });
       continue;
@@ -158,13 +157,13 @@ export function collectCleanupCandidates(paseoState, { git = null, existsDir = d
     const count = scratchAgentsByWorkspace.get(id) ?? 0;
     workspaceCandidate('scratch', byWorkspaceId.get(id),
       count ? `scratch scope with ${count} scratch agent(s)` : 'scratch scope (marked at creation)',
-      'archive scratch workspace and its agents');
+      'archive the scratch workspace natively (`paseo workspace archive <workspace-id>`)');
   }
 
   // Workspaces whose directory is gone: nothing on disk is at risk anymore.
   for (const ws of workspaces) {
     if (ws.workspaceDirectory && !existsDir(ws.workspaceDirectory)) {
-      workspaceCandidate('missing-directory', ws, `directory ${ws.workspaceDirectory} is gone`, 'archive workspace (no files at risk)');
+      workspaceCandidate('missing-directory', ws, `directory ${ws.workspaceDirectory} is gone`, 'archive the workspace natively (`paseo workspace archive <workspace-id>`); no files at risk');
     }
   }
 
@@ -192,7 +191,7 @@ export function collectCleanupCandidates(paseoState, { git = null, existsDir = d
     if (members.length) continue;
     candidates.push({
       kind: 'empty-project', id: project.projectId, title: project.projectDisplayName ?? null, path: project.projectRootPath ?? null,
-      detail: 'project without workspaces', action: 'delete project',
+      detail: 'project without workspaces', action: 'delete the project natively (`paseo project delete <project-id>`)',
       loss: projectLoss([], project.projectRootPath, [project.projectId]),
     });
   }
@@ -210,7 +209,7 @@ export function collectCleanupCandidates(paseoState, { git = null, existsDir = d
     candidates.push({
       kind: 'duplicate-project-path', id: path, title: null, path,
       detail: `${group.length} projects share this path: ${group.map((p) => p.projectId).join(', ')}`,
-      action: 'delete all but one project (manual choice)',
+      action: 'manual choice: keep one project, delete the rest natively (`paseo project delete <project-id>`)',
       loss: projectLoss(members, path, group.map((p) => p.projectId)),
     });
   }
@@ -223,12 +222,12 @@ export function collectCleanupCandidates(paseoState, { git = null, existsDir = d
     if (members.some((ws) => scopeWorkspaceIds.has(ws.id))) continue;
     candidates.push({
       kind: 'non-git-no-scope', id: project.projectId, title: project.projectDisplayName ?? null, path: project.projectRootPath ?? null,
-      detail: `${members.length} workspace(s), none is a factory scope`, action: 'adopt a workspace as scope, or archive the workspaces',
+      detail: `${members.length} workspace(s), none is a factory scope`, action: 'adopt a workspace as scope, or archive the workspaces natively (`paseo workspace archive <workspace-id>`)',
       loss: projectLoss(members, project.projectRootPath, [project.projectId]),
     });
   }
 
-  // Retired factory scopes (Decision 4: marked retired with movedTo).
+  // Retired factory scopes (marked retired, historically with movedTo).
   for (const scope of listScopes(paseoState ?? {})) {
     const meta = scope.workspace?.metadata?.[METADATA_KEY];
     if (meta?.retired !== true) continue;
@@ -236,7 +235,7 @@ export function collectCleanupCandidates(paseoState, { git = null, existsDir = d
     if (!ws) continue;
     workspaceCandidate('retired-scope', ws,
       meta.movedTo ? `retired scope, moved to ${meta.movedTo}` : 'retired scope',
-      'archive retired scope workspace');
+      'archive the retired scope workspace natively (`paseo workspace archive <workspace-id>`)');
   }
 
   return candidates;
@@ -265,167 +264,9 @@ export function formatLoss(loss) {
   return `${base}${archived}`;
 }
 
-function irreversibleSuffix(archived) {
-  return ` (irreversible${archived.length ? `: ${archived.length} archived agent${archived.length === 1 ? ' vanishes' : 's vanish'} permanently` : ''})`;
-}
-
 /** One compact line per candidate. */
 export function formatCandidate(candidate) {
   const head = candidate.title ? `${candidate.kind} ${candidate.id} "${candidate.title}"` : `${candidate.kind} ${candidate.id}`;
   const where = candidate.path ? ` ${candidate.path}` : '';
   return `${head}${where} · ${candidate.detail} · ${formatLoss(candidate.loss)} · → ${candidate.action}`;
-}
-
-const ARCHIVABLE_WORKSPACE_KINDS = new Set(['scratch', 'missing-directory', 'retired-scope']);
-
-/**
- * Builds cleanup ops from a daemon snapshot. `only` limits the plan to the
- * given candidate ids (unknown ids refuse); without `--allow-destructive`,
- * destructive ops become hints instead. Duplicate paths, scopeless non-git
- * projects and orphan scratch agents always stay hints: they need a human
- * choice (`project.delete` has no keeper rule, adoption is ambiguous, and S9b
- * defines no `agent.archive` op). Missing-directory worktrees stay manual
- * hints too: without the directory their git state is unverifiable, so the
- * archive gate could never pass. `scope.retire` is an executor building
- * block for relocate flows; cleanup planning never emits it.
- *
- * A `project.delete` is planned only for projects that are empty then or are
- * emptied by this plan's own archive ops — and chained deletes only in a full
- * plan, never under `--only` (which promises nothing beyond the selection).
- * `strictOnly` (default true) refuses unknown `--only` ids at plan time;
- * rediscovery passes false so drift surfaces as a conflict instead.
- */
-export function planCleanupOps(paseoState, { allowDestructive = false, allowIgnored = false, only = null, strictOnly = true, git = null, existsDir = defaultExistsDir } = {}) {
-  const candidates = collectCleanupCandidates(paseoState, { git, existsDir });
-  if (only?.length && strictOnly) {
-    const known = new Set(candidates.map((c) => c.id));
-    const unknown = [...new Set(only)].filter((id) => !known.has(id));
-    if (unknown.length) throw new Error(`Unknown cleanup candidate id(s): ${unknown.join(', ')}; run cleanup without --plan to list them`);
-  }
-  const selected = only?.length ? candidates.filter((c) => only.includes(c.id)) : candidates;
-  const agents = paseoState?.agents ?? [];
-  const workspaces = paseoState?.workspaces ?? [];
-  const projects = paseoState?.projects ?? [];
-  const planned = [];
-  const hints = [];
-
-  for (const candidate of selected) {
-    if (ARCHIVABLE_WORKSPACE_KINDS.has(candidate.kind) && workspaces.some((w) => w.id === candidate.id)) {
-      const ws = workspaces.find((w) => w.id === candidate.id);
-      if (candidate.kind === 'missing-directory' && isWorktreeWorkspace(ws)) {
-        hints.push({ id: candidate.id, kind: candidate.kind, detail: candidate.detail, loss: candidate.loss, reason: 'manual: worktree directory is gone, git state unverifiable; restore it or remove the workspace in Paseo' });
-      } else {
-        const live = liveAgentsIn(agents, candidate.id).map((a) => a.id).sort();
-        planned.push({
-          key: `workspace.archive.${candidate.id}`, kind: 'workspace.archive',
-          summary: `Archive ${candidate.kind} workspace ${candidate.id} (${candidate.detail})`,
-          params: { workspaceId: candidate.id, agents: live, allowIgnored }, loss: candidate.loss,
-        });
-      }
-    } else if (candidate.kind === 'empty-project') {
-      const archived = archivedFor(paseoState, agents, workspaces, candidate.id);
-      planned.push({
-        key: `project.delete.${candidate.id}`, kind: 'project.delete',
-        summary: `Delete empty project ${candidate.id}${candidate.path ? ` (${candidate.path})` : ''}${irreversibleSuffix(archived)}`,
-        params: { projectId: candidate.id, archivedAgents: archived.map((a) => a.id).sort() }, loss: candidate.loss,
-      });
-    } else if (candidate.kind === 'duplicate-project-path') {
-      hints.push({ id: candidate.id, kind: candidate.kind, detail: candidate.detail, loss: candidate.loss, reason: 'manual choice: keep one project, delete the rest outside the factory' });
-    } else if (candidate.kind === 'non-git-no-scope') {
-      hints.push({ id: candidate.id, kind: candidate.kind, detail: candidate.detail, loss: candidate.loss, reason: 'adopt a workspace as scope, or archive the workspaces first' });
-    } else if (candidate.kind === 'scratch') {
-      hints.push({ id: candidate.id, kind: candidate.kind, detail: candidate.detail, loss: candidate.loss, reason: 'S9b defines no agent.archive op; archive the agent in Paseo' });
-    }
-  }
-
-  if (!only?.length) {
-    const archivedByPlan = new Set(planned.filter((op) => op.kind === 'workspace.archive').map((op) => op.params.workspaceId));
-    for (const project of projects) {
-      const members = workspaces.filter((w) => w.projectId === project.projectId);
-      if (!members.length || !members.every((w) => archivedByPlan.has(w.id))) continue;
-      if (planned.some((op) => op.kind === 'project.delete' && op.params.projectId === project.projectId)) continue;
-      const live = members.flatMap((w) => liveAgentsIn(agents, w.id));
-      const archived = archivedFor(paseoState, agents, workspaces, project.projectId);
-      planned.push({
-        key: `project.delete.${project.projectId}`, kind: 'project.delete',
-        summary: `Delete project ${project.projectId}, emptied by this plan${irreversibleSuffix(archived)}`,
-        params: { projectId: project.projectId, archivedAgents: archived.map((a) => a.id).sort() },
-        loss: {
-          agents: live.length,
-          running: live.filter((a) => BUSY.has(a.status)).length,
-          worktree: members.some(isWorktreeWorkspace),
-          git: gitInventory(git, project.projectRootPath),
-          archivedAgents: { count: archived.length, first: archived.slice(0, 5) },
-        },
-      });
-    }
-  }
-  const ops = [];
-  for (const op of planned) {
-    if (allowDestructive) ops.push(op);
-    else hints.push({ id: op.params.workspaceId ?? op.params.projectId, kind: op.kind, detail: op.summary, loss: op.loss, reason: `needs --allow-destructive: ${op.summary}` });
-  }
-  return { ops, hints, candidates };
-}
-
-/**
- * True when an authorized cleanup op needs no execution anymore: its target
- * already shows the goal state. Anything else that vanishes from a fresh plan
- * is drift, not convergence, and must stop the run loudly.
- */
-export function opConverged(op, paseoState) {
-  const workspaces = paseoState?.workspaces ?? [];
-  if (op.kind === 'workspace.archive') return !workspaces.some((w) => w.id === op.params.workspaceId);
-  if (op.kind === 'project.delete') return !(paseoState?.projects ?? []).some((p) => p.projectId === op.params.projectId);
-  if (op.kind === 'scope.retire') {
-    const meta = workspaces.find((w) => w.id === op.params.workspaceId)?.metadata?.[METADATA_KEY];
-    return meta?.retired === true && meta?.activeSteer == null;
-  }
-  return false;
-}
-
-/**
- * Builds the rediscovery function the hash-confirmed apply loop needs:
- * same `(entries, options) => plans` shape as the repository runner. Filters
- * come from the authorization entries (`{ cleanup: { allowDestructive,
- * allowIgnored, only } }`), so they survive the apply loop's option forwarding
- * untouched. Every
- * authorized op that is neither pending anymore nor verifiably converged
- * becomes a conflict, which stops the run instead of silently skipping it.
- */
-export const CLEANUP_OP_KINDS = new Set(['workspace.archive', 'project.delete', 'scope.retire']);
-
-/**
- * Plan-kind routing for apply: cleanup authorizations rediscover through the
- * cleanup planner, everything else through the given repository runner. A
- * repository authorization carrying cleanup ops is refused outright instead
- * of being misrouted. Either runner validates its own entries, so a cleanup
- * plan can never execute via the repo runner and back.
- */
-export function selectApplyRunPlans(authorization, { repoRunPlans, client, git = null, existsDir = defaultExistsDir } = {}) {
-  const hasCleanupOps = (authorization?.plans ?? []).some((plan) => (plan.ops ?? []).some((op) => CLEANUP_OP_KINDS.has(op.kind)));
-  if (hasCleanupOps && authorization?.kind !== 'cleanup') {
-    throw new Error('Authorization mixes a repository plan with cleanup ops; run a new dry-run');
-  }
-  if (authorization?.kind === 'cleanup') return createCleanupRunPlans(authorization, { client, git, existsDir });
-  return repoRunPlans;
-}
-
-export function createCleanupRunPlans(authorization, { client, git = null, existsDir = defaultExistsDir } = {}) {
-  const entry = authorization?.entries?.[0]?.cleanup ?? null;
-  if (!entry || typeof entry !== 'object') throw new Error('Not a cleanup authorization (entries lack cleanup filters)');
-  const filters = { allowDestructive: entry.allowDestructive === true, allowIgnored: entry.allowIgnored === true, only: entry.only ?? null, strictOnly: false, git, existsDir };
-  const authorized = authorization?.plans?.[0] ?? null;
-  if (!authorized || !Array.isArray(authorized.ops)) throw new Error('Cleanup authorization carries no plan');
-  return async function runCleanupPlans() {
-    const state = await attachProjectArchivedAgents(await readPaseoState(client), client);
-    const { ops } = planCleanupOps(state, filters);
-    const freshKeys = new Set(ops.map((op) => op.key));
-    const conflicts = [];
-    for (const op of authorized.ops) {
-      if (freshKeys.has(op.key)) continue;
-      if (!opConverged(op, state)) conflicts.push({ key: op.key, reason: `cleanup drift: ${op.summary}; replan` });
-    }
-    return [{ repo: authorized.repo ?? 'cleanup', input: 'cleanup', status: conflicts.length ? 'conflict' : ops.length ? 'pending' : 'complete', ops, conflicts, notes: [], observed: {} }];
-  };
 }

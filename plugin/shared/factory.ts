@@ -670,58 +670,6 @@ export const factoryAssign = defineRpc({
   }),
 });
 
-const relocateArgs = {
-  repo: z.string().min(1).optional(),
-  workspaceId: z.string().min(1).optional(),
-  to: z.string().min(1),
-};
-
-export const factoryRelocatePreview = defineRpc({
-  name: "factory.relocate.preview",
-  input: z.object(relocateArgs),
-  output: z.looseObject({
-    scope: z.string(),
-    fromWorkspace: z.string(),
-    toDir: z.string(),
-    toWorkspace: z.string().nullable(),
-    adoptedWorkspace: z.boolean(),
-    movedTo: z.string(),
-    checkpoint: z.boolean(),
-    notes: z.array(z.unknown()),
-    steers: z.array(z.unknown()),
-    packets: z.array(z.unknown()),
-    fingerprint: z.string(),
-  }),
-});
-
-export const factoryRelocate = defineRpc({
-  name: "factory.relocate",
-  input: z.object({ ...relocateArgs, fingerprint: z.string().min(1) }),
-  output: z.looseObject({
-    scope: z.string(),
-    fromWorkspace: z.string(),
-    toDir: z.string(),
-    toWorkspace: z.unknown(),
-    movedTo: z.string(),
-    applied: z.boolean(),
-  }),
-});
-
-// Cleanup plan (like `cleanup --plan`): stored under its hash, applied with /factory apply.
-export const factoryCleanupPlan = defineRpc({
-  name: "factory.cleanup.plan",
-  input: z.object({
-    allowDestructive: z.boolean().optional(),
-    allowIgnored: z.boolean().optional(),
-    only: z.array(z.string().min(1)).optional(),
-  }),
-  output: z.looseObject({
-    hash: z.string(),
-    plans: z.array(z.unknown()),
-    hints: z.array(z.unknown()),
-  }),
-});
-
 const quotaPool = z.looseObject({
   pool: z.string(),
   sessionPct: z.number().nullable(),

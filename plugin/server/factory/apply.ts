@@ -17,7 +17,6 @@ import { inspectCloneTarget, readRemotes } from './local.js';
 import { LABEL, METADATA_KEY, LEGACY_PREFIX, parentOf, newKeyForLegacyKey } from './paseo.js';
 import { validScope } from './scope.js';
 import { isWorktreeWorkspace } from './discovery.js';
-import { readGitState } from './workers.js';
 
 export class ApplyRefused extends Error {}
 export class NotAuthorized extends Error {}
@@ -580,90 +579,6 @@ export function createExecutors({ client, gh, git, paseoCli, sleep = (ms) => new
       }
       return { agentId: before.id, labels: { ...labels } };
     },
-
-    async 'workspace.archive'(op) {
-      const { workspaceId, agents: plannedAgents } = op.params;
-      if (!workspaceId || !Array.isArray(plannedAgents)) throw new Error('workspace.archive needs workspaceId and the planned agent list');
-      const before = await client.workspaces.ref(workspaceId).refresh();
-      if (!before) throw new Error(`Workspace ${workspaceId} is missing; refusing to archive`);
-      const current = await listLiveAgents(client, workspaceId);
-      const running = current.filter((a) => CLEANUP_BUSY.has(a.status));
-      if (running.length) throw new Error(`Refusing to archive workspace ${workspaceId}: agent ${running[0].id} is ${running[0].status}; running agents are never archived`);
-      const currentIds = new Set(current.map((a) => a.id));
-      const planned = new Set(plannedAgents);
-      const added = [...currentIds].filter((id) => !planned.has(id)).sort();
-      const gone = [...planned].filter((id) => !currentIds.has(id)).sort();
-      if (added.length || gone.length) {
-        throw new Error(`Refusing to archive workspace ${workspaceId}: agent set changed since plan (added: ${added.join(', ') || 'none'}; gone: ${gone.join(', ') || 'none'})`);
-      }
-      if (isWorktreeWorkspace(before)) {
-        const gitState = readGitState(git, before.workspaceDirectory);
-        if (!gitState) throw new Error(`Refusing to archive worktree workspace ${workspaceId}: git state unreadable`);
-        if (gitState.dirty || gitState.untracked) throw new Error(`Refusing to archive worktree workspace ${workspaceId}: uncommitted changes`);
-        if (gitState.detached) throw new Error(`Refusing to archive worktree workspace ${workspaceId}: detached HEAD, commits would lose their reference`);
-        if (gitState.ahead === null) throw new Error(`Refusing to archive worktree workspace ${workspaceId}: no upstream to compare, commits may be unpublished`);
-        if (gitState.ahead > 0) throw new Error(`Refusing to archive worktree workspace ${workspaceId}: ${gitState.ahead} unpushed commit(s)`);
-        if (gitState.ignored > 0) {
-          const ignored = listIgnoredPaths(git, before.workspaceDirectory);
-          if (!ignored) throw new Error(`Refusing to archive worktree workspace ${workspaceId}: ignored state unreadable`);
-          const blocked = ignored.filter((path) => !IGNORED_ALLOWLIST.has(path.split('/')[0]));
-          if (blocked.length && !op.params.allowIgnored) {
-            const shown = blocked.slice(0, 5).join(', ');
-            throw new Error(`Refusing to archive worktree workspace ${workspaceId}: ignored files would be deleted (${shown}${blocked.length > 5 ? `, +${blocked.length - 5} more` : ''}); replan with --allow-ignored to confirm`);
-          }
-        }
-      }
-      const archivedBefore = new Set((await listWorkspaceAgents(client, workspaceId)).filter((a) => a.archivedAt).map((a) => a.id));
-      const result = await client.workspaces.archive(workspaceId);
-      if (result?.error) throw new Error(`Workspace archive failed: ${result.error}`);
-      for (const id of plannedAgents) {
-        const agent = (await client.agents.ref(id).refresh())?.agent;
-        if (!agent?.archivedAt) throw new Error(`Workspace ${workspaceId} archived, but agent ${id} is not archived; investigate before continuing`);
-      }
-      const coArchived = (await listWorkspaceAgents(client, workspaceId)).filter((a) => a.archivedAt && !archivedBefore.has(a.id) && !planned.has(a.id)).map((a) => a.id);
-      if (coArchived.length) throw new Error(`Workspace ${workspaceId} archived unplanned agent(s) ${coArchived.sort().join(', ')}; investigate before continuing`);
-      return { workspaceId, archived: true };
-    },
-
-    async 'project.delete'(op) {
-      const { projectId } = op.params;
-      if (!projectId) throw new Error('project.delete needs projectId');
-      const projects = (await client.projects.list())?.projects ?? [];
-      const project = projects.find((p) => p.projectId === projectId);
-      if (!project) throw new Error(`Project ${projectId} is missing; refusing to delete`);
-      const members = await listProjectWorkspaces(client, projectId);
-      if (members.length) throw new Error(`Refusing to delete project ${projectId}: not empty (${members.length} workspace(s): ${members.map((w) => w.id).join(', ')})`);
-      if (!project.projectKey) throw new Error(`Refusing to delete project ${projectId}: cannot verify archived members without a project key`);
-      const current = (await listArchivedProjectAgents(client, project.projectKey)).sort();
-      const planned = [...(op.params.archivedAgents ?? [])].sort();
-      const added = current.filter((id) => !planned.includes(id));
-      const gone = planned.filter((id) => !current.includes(id));
-      if (added.length || gone.length) {
-        throw new Error(`Refusing to delete project ${projectId}: archived members changed since plan (added: ${added.join(', ') || 'none'}; gone: ${gone.join(', ') || 'none'})`);
-      }
-      paseoCli(['project', 'delete', projectId]);
-      const remaining = (await client.projects.list())?.projects ?? [];
-      if (remaining.some((p) => p.projectId === projectId)) throw new Error(`Project ${projectId} still listed after delete`);
-      return { projectId, deleted: true };
-    },
-
-    async 'scope.retire'(op) {
-      const { workspaceId, epoch } = op.params;
-      if (!workspaceId || !Number.isInteger(epoch)) throw new Error('scope.retire needs workspaceId and the planned epoch');
-      return withLock(workspaceLockName(workspaceId), async (held) => {
-        const handle = client.workspaces.ref(workspaceId);
-        const meta = (await handle.refresh())?.metadata?.[METADATA_KEY];
-        if (!meta || typeof meta !== 'object') throw new Error(`Workspace ${workspaceId} has no factory state; refusing to retire`);
-        if (meta.epoch !== epoch) throw new Error(`Scope state changed (expected epoch ${epoch}, found ${meta.epoch}); replan`);
-        if (meta.retired === true && meta.activeSteer == null) return { workspaceId, retired: true, already: true };
-        const next = { ...meta, retired: true, activeSteer: null, epoch: meta.epoch + 1, previousSteer: meta.activeSteer ?? meta.previousSteer ?? null, retiredAt: new Date().toISOString() };
-        held.verify();
-        await handle.setMetadata({ [METADATA_KEY]: next });
-        const written = (await handle.refresh())?.metadata?.[METADATA_KEY];
-        if (written?.retired !== true || written?.activeSteer != null || written?.epoch !== meta.epoch + 1) throw new Error('Scope retire not verifiable after write');
-        return { workspaceId, retired: true, epoch: written.epoch };
-      });
-    },
   };
   return async function execute(op, config) {
     const handler = handlers[op.kind];
@@ -728,67 +643,6 @@ async function migrateAgentLabels(client, paseoCli, { agentId, migrate }) {
     if (after?.labels?.[newKey] !== value) throw new Error(`Agent ${before.id} label ${newKey} is ${after?.labels?.[newKey]}, expected ${value}`);
   }
   return { agentId: before.id, migrated: migrate, oldLabelsRemain: true };
-}
-
-const CLEANUP_BUSY = new Set(['running', 'initializing']);
-
-/** Paginated daemon lists, same guard as the central read. */
-async function collectListPages(list) {
-  const entries = [];
-  let cursor;
-  for (let guard = 0; guard < 1000; guard += 1) {
-    const page = await list(cursor);
-    entries.push(...(page.entries ?? []));
-    if (!page.pageInfo?.hasMore || !page.pageInfo.nextCursor) return entries;
-    cursor = page.pageInfo.nextCursor;
-  }
-  throw new Error('Pagination did not terminate');
-}
-
-/** Live agents of one workspace, freshly listed (archived ones are filtered out). */
-async function listLiveAgents(client, workspaceId) {
-  return (await listWorkspaceAgents(client, workspaceId)).filter((a) => !a.archivedAt);
-}
-
-/** All agents of one workspace, freshly listed (live and archived). */
-async function listWorkspaceAgents(client, workspaceId) {
-  const entries = await collectListPages((cursor) => client.agents.list({ includeBackground: true, filter: { includeArchived: true, includeBackground: true }, page: { limit: 200, ...(cursor ? { cursor } : {}) } }));
-  return entries.map((entry) => entry.agent ?? entry).filter((a) => a.workspaceId === workspaceId);
-}
-
-/** Build outputs that may be deleted with an archived worktree; anything else ignored refuses unless allowed. */
-const IGNORED_ALLOWLIST = new Set(['node_modules', 'dist', 'build', 'target', '__pycache__', '.venv']);
-
-/** Full ignored-path list, or null when unreadable. Mirrors the inventory parser in cleanup.mjs. */
-function listIgnoredPaths(git, dir) {
-  let output;
-  try {
-    output = git(dir, ['status', '--porcelain', '--ignored']);
-  } catch {
-    return null;
-  }
-  const paths = [];
-  for (const line of String(output ?? '').split('\n')) {
-    const match = line.match(/^!! (.+)$/);
-    if (!match) continue;
-    let path = match[1].trim();
-    if (path.startsWith('"') && path.endsWith('"')) path = path.slice(1, -1);
-    path = path.replace(/\/+$/, '');
-    if (path) paths.push(path);
-  }
-  return paths;
-}
-
-/** Archived agent ids of one project, including agents of vanished workspaces (server-side attribution). */
-async function listArchivedProjectAgents(client, projectKey) {
-  const entries = await collectListPages((cursor) => client.agents.list({ filter: { projectKeys: [projectKey], includeArchived: true }, page: { limit: 200, ...(cursor ? { cursor } : {}) } }));
-  return entries.map((entry) => entry.agent ?? entry).filter((a) => a.archivedAt).map((a) => a.id);
-}
-
-/** Workspaces of one project, freshly listed (archived ones vanish from the list). */
-async function listProjectWorkspaces(client, projectId) {
-  const entries = await collectListPages((cursor) => client.workspaces.list({ includeBackground: true, filter: { includeBackground: true, projectId }, page: { limit: 200, ...(cursor ? { cursor } : {}) } }));
-  return entries.filter((w) => w.projectId === projectId);
 }
 
 /**

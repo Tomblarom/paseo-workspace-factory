@@ -10,7 +10,6 @@ import type {
   factoryLabelsPreview,
   factoryPlan,
   factoryQuota,
-  factoryRelocatePreview,
   factoryResume,
   factoryResumeApply,
   factoryScopes,
@@ -83,14 +82,6 @@ export type FactoryPanelResult =
       workspaceId: string;
       at: string;
       preview: RpcOutput<typeof factoryFreshPreview>;
-    }
-  | {
-      kind: "relocatePreview";
-      repo?: string;
-      workspaceId: string;
-      to: string;
-      at: string;
-      preview: RpcOutput<typeof factoryRelocatePreview>;
     }
   | {
       kind: "assignPreview";

@@ -18,8 +18,6 @@ import {
   factoryLabelsPreview,
   factoryPlan,
   factoryQuota,
-  factoryRelocate,
-  factoryRelocatePreview,
   factoryResume,
   factoryResumeApply,
   factoryScopes,
@@ -83,7 +81,6 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
   const callResume = useRpc(factoryResume);
   const callResumeApply = useRpc(factoryResumeApply);
   const callFresh = useRpc(factoryFresh);
-  const callRelocate = useRpc(factoryRelocate);
   const callAssign = useRpc(factoryAssign);
   const callLabels = useRpc(factoryLabels);
   const callQuota = useRpc(factoryQuota);
@@ -268,22 +265,6 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
       }),
     onError: fail,
   });
-  const relocateMutation = useMutation({
-    mutationFn: async (vars: { repo?: string; workspaceId: string; to: string; fingerprint: string }) =>
-      vars.repo
-        ? callRelocate({ repo: vars.repo, to: vars.to, fingerprint: vars.fingerprint })
-        : callRelocate({ workspaceId: vars.workspaceId, to: vars.to, fingerprint: vars.fingerprint }),
-    onSuccess: (relocated) =>
-      setFactoryResult({
-        kind: "info",
-        at: new Date().toISOString(),
-        text: [
-          `Relocated ${text(field(relocated, "scope"))} ${text(field(relocated, "fromWorkspace"))} → ${text(field(relocated, "toDir"))} (${text(field(relocated, "toWorkspace") ?? "new workspace")}) · epoch 1.`,
-          "The retired scope keeps its agents; archive it via /factory cleanup --plan.",
-        ].join("\n"),
-      }),
-    onError: fail,
-  });
   const assignMutation = useMutation({
     mutationFn: async (vars: {
       repo?: string;
@@ -383,7 +364,6 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
     resumeMutation.isPending ||
     resumeApplyMutation.isPending ||
     freshMutation.isPending ||
-    relocateMutation.isPending ||
     assignMutation.isPending ||
     labelsMutation.isPending ||
     steerAddMutation.isPending;
@@ -416,15 +396,6 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
       slot: result.preview.slot,
       repo: result.repo,
       workspaceId: result.workspaceId,
-      fingerprint: result.preview.fingerprint,
-    });
-  };
-  const confirmRelocate = () => {
-    if (result?.kind !== "relocatePreview") return;
-    relocateMutation.mutate({
-      repo: result.repo,
-      workspaceId: result.workspaceId,
-      to: result.to,
       fingerprint: result.preview.fingerprint,
     });
   };
@@ -566,7 +537,6 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
           confirmSwitch,
           confirmResume,
           confirmFresh,
-          confirmRelocate,
           confirmAssign,
           confirmLabels,
           confirmSteerAdd,
@@ -599,7 +569,6 @@ export interface FactoryResultActions {
   confirmSwitch: () => void;
   confirmResume: () => void;
   confirmFresh: () => void;
-  confirmRelocate: () => void;
   confirmAssign: () => void;
   confirmLabels: () => void;
   confirmSteerAdd: () => void;
@@ -679,9 +648,6 @@ export function ResultView({
   }
   if (result.kind === "freshPreview") {
     return <FreshPreviewView at={result.at} preview={result.preview} styles={styles} actions={actions} />;
-  }
-  if (result.kind === "relocatePreview") {
-    return <RelocatePreviewView at={result.at} preview={result.preview} styles={styles} actions={actions} />;
   }
   if (result.kind === "assignPreview") {
     return <AssignPreviewView at={result.at} preview={result.preview} styles={styles} actions={actions} />;
@@ -1308,57 +1274,6 @@ function FreshPreviewView({
         onPress={actions.confirmFresh}
       >
         <Text style={styles.buttonText}>Fresh and deliver</Text>
-      </Pressable>
-    </View>
-  );
-}
-
-function RelocatePreviewView({
-  at,
-  preview,
-  styles,
-  actions,
-}: {
-  at: string;
-  preview: RpcOutput<typeof factoryRelocatePreview>;
-  styles: Styles;
-  actions: PanelActions;
-}) {
-  const steers = asList(preview.steers);
-  const notes = asList(preview.notes);
-  return (
-    <View style={styles.card}>
-      <Text style={styles.body}>
-        Relocate preview: {text(preview.scope)} {text(preview.fromWorkspace)} → {text(preview.toDir)}
-        {preview.toWorkspace ? ` (workspace ${text(preview.toWorkspace)})` : " (new workspace)"}
-      </Text>
-      <Text style={styles.label}>{at}</Text>
-      <Text style={styles.body}>
-        {steers.length} steer(s) · epoch 1 · movedTo {text(preview.movedTo)}
-        {preview.checkpoint ? "" : " · NO task checkpoint"}
-      </Text>
-      {notes.map((note, index) => (
-        <Text key={index} style={styles.label}>
-          Note: {text(note)}
-        </Text>
-      ))}
-      {steers.map((steer, index) => (
-        <Text key={index} style={styles.body}>
-          Steer {text(field(steer, "slot"))}: profile {text(field(steer, "profile"))} (
-          {text(field(steer, "provider"))}/{text(field(steer, "model"))})
-        </Text>
-      ))}
-      <Text style={styles.label}>
-        The retired scope keeps its agents; archive it via /factory cleanup --plan.
-      </Text>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={`Confirm relocate to ${text(preview.toDir)}`}
-        style={styles.button}
-        disabled={actions.busy}
-        onPress={actions.confirmRelocate}
-      >
-        <Text style={styles.buttonText}>Relocate and deliver</Text>
       </Pressable>
     </View>
   );

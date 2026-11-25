@@ -22,7 +22,7 @@ The factory is keyed by a GitHub repository (`owner/repo`). Everything that is n
 | Rename workspace / project | `workspace rename`, `project rename` | Retitle is a normal plan op |
 | Archive workspace | `workspace archive` (removes owned worktree with `--force`) | Destructive; needs git-clean precondition |
 | Delete project | `project delete` (with all workspaces) | Never implicit |
-| Move workspace between projects | none | "Relocate" = new + handoff + later archive |
+| Move workspace between projects | none | Manual: create a new scope at the target and switch |
 | Label existing agent | `agent update --label` | Agent adoption = labelling |
 | Remove an agent's parent | `agent detach` | Parented candidate can become a steer |
 | Move agent between workspaces | none | Adopted workers stay where they are |
@@ -69,13 +69,13 @@ Relations stay logical (metadata/labels), never `parent`: steers stay parent-fre
 ## Decision 4 — lifecycle without data loss
 
 - **Retitle**: title template (`workspaceTitle`, e.g. `{name} · Main` or `Main`); a mismatch is a planned `workspace.retitle` op with `--retitle`, otherwise a note.
-- **Relocate** (folder rename, other project): new main workspace at the new location → steers recreated by checkpoint (`fresh` logic) → old scope marked `retired` with `movedTo` → archiving the old workspace is a separate, later plan.
-- **Retire** scope: clears active steer, keeps agents; archiving is separate.
-- **Cleanup**: read-only report first (scratch scopes labelled `wsf.scratch`, missing directories, empty or duplicate projects). Each archive/delete op carries a loss inventory: agents (running?), owned worktree, uncommitted changes, unpushed commits.
+- **Relocate** was removed (K14): to move a scope, create a new scope at the target and switch. Old installs may still carry scopes retired with `movedTo`; they stay readable (status, scopes, cleanup) and refuse coordination.
+- **Retire** scope was removed with relocate; archiving stays a separate native step.
+- **Cleanup** is a read-only report (scratch scopes labelled `wsf.scratch`, missing directories, empty or duplicate projects, retired scopes). Each candidate carries a loss inventory — agents (running?), owned worktree, uncommitted changes, unpushed commits — plus the native command that archives it (`paseo archive`, `paseo workspace archive`, `paseo project delete`).
 
 ## Decision 5 — safety model unchanged, plus a destructive gate
 
-Plan → `apply --confirm <hash>` for everything. Ops that lose data (`workspace.archive`, `project.delete`, agent archive) are only planned with `--allow-destructive`, listed separately, and re-checked at apply (agent idle, worktree clean, no new agents since the plan); any drift stops the run. `project.delete` is planned only for projects that are empty after the other ops. Running agents are never archived.
+Plan → `apply --confirm <hash>` for everything the Factory executes itself. The destructive cleanup orchestration (`workspace.archive`, `project.delete` ops with `--allow-destructive`) was removed (K15): the Factory only reports candidates with their loss inventory, and archiving/deleting happens through explicit native commands. Running agents are never archived by the Factory.
 
 ## Decision 6 — public and host-neutral
 
