@@ -7,13 +7,13 @@
 // hash12 is the first 12 hex chars of sha256 over the sorted file list with
 // file hashes, so identical content always gives an identical directory.
 //
-// Default flow (build mode): verify the plugin/server/factory/ mirror is fresh
-// (the equivalent of `node scripts/plugin-sync.mjs --check`; plugin-sync.mjs
-// has no check mode, so the expected content is recomputed in memory), run
-// `npm run typecheck` and the plugin tests, build the snapshot, then print the
-// exact `paseo plugin remove`/`install` commands plus the rollback command for
-// the previously installed snapshot. The script NEVER installs by default;
-// installation only happens with `--install --confirm <hash12>`.
+// Default flow (build mode): run `npm run typecheck` and the plugin tests,
+// build the snapshot, then print the exact `paseo plugin remove`/`install`
+// commands plus the rollback command for the previously installed snapshot.
+// The script NEVER installs by default; installation only happens with
+// `--install --confirm <hash12>`. The plugin carries the factory core
+// directly (plugin/server/core/*.mjs, plugin/shared/*.mjs), so there is no
+// generated mirror to verify.
 //
 // `--prune` lists old snapshots (keeping the installed and the previous one)
 // without deleting; deletion only happens with `--prune --confirm`.
@@ -31,7 +31,7 @@ import {
   statSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const PLUGIN_ID = 'workspace-factory';
@@ -39,13 +39,6 @@ export const SNAPSHOT_PREFIX = 'workspace-factory-';
 export const SNAPSHOT_PATTERN = /^workspace-factory-[0-9a-f]{12}$/;
 // Top-level plugin/ entries that never ship in a snapshot.
 export const SNAPSHOT_EXCLUDE = new Set(['node_modules', 'package-lock.json', 'test']);
-// Must stay in sync with scripts/plugin-sync.mjs (single source of truth is
-// src/; this is only the --check equivalent, never a second sync writer).
-const SYNC_SKIP = new Set(['cli.mjs']);
-// Must stay in sync with SHARED_MIRROR in scripts/plugin-sync.mjs.
-const SHARED_MIRROR = [['defaults.mjs', join('shared', 'defaults.ts')]];
-const SYNC_HEADER = (file) =>
-  `// @ts-nocheck\n// GENERATED from src/${file} by npm run plugin:sync. Do not edit.\n`;
 
 export function defaultReleasesDir(home = homedir()) {
   return join(home, 'projects', 'paseo', 'releases');
@@ -77,54 +70,13 @@ export function usage() {
   return `usage: node scripts/build-snapshot.mjs [--out-dir <releases-dir>] [--skip-checks] [--install --confirm <hash12>]
        node scripts/build-snapshot.mjs --prune [--out-dir <releases-dir>] [--confirm]
 
-Build mode verifies the factory mirror, runs the plugin typecheck and tests,
+Build mode runs the plugin typecheck and tests,
 builds <releases>/workspace-factory-<hash12> (default releases dir
 ~/projects/paseo/releases) and prints the install/rollback commands.
 Nothing is installed unless --install --confirm <hash12> names the built hash.
 
 --prune only lists old snapshots (keeping installed and previous); files are
 deleted only with --prune --confirm.`;
-}
-
-// What scripts/plugin-sync.mjs would write for one src file.
-export function generatedContent(srcFile, source) {
-  return SYNC_HEADER(srcFile) + source.replace(/\.mjs(?=['"])/g, '.js');
-}
-
-// Equivalent of `plugin-sync.mjs --check`: compare the mirror against freshly
-// generated content without touching the working tree. Returns a list of stale
-// entries (empty when fresh). The shared mirror is checked only when
-// sharedDir (the plugin dir) is passed.
-export function checkMirrorStale({ srcDir, factoryDir, sharedDir = null }) {
-  const stale = [];
-  if (!existsSync(factoryDir)) return ['missing directory: plugin/server/factory/ (run npm run plugin:sync)'];
-  const generated = new Map(); // dest name -> expected content
-  for (const file of readdirSync(srcDir).sort()) {
-    if (!file.endsWith('.mjs') || SYNC_SKIP.has(file)) continue;
-    const base = file.slice(0, -'.mjs'.length);
-    generated.set(`${base}.ts`, generatedContent(file, readFileSync(join(srcDir, file), 'utf8')));
-  }
-  for (const [dest, expected] of generated) {
-    const path = join(factoryDir, dest);
-    if (!existsSync(path)) stale.push(`missing: plugin/server/factory/${dest}`);
-    else if (readFileSync(path, 'utf8') !== expected) stale.push(`modified: plugin/server/factory/${dest}`);
-  }
-  for (const entry of readdirSync(factoryDir).sort()) {
-    if (!entry.endsWith('.ts') || generated.has(entry)) continue;
-    const content = readFileSync(join(factoryDir, entry), 'utf8');
-    const match = content.match(/^\/\/ GENERATED from src\/(\S+) by npm run plugin:sync\./m);
-    if (match && !existsSync(join(srcDir, match[1]))) stale.push(`orphan: plugin/server/factory/${entry} (src/${match[1]} gone)`);
-  }
-  if (sharedDir !== null) {
-    for (const [file, dest] of SHARED_MIRROR) {
-      const expected = generatedContent(file, readFileSync(join(srcDir, file), 'utf8'));
-      const path = join(sharedDir, dest);
-      const label = `plugin/${dest.split(sep).join('/')}`;
-      if (!existsSync(path)) stale.push(`missing: ${label}`);
-      else if (readFileSync(path, 'utf8') !== expected) stale.push(`modified: ${label}`);
-    }
-  }
-  return stale;
 }
 
 // Sorted snapshot file list as posix-style relative paths.
@@ -380,16 +332,12 @@ export function main(argv, deps = {}) {
   if (args.install && (!args.confirmGiven || !args.confirm)) return fail('--install requires --confirm <hash12> naming the built snapshot hash');
   if (!existsSync(pluginDir)) return fail(`plugin directory not found: ${pluginDir}`);
   if (!args.skipChecks) {
-    const stale = checkMirrorStale({ srcDir: join(repoRoot, 'src'), factoryDir: join(pluginDir, 'server', 'factory'), sharedDir: pluginDir });
-    if (stale.length > 0) {
-      return fail(`plugin/server/factory/ mirror is stale (run npm run plugin:sync):\n  ${stale.join('\n  ')}`);
-    }
     try {
       runChecks({ run, pluginDir });
     } catch (error) {
       return fail(error.message);
     }
-    out('checks: mirror fresh, typecheck ok, plugin tests ok');
+    out('checks: typecheck ok, plugin tests ok');
   }
   let built;
   try {

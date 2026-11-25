@@ -1,7 +1,7 @@
 import { realpathSync } from "node:fs";
 import { dirname } from "node:path";
 import type { PluginHandlerContext, PluginServerContext } from "@getpaseo/plugin/server";
-import { FACTORY_PLUGIN_ID, PROMPT_SETTINGS_RPC, findFactoryCheckout } from "./factory/findings.js";
+import { FACTORY_PLUGIN_ID, PROMPT_SETTINGS_RPC, findFactoryCheckout } from "./core/findings.mjs";
 import { factoryPromptSettings } from "../shared/prompt-settings.js";
 import type { HostSettingsReader } from "./config.js";
 

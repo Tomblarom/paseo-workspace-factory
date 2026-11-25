@@ -15,9 +15,9 @@ const quota = await import("../server/quota.ts");
 const supervise = await import("../server/supervise.ts");
 const { CLEANUP_DEFAULTS } = await import("../shared/idle-cleanup.ts");
 const { SUPERVISION_SETTINGS_DEFAULTS } = await import("../shared/supervise.ts");
-import { LABEL, METADATA_KEY } from "../../src/paseo.mjs";
-import { WORKERS_KEY } from "../../src/supervision.mjs";
-import { AGENTS_KEY } from "../../src/agent-state.mjs";
+import { LABEL, METADATA_KEY } from "../server/core/paseo.mjs";
+import { WORKERS_KEY } from "../server/core/supervision.mjs";
+import { AGENTS_KEY } from "../server/core/agent-state.mjs";
 
 const NOW = Date.parse("2026-11-25T12:00:00.000Z");
 const MIN = 60_000;

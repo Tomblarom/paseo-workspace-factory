@@ -7,7 +7,7 @@ import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import type { factoryModelsList, factoryModelsSet } from "../shared/factory.js";
 import { settingsFromConfig, validateFactorySettings, type FactorySettingsValues } from "../shared/settings-validate.js";
 import type { ConfigLoader, HostSettingsReader } from "./config.js";
-import { isAdvisorProfile, isSensitiveProfile, slotOrder, validateProfilesAgainstCatalog, workerPriority } from "./factory/config.js";
+import { isAdvisorProfile, isSensitiveProfile, slotOrder, validateProfilesAgainstCatalog, workerPriority } from "./core/config.mjs";
 import {
   planAdvisorTag,
   planSensitiveTag,
@@ -17,7 +17,7 @@ import {
   planWorkerSet,
   resolveProfile,
   steerFallbackList,
-} from "./factory/models.js";
+} from "./core/models.mjs";
 import { readZerosubStateSafe } from "./zerosub-runtime.js";
 
 export const CATALOG_TTL_MS = 60_000;

@@ -10,8 +10,8 @@ register("./ts-resolve-hooks.mjs", import.meta.url);
 const briefs = await import("../server/steer-brief.ts");
 const { factorySteerBrief } = await import("../shared/factory.ts");
 const { factorySteerMenuSettings } = await import("../shared/settings.ts");
-import { LABEL, METADATA_KEY } from "../../src/paseo.mjs";
-import { AGENTS_KEY } from "../../src/agent-state.mjs";
+import { LABEL, METADATA_KEY } from "../server/core/paseo.mjs";
+import { AGENTS_KEY } from "../server/core/agent-state.mjs";
 
 const REPO = "example-owner/example-repo";
 

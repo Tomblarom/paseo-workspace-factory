@@ -5,11 +5,11 @@ import { test } from 'node:test';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { validateConfig } from '../src/config.mjs';
-import { STEER_TITLE, STEER_DIGIT_TITLE, ACTIVE_STEER_MARKER, activeMarker, stripActiveMarker, markSteerTitle } from '../src/discovery.mjs';
-import { switchSteer, freshSteer, applyActiveMarker } from '../src/steer.mjs';
-import { withLock } from '../src/lock.mjs';
-import { LABEL, METADATA_KEY } from '../src/paseo.mjs';
+import { validateConfig } from '../plugin/server/core/config.mjs';
+import { STEER_TITLE, STEER_DIGIT_TITLE, ACTIVE_STEER_MARKER, activeMarker, stripActiveMarker, markSteerTitle } from '../plugin/server/core/discovery.mjs';
+import { switchSteer, freshSteer, applyActiveMarker } from '../plugin/server/core/steer.mjs';
+import { withLock } from '../plugin/server/core/lock.mjs';
+import { LABEL, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
 
 const REPO = 'example-owner/example-repo';
 const CONFIG = {

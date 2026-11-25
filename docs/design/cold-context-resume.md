@@ -227,8 +227,8 @@ C1: on a scratch Claude agent (with approval): `/clear` → new session id notic
 
 | Package | Owner | Files |
 |---|---|---|
-| C3 brief, checkpoint fields, `wsf.agents` helpers with lock, `status`/`switch`/`fresh` integration | core worker | `src/steer.mjs`, `src/paseo.mjs`, new `src/agent-state.mjs`, `src/cli.mjs` |
-| C2 hook, C5 timer, C6 pill, settings, RPC/slash `resume` | plugin worker | `plugin/**` (core via `plugin-sync`) |
+| C3 brief, checkpoint fields, `wsf.agents` helpers with lock, `status`/`switch`/`fresh` integration | core worker | `plugin/server/core/steer.mjs`, `plugin/server/core/paseo.mjs`, new `plugin/server/core/agent-state.mjs`, `src/cli.mjs` |
+| C2 hook, C5 timer, C6 pill, settings, RPC/slash `resume` | plugin worker | `plugin/**` (core imported directly) |
 | C4 instruction text, docs | docs worker or steer | `docs/steer-instructions.md`, `AGENTS.md`, this file |
 | C1, C7 live checks | steer, with user approval for scratch agents | none |
 

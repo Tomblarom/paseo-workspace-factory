@@ -23,8 +23,8 @@ const {
   isAbsolutePath,
 } = validate;
 const { createConfigLoader, isMissingFileError, loadFileConfig } = await import("../server/config.ts");
-const { validateConfig } = await import("../server/factory/config.ts");
-const { runtime } = await import("../server/factory/runtime.ts");
+const { validateConfig } = await import("../server/core/config.mjs");
+const { runtime } = await import("../server/core/runtime.mjs");
 
 function settingsDoc(overrides = {}) {
   return { ...factoryConfigSettings.schema.parse({}), ...overrides };

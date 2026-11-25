@@ -2,7 +2,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import { withLock, workspaceLockName } from './lock.mjs';
 import { METADATA_KEY } from './paseo.mjs';
-import { QUOTA_DEFAULTS } from './defaults.mjs';
+import { QUOTA_DEFAULTS } from '../../shared/defaults.mjs';
 
 export { QUOTA_DEFAULTS };
 export const PROFILE_UNHEALTHY_MINUTES = 10;

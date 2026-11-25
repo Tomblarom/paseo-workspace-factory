@@ -12,11 +12,11 @@ const turnHook = await import("../server/turn-hook.ts");
 const { collectSteerStates } = await import("../server/steer-feed.ts");
 const { applyResume } = await import("../server/resume-apply.ts");
 const { deliverSteer, finishSteerDelivery } = await import("../server/steer-delivery.ts");
-const { LockBusy } = await import("../server/factory/lock.ts");
-import { LABEL, METADATA_KEY } from "../../src/paseo.mjs";
-import { AGENTS_KEY } from "../../src/agent-state.mjs";
-import { WORKERS_KEY } from "../../src/supervision.mjs";
-import { CHECKPOINT_KEY } from "../../src/steer.mjs";
+const { LockBusy } = await import("../server/core/lock.mjs");
+import { LABEL, METADATA_KEY } from "../server/core/paseo.mjs";
+import { AGENTS_KEY } from "../server/core/agent-state.mjs";
+import { WORKERS_KEY } from "../server/core/supervision.mjs";
+import { CHECKPOINT_KEY } from "../server/core/steer.mjs";
 
 const REPO = "example-owner/example-repo";
 const NOW = new Date("2026-11-24T12:00:00.000Z").getTime();
@@ -777,7 +777,7 @@ test("a lost worker acknowledgement resumes after the recorded admission without
 
 test("a reserved switch retains the cold-context decision after recovery", async () => {
   const { ws, steer, world, client, deps, buildBrief } = deliveryFixture({ minutesIdle: 6 });
-  const { newSteerAction } = await import("../../src/steer-action.mjs");
+  const { newSteerAction } = await import("../server/core/steer-action.mjs");
   ws.metadata[AGENTS_KEY][steer.id].action = newSteerAction({
     id: "switch-id", kind: "switch", epoch: 3, at: at(NOW), text: "Original handoff", note: "Handoff note", phase: "reserved",
   });

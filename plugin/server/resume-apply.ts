@@ -1,13 +1,13 @@
 // Manual /factory resume validates the preview and captures a checkpoint before delivery.
-import { AGENTS_KEY } from "./factory/agent-state.js";
-import { readCleanupAction } from "./factory/steer-action.js";
-import { actionFact } from "./factory/action-facts.js";
-import { withLock, workspaceLockName } from "./factory/lock.js";
-import { METADATA_KEY, readPaseoState } from "./factory/paseo.js";
-import { listScopes, sameScopeId } from "./factory/scope.js";
-import { guardScope, scopeHolder } from "./factory/scope-guard.js";
-import { lastAssistantText, parseCheckpointBlock } from "./factory/steer.js";
-import { WORKERS_KEY } from "./factory/supervision.js";
+import { AGENTS_KEY } from "./core/agent-state.mjs";
+import { readCleanupAction } from "./core/steer-action.mjs";
+import { actionFact } from "./core/action-facts.mjs";
+import { withLock, workspaceLockName } from "./core/lock.mjs";
+import { METADATA_KEY, readPaseoState } from "./core/paseo.mjs";
+import { listScopes, sameScopeId } from "./core/scope.mjs";
+import { guardScope, scopeHolder } from "./core/scope-guard.mjs";
+import { lastAssistantText, parseCheckpointBlock } from "./core/steer.mjs";
+import { WORKERS_KEY } from "./core/supervision.mjs";
 import { CLEANUP_DEFAULTS, cleanupIdentity, formatResumeMessage, type ResumeClearSettings } from "../shared/idle-cleanup.js";
 import { decideSteerDelivery, deliverSteer, type DeliveryResult, type SteerDeliveryDeps } from "./steer-delivery.js";
 import { resumeFingerprint } from "../shared/preview.js";

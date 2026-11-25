@@ -2,14 +2,14 @@
 // profile tags, switch refusal, fresh fallback, brief header, failover skip.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { configWarnings, isSensitiveProfile, validateConfig } from '../src/config.mjs';
-import { planAdvisorTag, planSensitiveTag } from '../src/models.mjs';
+import { configWarnings, isSensitiveProfile, validateConfig } from '../plugin/server/core/config.mjs';
+import { planAdvisorTag, planSensitiveTag } from '../plugin/server/core/models.mjs';
 import {
   buildResumeBrief, freshSteer, steerStatus, switchSteer, SwitchRefused,
-} from '../src/steer.mjs';
-import { failoverChain } from '../src/supervision.mjs';
-import { formatStatus } from '../src/scopes-view.mjs';
-import { LABEL, METADATA_KEY } from '../src/paseo.mjs';
+} from '../plugin/server/core/steer.mjs';
+import { failoverChain } from '../plugin/server/core/supervision.mjs';
+import { formatStatus } from '../plugin/server/core/scopes-view.mjs';
+import { LABEL, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
 
 const CONFIG = {
   version: 1,

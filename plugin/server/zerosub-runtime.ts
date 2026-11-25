@@ -3,8 +3,8 @@
 // ZeroSub (no daemon, no ZeroSub plugin, RPC error, unreadable timeline) always
 // degrades to null, and every caller keeps its legacy behavior without it.
 //
-// Row parsing reuses the shared core (./factory/zerosub.js, single source
-// src/zerosub.mjs): `pendingAccountId` only covers in-place moves (never Codex
+// Row parsing reuses the shared core (./core/zerosub.mjs):
+// `pendingAccountId` only covers in-place moves (never Codex
 // hand-offs), so the row is the authoritative no-double-reaction signal. A set
 // `continuedIn` wins over everything (the conversation carries on there, even
 // with outcome `stayed`); `continued: true` only means a follow-up was sent so
@@ -13,7 +13,7 @@
 // `stayed` and no `continuedIn` means no account is free (the factory may
 // proceed, waking at `resetsAt`). Only erasable TypeScript: node --test
 // imports this file with type stripping (see plugin/test/ts-resolve-hooks.mjs).
-import * as zerosubCore from "./factory/zerosub.js";
+import * as zerosubCore from "./core/zerosub.mjs";
 
 // The synced core is unchecked (@ts-nocheck): talk to it as any.
 const Z = zerosubCore as unknown as {

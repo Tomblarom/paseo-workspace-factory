@@ -4,7 +4,7 @@ import { register } from "node:module";
 
 register("./ts-resolve-hooks.mjs", import.meta.url);
 
-// Shared modules import the generated defaults through `.js` specifiers, so
+// Shared modules import each other through `.js` specifiers, so
 // they must load dynamically after the resolve hook is registered.
 const {
   validateCleanupSettings,

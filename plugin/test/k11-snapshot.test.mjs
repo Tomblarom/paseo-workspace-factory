@@ -13,11 +13,11 @@ register("./ts-resolve-hooks.mjs", import.meta.url);
 const { getStatus, getResume } = await import("../server/handlers.ts");
 const { collectSteerStates } = await import("../server/steer-feed.ts");
 const { CLEANUP_DEFAULTS } = await import("../shared/idle-cleanup.ts");
-const { resolveSteerHolders } = await import("../../src/discovery.mjs");
-const { scopeHolder } = await import("../../src/scope-guard.mjs");
-const { resolveWakeTarget } = await import("../../src/supervision.mjs");
-import { LABEL, METADATA_KEY } from "../../src/paseo.mjs";
-import { CONTINUED_FROM_LABEL } from "../../src/zerosub.mjs";
+const { resolveSteerHolders } = await import("../server/core/discovery.mjs");
+const { scopeHolder } = await import("../server/core/scope-guard.mjs");
+const { resolveWakeTarget } = await import("../server/core/supervision.mjs");
+import { LABEL, METADATA_KEY } from "../server/core/paseo.mjs";
+import { CONTINUED_FROM_LABEL } from "../server/core/zerosub.mjs";
 
 // ---------------------------------------------------------------- fixtures
 

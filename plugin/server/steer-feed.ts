@@ -1,16 +1,16 @@
-import { readSteerAction } from "./factory/steer-action.js";
+import { readSteerAction } from "./core/steer-action.mjs";
 // Host-wide steer-state feed (docs/design/steer-menu.md, step 1): one small
 // projection per known steer tab for the persistent composer pill (the pill
 // itself subscribes in step 2). Read-only: local metadata reads plus the
 // reused quota sampling, no timeline fetches, no provider calls, no
 // per-agent polling for the face.
-import { AGENTS_KEY, currentFreshHint } from "./factory/agent-state.js";
-import { isAdvisorSlot } from "./factory/config.js";
-import { liveSlotHolders, resolveSteerHolders } from "./factory/discovery.js";
-import { METADATA_KEY, readPaseoState } from "./factory/paseo.js";
-import { QUOTA_DEFAULTS } from "./factory/quota.js";
-import { listScopes } from "./factory/scope.js";
-import { resolveContinuations } from "./factory/zerosub.js";
+import { AGENTS_KEY, currentFreshHint } from "./core/agent-state.mjs";
+import { isAdvisorSlot } from "./core/config.mjs";
+import { liveSlotHolders, resolveSteerHolders } from "./core/discovery.mjs";
+import { METADATA_KEY, readPaseoState } from "./core/paseo.mjs";
+import { QUOTA_DEFAULTS } from "./core/quota.mjs";
+import { listScopes } from "./core/scope.mjs";
+import { resolveContinuations } from "./core/zerosub.mjs";
 import { getQuotaSampledAt, getQuotaSnapshot } from "./quota.js";
 import { resolveZerosub, type ZerosubState } from "./zerosub-runtime.js";
 import {

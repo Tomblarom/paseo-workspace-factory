@@ -2,10 +2,10 @@
 // real waiting: the clock and sleep are injected.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { DRAIN_DEFAULT_TIMEOUT_MS, DRAIN_GRACE_MS, DRAIN_KEY, buildDrainMarker, clearDrainMarker, drain, factoryRunningAgents, isDrainMarkerActive, isRunningAgent, markPlannedRestart, parseTimeout, setDrainMarker } from '../src/drain.mjs';
-import { AGENTS_KEY } from '../src/agent-state.mjs';
-import { CHECKPOINT_KEY } from '../src/steer.mjs';
-import { LABEL, METADATA_KEY } from '../src/paseo.mjs';
+import { DRAIN_DEFAULT_TIMEOUT_MS, DRAIN_GRACE_MS, DRAIN_KEY, buildDrainMarker, clearDrainMarker, drain, factoryRunningAgents, isDrainMarkerActive, isRunningAgent, markPlannedRestart, parseTimeout, setDrainMarker } from '../plugin/server/core/drain.mjs';
+import { AGENTS_KEY } from '../plugin/server/core/agent-state.mjs';
+import { CHECKPOINT_KEY } from '../plugin/server/core/steer.mjs';
+import { LABEL, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
 
 const SCOPE = 'example/web';
 

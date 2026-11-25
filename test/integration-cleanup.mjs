@@ -2,8 +2,8 @@
 // archiving happens only when every object is positively identified. Missing or
 // unreadable evidence means: no archive call at all.
 import { realpathSync } from 'node:fs';
-import { parentOf, METADATA_KEY } from '../src/paseo.mjs';
-import { runtime } from '../src/runtime.mjs';
+import { parentOf, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
+import { runtime } from '../plugin/server/core/runtime.mjs';
 
 function canonical(path, realpath) {
   try {

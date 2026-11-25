@@ -4,10 +4,10 @@
 // Fakes only; no daemon, no GitHub.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { normalizeEntry } from '../src/discovery.mjs';
-import { createRunner } from '../src/factory.mjs';
-import { scopeCandidates, formatScopeCandidates } from '../src/scopes-view.mjs';
-import { LABEL, METADATA_KEY } from '../src/paseo.mjs';
+import { normalizeEntry } from '../plugin/server/core/discovery.mjs';
+import { createRunner } from '../plugin/server/core/factory.mjs';
+import { scopeCandidates, formatScopeCandidates } from '../plugin/server/core/scopes-view.mjs';
+import { LABEL, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
 
 const CONFIG = {
   version: 1,

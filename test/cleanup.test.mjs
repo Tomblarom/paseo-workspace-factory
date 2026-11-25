@@ -3,9 +3,9 @@
 // performs it. Fakes only; no daemon, no filesystem, no git.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { METADATA_KEY } from '../src/paseo.mjs';
-import { attachProjectArchivedAgents, collectCleanupCandidates, formatCandidate, SCRATCH_LABEL } from '../src/cleanup.mjs';
-import { createExecutors } from '../src/apply.mjs';
+import { METADATA_KEY } from '../plugin/server/core/paseo.mjs';
+import { attachProjectArchivedAgents, collectCleanupCandidates, formatCandidate, SCRATCH_LABEL } from '../plugin/server/core/cleanup.mjs';
+import { createExecutors } from '../plugin/server/core/apply.mjs';
 
 // ---------------------------------------------------------------- fakes
 

@@ -4,7 +4,7 @@
 // below, in the style of zerosub.test.mjs.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { normalizeZerosubState } from '../src/zerosub.mjs';
+import { normalizeZerosubState } from '../plugin/server/core/zerosub.mjs';
 import {
   SUPERVISION_DEFAULTS,
   exhaustedWakeDecision,
@@ -12,14 +12,14 @@ import {
   planWake,
   zerosubMoveDecision,
   zerosubPendingTarget,
-} from '../src/supervision.mjs';
-import { proactiveSwitchDecision } from '../src/steer.mjs';
-import { LABEL } from '../src/paseo.mjs';
+} from '../plugin/server/core/supervision.mjs';
+import { proactiveSwitchDecision } from '../plugin/server/core/steer.mjs';
+import { LABEL } from '../plugin/server/core/paseo.mjs';
 import {
   accountForAgent,
   allAccountsExhausted,
   earliestReset,
-} from '../src/quota.mjs';
+} from '../plugin/server/core/quota.mjs';
 
 const NOW = Date.parse('2026-11-24T12:00:00Z');
 const RESET_5H = '2026-11-24T15:00:00Z';

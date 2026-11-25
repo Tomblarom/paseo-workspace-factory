@@ -1,8 +1,9 @@
-// Resolve hook for plugin tests (not a test file itself): server modules import
-// the synced factory and shared code through `.js` specifiers (the TypeScript
-// bundler maps them to `.ts` at compile time), so plain node:test remaps them
-// to the `.ts` sources. Type stripping (--experimental-strip-types, also on by
-// default) compiles them. Only resolutions that fail normally are remapped.
+// Resolve hook for plugin tests (not a test file itself): the TypeScript
+// sources import each other through `.js` specifiers (the TypeScript bundler
+// maps them to `.ts` at compile time), so plain node:test remaps them to the
+// `.ts` sources. Type stripping (--experimental-strip-types, also on by
+// default) compiles them. Only resolutions that fail normally are remapped
+// (the `.mjs` core and shared modules resolve natively and need no hook).
 import { existsSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve as resolvePath } from "node:path";

@@ -5,10 +5,10 @@
 // fresh. Fakes only; no daemon.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { GitHubNotFound, remoteToFullName } from '../src/github.mjs';
-import { createRunner } from '../src/factory.mjs';
-import { steerStatus } from '../src/steer.mjs';
-import { LABEL, METADATA_KEY, PARENT_LABEL } from '../src/paseo.mjs';
+import { GitHubNotFound, remoteToFullName } from '../plugin/server/core/github.mjs';
+import { createRunner } from '../plugin/server/core/factory.mjs';
+import { steerStatus } from '../plugin/server/core/steer.mjs';
+import { LABEL, METADATA_KEY, PARENT_LABEL } from '../plugin/server/core/paseo.mjs';
 
 const CONFIG = {
   version: 1,

@@ -4,11 +4,11 @@
 // superseded via continuedFrom, and no duplicate rows appear.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { scopeRows, formatScopeRows, formatStatus } from '../src/scopes-view.mjs';
-import { discoverRepository } from '../src/discovery.mjs';
-import { steerStatus } from '../src/steer.mjs';
-import { CONTINUED_FROM_LABEL } from '../src/zerosub.mjs';
-import { LABEL, METADATA_KEY } from '../src/paseo.mjs';
+import { scopeRows, formatScopeRows, formatStatus } from '../plugin/server/core/scopes-view.mjs';
+import { discoverRepository } from '../plugin/server/core/discovery.mjs';
+import { steerStatus } from '../plugin/server/core/steer.mjs';
+import { CONTINUED_FROM_LABEL } from '../plugin/server/core/zerosub.mjs';
+import { LABEL, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
 
 const NOW = Date.parse('2026-11-24T12:00:00.000Z');
 const ago = (ms) => new Date(NOW - ms).toISOString();

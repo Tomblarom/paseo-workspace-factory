@@ -20,9 +20,9 @@ import { mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
-import { connect } from "../../../src/paseo.mjs";
-import { configureRuntime } from "../../../src/runtime.mjs";
-import { loadConfig } from "../../../src/config.mjs";
+import { connect } from "../../server/core/paseo.mjs";
+import { configureRuntime } from "../../server/core/runtime.mjs";
+import { loadConfig } from "../../server/core/config.mjs";
 
 const step = process.argv.find((a) => a.startsWith("--step="))?.slice(7) ?? null;
 const agentArg = process.argv.find((a) => a.startsWith("--agent="))?.slice(8) ?? null;

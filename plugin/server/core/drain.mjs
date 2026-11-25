@@ -1,5 +1,3 @@
-// @ts-nocheck
-// GENERATED from src/drain.mjs by npm run plugin:sync. Do not edit.
 // Drain for planned restarts (P3): waits until no factory agent is running,
 // then the daemon can be restarted cleanly. Agents still running at the
 // timeout are marked interrupted with reason "planned-restart" (git snapshot,
@@ -8,12 +6,12 @@
 // restarts anything itself. While it waits, a `wsf.drain` marker in every
 // scope's main workspace keeps supervision wakes quiet (M1).
 import { isDeepStrictEqual } from 'node:util';
-import { LABEL, METADATA_KEY, readPaseoState } from './paseo.js';
-import { withLock, workspaceLockName } from './lock.js';
-import { DRAIN_GRACE_MS, isDrainMarkerActive } from './defaults.js';
-import { listScopes } from './scope.js';
-import { AGENTS_KEY, buildRestartInterrupted, flagCheckpointInterrupted, updateAgentEntry } from './agent-state.js';
-import { CHECKPOINT_KEY, lastAssistantText, readGitSnapshot } from './steer.js';
+import { LABEL, METADATA_KEY, readPaseoState } from './paseo.mjs';
+import { withLock, workspaceLockName } from './lock.mjs';
+import { DRAIN_GRACE_MS, isDrainMarkerActive } from '../../shared/defaults.mjs';
+import { listScopes } from './scope.mjs';
+import { AGENTS_KEY, buildRestartInterrupted, flagCheckpointInterrupted, updateAgentEntry } from './agent-state.mjs';
+import { CHECKPOINT_KEY, lastAssistantText, readGitSnapshot } from './steer.mjs';
 
 export { DRAIN_GRACE_MS, isDrainMarkerActive };
 

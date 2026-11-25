@@ -3,9 +3,9 @@ import { test } from 'node:test';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { PROFILE_HEALTH_KEY, classifyProfileFailure, profileIsUnhealthy, readProfileHealth, recordProfileFailure, storeProfileFailure } from '../src/quota.mjs';
-import { withLock } from '../src/lock.mjs';
-import { resolveProfile } from '../src/models.mjs';
+import { PROFILE_HEALTH_KEY, classifyProfileFailure, profileIsUnhealthy, readProfileHealth, recordProfileFailure, storeProfileFailure } from '../plugin/server/core/quota.mjs';
+import { withLock } from '../plugin/server/core/lock.mjs';
+import { resolveProfile } from '../plugin/server/core/models.mjs';
 
 const LOCK_TMP = mkdtempSync(join(tmpdir(), 'wsf-profile-health-'));
 const testLock = (name, fn) => withLock(name, fn, { dir: LOCK_TMP });

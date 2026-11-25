@@ -1,8 +1,8 @@
 // Manual stage is an action with no effect until the user requests delivery.
-import { AGENTS_KEY } from "./factory/agent-state.js";
-import { withLock, workspaceLockName } from "./factory/lock.js";
-import { METADATA_KEY, readPaseoState } from "./factory/paseo.js";
-import { actionEntry, newSteerAction, readSteerAction } from "./factory/steer-action.js";
+import { AGENTS_KEY } from "./core/agent-state.mjs";
+import { withLock, workspaceLockName } from "./core/lock.mjs";
+import { METADATA_KEY, readPaseoState } from "./core/paseo.mjs";
+import { actionEntry, newSteerAction, readSteerAction } from "./core/steer-action.mjs";
 import { deliverSteer, type SteerDeliveryDeps } from "./steer-delivery.js";
 import { cleanupIdentity } from "../shared/idle-cleanup.js";
 

@@ -3,7 +3,7 @@
 // skipped rows show the pick skip reason. Table over ZeroSub states.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { resolveWorkerPick, workerListRows } from '../src/models.mjs';
+import { resolveWorkerPick, workerListRows } from '../plugin/server/core/models.mjs';
 
 const NOW = Date.parse('2026-11-24T12:00:00Z');
 const RESET = '2026-11-24T15:00:00Z';

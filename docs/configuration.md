@@ -224,7 +224,7 @@ Extend the built-in list with optional `knownLimits` (validated on load; an entr
 
 ## Version binding
 
-The receipt lookup (`lookupCreationReceipt` in `src/paseo.mjs`) speaks the internal `creation.subscribe` protocol message, which Paseo exposes only through the internal `DaemonClient` (the public SDK uses it itself to reattach to running creations). Its shape is not covered by the public SDK contract, so the lookup verifies the capability instead of pinning a version, and fails closed:
+The receipt lookup (`lookupCreationReceipt` in `plugin/server/core/paseo.mjs`) speaks the internal `creation.subscribe` protocol message, which Paseo exposes only through the internal `DaemonClient` (the public SDK uses it itself to reattach to running creations). Its shape is not covered by the public SDK contract, so the lookup verifies the capability instead of pinning a version, and fails closed:
 
 - Before use it verifies that the internal `DaemonClient` module shipping with `runtime.paseo.bin` loads and offers the methods the exchange needs, and after connecting that the daemon advertises the `creationLifecycle` feature flag.
 - Every response is shape-checked (snapshot kind, idempotency key, known phase, revision). A missing capability, a failed import, connect or exchange, or an unrecognized shape aborts with an error — the lookup never reports "no receipt" on failure, so `apply` never re-creates without a receipt.

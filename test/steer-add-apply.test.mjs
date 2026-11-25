@@ -9,8 +9,8 @@ import {
   SteerAddConflict,
   SteerAddRecovery,
   SteerAddStale,
-} from '../src/steer-add.mjs';
-import { normalizeZerosubState } from '../src/zerosub.mjs';
+} from '../plugin/server/core/steer-add.mjs';
+import { normalizeZerosubState } from '../plugin/server/core/zerosub.mjs';
 
 const NOW = Date.parse('2026-11-24T12:00:00Z');
 const RESET_5H = '2026-11-24T15:00:00Z';

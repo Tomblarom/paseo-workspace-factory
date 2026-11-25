@@ -54,25 +54,25 @@ import {
   fileProgress,
   storeAuthorization,
   withApplyLock,
-} from "./factory/apply.js";
-import { assignScope } from "./factory/assign.js";
-import { liveSlotHolders } from "./factory/discovery.js";
+} from "./core/apply.mjs";
+import { assignScope } from "./core/assign.mjs";
+import { liveSlotHolders } from "./core/discovery.mjs";
 import {
   attachProjectArchivedAgents,
   collectCleanupCandidates,
-} from "./factory/cleanup.js";
-import { isAdvisorSlot, isSensitiveProfile, workerPriority } from "./factory/config.js";
-import { DRAIN_DEFAULT_TIMEOUT_MS, drain, parseTimeout } from "./factory/drain.js";
-import { createRunner } from "./factory/factory.js";
-import { createGh } from "./factory/github.js";
-import { createGit } from "./factory/local.js";
-import { formatCatalog, paseoRunFlags, resolveProfile, usedProfilesByLiveSteers } from "./factory/models.js";
-import { QUOTA_DEFAULTS, readProfileHealth } from "./factory/quota.js";
-import { applySteerAdd, formatSteerAddPreview, planSteerAdd } from "./factory/steer-add.js";
-import { planHash } from "./factory/planner.js";
-import { defaultCreateRewindClient } from "./factory/rewind.js";
+} from "./core/cleanup.mjs";
+import { isAdvisorSlot, isSensitiveProfile, workerPriority } from "./core/config.mjs";
+import { DRAIN_DEFAULT_TIMEOUT_MS, drain, parseTimeout } from "./core/drain.mjs";
+import { createRunner } from "./core/factory.mjs";
+import { createGh } from "./core/github.mjs";
+import { createGit } from "./core/local.mjs";
+import { formatCatalog, paseoRunFlags, resolveProfile, usedProfilesByLiveSteers } from "./core/models.mjs";
+import { QUOTA_DEFAULTS, readProfileHealth } from "./core/quota.mjs";
+import { applySteerAdd, formatSteerAddPreview, planSteerAdd } from "./core/steer-add.mjs";
+import { planHash } from "./core/planner.mjs";
+import { defaultCreateRewindClient } from "./core/rewind.mjs";
 import { deliverSteerBrief, stageSteerBrief } from "./steer-brief.js";
-import { formatWorkersText, readWorkers, workersReport } from "./factory/supervision.js";
+import { formatWorkersText, readWorkers, workersReport } from "./core/supervision.mjs";
 import {
   LABEL,
   METADATA_KEY,
@@ -81,13 +81,13 @@ import {
   lookupCreationReceipt,
   paseoBinary,
   readPaseoState,
-} from "./factory/paseo.js";
-import { daemonHost, runtime } from "./factory/runtime.js";
+} from "./core/paseo.mjs";
+import { daemonHost, runtime } from "./core/runtime.mjs";
 import { applyResume } from "./resume-apply.js";
 import { deliverSteer, type SteerDeliveryDeps } from "./steer-delivery.js";
-import { listScopes } from "./factory/scope.js";
-import { scopeCandidates, scopeRows } from "./factory/scopes-view.js";
-import { AGENTS_KEY } from "./factory/agent-state.js";
+import { listScopes } from "./core/scope.mjs";
+import { scopeCandidates, scopeRows } from "./core/scopes-view.mjs";
+import { AGENTS_KEY } from "./core/agent-state.mjs";
 import {
   buildResumeBrief,
   freshSteer,
@@ -99,7 +99,7 @@ import {
   switchSteer,
   workerResumeAnswer,
   writeCheckpoint,
-} from "./factory/steer.js";
+} from "./core/steer.mjs";
 import type { ConfigLoader, HostSettingsReader } from "./config.js";
 import { getQuotaSampledAt, getQuotaSnapshot } from "./quota.js";
 import { settingsFromConfig, validateFactorySettings, type FactorySettingsValues } from "../shared/settings-validate.js";

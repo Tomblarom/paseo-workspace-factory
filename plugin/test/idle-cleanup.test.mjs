@@ -5,7 +5,7 @@ import { register } from "node:module";
 register("./ts-resolve-hooks.mjs", import.meta.url);
 
 const { resolveCacheTtl } = await import("../shared/cache-profiles.ts");
-const { currentFreshHint } = await import("../server/factory/agent-state.ts");
+const { currentFreshHint } = await import("../server/core/agent-state.mjs");
 
 const {
   CLEANUP_DEFAULTS,

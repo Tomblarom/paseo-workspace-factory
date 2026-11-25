@@ -4,11 +4,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
-import { buildAssignment } from '../src/assign.mjs';
+import { buildAssignment } from '../plugin/server/core/assign.mjs';
 import {
   buildHandoff, CHECKPOINT_KEY, checkpointRules, formatCheckpointBlock, parseCheckpointBlock, switchSteer,
-} from '../src/steer.mjs';
-import { LABEL, METADATA_KEY } from '../src/paseo.mjs';
+} from '../plugin/server/core/steer.mjs';
+import { LABEL, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
 
 const REPO = 'example-owner/example-repo';
 const FENCE = '```text\nCHECKPOINT\ntask: ';

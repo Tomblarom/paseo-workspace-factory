@@ -2,23 +2,23 @@
 // drives the real discovery, planner, apply loop and executors.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { parseRepoInput, resolveGitHub, GitHubNotFound } from '../src/github.mjs';
-import { scanCheckouts, classifyCheckouts } from '../src/local.mjs';
-import { validateConfig, validateProfilesAgainstCatalog } from '../src/config.mjs';
-import { planHash } from '../src/planner.mjs';
-import { createRunner } from '../src/factory.mjs';
-import { applyPlans, createExecutors, createAuthorization, memoryProgress, storeAuthorization, fileProgress, withApplyLock, ApplyRefused } from '../src/apply.mjs';
+import { parseRepoInput, resolveGitHub, GitHubNotFound } from '../plugin/server/core/github.mjs';
+import { scanCheckouts, classifyCheckouts } from '../plugin/server/core/local.mjs';
+import { validateConfig, validateProfilesAgainstCatalog } from '../plugin/server/core/config.mjs';
+import { planHash } from '../plugin/server/core/planner.mjs';
+import { createRunner } from '../plugin/server/core/factory.mjs';
+import { applyPlans, createExecutors, createAuthorization, memoryProgress, storeAuthorization, fileProgress, withApplyLock, ApplyRefused } from '../plugin/server/core/apply.mjs';
 import { verifyCleanup, performCleanup } from './integration-cleanup.mjs';
-import { switchSteer, steerStatus, SwitchRefused, writeCheckpoint, CHECKPOINT_KEY, parseCheckpointBlock, buildHandoff } from '../src/steer.mjs';
-import { configureRuntime, daemonHost } from '../src/runtime.mjs';
-import { defaultConfigPath } from '../src/config.mjs';
-import { acquireLock, withLock, LockBusy } from '../src/lock.mjs';
+import { switchSteer, steerStatus, SwitchRefused, writeCheckpoint, CHECKPOINT_KEY, parseCheckpointBlock, buildHandoff } from '../plugin/server/core/steer.mjs';
+import { configureRuntime, daemonHost } from '../plugin/server/core/runtime.mjs';
+import { defaultConfigPath } from '../plugin/server/core/config.mjs';
+import { acquireLock, withLock, LockBusy } from '../plugin/server/core/lock.mjs';
 import { mkdtempSync, writeFileSync as writeFile, rmSync, mkdirSync, symlinkSync, renameSync, lstatSync, realpathSync, readFileSync, readdirSync, closeSync, openSync } from 'node:fs';
 import { tmpdir, hostname } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { LABEL, METADATA_KEY, PARENT_LABEL } from '../src/paseo.mjs';
+import { LABEL, METADATA_KEY, PARENT_LABEL } from '../plugin/server/core/paseo.mjs';
 
 // ---------------------------------------------------------------- fixtures
 
@@ -942,7 +942,7 @@ test('two simultaneous switches from the same state: exactly one succeeds (and w
 
 // Real processes against a real lock directory. CONTENDER tries once (busy/acquired),
 // HOLDER keeps the lock for the given milliseconds after printing "holding".
-const LOCK_URL = new URL('../src/lock.mjs', import.meta.url).href;
+const LOCK_URL = new URL('../plugin/server/core/lock.mjs', import.meta.url).href;
 function lockProcess(dir, mode, holdMs = 0) {
   const code = `import { acquireLock } from ${JSON.stringify(LOCK_URL)};
 try {
@@ -1511,7 +1511,7 @@ test('P0.2 two concurrent applies on one plan: exactly one enters, the other fai
 
 test('P0.2 apply lock across real processes; a replaced lock file stops apply before the next mutation', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'wsf-apply-proc-'));
-  const applyUrl = new URL('../src/apply.mjs', import.meta.url).href;
+  const applyUrl = new URL('../plugin/server/core/apply.mjs', import.meta.url).href;
   const contender = () => new Promise((resolve) => {
     const child = spawn(process.execPath, ['--input-type=module', '-e', `
       import { withApplyLock } from ${JSON.stringify(applyUrl)};

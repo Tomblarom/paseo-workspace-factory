@@ -4,7 +4,7 @@ import { register } from "node:module";
 register("./ts-resolve-hooks.mjs", import.meta.url);
 const { extractTurnUsage, mergeTurnUsage, resetQuotaForTests, sampleQuotaAsync, uncachedInputTokens } = await import("../server/quota.ts");
 const { validateQuotaSettings } = await import("../shared/settings-validate.ts");
-const { failoverChain } = await import("../server/factory/supervision.ts");
+const { failoverChain } = await import("../server/core/supervision.mjs");
 
 test("turn usage extracts provider counters and keeps cumulative totals", () => {
   const usage = extractTurnUsage({ outcome: { usage: {

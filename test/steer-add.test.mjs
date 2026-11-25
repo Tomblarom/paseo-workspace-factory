@@ -1,10 +1,10 @@
-// Pure steer-add selection (src/models.mjs): slot suggestion, slot-priority
+// Pure steer-add selection (plugin/server/core/models.mjs): slot suggestion, slot-priority
 // profile order, catalog/health/quota eligibility and warn-threshold account
 // choice. Offline only: fake config, catalog and ZeroSub state, no live RPC.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { nextFreeSlot, resolveProfile, resolveSteerAdd } from '../src/models.mjs';
-import { normalizeZerosubState } from '../src/zerosub.mjs';
+import { nextFreeSlot, resolveProfile, resolveSteerAdd } from '../plugin/server/core/models.mjs';
+import { normalizeZerosubState } from '../plugin/server/core/zerosub.mjs';
 
 const NOW = Date.parse('2026-11-24T12:00:00Z');
 const RESET_5H = '2026-11-24T15:00:00Z';

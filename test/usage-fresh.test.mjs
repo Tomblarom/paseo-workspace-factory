@@ -6,10 +6,10 @@ import { test } from 'node:test';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { validateConfig } from '../src/config.mjs';
-import { switchSteer, freshSteer, steerStatus, agentUsage, writeCheckpoint } from '../src/steer.mjs';
-import { withLock } from '../src/lock.mjs';
-import { LABEL, METADATA_KEY, PARENT_LABEL } from '../src/paseo.mjs';
+import { validateConfig } from '../plugin/server/core/config.mjs';
+import { switchSteer, freshSteer, steerStatus, agentUsage, writeCheckpoint } from '../plugin/server/core/steer.mjs';
+import { withLock } from '../plugin/server/core/lock.mjs';
+import { LABEL, METADATA_KEY, PARENT_LABEL } from '../plugin/server/core/paseo.mjs';
 
 // ---------------------------------------------------------------- fixtures
 

@@ -2,7 +2,7 @@
 // (registration, turn transitions, wakes, batching, quiet periods, watchdog,
 // failover) against a fake Paseo client. Server modules load through the
 // ts-resolve-hooks remap (.js specifiers to .ts sources); core register rules
-// stay in src/ and are reused, never reimplemented.
+// stay in server/core/ and are reused, never reimplemented.
 import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -11,8 +11,8 @@ import { register } from "node:module";
 register("./ts-resolve-hooks.mjs", import.meta.url);
 
 const supervise = await import("../server/supervise.ts");
-const { LockBusy } = await import("../server/factory/lock.ts");
-// Shared modules import the generated defaults through `.js` specifiers, so
+const { LockBusy } = await import("../server/core/lock.mjs");
+// Shared modules import each other through `.js` specifiers, so
 // they must load dynamically after the resolve hook is registered.
 const {
   DRAIN_METADATA_KEY,
@@ -34,11 +34,11 @@ const {
   withArchiveHint,
 } = await import("../shared/supervise.ts");
 const { factorySupervisionSettings } = await import("../shared/settings.ts");
-import { LABEL, METADATA_KEY, readPaseoState } from "../../src/paseo.mjs";
-import { WORKERS_KEY } from "../../src/supervision.mjs";
-import { AGENTS_KEY } from "../../src/agent-state.mjs";
-import { CHECKPOINT_KEY, SwitchRefused, switchSteer } from "../../src/steer.mjs";
-import { normalizeZerosubState } from "../../src/zerosub.mjs";
+import { LABEL, METADATA_KEY, readPaseoState } from "../server/core/paseo.mjs";
+import { WORKERS_KEY } from "../server/core/supervision.mjs";
+import { AGENTS_KEY } from "../server/core/agent-state.mjs";
+import { CHECKPOINT_KEY, SwitchRefused, switchSteer } from "../server/core/steer.mjs";
+import { normalizeZerosubState } from "../server/core/zerosub.mjs";
 
 const REPO = "example-owner/example-repo";
 const NOW = new Date("2026-11-24T12:00:00.000Z").getTime();

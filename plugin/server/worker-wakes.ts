@@ -1,5 +1,5 @@
-import { AGENTS_KEY } from "./factory/agent-state.js";
-import { readWorkers } from "./factory/supervision.js";
+import { AGENTS_KEY } from "./core/agent-state.mjs";
+import { readWorkers } from "./core/supervision.mjs";
 import { hasActiveAgentWork } from "./agent-context.js";
 
 export function canMarkWorkerStale(agent: any, entry: any): boolean {

@@ -8,9 +8,9 @@ import { test } from 'node:test';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CHECKPOINT_KEY, freshSteer, switchSteer } from '../src/steer.mjs';
-import { withLock } from '../src/lock.mjs';
-import { LABEL, METADATA_KEY } from '../src/paseo.mjs';
+import { CHECKPOINT_KEY, freshSteer, switchSteer } from '../plugin/server/core/steer.mjs';
+import { withLock } from '../plugin/server/core/lock.mjs';
+import { LABEL, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
 
 // ---------------------------------------------------------------- fixtures
 

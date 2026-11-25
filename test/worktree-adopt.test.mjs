@@ -8,12 +8,12 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { normalizeEntry, isWorktreeWorkspace } from '../src/discovery.mjs';
-import { GitHubNotFound, remoteToFullName } from '../src/github.mjs';
-import { createRunner } from '../src/factory.mjs';
-import { applyPlans, createExecutors, createAuthorization } from '../src/apply.mjs';
-import { switchSteer, steerStatus, writeCheckpoint } from '../src/steer.mjs';
-import { LABEL, METADATA_KEY } from '../src/paseo.mjs';
+import { normalizeEntry, isWorktreeWorkspace } from '../plugin/server/core/discovery.mjs';
+import { GitHubNotFound, remoteToFullName } from '../plugin/server/core/github.mjs';
+import { createRunner } from '../plugin/server/core/factory.mjs';
+import { applyPlans, createExecutors, createAuthorization } from '../plugin/server/core/apply.mjs';
+import { switchSteer, steerStatus, writeCheckpoint } from '../plugin/server/core/steer.mjs';
+import { LABEL, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
 
 const CONFIG = {
   version: 1,

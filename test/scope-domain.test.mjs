@@ -8,14 +8,14 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { normalizeEntry } from '../src/discovery.mjs';
-import { listScopes, sameScopeId, domainOfScope } from '../src/scope.mjs';
-import { createRunner } from '../src/factory.mjs';
-import { applyPlans, createExecutors, createAuthorization } from '../src/apply.mjs';
-import { assignScope, buildAssignment } from '../src/assign.mjs';
-import { steerStatus, buildResumeBrief, CHECKPOINT_KEY } from '../src/steer.mjs';
-import { scopeRows, formatScopeRows } from '../src/scopes-view.mjs';
-import { LABEL, METADATA_KEY } from '../src/paseo.mjs';
+import { normalizeEntry } from '../plugin/server/core/discovery.mjs';
+import { listScopes, sameScopeId, domainOfScope } from '../plugin/server/core/scope.mjs';
+import { createRunner } from '../plugin/server/core/factory.mjs';
+import { applyPlans, createExecutors, createAuthorization } from '../plugin/server/core/apply.mjs';
+import { assignScope, buildAssignment } from '../plugin/server/core/assign.mjs';
+import { steerStatus, buildResumeBrief, CHECKPOINT_KEY } from '../plugin/server/core/steer.mjs';
+import { scopeRows, formatScopeRows } from '../plugin/server/core/scopes-view.mjs';
+import { LABEL, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
 
 const CONFIG = {
   version: 1,

@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
-import { QUOTA_SAMPLE_MINUTES } from "./factory/defaults.js";
-import { parseUsageJson } from "./factory/quota.js";
-import { paseoBinary } from "./factory/paseo.js";
+import { QUOTA_SAMPLE_MINUTES } from "../shared/defaults.mjs";
+import { parseUsageJson } from "./core/quota.mjs";
+import { paseoBinary } from "./core/paseo.mjs";
 
 /**
  * Per-turn token counters in provider-native meaning: `input` is the reported

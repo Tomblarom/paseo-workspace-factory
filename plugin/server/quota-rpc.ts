@@ -5,7 +5,7 @@ import type { RpcInput } from "@getpaseo/plugin";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import type { factoryQuota } from "../shared/factory.js";
 import type { ConfigLoader } from "./config.js";
-import { QUOTA_DEFAULTS, accountExhausted, earliestResetOf, freshMaxUsedPct, profilePool, quotaPct } from "./factory/quota.js";
+import { QUOTA_DEFAULTS, accountExhausted, earliestResetOf, freshMaxUsedPct, profilePool, quotaPct } from "./core/quota.mjs";
 import { getQuotaSampledAt, getQuotaSnapshot } from "./quota.js";
 import { resolveZerosub, type ZerosubSource } from "./zerosub-runtime.js";
 

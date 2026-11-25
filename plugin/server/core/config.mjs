@@ -4,7 +4,7 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
-import { KNOWN_UNSUPPORTED, knownUnsupportedReason } from './defaults.mjs';
+import { KNOWN_UNSUPPORTED, knownUnsupportedReason } from '../../shared/defaults.mjs';
 import { profilePool } from './quota.mjs';
 
 export { KNOWN_UNSUPPORTED };

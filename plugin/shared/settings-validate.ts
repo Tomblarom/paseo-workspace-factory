@@ -1,7 +1,7 @@
 // Validation and config layering for the factory settings documents.
-// Pure module: its only import is the generated defaults (single source:
-// src/defaults.mjs), so both the plugin bundles and plain node:test use it.
-import { KNOWN_UNSUPPORTED as CORE_KNOWN_UNSUPPORTED, QUOTA_DEFAULTS } from "./defaults.js";
+// Pure module: its only import is the shared defaults, so both the plugin
+// bundles and plain node:test use it.
+import { KNOWN_UNSUPPORTED as CORE_KNOWN_UNSUPPORTED, QUOTA_DEFAULTS } from "./defaults.mjs";
 
 export interface FactoryProfileValue {
   provider: string;
@@ -89,7 +89,7 @@ export interface KnownLimit {
   reason: string;
 }
 
-/** Settings the catalog advertises but a provider rejects at creation. Single source is src/defaults.mjs. */
+/** Settings the catalog advertises but a provider rejects at creation. Single source is ./defaults.mjs. */
 export const KNOWN_UNSUPPORTED = CORE_KNOWN_UNSUPPORTED as {
   provider: string;
   modelPattern: string;
@@ -126,7 +126,7 @@ export function validateQuotaSettings(values: QuotaSettingsValues): string[] {
   return errors;
 }
 
-/** Same account rule the CLI config validator uses (src/config.mjs). */
+/** Same account rule the CLI config validator uses (plugin/server/core/config.mjs). */
 export const GITHUB_OWNER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 
 /**

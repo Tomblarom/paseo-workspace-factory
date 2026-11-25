@@ -1,20 +1,20 @@
 import { randomUUID } from "node:crypto";
 import { finishSteerDelivery, pendingSteerDelivery, type SteerDeliveryDeps } from "./steer-delivery.js";
-import { METADATA_KEY, readPaseoState } from "./factory/paseo.js";
-import { listScopes } from "./factory/scope.js";
-import { guardScope } from "./factory/scope-guard.js";
-import { readCleanupAction, readSteerAction } from "./factory/steer-action.js";
-import { ACTION_FACTS, actionFact, mergeActionFacts } from "./factory/action-facts.js";
+import { METADATA_KEY, readPaseoState } from "./core/paseo.mjs";
+import { listScopes } from "./core/scope.mjs";
+import { guardScope } from "./core/scope-guard.mjs";
+import { readCleanupAction, readSteerAction } from "./core/steer-action.mjs";
+import { ACTION_FACTS, actionFact, mergeActionFacts } from "./core/action-facts.mjs";
 import { pushPreviousSession } from "../shared/idle-cleanup.js";
-import { createGit } from "./factory/local.js";
-import { withLock, withWorkspaceLock, workspaceLockName } from "./factory/lock.js";
+import { createGit } from "./core/local.mjs";
+import { withLock, withWorkspaceLock, workspaceLockName } from "./core/lock.mjs";
 import {
   agentUsage,
   lastAssistantText,
   parseCheckpointBlock,
   readGitSnapshot,
-} from "./factory/steer.js";
-import { buildSettingsBaseline, updateAgentEntry } from "./factory/agent-state.js";
+} from "./core/steer.mjs";
+import { buildSettingsBaseline, updateAgentEntry } from "./core/agent-state.mjs";
 import { speedOfLiveOptions } from "../shared/steer-settings.js";
 import { captureSweepPaseo, noteEffectFailure } from "./cold-sweep.js";
 import {
@@ -24,8 +24,8 @@ import {
 } from "../shared/idle-cleanup.js";
 import { firstUserText, workerIdentityFromMetadata } from "../shared/supervise.js";
 import { decideAssignmentReport } from "../shared/assignment-report.js";
-import { ASSIGNMENT_KEY } from "./factory/assign.js";
-import { QUOTA_DEFAULTS } from "./factory/quota.js";
+import { ASSIGNMENT_KEY } from "./core/assign.mjs";
+import { QUOTA_DEFAULTS } from "./core/quota.mjs";
 import { extractTurnUsage, mergeTurnUsage } from "./quota.js";
 import {
   proactiveHintDecision,

@@ -10,11 +10,11 @@ import {
   ACCOUNT_METADATA_KEY, ACCOUNT_PIN_METHOD, ACCOUNT_PIN_PLUGIN_ID, CONTINUED_FROM_LABEL,
   continuedFromId, inheritContinuationLabels, normalizeZerosubState,
   resolveContinuations, suggestAccountPin, switchesFromTimeline, latestSwitchRow, parseSwitchData,
-} from '../src/zerosub.mjs';
-import { applyContinuations, discoverRepository, remapWorkerParents } from '../src/discovery.mjs';
-import { resolveProfile } from '../src/models.mjs';
-import { steerStatus } from '../src/steer.mjs';
-import { LABEL, METADATA_KEY, PARENT_LABEL, parentOf } from '../src/paseo.mjs';
+} from '../plugin/server/core/zerosub.mjs';
+import { applyContinuations, discoverRepository, remapWorkerParents } from '../plugin/server/core/discovery.mjs';
+import { resolveProfile } from '../plugin/server/core/models.mjs';
+import { steerStatus } from '../plugin/server/core/steer.mjs';
+import { LABEL, METADATA_KEY, PARENT_LABEL, parentOf } from '../plugin/server/core/paseo.mjs';
 
 const NOW = Date.parse('2026-11-24T12:00:00Z');
 const FUTURE_5H = '2026-11-24T15:00:00Z';

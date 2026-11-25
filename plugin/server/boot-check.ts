@@ -5,18 +5,18 @@
 // the daemon start becomes an interrupted record with reason "daemon-restart"
 // (C2 shape plus reason) and clears the open fields, so a second plugin start
 // finds nothing to mark. Never throws out of ensureBootChecked.
-import { actionEntry, readSteerAction } from "./factory/steer-action.js";
+import { actionEntry, readSteerAction } from "./core/steer-action.mjs";
 import { execFileSync } from "node:child_process";
-import { METADATA_KEY, paseoBinary, readPaseoState } from "./factory/paseo.js";
-import { listScopes } from "./factory/scope.js";
-import { withWorkspaceLock } from "./factory/lock.js";
-import { createGit } from "./factory/local.js";
-import { lastAssistantText, readGitSnapshot } from "./factory/steer.js";
+import { METADATA_KEY, paseoBinary, readPaseoState } from "./core/paseo.mjs";
+import { listScopes } from "./core/scope.mjs";
+import { withWorkspaceLock } from "./core/lock.mjs";
+import { createGit } from "./core/local.mjs";
+import { lastAssistantText, readGitSnapshot } from "./core/steer.mjs";
 import {
   buildRestartInterrupted,
   isOpenTurnBeforeRestart,
-} from "./factory/agent-state.js";
-import { isAdvisorSlot } from "./factory/config.js";
+} from "./core/agent-state.mjs";
+import { isAdvisorSlot } from "./core/config.mjs";
 import { factoryIdentity } from "../shared/auto-checkpoint.js";
 import { RESUME_CLEAR_DEFAULTS, bootResumeReason } from "../shared/idle-cleanup.js";
 

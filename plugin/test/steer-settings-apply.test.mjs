@@ -9,8 +9,8 @@ register("./ts-resolve-hooks.mjs", import.meta.url);
 
 const settings = await import("../server/steer-settings.ts");
 const { factorySteerSettings, factorySteerSettingsPreview, factorySteerSettingsRevert } = await import("../shared/factory.ts");
-import { LABEL, METADATA_KEY } from "../../src/paseo.mjs";
-import { AGENTS_KEY } from "../../src/agent-state.mjs";
+import { LABEL, METADATA_KEY } from "../server/core/paseo.mjs";
+import { AGENTS_KEY } from "../server/core/agent-state.mjs";
 
 const REPO = "example-owner/example-repo";
 const NOW = Date.parse("2026-11-25T12:00:00.000Z");

@@ -1,8 +1,8 @@
 // Self-takeover: `switch --to <own slot> --apply` called by the target steer itself. Fakes only.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { switchSteer, SwitchRefused } from '../src/steer.mjs';
-import { LABEL, METADATA_KEY } from '../src/paseo.mjs';
+import { switchSteer, SwitchRefused } from '../plugin/server/core/steer.mjs';
+import { LABEL, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
 
 const REPO = 'example-owner/example-repo';
 

@@ -8,12 +8,12 @@ import { test } from 'node:test';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createRunner } from '../src/factory.mjs';
-import { liveSlotHolders, resolveSteerHolders } from '../src/discovery.mjs';
-import { LABEL, METADATA_KEY } from '../src/paseo.mjs';
-import { scopeHolder } from '../src/scope-guard.mjs';
-import { resolveWakeTarget } from '../src/supervision.mjs';
-import { CONTINUED_FROM_LABEL } from '../src/zerosub.mjs';
+import { createRunner } from '../plugin/server/core/factory.mjs';
+import { liveSlotHolders, resolveSteerHolders } from '../plugin/server/core/discovery.mjs';
+import { LABEL, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
+import { scopeHolder } from '../plugin/server/core/scope-guard.mjs';
+import { resolveWakeTarget } from '../plugin/server/core/supervision.mjs';
+import { CONTINUED_FROM_LABEL } from '../plugin/server/core/zerosub.mjs';
 
 // ---------------------------------------------------------------- fixtures
 

@@ -9,9 +9,9 @@ import { register } from "node:module";
 register("./ts-resolve-hooks.mjs", import.meta.url);
 
 const { handleTurnAfter } = await import("../server/turn-hook.ts");
-import { LABEL, METADATA_KEY } from "../../src/paseo.mjs";
-import { AGENTS_KEY } from "../../src/agent-state.mjs";
-import { normalizeZerosubState } from "../../src/zerosub.mjs";
+import { LABEL, METADATA_KEY } from "../server/core/paseo.mjs";
+import { AGENTS_KEY } from "../server/core/agent-state.mjs";
+import { normalizeZerosubState } from "../server/core/zerosub.mjs";
 
 const REPO = "example-owner/example-repo";
 

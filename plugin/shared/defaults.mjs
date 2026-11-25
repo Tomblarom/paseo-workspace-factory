@@ -1,14 +1,12 @@
-// @ts-nocheck
-// GENERATED from src/defaults.mjs by npm run plugin:sync. Do not edit.
 // Factory-wide default facts shared with the plugin client.
 //
 // Pure module: zero imports, no node APIs, no Date.now() defaults in exported
 // signatures except an explicit opt-in. It is the single source for the quota
 // thresholds (documented: warn 75, exhausted 95), the quota sampling cadence
 // and staleness rule, the drain-marker predicate, and the built-in
-// catalog-exceptions table. src/*.mjs import it directly; the plugin client
-// cannot reach src/, so `npm run plugin:sync` mirrors this file to
-// plugin/shared/defaults.ts (generated, do not edit there).
+// catalog-exceptions table. It lives in plugin/shared/ so the plugin client,
+// the plugin server and the CLI (via the core in plugin/server/core/) all
+// import this single copy directly.
 //
 // Anything here must stay serializable and browser-safe: no RegExp literals
 // (patterns are strings, compiled at use), no process/env access.

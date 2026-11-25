@@ -6,21 +6,20 @@
 // archives (the wake text tells the steer to archive accepted workers) and
 // never wakes background agents. Design: docs/design/supervision-design.md.
 //
-// All register rules come from the synced core (./factory/supervision.js,
-// single source src/supervision.mjs, mirrored by `node scripts/plugin-sync.mjs`)
+// All register rules come from the core (./core/supervision.mjs)
 // and are never duplicated here; plugin-only text and scans live in
 // ../shared/supervise.ts. Only erasable TypeScript: node --test imports this
 // file with type stripping (see plugin/test/ts-resolve-hooks.mjs).
 import { deliverSteer, finishSteerDelivery, pendingSteerDelivery, type EventBatch, type SteerDeliveryDeps } from "./steer-delivery.js";
 import { canMarkWorkerStale, filterStaleWorkerEvents } from "./worker-wakes.js";
-import * as paseoCore from "./factory/paseo.js";
+import * as paseoCore from "./core/paseo.mjs";
 import { setTimeout as delay } from "node:timers/promises";
-import * as scopeCore from "./factory/scope.js";
-import * as lockCore from "./factory/lock.js";
-import * as supervisionCore from "./factory/supervision.js";
-import * as agentStateCore from "./factory/agent-state.js";
-import * as steerCore from "./factory/steer.js";
-import * as quotaCore from "./factory/quota.js";
+import * as scopeCore from "./core/scope.mjs";
+import * as lockCore from "./core/lock.mjs";
+import * as supervisionCore from "./core/supervision.mjs";
+import * as agentStateCore from "./core/agent-state.mjs";
+import * as steerCore from "./core/steer.mjs";
+import * as quotaCore from "./core/quota.mjs";
 
 // The synced core is unchecked (@ts-nocheck): its inferred parameter types are
 // too narrow for real calls, so supervision talks to it as any (as the sweep

@@ -3,11 +3,11 @@
 // and multi-entry plans with a clear message. Fakes only.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { normalizeEntry } from '../src/discovery.mjs';
-import { createRunner } from '../src/factory.mjs';
-import { planHash } from '../src/planner.mjs';
-import { applyPlans, createAuthorization, memoryProgress, storeAuthorization, ApplyRefused } from '../src/apply.mjs';
-import { METADATA_KEY } from '../src/paseo.mjs';
+import { normalizeEntry } from '../plugin/server/core/discovery.mjs';
+import { createRunner } from '../plugin/server/core/factory.mjs';
+import { planHash } from '../plugin/server/core/planner.mjs';
+import { applyPlans, createAuthorization, memoryProgress, storeAuthorization, ApplyRefused } from '../plugin/server/core/apply.mjs';
+import { METADATA_KEY } from '../plugin/server/core/paseo.mjs';
 
 const CONFIG = {
   version: 1,

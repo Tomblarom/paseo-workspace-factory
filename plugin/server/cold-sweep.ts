@@ -1,15 +1,15 @@
-import { AGENTS_KEY, currentFreshHint, updateAgentEntry } from "./factory/agent-state.js";
-import { isAdvisorSlot } from "./factory/config.js";
-import { METADATA_KEY, readPaseoState } from "./factory/paseo.js";
-import { QUOTA_DEFAULTS, accountExhausted, freshMaxUsedPct, quotaEntry, quotaExhausted, quotaPct } from "./factory/quota.js";
-import { listScopes } from "./factory/scope.js";
-import { WORKERS_KEY } from "./factory/supervision.js";
-import { buildRewindRecord } from "./factory/steer.js";
-import { rewindSameTab } from "./factory/rewind.js";
-import { actionEntry, readSteerAction, readCleanupAction } from "./factory/steer-action.js";
-import { actionFact } from "./factory/action-facts.js";
-import { withLock, workspaceLockName } from "./factory/lock.js";
-import { guardScope } from "./factory/scope-guard.js";
+import { AGENTS_KEY, currentFreshHint, updateAgentEntry } from "./core/agent-state.mjs";
+import { isAdvisorSlot } from "./core/config.mjs";
+import { METADATA_KEY, readPaseoState } from "./core/paseo.mjs";
+import { QUOTA_DEFAULTS, accountExhausted, freshMaxUsedPct, quotaEntry, quotaExhausted, quotaPct } from "./core/quota.mjs";
+import { listScopes } from "./core/scope.mjs";
+import { WORKERS_KEY } from "./core/supervision.mjs";
+import { buildRewindRecord } from "./core/steer.mjs";
+import { rewindSameTab } from "./core/rewind.mjs";
+import { actionEntry, readSteerAction, readCleanupAction } from "./core/steer-action.mjs";
+import { actionFact } from "./core/action-facts.mjs";
+import { withLock, workspaceLockName } from "./core/lock.mjs";
+import { guardScope } from "./core/scope-guard.mjs";
 import { getQuotaSampledAt, getQuotaSnapshot } from "./quota.js";
 import {
   CLEAR_COMMAND,

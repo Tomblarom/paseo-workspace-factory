@@ -174,7 +174,7 @@ The main risks are stale messages after letter reuse, loss of file-only setup or
 classification, cache estimates that make a poor tie-breaker, and a CLI/plugin version
 mismatch on the internal Paseo client. Counter these with identity/epoch guards, visible
 setup and review prompts, cache ranking behind quota, and a versioned RPC with explicit
-errors. Keep CLI and generated `plugin/server/factory` modules in sync via `npm run plugin:sync`.
+errors. Keep the CLI entry and the in-package core consistent (single copy under `plugin/`, imported relatively by `src/cli.mjs`).
 
 ## Implementation sequence
 

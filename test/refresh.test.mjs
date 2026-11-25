@@ -6,17 +6,17 @@ import { test } from 'node:test';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { freshSteer, steerStatus, switchSteer } from '../src/steer.mjs';
-import { markSupersededSlotHolders } from '../src/discovery.mjs';
-import { planRepository } from '../src/planner.mjs';
-import { createExecutors } from '../src/apply.mjs';
-import { planSteerAdd } from '../src/steer-add.mjs';
-import { WORKERS_KEY, formatWorkersPruneText, pruneWorkerRegister, staleWorkerEntries } from '../src/supervision.mjs';
-import { formatSlotProfileSuggestion, suggestSlotProfile } from '../src/models.mjs';
-import { scopeRows } from '../src/scopes-view.mjs';
-import { withLock } from '../src/lock.mjs';
-import { LABEL, METADATA_KEY, PARENT_LABEL } from '../src/paseo.mjs';
-import { AGENTS_KEY } from '../src/agent-state.mjs';
+import { freshSteer, steerStatus, switchSteer } from '../plugin/server/core/steer.mjs';
+import { markSupersededSlotHolders } from '../plugin/server/core/discovery.mjs';
+import { planRepository } from '../plugin/server/core/planner.mjs';
+import { createExecutors } from '../plugin/server/core/apply.mjs';
+import { planSteerAdd } from '../plugin/server/core/steer-add.mjs';
+import { WORKERS_KEY, formatWorkersPruneText, pruneWorkerRegister, staleWorkerEntries } from '../plugin/server/core/supervision.mjs';
+import { formatSlotProfileSuggestion, suggestSlotProfile } from '../plugin/server/core/models.mjs';
+import { scopeRows } from '../plugin/server/core/scopes-view.mjs';
+import { withLock } from '../plugin/server/core/lock.mjs';
+import { LABEL, METADATA_KEY, PARENT_LABEL } from '../plugin/server/core/paseo.mjs';
+import { AGENTS_KEY } from '../plugin/server/core/agent-state.mjs';
 
 // ---------------------------------------------------------------- fixtures
 

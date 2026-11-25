@@ -64,11 +64,11 @@ Importing across that line, putting a code module at the plugin root, or importi
 Consequences for reusing `src/`:
 
 1. The plugin cannot import the factory checkout. "[R]epository-only import aliases and files outside the package do not reach users" ([publishing](https://paseo.sh/docs/plugins/publishing.md#3-check-the-package-and-publish)). The core must travel inside the plugin package.
-2. Recommended for the pilot: vendor the core as TypeScript under `server/factory/` (the modules are dependency-free ESM; only the `paseo`/`gh`/`git` CLIs and the daemon SDK are external). Replace the factory's own SDK connect (`loadSdk`/`connect` in `src/paseo.mjs`) with the handler's `{ paseo }`; keep `child_process` calls to `gh`, `git`, and the `paseo` CLI, which remain available in the daemon subprocess.
+2. Done: the core lives in the package as plain `.mjs` under `server/core/` (plus browser-safe `shared/*.mjs` for modules the client needs). The modules are dependency-free ESM; only the `paseo`/`gh`/`git` CLIs and the daemon SDK are external. Replace the factory's own SDK connect (`loadSdk`/`connect` in `server/core/paseo.mjs`) with the handler's `{ paseo }`; keep `child_process` calls to `gh`, `git`, and the `paseo` CLI, which remain available in the daemon subprocess.
 3. Alternative: publish the core as an npm dependency. That requires the dependency in `dependencies` (not `devDependencies`), a published `npm-shrinkwrap.json` locking the whole tree, and usually a `"build": [["npm", "ci", "--omit=dev", "--ignore-scripts"]]` step plus npm on the daemon `PATH` ([publishing](https://paseo.sh/docs/plugins/publishing.md#2-lock-installed-dependencies), [reference](https://paseo.sh/docs/plugins/reference.md#cli-reference)). Heavier; only worth it if the core is shared with other consumers.
 4. Not recommended: shelling out to an installed `paseo-factory` binary from the handler. It works (Node `child_process`), but couples the plugin to an out-of-band install on every daemon host.
-5. Verify during implementation: the daemon subprocess Node version must satisfy the factory's `engines: node >= 22` (log `process.version` via `paseo plugin logs`). No `.mjs` outside the compiled roots: keep vendored code as `.ts` so the plugin compiler and `npm run typecheck` cover it.
-6. Plans, authorizations, journals, and locks (`runtime.stateDir`) stay daemon-host files; the server side can keep the same layout and the single-host `flock` model. The receipt-lookup version pin (`RECEIPT_LOOKUP_TESTED_VERSIONS` in `src/paseo.mjs`) must be re-verified against the daemon the plugin runs on.
+5. Verify during implementation: the daemon subprocess Node version must satisfy the factory's `engines: node >= 22` (log `process.version` via `paseo plugin logs`). The `.mjs` core compiles with the production plugin compiler (verified on 0.17.4 for both bundles); `tsconfig` sets `allowJs` so `npm run typecheck` resolves it.
+6. Plans, authorizations, journals, and locks (`runtime.stateDir`) stay daemon-host files; the server side can keep the same layout and the single-host `flock` model. The receipt-lookup version pin (`RECEIPT_LOOKUP_TESTED_VERSIONS` in `server/core/paseo.mjs`) must be re-verified against the daemon the plugin runs on.
 
 ## (c) Command Center entries
 
@@ -126,7 +126,7 @@ plugin/
   index.server.ts            # server.handle(...) per RPC + registerSettings
   shared/factory.ts          # defineRpc contracts + defineSettings documents
   shared/…
-  server/factory/…           # vendored core (planner, discovery, steer…)
+  server/core/…              # factory core as .mjs (planner, discovery, steer…)
   server/handlers.ts         # thin handlers mapping RPC input to core calls
   client/factory-panel.tsx   # status/plan preview/confirm UI
   client/settings-*.tsx      # host + device settings screens
@@ -142,7 +142,7 @@ Receipt lookup verifies the `creation.subscribe` capability (internal `DaemonCli
 
 ## Decisions
 
-- Core reuse: dev-time sync, no hand duplication. `npm run plugin:sync` (`scripts/plugin-sync.mjs`) copies `src/*.mjs` except the CLI entry to `plugin/server/factory/*.ts`, rewrites `.mjs` imports to `.js` for the TypeScript bundler resolution, and adds an `@ts-nocheck` banner. `src/` stays the single source of truth; re-run after `src/` changes. Rationale: the plugin compiler only bundles in-package files, and the scaffold typechecks `**/*.ts(x)` only, so `.ts` is the only documented shape; a daemon-side build copy from `../src` fails for Git `:plugin` installs where only the subdir is staged; an npm dependency needs a publish, a shrinkwrap, and npm on the daemon `PATH`; shelling out couples the plugin to an out-of-band binary install.
+- Core reuse: single copy, no hand duplication. The factory core lives in the package as `plugin/server/core/*.mjs` (browser-safe client leaves as `plugin/shared/*.mjs`); the plugin server imports it directly and the CLI entry (`src/cli.mjs`) imports it relatively. Rationale: the plugin compiler only bundles in-package files, and a spike proved it bundles plain `.mjs` in both the server and client bundles; a daemon-side build copy from `../src` fails for Git `:plugin` installs where only the subdir is staged; an npm dependency needs a publish, a shrinkwrap, and npm on the daemon `PATH`; shelling out couples the plugin to an out-of-band binary install.
 - Config layering: the file stays the source of truth for `github`, `checkoutRoot`, `runtime`, and `knownLimits`; the host-scope settings document replaces slots, prepare, start steer, and the worker priority list and overlays profiles per name. The server re-validates the merged config with the CLI validator. Settings edits never touch live steers; the live model is authoritative (no drift display since K13).
 - Writes: `factory.apply` quotes the stored plan hash (stored authorization, same checks as the CLI); `factory.switch` and `factory.checkpoint` quote a preview fingerprint that the server recomputes from fresh state and refuses when stale. `/factory switch --apply` and `/factory checkpoint` only preview; the panel button confirms. RPC names stay lowercase with dots (`factory.switch.preview`).
 - Sidebar: registered synchronously; the entry ("Workspace Factory", with a resume counter for the active steer) opens the plugin settings page. The sidebar row uses `client.openSettings(id)` to open the registered plugin settings page with Paseo’s responsive layout and scrolling. Chat display: a host-scope `checkpointInChat` toggle (default on) drives a timeline transformer that collapses CHECKPOINT blocks to one line when off.
@@ -178,7 +178,7 @@ For live validation of command effects, see the [provider live checks](../provid
 
 ## Worker supervision
 
-The plugin’s hooks, wakes, watchdog, and failover in `server/supervise.ts` reuse `src/supervision.mjs` through the synced factory copy. Plugin-specific text and scans live in `shared/supervise.ts`. [Supervision design](supervision-design.md)
+The plugin’s hooks, wakes, watchdog, and failover in `server/supervise.ts` reuse `server/core/supervision.mjs` directly. Plugin-specific text and scans live in `shared/supervise.ts`. [Supervision design](supervision-design.md)
 
 - `agent.create.after` registers agents started by a labelled scope steer as `running` and writes the immutable worker metadata (`wsf.worker`: scope id, starting steer, epoch, task excerpt); background agents are skipped.
 - A second `agent.turn.after` hook transitions supervised workers (CHECKPOINT status, ADVISOR-REQUEST, missing CHECKPOINT, failed/canceled) and wakes the steer that is active at send time: immediately for every actionable outcome (debounced by `wakeDebounceSeconds`), queued during the quiet periods (drain flag, before the boot check). Archived workers lose their entry; steers, unassigned and background agents are ignored; `closed` agents stay supervised.
@@ -198,7 +198,7 @@ clear
 npm ci --prefix plugin && npm run build-snapshot
 ```
 
-1. The builder (`scripts/build-snapshot.mjs`) verifies `plugin/server/factory/`, then typechecks and tests the plugin. If the mirror is stale, run `npm run plugin:sync` first. The builder copies the plugin sources into `<releases-dir>/workspace-factory-<hash12>` and omits `node_modules`, `package-lock.json`, and `test/`. The releases dir defaults to `~/projects/paseo/releases` and can be set with `--out-dir`. The sorted list of files and their hashes produces the same 12-character SHA-256 prefix for identical content.
+1. The builder (`scripts/build-snapshot.mjs`) typechecks and tests the plugin. The builder copies the plugin sources into `<releases-dir>/workspace-factory-<hash12>` and omits `node_modules`, `package-lock.json`, and `test/`. The releases dir defaults to `~/projects/paseo/releases` and can be set with `--out-dir`. The sorted list of files and their hashes produces the same 12-character SHA-256 prefix for identical content.
 2. The script prints install and rollback commands. The release installs as a directory source. **Removing an existing `workspace-factory` installation deletes its settings.** Save the values you need before running the printed commands. Scripted installation requires `npm run build-snapshot -- --install --confirm <hash12>` with the built hash. [Install a built release](../getting-started.md#install-a-built-release)
 3. Use `paseo plugin ls` to check for `running`, `paseo plugin logs workspace-factory` to check startup, and `/factory status` to check the app connection. `npm run build-snapshot -- --prune` previews cleanup of old snapshots while keeping the installed and previous snapshots. Deletion requires `--prune --confirm`.
 

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { readCliPromptOptions } from '../src/cli.mjs';
-import { findFactoryCheckout, findingsPassage } from '../src/findings.mjs';
+import { findFactoryCheckout, findingsPassage } from '../plugin/server/core/findings.mjs';
 
 test('findings passage only for a git-checkout install', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'factory-findings-'));

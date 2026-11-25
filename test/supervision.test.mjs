@@ -16,10 +16,10 @@ import {
   planWake, resolveWakeTarget, formatWakeMessage, isStaleWake,
   failoverChain, escalationStep, describeEscalation,
   updateWorkerEntry, registerWorker, removeWorker, formatWorkersText,
-} from '../src/supervision.mjs';
-import { CHECKPOINT_KEY, SwitchRefused, buildHandoff, buildResumeBrief, steerStatus, switchSteer, writeCheckpoint } from '../src/steer.mjs';
-import { LABEL, METADATA_KEY } from '../src/paseo.mjs';
-import { LockBusy, withLock } from '../src/lock.mjs';
+} from '../plugin/server/core/supervision.mjs';
+import { CHECKPOINT_KEY, SwitchRefused, buildHandoff, buildResumeBrief, steerStatus, switchSteer, writeCheckpoint } from '../plugin/server/core/steer.mjs';
+import { LABEL, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
+import { LockBusy, withLock } from '../plugin/server/core/lock.mjs';
 
 const REPO = 'example-owner/example-repo';
 const NOW = new Date('2026-11-24T12:00:00.000Z').getTime();

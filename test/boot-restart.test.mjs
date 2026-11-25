@@ -6,9 +6,9 @@ import { test } from 'node:test';
 import {
   AGENTS_KEY, buildRestartInterrupted, flagCheckpointInterrupted,
   isOpenTurnBeforeRestart, updateAgentEntry,
-} from '../src/agent-state.mjs';
-import { LABEL, METADATA_KEY } from '../src/paseo.mjs';
-import { CHECKPOINT_KEY } from '../src/steer.mjs';
+} from '../plugin/server/core/agent-state.mjs';
+import { LABEL, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
+import { CHECKPOINT_KEY } from '../plugin/server/core/steer.mjs';
 
 const DAEMON = '2026-11-23T11:00:00.000Z';
 const BEFORE = '2026-11-23T10:00:00.000Z';

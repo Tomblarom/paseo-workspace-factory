@@ -1,4 +1,4 @@
-// Steer-add core planning (src/steer-add.mjs): slot classification with exact
+// Steer-add core planning (plugin/server/core/steer-add.mjs): slot classification with exact
 // label IDs/roles, free-slot suggestion across config+live, pure preview (no
 // live config writes), retryable create op with stable idempotency key and
 // ZeroSub pin metadata. Offline only: fake config, catalog, live steers and
@@ -11,9 +11,9 @@ import {
   liveSteerForSlot,
   nextFreeSlotForAdd,
   planSteerAdd,
-} from '../src/steer-add.mjs';
-import { normalizeZerosubState } from '../src/zerosub.mjs';
-import { buildCandidate } from '../src/models.mjs';
+} from '../plugin/server/core/steer-add.mjs';
+import { normalizeZerosubState } from '../plugin/server/core/zerosub.mjs';
+import { buildCandidate } from '../plugin/server/core/models.mjs';
 
 const NOW = Date.parse('2026-11-24T12:00:00Z');
 const RESET_5H = '2026-11-24T15:00:00Z';

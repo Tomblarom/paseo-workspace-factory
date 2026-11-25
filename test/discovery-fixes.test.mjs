@@ -9,12 +9,12 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseRepoInput, GitHubNotFound } from '../src/github.mjs';
-import { STEER_TITLE, STEER_DIGIT_TITLE } from '../src/discovery.mjs';
-import { resolveScope, ScopeConflict } from '../src/scope.mjs';
-import { idempotencyKey } from '../src/planner.mjs';
-import { createRunner } from '../src/factory.mjs';
-import { LABEL, METADATA_KEY } from '../src/paseo.mjs';
+import { parseRepoInput, GitHubNotFound } from '../plugin/server/core/github.mjs';
+import { STEER_TITLE, STEER_DIGIT_TITLE } from '../plugin/server/core/discovery.mjs';
+import { resolveScope, ScopeConflict } from '../plugin/server/core/scope.mjs';
+import { idempotencyKey } from '../plugin/server/core/planner.mjs';
+import { createRunner } from '../plugin/server/core/factory.mjs';
+import { LABEL, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
 
 // ---------------------------------------------------------------- fixtures
 

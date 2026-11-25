@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { guardScope, scopeHolder } from '../src/scope-guard.mjs';
-import { LABEL, METADATA_KEY } from '../src/paseo.mjs';
-import { CONTINUED_FROM_LABEL } from '../src/zerosub.mjs';
+import { guardScope, scopeHolder } from '../plugin/server/core/scope-guard.mjs';
+import { LABEL, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
+import { CONTINUED_FROM_LABEL } from '../plugin/server/core/zerosub.mjs';
 
 const scopeId = 'example/repo';
 const workspaceId = 'wks_1';

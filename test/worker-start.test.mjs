@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { LABEL, METADATA_KEY, PARENT_LABEL } from '../src/paseo.mjs';
-import { startScopedWorker } from '../src/workers.mjs';
+import { LABEL, METADATA_KEY, PARENT_LABEL } from '../plugin/server/core/paseo.mjs';
+import { startScopedWorker } from '../plugin/server/core/workers.mjs';
 
 function setup() {
   const workspaceId = 'wks_example';

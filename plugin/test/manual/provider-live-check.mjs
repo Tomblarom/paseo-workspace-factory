@@ -13,9 +13,9 @@ import { mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
-import { connect } from "../../../src/paseo.mjs";
-import { configureRuntime } from "../../../src/runtime.mjs";
-import { loadConfig } from "../../../src/config.mjs";
+import { connect } from "../../server/core/paseo.mjs";
+import { configureRuntime } from "../../server/core/runtime.mjs";
+import { loadConfig } from "../../server/core/config.mjs";
 
 const STEPS = ["checkpoint", "interruption", "handoff", "compact", "clear", "wake", "advisor", "limits", "all"];
 const step = process.argv.find((arg) => arg.startsWith("--step="))?.slice(7) ?? null;

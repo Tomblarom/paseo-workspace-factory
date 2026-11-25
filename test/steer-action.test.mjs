@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { actionEntry, newSteerAction, readSteerAction, reconcileSteerSend } from '../src/steer-action.mjs';
-import { AGENTS_KEY } from '../src/agent-state.mjs';
-import { METADATA_KEY } from '../src/paseo.mjs';
-import { actionFact, mergeActionFacts } from '../src/action-facts.mjs';
+import { actionEntry, newSteerAction, readSteerAction, reconcileSteerSend } from '../plugin/server/core/steer-action.mjs';
+import { AGENTS_KEY } from '../plugin/server/core/agent-state.mjs';
+import { METADATA_KEY } from '../plugin/server/core/paseo.mjs';
+import { actionFact, mergeActionFacts } from '../plugin/server/core/action-facts.mjs';
 
 const lock = (_name, fn) => fn({ verify() {} });
 function fixture() {

@@ -7,11 +7,11 @@ import { test } from 'node:test';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { firstRewindPoint, readRewindPoint, rewindAndBrief, rewindSameTab } from '../src/rewind.mjs';
-import { buildRewindRecord, buildRefreshPacket, freshRewindIdempotent, freshSteer, steerStatus } from '../src/steer.mjs';
-import { withLock } from '../src/lock.mjs';
-import { LABEL, METADATA_KEY, PARENT_LABEL } from '../src/paseo.mjs';
-import { AGENTS_KEY } from '../src/agent-state.mjs';
+import { firstRewindPoint, readRewindPoint, rewindAndBrief, rewindSameTab } from '../plugin/server/core/rewind.mjs';
+import { buildRewindRecord, buildRefreshPacket, freshRewindIdempotent, freshSteer, steerStatus } from '../plugin/server/core/steer.mjs';
+import { withLock } from '../plugin/server/core/lock.mjs';
+import { LABEL, METADATA_KEY, PARENT_LABEL } from '../plugin/server/core/paseo.mjs';
+import { AGENTS_KEY } from '../plugin/server/core/agent-state.mjs';
 
 // ---------------------------------------------------------------- fixtures
 

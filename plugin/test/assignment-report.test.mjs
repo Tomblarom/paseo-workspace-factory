@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { register } from "node:module";
 register("./ts-resolve-hooks.mjs", import.meta.url);
 const { decideAssignmentReport, readAssignment } = await import("../shared/assignment-report.ts");
-const { parseCheckpointBlock } = await import("../../src/steer.mjs");
+const { parseCheckpointBlock } = await import("../server/core/steer.mjs");
 
 const base = {
   assignment: { by: "requester", epoch: 1, at: "2026-11-24T16:00:00Z", reportedAt: null },

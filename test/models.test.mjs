@@ -1,16 +1,16 @@
-// Model CLI logic (src/models.mjs) with a mocked provider catalog.
+// Model CLI logic (plugin/server/core/models.mjs) with a mocked provider catalog.
 // Fixtures mirror the CONFIG/PROVIDERS shape in test/workspace-factory.test.mjs
-// and reuse validateConfig()/validateProfilesAgainstCatalog() from src/config.mjs.
+// and reuse validateConfig()/validateProfilesAgainstCatalog() from plugin/server/core/config.mjs.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { validateConfig } from '../src/config.mjs';
+import { validateConfig } from '../plugin/server/core/config.mjs';
 import {
   flagValue, formatCatalog, parseProviderModel, planSteerRemove, planSteerSet,
   planWorkerSet, previewConfig, writeConfigAtomic,
-} from '../src/models.mjs';
+} from '../plugin/server/core/models.mjs';
 
 const CONFIG = {
   version: 1,

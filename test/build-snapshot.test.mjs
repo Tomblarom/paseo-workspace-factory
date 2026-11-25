@@ -1,15 +1,13 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync, utimesSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   SNAPSHOT_PATTERN,
   buildSnapshot,
-  checkMirrorStale,
   collectSnapshotFiles,
   findInstalledSnapshot,
-  generatedContent,
   hashSnapshotFiles,
   installCommands,
   installSnapshot,
@@ -34,7 +32,8 @@ function writePluginFixture(pluginDir, extra = {}) {
     'index.server.ts': 'export const x = 1;\n',
     'client/panel.tsx': 'export const panel = 1;\n',
     'server/handlers.ts': 'export const h = 1;\n',
-    'shared/factory.ts': 'export const c = 1;\n',
+    'server/core/alpha.mjs': 'export const a = 1;\n',
+    'shared/defaults.mjs': 'export const v = 1;\n',
     'node_modules/dep/index.js': 'should be excluded\n',
     'package-lock.json': '{"lockfileVersion": 3}\n',
     'test/example.test.mjs': 'should be excluded\n',
@@ -46,32 +45,6 @@ function writePluginFixture(pluginDir, extra = {}) {
     writeFileSync(full, content);
   }
   return files;
-}
-
-function writeSrcFactoryMirror(root, { stale = null, orphan = false, shared = false } = {}) {
-  const srcDir = join(root, 'src');
-  const pluginDir = join(root, 'plugin');
-  const factoryDir = join(pluginDir, 'server', 'factory');
-  mkdirSync(srcDir, { recursive: true });
-  mkdirSync(factoryDir, { recursive: true });
-  writeFileSync(join(srcDir, 'alpha.mjs'), `import { x } from './beta.mjs';\nexport const a = x;\n`);
-  writeFileSync(join(srcDir, 'beta.mjs'), 'export const x = 1;\n');
-  writeFileSync(join(srcDir, 'cli.mjs'), 'cli entry is skipped\n');
-  writeFileSync(join(srcDir, 'defaults.mjs'), 'export const v = 1;\n');
-  for (const file of ['alpha.mjs', 'beta.mjs', 'defaults.mjs']) {
-    const base = file.slice(0, -'.mjs'.length);
-    writeFileSync(join(factoryDir, `${base}.ts`), generatedContent(file, readFileSync(join(srcDir, file), 'utf8')));
-  }
-  if (shared) {
-    mkdirSync(join(pluginDir, 'shared'), { recursive: true });
-    writeFileSync(join(pluginDir, 'shared', 'defaults.ts'), generatedContent('defaults.mjs', readFileSync(join(srcDir, 'defaults.mjs'), 'utf8')));
-  }
-  if (stale === 'modified') writeFileSync(join(factoryDir, 'alpha.ts'), '// hand edit\n');
-  if (stale === 'missing-file') rmSync(join(factoryDir, 'alpha.ts'));
-  if (orphan) {
-    writeFileSync(join(factoryDir, 'gone.ts'), generatedContent('gone.mjs', 'export const g = 1;\n'));
-  }
-  return { srcDir, factoryDir, pluginDir };
 }
 
 // process-runner fake: handlers keyed by "cmd args…", records every call.
@@ -105,8 +78,9 @@ test('collectSnapshotFiles skips node_modules, package-lock.json and test/', () 
     'index.server.ts',
     'package.json',
     'paseo-plugin.json',
+    'server/core/alpha.mjs',
     'server/handlers.ts',
-    'shared/factory.ts',
+    'shared/defaults.mjs',
   ]);
   assert.ok(!files.some((rel) => rel.includes('node_modules') || rel.includes('package-lock') || rel.startsWith('test/')));
 });
@@ -121,7 +95,7 @@ test('hash12 is stable for identical content and changes with it', () => {
   assert.match(hashA, /^[0-9a-f]{12}$/);
   assert.equal(hashA, hashB);
   assert.match(`workspace-factory-${hashA}`, SNAPSHOT_PATTERN);
-  writePluginFixture(b, { 'shared/factory.ts': 'export const c = 2;\n' });
+  writePluginFixture(b, { 'server/core/alpha.mjs': 'export const a = 2;\n' });
   assert.notEqual(hashSnapshotFiles(b), hashA);
 });
 
@@ -133,8 +107,9 @@ test('buildSnapshot copies the subset and reuses identical content', () => {
   const first = buildSnapshot({ pluginDir, releasesDir });
   assert.match(first.snapshotDir, /workspace-factory-[0-9a-f]{12}$/);
   assert.equal(first.existed, false);
-  assert.equal(first.files.length, 6);
-  assert.ok(existsSync(join(first.snapshotDir, 'shared', 'factory.ts')));
+  assert.equal(first.files.length, 7);
+  assert.ok(existsSync(join(first.snapshotDir, 'server', 'core', 'alpha.mjs')));
+  assert.ok(existsSync(join(first.snapshotDir, 'shared', 'defaults.mjs')));
   assert.ok(!existsSync(join(first.snapshotDir, 'node_modules')));
   assert.ok(!existsSync(join(first.snapshotDir, 'package-lock.json')));
   assert.ok(!existsSync(join(first.snapshotDir, 'test')));
@@ -156,50 +131,12 @@ test('buildSnapshot refuses to overwrite a same-named foreign directory', () => 
   assert.throws(() => buildSnapshot({ pluginDir, releasesDir }), /refusing to overwrite/);
 });
 
-test('checkMirrorStale mirrors plugin-sync exactly, including orphans', () => {
-  const fresh = makeTempRoot();
-  const { srcDir, factoryDir } = writeSrcFactoryMirror(fresh);
-  assert.deepEqual(checkMirrorStale({ srcDir, factoryDir }), []);
-  // .mjs imports are rewritten to .js like plugin-sync.mjs does.
-  assert.ok(readFileSync(join(factoryDir, 'alpha.ts'), 'utf8').includes(`from './beta.js'`));
-  // cli.mjs is skipped.
-  assert.ok(!existsSync(join(factoryDir, 'cli.ts')));
-
-  const modified = makeTempRoot();
-  const mod = writeSrcFactoryMirror(modified, { stale: 'modified' });
-  assert.deepEqual(checkMirrorStale(mod), ['modified: plugin/server/factory/alpha.ts']);
-
-  const missing = makeTempRoot();
-  const miss = writeSrcFactoryMirror(missing, { stale: 'missing-file' });
-  assert.deepEqual(checkMirrorStale(miss), ['missing: plugin/server/factory/alpha.ts']);
-
-  const orphaned = makeTempRoot();
-  const orph = writeSrcFactoryMirror(orphaned, { orphan: true });
-  assert.deepEqual(checkMirrorStale(orph), ['orphan: plugin/server/factory/gone.ts (src/gone.mjs gone)']);
-
-  // Hand-written extras without the GENERATED banner are left alone.
-  writeFileSync(join(orph.factoryDir, 'hand.ts'), 'export const h = 1;\n');
-  assert.deepEqual(checkMirrorStale(orph), ['orphan: plugin/server/factory/gone.ts (src/gone.mjs gone)']);
-});
-
-test('checkMirrorStale covers the shared client mirror when a plugin dir is passed', () => {
-  const root = makeTempRoot();
-  const { srcDir, factoryDir, pluginDir } = writeSrcFactoryMirror(root);
-  const sharedTarget = join(pluginDir, 'shared', 'defaults.ts');
-  // Without a plugin dir the shared mirror is not checked.
-  assert.deepEqual(checkMirrorStale({ srcDir, factoryDir }), []);
-  assert.deepEqual(
-    checkMirrorStale({ srcDir, factoryDir, sharedDir: pluginDir }),
-    ['missing: plugin/shared/defaults.ts'],
-  );
-  mkdirSync(join(pluginDir, 'shared'), { recursive: true });
-  writeFileSync(sharedTarget, generatedContent('defaults.mjs', readFileSync(join(srcDir, 'defaults.mjs'), 'utf8')));
-  assert.deepEqual(checkMirrorStale({ srcDir, factoryDir, sharedDir: pluginDir }), []);
-  writeFileSync(sharedTarget, '// hand edit\n');
-  assert.deepEqual(
-    checkMirrorStale({ srcDir, factoryDir, sharedDir: pluginDir }),
-    ['modified: plugin/shared/defaults.ts'],
-  );
+test('snapshot ships the single-copy core directly (no generated mirror)', () => {
+  const pluginDir = join(makeTempRoot(), 'plugin');
+  writePluginFixture(pluginDir);
+  const files = collectSnapshotFiles(pluginDir);
+  assert.ok(files.includes('server/core/alpha.mjs'));
+  assert.ok(files.includes('shared/defaults.mjs'));
 });
 
 test('runChecks runs typecheck and plugin tests in the plugin dir', () => {
@@ -370,7 +307,6 @@ test('main build prints commands and never installs by default', () => {
   const root = makeTempRoot();
   const pluginDir = join(root, 'plugin');
   writePluginFixture(pluginDir);
-  writeSrcFactoryMirror(root, { shared: true });
   const releasesDir = join(root, 'releases');
   const run = fakeRun({
     'npm run typecheck': { status: 0, stdout: '', stderr: '' },
@@ -385,25 +321,22 @@ test('main build prints commands and never installs by default', () => {
   const code = main(['--out-dir', releasesDir], { run, root, ...deps });
   assert.equal(code, 0);
   const output = lines.out.join('\n');
-  assert.ok(output.includes('checks: mirror fresh, typecheck ok, plugin tests ok'));
+  assert.ok(output.includes('checks: typecheck ok, plugin tests ok'));
   assert.ok(output.includes('paseo plugin remove workspace-factory'));
   assert.ok(output.includes('paseo plugin install'));
   assert.ok(output.includes('workspace-factory-40513961cc4f'));
   assert.ok(!run.calls.some((call) => call.args[1] === 'remove' || call.args[1] === 'install'));
 
-  // Stale mirror fails the build before any check command runs.
-  writeFileSync(join(pluginDir, 'server', 'factory', 'alpha.ts'), '// stale\n');
-  const staleRun = fakeRun({
-    'npm run typecheck': { status: 0, stdout: '', stderr: '' },
-    'npm test': { status: 0, stdout: '', stderr: '' },
+  // A failing check fails the build before any snapshot is written.
+  const failingRun = fakeRun({
+    'npm run typecheck': { status: 1, stdout: '', stderr: 'type error' },
     'paseo plugin ls --json': { status: 0, stdout: '[]', stderr: '' },
     'paseo plugin ls': { status: 0, stdout: '', stderr: '' },
   });
-  const staleCapture = captureOutput();
-  const staleCode = main(['--out-dir', releasesDir], { run: staleRun, root, ...staleCapture.deps });
-  assert.equal(staleCode, 1);
-  assert.ok(staleCapture.lines.err.join('\n').includes('mirror is stale'));
-  assert.equal(staleRun.calls.length, 0);
+  const failingCapture = captureOutput();
+  const failingCode = main(['--out-dir', releasesDir], { run: failingRun, root, ...failingCapture.deps });
+  assert.equal(failingCode, 1);
+  assert.ok(failingCapture.lines.err.join('\n').includes('npm run typecheck failed'));
 });
 
 test('main rejects --install without a matching --confirm hash', () => {

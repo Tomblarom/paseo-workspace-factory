@@ -1,7 +1,7 @@
-// Offline tests for the hub overview (src/scopes-view.mjs) with fake Paseo state.
+// Offline tests for the hub overview (plugin/server/core/scopes-view.mjs) with fake Paseo state.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { scopeRows, scopeCandidates, formatScopeRows, formatScopeCandidates } from '../src/scopes-view.mjs';
+import { scopeRows, scopeCandidates, formatScopeRows, formatScopeCandidates } from '../plugin/server/core/scopes-view.mjs';
 
 const NOW = Date.parse('2026-11-23T12:00:00.000Z');
 const ago = (ms) => new Date(NOW - ms).toISOString();

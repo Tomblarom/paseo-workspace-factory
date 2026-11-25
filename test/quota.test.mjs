@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { configWarnings, validateConfig } from '../src/config.mjs';
-import { resolveProfile } from '../src/models.mjs';
-import { failoverChain } from '../src/supervision.mjs';
-import { buildAssignment } from '../src/assign.mjs';
-import { buildResumeBrief } from '../src/steer.mjs';
-import { accountExhausted, formatQuotaLine, freshMaxUsedPct, parseUsageJson, profilePool, quotaExhausted } from '../src/quota.mjs';
+import { configWarnings, validateConfig } from '../plugin/server/core/config.mjs';
+import { resolveProfile } from '../plugin/server/core/models.mjs';
+import { failoverChain } from '../plugin/server/core/supervision.mjs';
+import { buildAssignment } from '../plugin/server/core/assign.mjs';
+import { buildResumeBrief } from '../plugin/server/core/steer.mjs';
+import { accountExhausted, formatQuotaLine, freshMaxUsedPct, parseUsageJson, profilePool, quotaExhausted } from '../plugin/server/core/quota.mjs';
 
 const config = {
   version: 1, github: { owner: 'Test', cloneProtocol: 'https', upstreamRemote: 'upstream' },

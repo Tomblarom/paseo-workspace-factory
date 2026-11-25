@@ -8,8 +8,8 @@
 // the needsResume reason union mirrors idle-cleanup.ts (validated by the feed
 // with isNeedsResumeReason); freshHint arrives already validated for the
 // current idle period (the feed uses currentFreshHint); quota thresholds,
-// cadence and staleness come from the generated defaults (single source:
-// src/defaults.mjs; the feed passes the effective config values). All UI
+// cadence and staleness come from the shared defaults (the feed passes the
+// effective config values). All UI
 // text is English.
 import {
   effectiveMinContextTokens,
@@ -25,7 +25,7 @@ import {
   type CleanupProfile,
 } from "./cache-profiles.js";
 import type { NeedsResumeReason } from "./idle-cleanup.js";
-import { QUOTA_DEFAULTS, QUOTA_SAMPLE_MINUTES, isQuotaSampleStale } from "./defaults.js";
+import { QUOTA_DEFAULTS, QUOTA_SAMPLE_MINUTES, isQuotaSampleStale } from "./defaults.mjs";
 
 /** Face states in priority order (highest first); Unknown is the fallback. */
 export const STEER_STATES = [
@@ -73,7 +73,7 @@ export type SteerPrimaryAction =
   | "focus"
   | "reload-or-open";
 
-/** Quota defaults; single source is QUOTA_DEFAULTS in src/defaults.mjs. */
+/** Quota defaults; single source is QUOTA_DEFAULTS in ./defaults.mjs. */
 export const STEER_QUOTA_WARN_PCT = QUOTA_DEFAULTS.warnPct;
 export const STEER_QUOTA_EXHAUSTED_PCT = QUOTA_DEFAULTS.exhaustedPct;
 

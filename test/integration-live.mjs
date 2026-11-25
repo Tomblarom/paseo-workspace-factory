@@ -15,10 +15,10 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { connect, parentOf, readPaseoState, METADATA_KEY } from '../src/paseo.mjs';
+import { connect, parentOf, readPaseoState, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
 import { verifyCleanup, performCleanup } from './integration-cleanup.mjs';
-import { configureRuntime } from '../src/runtime.mjs';
-import { loadConfig, validateProfilesAgainstCatalog } from '../src/config.mjs';
+import { configureRuntime } from '../plugin/server/core/runtime.mjs';
+import { loadConfig, validateProfilesAgainstCatalog } from '../plugin/server/core/config.mjs';
 
 let MANIFEST_DIR;
 let SCRATCH_BASE;

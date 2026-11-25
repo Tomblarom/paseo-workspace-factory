@@ -3,11 +3,11 @@
 // without CHECKPOINT). Fakes only.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { daemonStartedAt, isRestartReason, restartMessage } from '../src/paseo.mjs';
-import { isHeuristicRestart, restartInterruptions, steerStatus, buildResumeBrief, CHECKPOINT_KEY } from '../src/steer.mjs';
-import { scopeRows, formatScopeRows } from '../src/scopes-view.mjs';
-import { AGENTS_KEY } from '../src/agent-state.mjs';
-import { LABEL, METADATA_KEY } from '../src/paseo.mjs';
+import { daemonStartedAt, isRestartReason, restartMessage } from '../plugin/server/core/paseo.mjs';
+import { isHeuristicRestart, restartInterruptions, steerStatus, buildResumeBrief, CHECKPOINT_KEY } from '../plugin/server/core/steer.mjs';
+import { scopeRows, formatScopeRows } from '../plugin/server/core/scopes-view.mjs';
+import { AGENTS_KEY } from '../plugin/server/core/agent-state.mjs';
+import { LABEL, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
 
 const DAEMON = '2026-11-23T11:00:00.000Z';
 const OLD_CP = '2026-11-23T10:00:00.000Z';

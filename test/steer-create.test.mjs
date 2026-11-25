@@ -4,7 +4,7 @@
 // plan, steer add and fresh. Fake state only; no daemon.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { LABEL, PARENT_LABEL } from '../src/paseo.mjs';
+import { LABEL, PARENT_LABEL } from '../plugin/server/core/paseo.mjs';
 import {
   buildSteerCreate,
   checkedCreationReceipt,
@@ -19,7 +19,7 @@ import {
   SteerPlacementError,
   verifyCreatedAgent,
   verifySteerPlacement,
-} from '../src/steer-create.mjs';
+} from '../plugin/server/core/steer-create.mjs';
 
 const PROFILE = { name: 'standard', provider: 'codex', model: 'gpt-6.2-sol', thinking: 'high', mode: 'full-access' };
 

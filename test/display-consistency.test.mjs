@@ -4,10 +4,10 @@
 // multipleReposActive, renderWorkspaceTitle, isFactoryHandleTitle.)
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PARENT_LABEL, describeParent, parentOf } from '../src/paseo.mjs';
-import { formatScopeCandidates, scopeCandidates } from '../src/scopes-view.mjs';
-import { planHash } from '../src/planner.mjs';
-import { validateConfig } from '../src/config.mjs';
+import { PARENT_LABEL, describeParent, parentOf } from '../plugin/server/core/paseo.mjs';
+import { formatScopeCandidates, scopeCandidates } from '../plugin/server/core/scopes-view.mjs';
+import { planHash } from '../plugin/server/core/planner.mjs';
+import { validateConfig } from '../plugin/server/core/config.mjs';
 
 // ------------------------------------------------------------------ #8
 

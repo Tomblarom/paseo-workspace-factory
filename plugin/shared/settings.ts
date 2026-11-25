@@ -1,6 +1,6 @@
 import { defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
-import { QUOTA_DEFAULTS } from "./defaults.js";
+import { QUOTA_DEFAULTS } from "./defaults.mjs";
 
 /**
  * factory-config v1 -> v2: workerDefault becomes workerPriority=[workerDefault];

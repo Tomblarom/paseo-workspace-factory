@@ -1,9 +1,9 @@
 // Worker supervision (S-B) plugin-side decisions. Pure module: its only
-// import is the generated defaults (single source: src/defaults.mjs), so
+// import is the shared defaults, so
 // both the plugin bundles and plain node:test use it. The core register rules
 // (transitions, wake planning, failover chain, escalation) live in
-// src/supervision.mjs; server/supervise.ts uses them through the synced factory
-// copy. This module only holds what the core does not: worker metadata, the
+// server/core/supervision.mjs. This module only holds what the core does
+// not: worker metadata, the
 // ADVISOR-REQUEST scan, the first-turn excerpt, the drain-marker quiet check,
 // wake text extras (archive hint, takeover requests), the
 // answered/busy/unanswered classification, and the settings mirror.
@@ -11,13 +11,13 @@ import {
   DRAIN_GRACE_MS as CORE_DRAIN_GRACE_MS,
   QUOTA_DEFAULTS,
   isDrainMarkerActive as coreIsDrainMarkerActive,
-} from "./defaults.js";
+} from "./defaults.mjs";
 
 /** Agent metadata key carrying the immutable worker facts (plugin-owned). */
 export const WORKER_METADATA_KEY = "wsf.worker";
 /** Workspace metadata key carrying the live drain marker; mirrors DRAIN_KEY in core drain.mjs. */
 export const DRAIN_METADATA_KEY = "wsf.drain";
-/** Stale-marker grace; single source is DRAIN_GRACE_MS in src/defaults.mjs. */
+/** Stale-marker grace; single source is DRAIN_GRACE_MS in ./defaults.mjs. */
 export const DRAIN_GRACE_MS = CORE_DRAIN_GRACE_MS;
 /** Task excerpt bound; mirrors TASK_MAX in core supervision.mjs. */
 export const TASK_EXCERPT_MAX = 300;
@@ -282,7 +282,7 @@ export function scopeLastWakeAt(
 /**
  * True while a drain marker claims a live drain (now <= timeoutAt + 1 min).
  * Malformed or expired markers are ignored (no quiet), so a crashed drain
- * self-expires. Single source is isDrainMarkerActive in src/defaults.mjs
+ * self-expires. Single source is isDrainMarkerActive in ./defaults.mjs
  * (re-exported here so server and test imports keep working).
  */
 export const isDrainMarkerActive: (marker: unknown, nowMs: number) => boolean = coreIsDrainMarkerActive;

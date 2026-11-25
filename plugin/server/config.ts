@@ -1,5 +1,5 @@
-import { loadConfig, validateConfig } from "./factory/config.js";
-import { configureRuntime } from "./factory/runtime.js";
+import { loadConfig, validateConfig } from "./core/config.mjs";
+import { configureRuntime } from "./core/runtime.mjs";
 import type { PromptOptionsReader } from "./prompt-settings.js";
 import {
   mergeFactoryConfig,

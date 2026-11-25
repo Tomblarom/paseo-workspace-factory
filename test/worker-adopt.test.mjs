@@ -3,10 +3,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { execFileSync } from 'node:child_process';
-import { createRunner } from '../src/factory.mjs';
-import { applyPlans, createExecutors, createAuthorization } from '../src/apply.mjs';
-import { steerStatus, buildHandoff } from '../src/steer.mjs';
-import { LABEL, METADATA_KEY, PARENT_LABEL } from '../src/paseo.mjs';
+import { createRunner } from '../plugin/server/core/factory.mjs';
+import { applyPlans, createExecutors, createAuthorization } from '../plugin/server/core/apply.mjs';
+import { steerStatus, buildHandoff } from '../plugin/server/core/steer.mjs';
+import { LABEL, METADATA_KEY, PARENT_LABEL } from '../plugin/server/core/paseo.mjs';
 
 const CONFIG = {
   version: 1,

@@ -42,7 +42,7 @@ decision logic · 5 historical · 6 not yet assessable.
 |---|---|
 | Hand-written production code | 87 modules, 32,626 lines (27,468 non-blank, non-comment): `src/` 28 modules 11,320 · `plugin/server` 19 · 8,504 · `plugin/shared` 17 · 6,085 · `plugin/client` 21 · 6,074 · entries 2 · 643 |
 | Largest modules | `src/steer.mjs` 1,658 · `plugin/server/supervise.ts` 1,748 · `plugin/server/handlers.ts` 1,647 · `plugin/client/factory-panel.tsx` 1,532 |
-| Generated (separate) | `plugin/server/factory/` 27 files, 10,353 lines: same JS as `src/` with `.js` imports and `@ts-nocheck`; physical copy, no second logic |
+| Generated (separate) | the generated in-package core copy, 27 files, 10,353 lines (removed by K12a): same JS as `src/` with `.js` imports and `@ts-nocheck`; physical copy, no second logic |
 | Tests / docs (separate) | 91 files, 29,073 lines / 24 files, 2,963 lines |
 | Background timers | 5 `setInterval` (`quota.ts:71`, `steer-feed.ts:367`, `cold-sweep.ts:686`, `:782`, `supervise.ts:1705`), 5 `setTimeout` |
 | Subprocesses | `paseo` CLI: 9 subcommands at ≈15 call sites (`usage`, `daemon status` ×2, `agent import`, `clone`, `project create/rename/delete`, `workspace rename`, `agent detach`, `agent update --label`); plus `git`, `gh`, `flock`. All synchronous (`execFileSync`/`spawnSync`) |
@@ -127,7 +127,7 @@ lines, estimates to be checked in the diff; tests not counted.
 | K9 | creation: near-identical steer request builders (plan, add, fresh ×2, relocate) → one builder + placement verifier | each feature added its own | `src/{planner,steer,steer-add,apply,workers,relocate}.mjs` | ≈70–130 | foreign occupant, parent/account mismatch, same key changed request | merge | F (after K1) |
 | K10 | timers → one subscribed projection for steer feed and attention (2 per-subscriber timers), `agent.archive.after` for worker retirement, deadline scheduler for idle/cache/quota/stale | polling was the simple first version | `steer-feed.ts`, `cold-sweep.ts`, `supervise.ts`, `quota.ts` | 5 intervals → 1–2 deadline schedulers; less load per open app | reconnect, daemon downtime, missed hook; keep bounded reconciliation | simplify | F |
 | K11 | discovery: full daemon state read several times per RPC, 5 holder selectors → one snapshot per call, one holder selector | per-module needs | `src/{paseo,discovery,scope}.mjs`, feed, sweep, boot, settings, supervise | ≈50–110 | legacy labels, ZeroSub multi-hop, same-slot holders | simplify | F |
-| K12 | CLI thin RPC client (with TODO 16): keep only agent-facing commands (`status`, `resume`, `checkpoint`, `worker pick/start`, `workers`, `switch`/takeover, `assign`); move core into `plugin/` as single source; delete generated mirror and `scripts/plugin-sync.mjs` | CLI predates the plugin | `src/cli.mjs`, `src/*`, `plugin/server/factory/`, scripts, docs | −10,353 generated; `cli.mjs` 1,021 → ≈250; one copy of core | needs spike: Paseo plugin compiler with `.mjs`/erasable TS imports; CLI needs a running plugin (decided) | merge | F |
+| K12 | CLI thin RPC client (with TODO 16): keep only agent-facing commands (`status`, `resume`, `checkpoint`, `worker pick/start`, `workers`, `switch`/takeover, `assign`); move core into `plugin/` as single source; delete generated mirror and the sync script (mirror half done in K12a, thin-client half open) | CLI predates the plugin | `src/cli.mjs`, `src/*`, the generated in-package copy, scripts, docs | −10,353 generated; `cli.mjs` 1,021 → ≈250; one copy of core | spike done (production compiler bundles `.mjs` in both bundles); CLI needs a running plugin (decided) | merge | F |
 | K13 | plan/apply beyond onboarding → initial enrollment of one existing workspace + repair only; drop recurring top-up, retitle, project rename, expected-model drift, fork/clone knobs | built for bulk provisioning | `src/{planner,apply,factory,github}.mjs`, plan UI | ≈500–900 | keep durable compound replay for enrollment; ties to slots-live (TODO 17) | simplify | F |
 | K14 | relocate (cross-workspace authority transfer, has a dual-live window after the first lock) | one-time moves | `src/relocate.mjs`, RPCs, UI | ≈350–450 | no proven routine demand; manual alternative: new scope + switch | remove (decision) | S–F |
 | K15 | `cleanup --plan` generalized destructive orchestration → read-only scope health + native archive actions | before native archive covered ownership | `src/cleanup.mjs`, RPC, panel | ≈250–350 | keep loss inventory for test leftovers if retained | simplify (decision) | F |
@@ -142,7 +142,7 @@ A matching share of tests goes with removed features.
 
 ## 5. CLI/plugin boundary
 
-- Physical duplication: `plugin/server/factory/` (generated). Logic maintained twice: small
+- Physical duplication: the generated in-package core copy (removed by K12a). Logic maintained twice: small
   (K5) plus two configuration paths (file overlay vs. native settings, TODO 16).
 - Plugin compiles the checked-in sources on load; there is no build step at install. The
   generated files therefore cannot simply be dropped from Git while `src/` stays the source.

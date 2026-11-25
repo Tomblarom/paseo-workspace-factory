@@ -3,14 +3,14 @@
 // agent keeps its provider); access mode, other provider options, account
 // policy and role are preserved. Only erasable TypeScript: node --test
 // imports this file with type stripping (see plugin/test/ts-resolve-hooks.mjs).
-import { AGENTS_KEY, buildSettingsBaseline, updateAgentEntry } from "./factory/agent-state.js";
-import { withLock, workspaceLockName } from "./factory/lock.js";
-import { METADATA_KEY, paseoBinary, readPaseoState } from "./factory/paseo.js";
-import { runtime } from "./factory/runtime.js";
-import { listScopes } from "./factory/scope.js";
-import { buildRewindRecord, freshRewindIdempotent } from "./factory/steer.js";
-import { actionFact } from "./factory/action-facts.js";
-import { defaultCreateRewindClient, rewindAndBrief, sendUserBrief } from "./factory/rewind.js";
+import { AGENTS_KEY, buildSettingsBaseline, updateAgentEntry } from "./core/agent-state.mjs";
+import { withLock, workspaceLockName } from "./core/lock.mjs";
+import { METADATA_KEY, paseoBinary, readPaseoState } from "./core/paseo.mjs";
+import { runtime } from "./core/runtime.mjs";
+import { listScopes } from "./core/scope.mjs";
+import { buildRewindRecord, freshRewindIdempotent } from "./core/steer.mjs";
+import { actionFact } from "./core/action-facts.mjs";
+import { defaultCreateRewindClient, rewindAndBrief, sendUserBrief } from "./core/rewind.mjs";
 import { cleanupIdentity } from "../shared/idle-cleanup.js";
 import { settingsFingerprint } from "../shared/preview.js";
 import { resolveQuota } from "../shared/steer-state.js";

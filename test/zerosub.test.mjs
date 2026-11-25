@@ -3,10 +3,10 @@
 // injected client factory.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { normalizeZerosubState, readZerosubState } from '../src/zerosub.mjs';
-import { resolveProfile } from '../src/models.mjs';
-import { failoverChain } from '../src/supervision.mjs';
-import { accountExhausted, bestFamilyAccount, earliestFamilyReset, familyExhausted, formatQuotaLine } from '../src/quota.mjs';
+import { normalizeZerosubState, readZerosubState } from '../plugin/server/core/zerosub.mjs';
+import { resolveProfile } from '../plugin/server/core/models.mjs';
+import { failoverChain } from '../plugin/server/core/supervision.mjs';
+import { accountExhausted, bestFamilyAccount, earliestFamilyReset, familyExhausted, formatQuotaLine } from '../plugin/server/core/quota.mjs';
 
 const NOW = Date.parse('2026-11-24T12:00:00Z');
 const FUTURE_5H = '2026-11-24T15:00:00Z';

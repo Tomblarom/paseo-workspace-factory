@@ -29,7 +29,7 @@ register("./ts-resolve-hooks.mjs", import.meta.url);
 const pill = await import("../client/steer-pill.ts");
 const { collectSteerStates } = await import("../server/steer-feed.ts");
 const { CLEANUP_DEFAULTS } = await import("../shared/idle-cleanup.ts");
-const { readPaseoState, LABEL } = await import("../../src/paseo.mjs");
+const { readPaseoState, LABEL } = await import("../server/core/paseo.mjs");
 
 const NOW = Date.parse("2026-11-25T12:00:00.000Z");
 const iso = (ms) => new Date(ms).toISOString();

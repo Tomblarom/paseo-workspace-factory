@@ -1,6 +1,6 @@
 // Worker supervision core (S-A): the wsf.workers register plus pure rules for
 // state transitions, wake planning, failover and escalation. Pure functions
-// have no IO so the plugin (S-B) reuses them through plugin-sync; register
+// have no IO so the plugin (S-B) reuses them by importing this module; register
 // writes go through the workspace lock like checkpoints (see agent-state.mjs).
 import { isDeepStrictEqual } from 'node:util';
 import { liveSlotHolders } from './discovery.mjs';

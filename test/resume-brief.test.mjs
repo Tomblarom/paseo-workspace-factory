@@ -6,10 +6,10 @@ import { execFileSync } from 'node:child_process';
 import {
   buildHandoff, buildRefreshPacket, buildResumeBrief, BRIEF_BUDGET, parseCheckpointBlock, readGitBrief, switchSteer, freshSteer,
   writeCheckpoint, steerStatus,
-} from '../src/steer.mjs';
-import { updateAgentEntry, flagCheckpointInterrupted, AGENTS_KEY, clipText } from '../src/agent-state.mjs';
-import { LABEL, METADATA_KEY } from '../src/paseo.mjs';
-import { CHECKPOINT_KEY } from '../src/steer.mjs';
+} from '../plugin/server/core/steer.mjs';
+import { updateAgentEntry, flagCheckpointInterrupted, AGENTS_KEY, clipText } from '../plugin/server/core/agent-state.mjs';
+import { LABEL, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
+import { CHECKPOINT_KEY } from '../plugin/server/core/steer.mjs';
 
 const REPO = 'example-owner/example-repo';
 const NOW = new Date('2026-11-23T12:00:00.000Z').getTime();
@@ -353,7 +353,7 @@ test('checkpoint rejects an inactive steer and an A → B → A stale observatio
 
 
 test('withWorkspaceLock runs under the workspace lock name', async () => {
-  const { withWorkspaceLock, workspaceLockName, withLock, LockBusy } = await import('../src/lock.mjs');
+  const { withWorkspaceLock, workspaceLockName, withLock, LockBusy } = await import('../plugin/server/core/lock.mjs');
   const { mkdtempSync, rmSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
@@ -373,7 +373,7 @@ test('withWorkspaceLock runs under the workspace lock name', async () => {
 // ------------------------------------------------- switch/fresh integration
 
 test('switch handoff carries the brief only when interrupted', async () => {
-  const { switchSteer: runSwitch } = await import('../src/steer.mjs');
+  const { switchSteer: runSwitch } = await import('../plugin/server/core/steer.mjs');
   const world = makeWorld();
   provisioned(world, {
     checkpoint: { task: 't', tests: [], blockers: [], next: null, epoch: 3, updatedAt: hoursAgo(1), source: 'manual', interrupted: { agentId: 'agent-1', at: hoursAgo(1) } },

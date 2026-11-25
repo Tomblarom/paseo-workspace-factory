@@ -27,10 +27,10 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { connect, readPaseoState, lookupCreationReceipt, METADATA_KEY, LABEL } from '../src/paseo.mjs';
-import { applyPlans, createAuthorization, createExecutors, fileProgress, storeAuthorization, withApplyLock } from '../src/apply.mjs';
-import { loadConfig } from '../src/config.mjs';
-import { configureRuntime } from '../src/runtime.mjs';
+import { connect, readPaseoState, lookupCreationReceipt, METADATA_KEY, LABEL } from '../plugin/server/core/paseo.mjs';
+import { applyPlans, createAuthorization, createExecutors, fileProgress, storeAuthorization, withApplyLock } from '../plugin/server/core/apply.mjs';
+import { loadConfig } from '../plugin/server/core/config.mjs';
+import { configureRuntime } from '../plugin/server/core/runtime.mjs';
 const SELF = fileURLToPath(import.meta.url);
 
 if (process.env.WSF_LIVE_CRASH !== 'approved') {

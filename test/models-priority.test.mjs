@@ -5,13 +5,13 @@ import { test } from 'node:test';
 import {
   configWarnings, isAdvisorProfile, isAdvisorSlot, isSensitiveProfile, isSensitiveSlot,
   providerIsSensitive, slotOrder, validateConfig, workerPriority,
-} from '../src/config.mjs';
+} from '../plugin/server/core/config.mjs';
 import {
   formatWorkerModel, paseoRunFlags, planSteerRemove, planSteerSet, planWorkerRemove,
   planWorkerSet, resolveProfile, resolveSteerTarget, steerFallbackList,
-} from '../src/models.mjs';
+} from '../plugin/server/core/models.mjs';
 import { defaultPickAddress } from '../src/cli.mjs';
-import { LABEL, METADATA_KEY } from '../src/paseo.mjs';
+import { LABEL, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
 
 const CONFIG = {
   version: 1,

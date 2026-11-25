@@ -2,9 +2,9 @@
 // resolution (id -> workspace id -> path -> legacy alias). Fakes only.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { LABEL, METADATA_KEY } from '../src/paseo.mjs';
-import { listScopes, resolveScope, scopeToEntry, ScopeConflict } from '../src/scope.mjs';
-import { resolveTargetEntry } from '../src/steer.mjs';
+import { LABEL, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
+import { listScopes, resolveScope, scopeToEntry, ScopeConflict } from '../plugin/server/core/scope.mjs';
+import { resolveTargetEntry } from '../plugin/server/core/steer.mjs';
 
 let seq = 0;
 const state = ({ workspaces = [], agents = [] } = {}) => ({

@@ -3,9 +3,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { execFileSync } from 'node:child_process';
-import { assignScope, buildAssignment, AssignRefused, ASSIGNMENT_KEY } from '../src/assign.mjs';
-import { LABEL, METADATA_KEY, PARENT_LABEL } from '../src/paseo.mjs';
-import { CHECKPOINT_KEY, parseCheckpointBlock } from '../src/steer.mjs';
+import { assignScope, buildAssignment, AssignRefused, ASSIGNMENT_KEY } from '../plugin/server/core/assign.mjs';
+import { LABEL, METADATA_KEY, PARENT_LABEL } from '../plugin/server/core/paseo.mjs';
+import { CHECKPOINT_KEY, parseCheckpointBlock } from '../plugin/server/core/steer.mjs';
 
 const REPO = 'example-owner/example-repo';
 

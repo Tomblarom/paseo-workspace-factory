@@ -3,11 +3,11 @@
 // state is built by the helpers below, in the style of zerosub.test.mjs.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { normalizeZerosubState } from '../src/zerosub.mjs';
-import { bestFamilyAccount, formatQuotaLine } from '../src/quota.mjs';
-import { resolveProfile } from '../src/models.mjs';
-import { failoverChain } from '../src/supervision.mjs';
-import { buildResumeBrief } from '../src/steer.mjs';
+import { normalizeZerosubState } from '../plugin/server/core/zerosub.mjs';
+import { bestFamilyAccount, formatQuotaLine } from '../plugin/server/core/quota.mjs';
+import { resolveProfile } from '../plugin/server/core/models.mjs';
+import { failoverChain } from '../plugin/server/core/supervision.mjs';
+import { buildResumeBrief } from '../plugin/server/core/steer.mjs';
 
 const NOW = Date.parse('2026-11-24T12:00:00Z');
 const FUTURE_5H = '2026-11-24T15:00:00Z';

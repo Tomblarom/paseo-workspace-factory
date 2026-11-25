@@ -6,12 +6,12 @@ import { test } from 'node:test';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { configureRuntime } from '../src/runtime.mjs';
-import { LABEL, METADATA_KEY, PARENT_LABEL } from '../src/paseo.mjs';
-import { steerStatus, switchSteer } from '../src/steer.mjs';
-import { freshSteer } from '../src/steer.mjs';
-import { planRepository } from '../src/planner.mjs';
-import { withLock } from '../src/lock.mjs';
+import { configureRuntime } from '../plugin/server/core/runtime.mjs';
+import { LABEL, METADATA_KEY, PARENT_LABEL } from '../plugin/server/core/paseo.mjs';
+import { steerStatus, switchSteer } from '../plugin/server/core/steer.mjs';
+import { freshSteer } from '../plugin/server/core/steer.mjs';
+import { planRepository } from '../plugin/server/core/planner.mjs';
+import { withLock } from '../plugin/server/core/lock.mjs';
 
 // Locked paths take real workspace locks; keep them in a throwaway state dir
 // instead of the production one (per-file processes).

@@ -125,7 +125,7 @@ Decision F4 (accepted): when the woken steer carries `needsResume` (set after a 
 | S-B plugin | `create.after` registration and worker metadata, turn-end transitions, immediate and debounced wakes, watchdog, failover chain, quiet periods, C5 skip rule, settings | new `plugin/server/supervise.ts`, `plugin/index.server.ts`, `plugin/shared/settings.ts`, `plugin/shared/idle-cleanup.ts`, tests |
 | S-C docs | principle in concepts, steer instructions, AGENTS.md; this page | `docs/*`, `AGENTS.md` |
 
-Order: S-A first (S-B reads its functions through `plugin-sync`), S-B after S-A is integrated, S-C in parallel.
+Order: S-A first (S-B imports its functions from the core directly), S-B after S-A is integrated, S-C in parallel.
 
 ## Tests
 

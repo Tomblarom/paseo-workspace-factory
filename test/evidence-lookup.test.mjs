@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CREATION_SNAPSHOT_PHASES, lookupCreationReceipt } from '../src/paseo.mjs';
+import { CREATION_SNAPSHOT_PHASES, lookupCreationReceipt } from '../plugin/server/core/paseo.mjs';
 
 const DAEMON = { version: '0.17.4', features: { creationLifecycle: true } };
 const SNAPSHOT = { kind: 'workspace', idempotencyKey: 'key-1', revision: 3, phase: 'completed', workspaceId: 'wks_test', agentId: null, error: null };

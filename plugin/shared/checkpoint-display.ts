@@ -1,6 +1,6 @@
 // Display shortening for CHECKPOINT blocks in the chat (factory-display
 // setting). No imports, so plain node:test can use it. The header/field
-// matchers mirror parseCheckpointBlock in src/steer.mjs: whatever the
+// matchers mirror parseCheckpointBlock in plugin/server/core/steer.mjs: whatever the
 // factory parses as a checkpoint is what gets shortened.
 
 const HEADER = /^\s*(?:#{1,6}\s*)?(?:\*\*|__)?`*\s*CHECKPOINT\s*:?\s*`*(?:\*\*|__)?\s*$/i;

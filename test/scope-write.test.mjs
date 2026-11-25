@@ -4,10 +4,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { execFileSync } from 'node:child_process';
-import { normalizeEntry } from '../src/discovery.mjs';
-import { createRunner } from '../src/factory.mjs';
-import { applyPlans, createExecutors, createAuthorization } from '../src/apply.mjs';
-import { LABEL, METADATA_KEY } from '../src/paseo.mjs';
+import { normalizeEntry } from '../plugin/server/core/discovery.mjs';
+import { createRunner } from '../plugin/server/core/factory.mjs';
+import { applyPlans, createExecutors, createAuthorization } from '../plugin/server/core/apply.mjs';
+import { LABEL, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
 
 const CONFIG = {
   version: 1,
