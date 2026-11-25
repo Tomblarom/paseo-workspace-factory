@@ -61,3 +61,17 @@ flowchart LR
     Decide -->|yes| Steer
     Decide -->|cold / oversized / quota / failure| Next[Renew or hand off]
     Next --> Route
+
+## Related work
+
+[Paseo SLP](https://github.com/duongvm57/paseo-slp-plugin) (MIT) coordinates Supervisor,
+Lead and Peer agents through a durable per-repository ledger with explicit ownership, review
+selection and evidence. We reviewed it as a reference and adopt selected patterns step by step,
+for example outcome-oriented briefs, risk-based instead of mandatory review, and results bound
+to the revision they were checked on. Workspace Factory does not depend on it.
+
+The focus differs. SLP governs *who may decide and accept what*: assignments, briefs, scopes,
+reviews and planned owner handoffs with acknowledgment. Workspace Factory optimizes *how far the
+available quota goes*: provider/account-aware routing, cache- and context-aware renewal, and
+automatic coordinator failover after unplanned interruptions, using a compact checkpoint instead
+of a full ledger.
