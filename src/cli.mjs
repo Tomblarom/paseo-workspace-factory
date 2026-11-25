@@ -15,7 +15,7 @@ import { applyPlans, createExecutors, createAuthorization, storeAuthorization, f
 import { CHECKPOINT_KEY, restartInterruptions, steerStatus, switchSteer, freshSteer, writeCheckpoint, parseCheckpointBlock, lastAssistantText, resolveTargetEntry, buildResumeBrief, readGitBrief, workerResumeAnswer } from './steer.mjs';
 import { AGENTS_KEY } from './agent-state.mjs';
 import { listScopes, resolveScope } from './scope.mjs';
-import { planLabelFixes, formatLabelFixes } from './labels.mjs';
+import { planMigration, formatMigration, applyMigration, formatMigrationResult } from './migrate.mjs';
 import { DRAIN_DEFAULT_TIMEOUT_MS, drain, parseTimeout } from './drain.mjs';
 import { startScopedWorker } from './workers.mjs';
 import { formatWorkersPruneText, formatWorkersText, pruneWorkerRegister, readWorkers, staleWorkerEntries, workersReport } from './supervision.mjs';
@@ -90,7 +90,7 @@ const USAGE = `Usage: paseo-factory <command> [options]
   model advisor <profile|provider/model> on|off [--dry-run]
   model sensitive <profile|provider/model> on|off [--dry-run]
   scopes [--json] [--candidates]   one line per live scope; --candidates lists unadopted workspaces
-  labels [scope|agent-id] [--apply] [--json]   list missing/wrong factory agent labels (dry-run); --apply sets them
+  migrate [--apply] [--json]   one-time migration of legacy factory state (dry-run); --apply backs up, then writes
   drain [--timeout 10m] [--json]   wait until no factory agent runs; marks leftovers planned-restart (exit 2), never restarts itself
 plan enrolls exactly one existing Paseo workspace as a factory scope (or repairs it); open the workspace natively first, then plan it by scope id, workspace:<id> or --local <path>.
 --local plans an existing directory without GitHub; it may carry --name for the scope id.
@@ -381,32 +381,18 @@ async function main() {
       const rows = scopeRows(paseo, { ...(heuristic ?? {}), config });
       return console.log(values.json ? JSON.stringify(rows, null, 2) : formatScopeRows(rows));
     }
-    if (command === 'labels') {
-      if (entries.length > 1) throw new Error('labels takes at most one scope or agent id; use paseo-factory labels [scope|agent-id] [--apply] [--json]');
+    if (command === 'migrate') {
+      if (entries.length) throw new Error('migrate takes no repository; use paseo-factory migrate [--apply] [--json]');
       const paseo = await readPaseoState(client);
-      const rows = planLabelFixes(paseo, entries.length ? { address: entries[0] } : {});
+      const plan = planMigration(paseo);
       if (!values.apply) {
-        return console.log(values.json ? JSON.stringify(rows, null, 2) : formatLabelFixes(rows));
+        return console.log(values.json ? JSON.stringify(plan, null, 2) : formatMigration(plan));
       }
-      const fixable = rows.filter((row) => Object.keys(row.labels).length);
-      const execute = createExecutors({ client, paseoCli: createPaseoCli() });
-      const applied = [];
-      for (const row of fixable) {
-        try {
-          await execute({ key: `labels.${row.agentId}`, kind: 'labels.set', summary: `Set ${Object.keys(row.labels).join(', ')} on agent ${row.agentId}`, params: { agentId: row.agentId, labels: row.labels } }, config);
-          applied.push({ agentId: row.agentId, ok: true });
-        } catch (error) {
-          applied.push({ agentId: row.agentId, ok: false, error: error.message });
-        }
-      }
-      if (values.json) return console.log(JSON.stringify({ rows, applied }, null, 2));
-      for (const result of applied) {
-        console.log(result.ok ? `${result.agentId}: labels set` : `${result.agentId}: FAILED: ${result.error}`);
-      }
-      const skipped = rows.length - fixable.length;
-      const failed = applied.filter((r) => !r.ok).length;
-      console.log(`Labels: ${applied.length - failed} agent(s) fixed${skipped ? `, ${skipped} reported without a fix` : ''}${failed ? `, ${failed} failed` : ''}.`);
-      if (failed) process.exitCode = 1;
+      const result = await applyMigration({ client, paseoCli: createPaseoCli(), plan, paseoState: paseo });
+      if (values.json) return console.log(JSON.stringify(result, null, 2));
+      console.log(`Backup: ${result.backupPath}`);
+      console.log(formatMigrationResult(result));
+      if (result.summary?.failed) process.exitCode = 1;
       return;
     }
     if (command === 'drain') {

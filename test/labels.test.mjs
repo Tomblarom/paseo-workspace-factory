@@ -3,7 +3,6 @@
 // writes them via `agent update`. Fakes only; no daemon, no live apply.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { execFileSync } from 'node:child_process';
 import { LABEL, METADATA_KEY, PARENT_LABEL, readPaseoState } from '../src/paseo.mjs';
 import { planLabelFixes, formatLabelFixes } from '../src/labels.mjs';
 import { createExecutors } from '../src/apply.mjs';
@@ -210,7 +209,5 @@ test('format prints one line per agent with its fix', async () => {
   assert.equal(formatLabelFixes([]), '(no label fixes needed)');
 });
 
-test('CLI usage documents labels', () => {
-  const out = execFileSync('node', ['src/cli.mjs', '--help'], { encoding: 'utf8' });
-  assert.match(out, /labels \[scope\|agent-id\] \[--apply\] \[--json\]/);
-});
+// The CLI `labels` command was replaced by `migrate` (K16a); the audit itself
+// stays for the plugin RPC (`factory.labels`), covered above.
