@@ -153,7 +153,7 @@ export default function contribute(server: PluginServerContext) {
     }
     bootChained = true;
     void ensureBootChecked(paseo, bootDeps).then((marks) =>
-      handleBootFinished(paseo, marks, { getSettings: readSupervision, getConfig: () => loader.loadEffectiveConfig(), resumeSteer, getZerosub }),
+      handleBootFinished(paseo, marks, { getSettings: readSupervision, getConfig: () => loader.loadEffectiveConfig(), resumeSteer, getZerosub, buildBrief: buildResumeBrief }),
     );
   };
   server.handle(factoryPing, ping);
@@ -251,10 +251,10 @@ export default function contribute(server: PluginServerContext) {
   // pass; hook order is irrelevant).
   const removeSuperviseHook = server.addHook("agent.turn.after", async (payload, context) => {
     captureSupervisionPaseo(context.paseo);
-    await handleWorkerTurnAfter(payload, context, { getSettings: readSupervision, getConfig: () => loader.loadEffectiveConfig(), resumeSteer, getZerosub });
+    await handleWorkerTurnAfter(payload, context, { getSettings: readSupervision, getConfig: () => loader.loadEffectiveConfig(), resumeSteer, getZerosub, buildBrief: buildResumeBrief });
   });
   const stopCleanupTimer = startCleanupTimer({ readSettings, getZerosub, getQuotaSettings: readQuotaSettings });
-  const stopSupervisionTimer = startSupervisionTimer({ getSettings: readSupervision, getConfig: () => loader.loadEffectiveConfig(), resumeSteer, getZerosub });
+  const stopSupervisionTimer = startSupervisionTimer({ getSettings: readSupervision, getConfig: () => loader.loadEffectiveConfig(), resumeSteer, getZerosub, buildBrief: buildResumeBrief });
   const stopQuotaTimer = startQuotaTimer({ getSettings: readQuotaSettings });
   return () => {
     removeTurnBefore();

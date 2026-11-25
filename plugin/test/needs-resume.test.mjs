@@ -585,8 +585,8 @@ test("sendScopeWake auto-resumes a flagged steer instead of the wake text", asyn
       },
     },
   );
-  assert.equal(sent.sent, true);
-  assert.equal(sent.resumed, true);
+  assert.equal(sent.sent, false, "clear path stays pending until the brief is sent");
+  assert.equal(sent.reason, "brief-pending");
   assert.equal(sent.target, steerA.id);
   assert.equal(resumed.length, 1);
   assert.equal(resumed[0].workspaceId, ws.id);
@@ -594,7 +594,27 @@ test("sendScopeWake auto-resumes a flagged steer instead of the wake text", asyn
   assert.match(resumed[0].note, new RegExp(`worker ${workerId} done`));
   assert.equal(sendsTo(world, steerA.id).length, 0, "no plain wake text on auto-resume");
   const entry = world.workspaces[0].metadata[WORKERS_KEY][workerId];
-  assert.equal(entry.lastWakeAt, at(NOW));
+  assert.equal(entry.lastWakeAt, null, "not delivered until the brief succeeds");
+  assert.deepEqual(entry.pendingWake, { state: "done", queuedAt: at(NOW) });
+  const pending = world.workspaces[0].metadata[AGENTS_KEY][steerA.id].pendingWakeBrief;
+  assert.ok(pending?.wakeId, "pending wake brief staged");
+  assert.equal(pending.events.length, 1);
+  assert.match(pending.note, new RegExp(`worker ${workerId} done`));
+
+  const immediate = await supervise.sendScopeWake(
+    fakeClient(world),
+    { scope: { id: REPO, workspaceId: ws.id }, events: [{ workerId, state: "done" }] },
+    {
+      settings: { enabled: true, batchMinutes: 10, watchdogMinutes: 15, staleMinutes: 60, answerMinutes: 10, maxAutoResumes: 2 },
+      lock: noLock,
+      log: () => {},
+      nowMs: NOW,
+      nowIso: at(NOW),
+      resumeSteer: async () => ({ cleared: false }),
+    },
+  );
+  assert.equal(immediate.sent, true, "immediate-brief path delivers at once");
+  assert.equal(immediate.resumed, true);
 });
 
 test("sendScopeWake without a flag (or wiring) sends the plain wake text", async () => {

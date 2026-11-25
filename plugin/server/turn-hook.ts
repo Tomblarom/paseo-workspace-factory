@@ -1,7 +1,7 @@
 import { LEGACY_PREFIX, METADATA_KEY, readPaseoState } from "./factory/paseo.js";
 import { listScopes } from "./factory/scope.js";
 import { createGit } from "./factory/local.js";
-import { withWorkspaceLock } from "./factory/lock.js";
+import { withLock, withWorkspaceLock, workspaceLockName } from "./factory/lock.js";
 import {
   agentUsage,
   lastAssistantText,
@@ -22,7 +22,15 @@ import { firstUserText } from "../shared/supervise.js";
 import { decideAssignmentReport } from "../shared/assignment-report.js";
 import { ASSIGNMENT_KEY } from "./factory/assign.js";
 import { extractTurnUsage, mergeTurnUsage } from "./quota.js";
-import { proactiveHintDecision, runFailoverCheck } from "./supervise.js";
+import {
+  proactiveHintDecision,
+  restorePendingWakeBrief,
+  retryOnLockBusy,
+  runFailoverCheck,
+  takePendingWakeBrief,
+  type PendingWakeBrief,
+} from "./supervise.js";
+import { markWakeSent, readWorkers, updateWorkerEntry } from "./factory/supervision.js";
 import {
   findZerosubSwitch,
   resolveZerosub,
@@ -67,6 +75,8 @@ export interface TurnHookDeps extends ZerosubSource {
   now?: () => string;
   getConfig?: () => Promise<any>;
   getSupervisionSettings?: () => Promise<any>;
+  /** Lock for metadata writes; tests only (defaults to the real one, always with LockBusy retry). */
+  lock?: (name: string, fn: (held: { verify: () => void }) => Promise<any>) => Promise<any>;
 }
 
 /**
@@ -134,6 +144,7 @@ async function runTurnBefore(payload: TurnBeforePayload, paseo: any, deps: TurnH
     agentId,
     patch: { openTurnId: payload.turnId ?? null, turnStartedAt: now },
     liveIds: null,
+    lock: lockOf(deps),
   });
 }
 
@@ -153,6 +164,27 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+function lockOf(deps: TurnHookDeps): (
+  name: string,
+  fn: (held: { verify: () => void }) => Promise<any>,
+) => Promise<any> {
+  const lock = deps.lock ?? (withLock as unknown as (
+    name: string,
+    fn: (held: { verify: () => void }) => Promise<any>,
+  ) => Promise<any>);
+  return async (name, fn) => retryOnLockBusy(() => lock(name, fn));
+}
+
+async function withWorkspaceLockRetry(
+  mainId: string,
+  fn: (held: { verify: () => void }) => Promise<any>,
+  deps: TurnHookDeps,
+): Promise<any> {
+  const lock = lockOf(deps);
+  const name = (workspaceLockName as unknown as (id: string) => string)(mainId);
+  return lock(name, fn);
 }
 
 /**
@@ -237,11 +269,12 @@ async function reportAssignment(args: {
   kind: string;
   block: any;
   lastAnswer: string | null;
+  deps?: TurnHookDeps;
 }): Promise<void> {
   const { paseo, mainId, agentId } = args;
   try {
     let decision: ReturnType<typeof decideAssignmentReport> | null = null;
-    await withWorkspaceLock(mainId, async (held: any) => {
+    await withWorkspaceLockRetry(mainId, async (held: any) => {
       const snap: any = await paseo.workspaces.ref(mainId).refresh().catch(() => null);
       const meta = snap?.metadata ?? {};
       const wsf = asRecord(meta[METADATA_KEY]);
@@ -263,7 +296,7 @@ async function reportAssignment(args: {
       await paseo.workspaces.ref(mainId).setMetadata({
         [ASSIGNMENT_KEY]: { ...assignment, reportedAt: new Date().toISOString(), reportStatus: decision.status },
       });
-    }, undefined);
+    }, args.deps ?? {});
     const sent = decision as ReturnType<typeof decideAssignmentReport> | null;
     if (!sent?.report || !sent.to || !sent.text) return;
     await paseo.agents.ref(sent.to).send(sent.text);
@@ -416,8 +449,7 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
       : null;
 
   // One core lock helper names and takes workspace locks (never duplicated here).
-  const lockOptions: any = undefined;
-  await withWorkspaceLock(mainId, async (held: any) => {
+  await withWorkspaceLockRetry(mainId, async (held: any) => {
     // refresh() is raw: legacy fallback for pre-migration records.
     const freshSnap: any = await paseo.workspaces.ref(mainId).refresh().catch(() => null);
     const freshMeta = freshSnap?.metadata ?? {};
@@ -469,9 +501,9 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
     held.verify();
     await paseo.workspaces.ref(mainId).setMetadata(patch);
     console.log(`[factory] turn hook: ${decision.log}`);
-  }, lockOptions);
+  }, deps);
 
-  await reportAssignment({ paseo, mainId, scopeId: scope.id, agentId, identity, kind, block, lastAnswer });
+  await reportAssignment({ paseo, mainId, scopeId: scope.id, agentId, identity, kind, block, lastAnswer, deps });
 
   if (proactiveHint) {
     try {
@@ -529,25 +561,126 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
       console.error(`[factory] turn hook: resume brief for ${agentId} not sent (no brief builder wired)`);
       return;
     }
+    const lock = lockOf(deps);
+    const update = updateAgentEntry as unknown as (args: any) => Promise<any>;
+    const updateWorker = updateWorkerEntry as unknown as (args: any) => Promise<any>;
+    let taken: PendingWakeBrief | null = null;
+    try {
+      taken = await takePendingWakeBrief(paseo, mainId, agentId, lock);
+    } catch (error) {
+      console.error(
+        `[factory] turn hook: wake brief take for ${agentId} failed (${error instanceof Error ? error.message : String(error)}); needsResume kept`,
+      );
+      return;
+    }
+    const hadPending = !!(previous as Record<string, unknown> | null)?.pendingWakeBrief;
+    if (!taken && hadPending) {
+      console.log(`[factory] turn hook: wake brief for ${agentId} already taken elsewhere; skip`);
+      return;
+    }
+    const nowIso = new Date().toISOString();
+    if (taken?.briefSent === true) {
+      try {
+        await update({ client: paseo, workspaceId: mainId, agentId, patch: { needsResume: null }, liveIds: null, lock });
+        const freshMeta = ((await paseo.workspaces.ref(mainId).refresh().catch(() => null))?.metadata ?? {}) as Record<string, unknown>;
+        const freshWsf = asRecord(freshMeta[METADATA_KEY]) ?? asRecord(freshMeta[LEGACY_PREFIX]);
+        const moved =
+          typeof freshWsf?.epoch === "number" && typeof taken.epoch === "number" && freshWsf.epoch !== taken.epoch;
+        if (!moved) {
+          const register = (readWorkers as unknown as (m: unknown) => Record<string, any>)(freshMeta);
+          for (const event of taken.events) {
+            const current = register[event.workerId];
+            if (!current || typeof current !== "object") continue;
+            const marked = (markWakeSent as unknown as (e: any, o: any) => any)(current, { at: nowIso });
+            await updateWorker({
+              client: paseo,
+              workspaceId: mainId,
+              workerId: event.workerId,
+              patch: { lastWakeAt: marked.lastWakeAt, pendingWake: marked.pendingWake },
+              lock,
+            });
+          }
+        }
+        console.log(`[factory] turn hook: wake brief ${taken.wakeId} marking retried for ${agentId}`);
+      } catch (error) {
+        const back = { ...taken, lastAttemptAt: nowIso, lastError: (error instanceof Error ? error.message : String(error)).slice(0, 300) };
+        try {
+          await restorePendingWakeBrief(paseo, mainId, agentId, back as never, lock);
+        } catch {}
+        console.error(
+          `[factory] turn hook: wake brief ${taken.wakeId} marking failed (${error instanceof Error ? error.message : String(error)}); retry next tick`,
+        );
+      }
+      return;
+    }
+    const pendingNote = taken?.note ?? null;
+    const actionNote = asRecord(previous?.pendingAction)?.note;
+    const note = typeof pendingNote === "string" && pendingNote ? pendingNote : typeof actionNote === "string" ? actionNote : null;
     try {
       const brief = await deps.getResumeBrief(paseo, mainId, agentId);
-      const note = asRecord(previous?.pendingAction)?.note;
-      const full = typeof note === "string" && note ? `${brief}\n\n${note}` : brief;
+      const full = note ? `${brief}\n\n${note}` : brief;
       await paseo.agents.ref(agentId).send(
         formatResumeMessage(full, { cleared: decision.effectFailed !== true }),
       );
-      const update = updateAgentEntry as unknown as (args: any) => Promise<any>;
-      await update({
-        client: paseo,
-        workspaceId: mainId,
-        agentId,
-        patch: { needsResume: null },
-        liveIds: null,
-      });
-      console.log(`[factory] turn hook: sent resume brief to ${agentId}`);
     } catch (error) {
+      if (taken) {
+        const back = {
+          ...taken,
+          attempts: taken.attempts + 1,
+          lastAttemptAt: nowIso,
+          lastError: (error instanceof Error ? error.message : String(error)).slice(0, 300),
+        };
+        try {
+          await restorePendingWakeBrief(paseo, mainId, agentId, back as never, lock);
+        } catch {}
+      }
       console.error(
         `[factory] turn hook: resume brief to ${agentId} failed (${error instanceof Error ? error.message : String(error)}); needsResume kept`,
+      );
+      return;
+    }
+    try {
+      await update({ client: paseo, workspaceId: mainId, agentId, patch: { needsResume: null }, liveIds: null, lock });
+      if (taken) {
+        const freshMeta = ((await paseo.workspaces.ref(mainId).refresh().catch(() => null))?.metadata ?? {}) as Record<string, unknown>;
+        const freshWsf = asRecord(freshMeta[METADATA_KEY]) ?? asRecord(freshMeta[LEGACY_PREFIX]);
+        const moved =
+          typeof freshWsf?.epoch === "number" && typeof taken.epoch === "number" && freshWsf.epoch !== taken.epoch;
+        if (moved) {
+          console.log(`[factory] turn hook: wake brief ${taken.wakeId} sent to ${agentId} but the epoch moved; workers stay queued`);
+        } else {
+          const register = (readWorkers as unknown as (m: unknown) => Record<string, any>)(freshMeta);
+          for (const event of taken.events) {
+            const current = register[event.workerId];
+            if (!current || typeof current !== "object") continue;
+            const marked = (markWakeSent as unknown as (e: any, o: any) => any)(current, { at: nowIso });
+            await updateWorker({
+              client: paseo,
+              workspaceId: mainId,
+              workerId: event.workerId,
+              patch: { lastWakeAt: marked.lastWakeAt, pendingWake: marked.pendingWake },
+              lock,
+            });
+          }
+          console.log(`[factory] turn hook: sent resume brief to ${agentId} (wake ${taken.wakeId} delivered)`);
+        }
+      } else {
+        console.log(`[factory] turn hook: sent resume brief to ${agentId}`);
+      }
+    } catch (error) {
+      if (taken) {
+        const back = {
+          ...taken,
+          briefSent: true as const,
+          lastAttemptAt: nowIso,
+          lastError: (error instanceof Error ? error.message : String(error)).slice(0, 300),
+        };
+        try {
+          await restorePendingWakeBrief(paseo, mainId, agentId, back as never, lock);
+        } catch {}
+      }
+      console.error(
+        `[factory] turn hook: resume brief to ${agentId} sent but the marking failed (${error instanceof Error ? error.message : String(error)}); retry marking next tick`,
       );
     }
     return;

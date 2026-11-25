@@ -64,6 +64,7 @@ State transitions:
 The plugin wakes the steer that is active **when the wake is sent**, read from the scope state — never the worker's parent. Every wake carries the scope id, the epoch and the worker ids; a steer ignores a wake whose epoch is older than the current one.
 
 - Every actionable worker outcome queues a wake before delivery. The timer tries again after a failed send or when the active steer finishes its current turn.
+- A wake behind a `/clear` stays pending (`wsf.agents.<steer>.pendingWakeBrief`) until the brief send succeeded in the turn-after hook; a failed follow-up (hook error, busy workspace lock, plugin stopped, provider error) keeps the workers queued and retries on the next supervise tick and the boot check, at most once per tick per scope, without duplicate briefs (take-before-send under the workspace lock, `wakeId`, `briefSent` flag — same exactly-once pattern as the staged steer brief).
 - Debounced: simultaneous actionable events are collected and sent together within `wakeDebounceSeconds`; there is no 10-minute batch.
 - Watchdog: a plugin timer (every 15 minutes) marks `running` workers that are idle beyond `staleMinutes` as `stale` and wakes the steer; it also re-sends a wake that got no answer (see Failover).
 - Quiet periods: no wakes while `drain` runs, and none before the boot check after a restart has finished; then one combined wake lists every interrupted worker.
