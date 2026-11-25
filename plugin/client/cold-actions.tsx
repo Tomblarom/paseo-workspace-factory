@@ -74,7 +74,7 @@ export function ColdActions({
 
   const confirmation = action === "refresh" ? preview : null;
   const primaryLabel =
-    action === "continue" ? "Weiterschreiben" : confirmation ? "Kontext jetzt auffrischen" : "Kontext auffrischen";
+    action === "continue" ? "Continue writing" : confirmation ? "Confirm refresh" : "Refresh chat";
 
   const onPrimary = () => run(async () => {
     if (action === "continue") {
@@ -93,21 +93,21 @@ export function ColdActions({
       });
       setPreview(null);
       if (applied.delivered) {
-        setNotice("Der Chat wurde aufgefrischt. Der Arbeitsstand wurde gesendet.");
+        setNotice("Chat refreshed and work brief sent.");
       } else if (applied.idempotent === true) {
-        setNotice("Der Chat wurde bereits aufgefrischt.");
+        setNotice("This chat was already refreshed.");
       } else {
-        setError("Der Arbeitsstand konnte nicht gesendet werden.");
+        setError("Could not send the work brief.");
       }
       return;
     }
 
     const next = await callFreshPreview({ workspaceId, slot });
     if (next.from !== agentId) {
-      setError("Für diesen Chat ist das Auffrischen nicht mehr verfügbar.");
+      setError("Refresh is no longer available for this chat.");
     } else if (next.refreshMode !== "rewind") {
       // The existing new-agent fallback also prompts the old agent.
-      setError("Dieser Chat lässt sich hier nicht auffrischen.");
+      setError("This chat cannot be refreshed here.");
     } else {
       setPreview(next);
     }
@@ -115,19 +115,19 @@ export function ColdActions({
 
   const onOpenHistory = () => run(async () => {
     await callHistory({ agentId });
-    setNotice("Der gespeicherte Verlauf wurde in einem eigenen Tab geöffnet.");
+    setNotice("Saved chat opened in a new tab.");
   });
 
   return (
     <View style={styles.actions}>
       {confirmation ? (
         <Text style={styles.muted}>
-          Der Chat wird zurückgesetzt. Spätere Nachrichten verschwinden aus diesem Tab und der Agent
-          setzt hier mit einem kurzen Arbeitsstand fort.
+          This resets the chat and removes later messages from this tab. The agent continues here
+          with a short work brief.
         </Text>
       ) : null}
       {action === "unavailable" ? (
-        <Text style={styles.muted}>Dieser Chat kann hier nicht aufgefrischt werden.</Text>
+        <Text style={styles.muted}>This chat cannot be refreshed here.</Text>
       ) : (
         <Pressable
           accessibilityRole="button"
@@ -135,7 +135,7 @@ export function ColdActions({
           disabled={busy || running || (action === "continue" && !composer)}
           onPress={() => void onPrimary()}
         >
-          <Text style={styles.buttonText}>{busy ? "Bitte warten…" : primaryLabel}</Text>
+          <Text style={styles.buttonText}>{busy ? "Please wait…" : primaryLabel}</Text>
         </Pressable>
       )}
       {confirmation || hasHistory ? (
@@ -146,7 +146,7 @@ export function ColdActions({
           onPress={confirmation ? () => setPreview(null) : () => void onOpenHistory()}
         >
           <Text style={styles.muted}>
-            {confirmation ? "Abbrechen" : "Gespeicherten Verlauf in neuem Tab öffnen"}
+            {confirmation ? "Cancel" : "Open saved chat in new tab"}
           </Text>
         </Pressable>
       ) : null}

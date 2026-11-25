@@ -101,7 +101,7 @@ function ColdBody({
   if (self === undefined) {
     return (
       <View style={styles.screen}>
-        <Text style={styles.muted}>Kontext wird geprüft…</Text>
+        <Text style={styles.muted}>Checking chat…</Text>
       </View>
     );
   }
@@ -115,7 +115,7 @@ function ColdBody({
       {self ? <Text style={styles.title}>{attentionStatus(self)}</Text> : null}
       {self?.reason === "limit" ? (
         <Text style={styles.muted}>
-          Warte, bis wieder Kontingent verfügbar ist.
+          Wait until your usage limit resets.
         </Text>
       ) : null}
       <ColdActions

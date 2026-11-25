@@ -393,7 +393,7 @@ test('digit candidates get a plan note with the explicit --adopt form', async ()
   const note = p.notes.find((n) => n.includes(agent.id));
   assert.ok(note, p.notes.join('\n'));
   assert.match(note, /"Steer 3"/);
-  assert.match(note, /nicht automatisch zugeordnet/);
+  assert.match(note, /^Assign candidate /);
   assert.match(note, new RegExp(`--adopt <slot>=${agent.id}`));
 });
 

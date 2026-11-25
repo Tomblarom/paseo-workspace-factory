@@ -8,7 +8,9 @@ The `/factory` slash command offers status, scopes, cleanup, plan, apply, checkp
 
 ## Cold context
 
-The plugin tracks Factory turn outcomes, CHECKPOINT blocks, and interruptions without a model call. Long idle chats can get a cold-context indicator with actions to read the resume brief, preview a fresh context, or reopen saved history when available. Fresh uses a same-tab rewind where possible and falls back to a new agent. In a steer tab, `/factory resume` delivers the brief and clears the context where the provider supports it. `/factory resume --brief` shows the read-only report.
+The plugin tracks Factory turn outcomes, CHECKPOINT blocks, and interruptions without a model call. The composer pill and **Factory: context** panel show why a chat needs attention. **Continue writing** returns to the composer. **Refresh chat** previews a reset in the same steer tab and sends a short work brief after confirmation. **Open saved chat in new tab** is available when an earlier session was saved.
+
+In a steer tab, `/factory resume` delivers the brief and first clears the context on providers configured for native clearing. `/factory resume --brief` shows the read-only report. The plugin generates handoff previews and messages in English.
 
 Idle cleanup mode `compact-warm` can compact eligible chats before the cache expires and suggest a fresh context for cold chats. An opt-in setting can rewind eligible Codex chats in place. Mode `clear` can start a new session on providers with native `/clear` after you acknowledge the effect on chat history. Cleanup verifies the provider command’s effect and pauses with a hint if the command arrives as text.
 

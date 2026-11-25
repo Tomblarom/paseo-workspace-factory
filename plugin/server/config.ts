@@ -15,7 +15,7 @@ export interface HostSettingsReader {
 
 export async function loadFileConfig(configPath?: string): Promise<any> {
   const config = await loadConfig(configPath ?? undefined);
-  configureRuntime(config);
+  configureRuntime({ ...config, runtime: { ...config.runtime, handoffLanguage: "en" } });
   return config;
 }
 

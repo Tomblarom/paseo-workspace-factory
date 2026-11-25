@@ -32,10 +32,10 @@ export function attentionStatus({
   freshHint: string | null;
   idleMinutes: number;
 }): string {
-  if (reason === "daemon-restart") return "Paseo wurde neu gestartet";
-  if (reason === "limit") return "Nutzungslimit erreicht";
-  if (reason === "failed") return "Letzte Antwort fehlgeschlagen";
-  if (freshHint) return "Auffrischen empfohlen";
+  if (reason === "daemon-restart") return "Paseo restarted";
+  if (reason === "limit") return "Usage limit reached";
+  if (reason === "failed") return "Last reply failed";
+  if (freshHint) return "Chat refresh recommended";
   const idle = idleMinutes < 60 ? `${idleMinutes} min` : `${Math.floor(idleMinutes / 60)} h`;
-  return `Kontext kalt · seit ${idle} inaktiv`;
+  return `Idle chat · ${idle}`;
 }

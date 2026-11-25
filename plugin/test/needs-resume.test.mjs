@@ -334,24 +334,24 @@ test("bootResumeReason marks active and non-active recent steers, advisors only 
 
 test("resumeReminderText: active keeps the short label, others name the last steer", () => {
   assert.deepEqual(
-    resumeReminderText({ reasonLabel: "Neustart", canFresh: true, advisor: false, activeSteer: "A" }),
-    { pill: "Resume nötig · Neustart", title: "Resume nötig · Neustart", body: "" },
+    resumeReminderText({ reasonLabel: "Paseo restarted", canFresh: true, advisor: false, activeSteer: "A" }),
+    { pill: "Resume required · Paseo restarted", title: "Resume required · Paseo restarted", body: "" },
   );
   assert.deepEqual(
-    resumeReminderText({ reasonLabel: "Limit", canFresh: false, advisor: false, activeSteer: "A" }),
+    resumeReminderText({ reasonLabel: "Usage limit reached", canFresh: false, advisor: false, activeSteer: "A" }),
     {
-      pill: "Zuletzt steuerte Steer A",
-      title: "Zuletzt steuerte Steer A",
-      body: "Du kannst hier weitermachen; dieser Steer wird dann zum steuernden.",
+      pill: "Steer A coordinated last",
+      title: "Steer A coordinated last",
+      body: "Continuing here makes this the active steer.",
     },
   );
   assert.deepEqual(
-    resumeReminderText({ reasonLabel: "Fehler", canFresh: false, advisor: true, activeSteer: "A" }).pill,
-    "Resume nötig · Fehler",
+    resumeReminderText({ reasonLabel: "Last reply failed", canFresh: false, advisor: true, activeSteer: "A" }).pill,
+    "Resume required · Last reply failed",
   );
-  assert.match(
-    resumeReminderText({ reasonLabel: "Neustart", canFresh: false, advisor: false, activeSteer: null }).pill,
-    /ein anderer Steer/,
+  assert.equal(
+    resumeReminderText({ reasonLabel: "Paseo restarted", canFresh: false, advisor: false, activeSteer: null }).pill,
+    "Another steer coordinated last",
   );
 });
 

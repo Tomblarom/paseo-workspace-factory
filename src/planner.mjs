@@ -559,7 +559,7 @@ export function planRepository(discovery, config, { allowFork = false, adopt = {
   for (const candidate of discovery.steers.digitCandidates ?? []) {
     const title = (candidate.title ?? '').trim();
     const digit = title.match(STEER_DIGIT_TITLE)?.[1] ?? '?';
-    notes.push(`Candidate "Steer ${digit}" ${candidate.id} (${candidate.provider}/${candidate.model}, ${candidate.status}) is not automatically assigned to a slot (nicht automatisch zugeordnet); adopt it explicitly with --adopt <slot>=${candidate.id} (zum Übernehmen)`);
+    notes.push(`Assign candidate "Steer ${digit}" ${candidate.id} (${candidate.provider}/${candidate.model}, ${candidate.status}) to a slot with --adopt <slot>=${candidate.id}.`);
   }
 
   // Workers of other scopes' steers are never steer candidates; each keeps its

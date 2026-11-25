@@ -215,7 +215,7 @@ test("mayResumeClear gates clear by provider with claude default", () => {
 test("formatResumeMessage heads the brief, with notice when not cleared", () => {
   assert.equal(formatResumeMessage("brief body"), "[Factory resume]\nbrief body");
   const noted = formatResumeMessage("brief body", { cleared: false });
-  assert.match(noted, /^\[Factory resume\] \(Kontext nicht geleert/);
+  assert.match(noted, /^\[Factory resume\] \(The context was kept because the clear command had no effect\./);
   assert.match(noted, /brief body$/);
   assert.equal(formatResumeMessage("  padded  \n"), "[Factory resume]\npadded");
 });

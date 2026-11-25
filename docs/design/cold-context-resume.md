@@ -134,15 +134,15 @@ Rewind execution (opt-in): with the `rewindFresh` cleanup setting on (default of
 
 ## C6 Cold hint (manual)
 
-The composer pill and **Factory: Kontext** panel show the reason the chat needs attention, for example **Kontext kalt · seit 2 h inaktiv**, **Paseo wurde neu gestartet**, or **Nutzungslimit erreicht**. Both surfaces offer the same action.
+The composer pill and **Factory: context** panel show the reason the chat needs attention, for example **Idle chat · 2 h**, **Paseo restarted**, or **Usage limit reached**. Both surfaces offer the same action.
 
-- **Weiterschreiben** puts the cursor in the existing chat without sending a message. It is offered when there is no refresh signal or when a failed turn or limit leaves a recent, small context.
-- **Kontext auffrischen** prepares a shorter conversation from the saved work brief. The confirmation explains which visible history will disappear before the agent starts a turn. The same-tab action is offered for steers. If the tab cannot be refreshed safely, the panel explains that the action is unavailable.
-- **Gespeicherten Verlauf in neuem Tab öffnen** appears when an earlier session was saved. It opens that conversation for reference without starting a turn.
+- **Continue writing** puts the cursor in the existing chat without sending a message. It is offered when there is no refresh signal or when a failed turn or limit leaves a recent, small context.
+- **Refresh chat** prepares a shorter conversation from the saved work brief. The preview explains which visible history will disappear. **Confirm refresh** resets the chat in the steer’s tab and sends the brief. If the tab cannot be refreshed safely, the panel explains that the action is unavailable.
+- **Open saved chat in new tab** appears when an earlier session was saved. It opens that conversation for reference without starting a turn.
 
 ## R — `/factory resume` as the restart path
 
-`/factory resume`, typed in the steer's own tab, saves the state and sends a work brief from the main workspace. On providers configured for native clearing, it first clears the context of the same agent (same id, same tab, same name). For the recommended action after an interruption, open the composer pill or **Factory: Kontext** panel.
+`/factory resume`, typed in the steer's own tab, saves the state and sends a work brief from the main workspace. On providers configured for native clearing, it first clears the context of the same agent (same id, same tab, same name). For the recommended action after an interruption, open the composer pill or **Factory: context** panel.
 
 ### Scope (E3)
 

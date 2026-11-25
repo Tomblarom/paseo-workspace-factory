@@ -36,8 +36,9 @@ test("an agent without a refresh target never offers ordinary continuation for f
 
 test("status reports a plain-language reason without exposing stored cleanup diagnostics", () => {
   const cold = { ...warm, reason: "cold", idleMinutes: 120 };
-  assert.equal(attentionStatus(cold), "Kontext kalt · seit 2 h inaktiv");
-  assert.equal(attentionStatus({ ...cold, freshHint: "package boundary" }), "Auffrischen empfohlen");
-  assert.equal(attentionStatus({ ...cold, reason: "limit", freshHint: "package boundary" }), "Nutzungslimit erreicht");
-  assert.equal(attentionStatus({ ...cold, reason: "daemon-restart" }), "Paseo wurde neu gestartet");
+  assert.equal(attentionStatus(cold), "Idle chat · 2 h");
+  assert.equal(attentionStatus({ ...cold, freshHint: "package boundary" }), "Chat refresh recommended");
+  assert.equal(attentionStatus({ ...cold, reason: "limit", freshHint: "package boundary" }), "Usage limit reached");
+  assert.equal(attentionStatus({ ...cold, reason: "daemon-restart" }), "Paseo restarted");
+  assert.equal(attentionStatus({ ...cold, reason: "failed" }), "Last reply failed");
 });

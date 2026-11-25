@@ -39,7 +39,7 @@ export function CleanupSettingsSection() {
       <SettingsCard>
         <SettingsSelect
           label="What to do with idle agents"
-          hint="Off shows a “Kontext kalt” hint. Compact shrinks the chat with a small model turn. Clear uses a new chat in the same tab after you acknowledge it below."
+          hint="Off shows an “Idle chat” hint. Compact shrinks the chat with a small model turn. Clear uses a new chat in the same tab after you acknowledge it below."
           value={values.mode}
           options={[
             { label: "Off – only show a hint", value: "off" },
@@ -107,7 +107,7 @@ export function CleanupSettingsSection() {
         />
         <SettingsSwitch
           label="I understand what Clear does"
-          hint="After a reload, the agent tab shows the new chat. Open the old chat from the “Kontext kalt” panel."
+          hint="After a reload, the agent tab shows the new chat. Open the saved chat in the Factory: context panel."
           error={needsAcknowledgement ? "Clear starts after you turn on this acknowledgement." : null}
           value={values.clearAcknowledged}
           onValueChange={(clearAcknowledged) => void save((current) => ({ ...current, clearAcknowledged }))}

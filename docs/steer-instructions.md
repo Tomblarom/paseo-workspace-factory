@@ -56,7 +56,7 @@ Assigning to another scope (`assign <scope> --apply`) records you as requester; 
 
 The resume rule in the block above is the fallback every steer and worker follows after a cleared or compacted context. Optionally, a Claude Code SessionStart hook can print the brief automatically (see [configuration](configuration.md#resume-brief)); the factory never changes host settings itself.
 
-In Paseo with the plugin, `/factory resume` typed in the steer's own tab is the way back after a restart, crash, or limit: it saves the checkpoint, clears the context, and then delivers the brief (details: [cold context](design/cold-context-resume.md#r--factory-resume-as-the-restart-path)). A "Resume nötig" pill on the steer (reason: restart, limit, or error) with a "Resume jetzt" button asks for it; the pill stays until the resume. Every recently active steer of the scope shows the reminder; a non-active steer shows "Zuletzt steuerte Steer X …" instead, and resuming there also takes over coordination. The CLI `resume` stays the read-only letter: it never clears and never writes.
+After a restart, crash, or limit, the composer pill shows the reason and offers **Continue writing** or **Refresh chat** when available. Type `/factory resume` in the steer's own tab to save the checkpoint and deliver the brief. It first clears the context on providers configured for native clearing. A non-active steer can take over coordination by running `/factory resume` in its own tab. CLI `resume` gives a read-only report. [Cold context and resume](design/cold-context-resume.md#r--factory-resume-as-the-restart-path)
 
 ## Hub instructions
 

@@ -43,7 +43,7 @@ export default function contribute(client: PluginClientContext) {
   });
   client.addAgentPanel({
     id: "factory-cold",
-    title: "Factory: Kontext",
+    title: "Factory: context",
     icon: "Snowflake",
     Component: FactoryColdPanel,
   });
@@ -171,7 +171,7 @@ export default function contribute(client: PluginClientContext) {
   });
   client.addCommandCenterItem({
     id: "factory-open-panel",
-    title: "Factory: Panel öffnen",
+    title: "Factory: open panel",
     icon: "Factory",
     keywords: ["steer", "panel"],
     context: "workspace",

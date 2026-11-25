@@ -250,8 +250,8 @@ test("isCold and coldHintText describe the C6 hint", () => {
   assert.equal(isCold({ ...base, lastTurnEndedAt: at(NOW - 2 * HOUR), contextTokens: 1000 }), false);
   assert.equal(isCold({ ...base, lastTurnEndedAt: null, contextTokens: 120_000 }), false);
   assert.equal(isCold({ ...base, lastTurnEndedAt: at(NOW - 2 * HOUR), contextTokens: null }), false);
-  assert.equal(coldHintText(350_000, 2 * HOUR), "Kontext kalt · 350k · 2h");
-  assert.equal(coldHintText(61_200, 45 * 60_000), "Kontext kalt · 61k · 45m");
+  assert.equal(coldHintText(350_000, 2 * HOUR), "Idle chat · 350k · 2h");
+  assert.equal(coldHintText(61_200, 45 * 60_000), "Idle chat · 61k · 45m");
 });
 
 test("scanCleanupEvidence finds compaction and session signals", () => {
@@ -687,8 +687,8 @@ test("currentFreshHint keeps only current hints, freshHintText labels the pill",
     "boundary",
     "unknown last turn keeps the hint, mirroring the resume brief",
   );
-  assert.equal(freshHintText(120_000, 55 * MIN), "Fresh empfohlen · 120k · 55m");
-  assert.equal(freshHintText(61_200, 2 * HOUR), "Fresh empfohlen · 61k · 2h");
+  assert.equal(freshHintText(120_000, 55 * MIN), "Chat refresh recommended · 120k · 55m");
+  assert.equal(freshHintText(61_200, 2 * HOUR), "Chat refresh recommended · 61k · 2h");
 });
 
 test("shouldRewindFresh gates the rewind execution by setting and group", () => {

@@ -31,7 +31,7 @@ export const RESUME_PENDING_REASON = "resume";
 export const SWEEP_PENDING_REASON = "idle";
 /** Notice heading the brief when it arrives without a cleared context. */
 export const RESUME_NOT_CLEARED_NOTICE =
-  "Kontext nicht geleert: der Clear-Befehl blieb ohne Wirkung; der Brief unten ist der aktuelle Stand.";
+  "The context was kept because the clear command had no effect. The brief below reflects the current task.";
 
 /** Why a steer needs `/factory resume` (E4); "cold" keeps the C6 hint shape. */
 export type NeedsResumeReason = "daemon-restart" | "limit" | "failed" | "cold";
@@ -125,8 +125,8 @@ export function bootResumeReason(args: {
 
 /**
  * Reminder text for a steer flagged with needsResume. The active steer (and
- * any advisor, which can never take over) keeps the short "Resume nötig ·
- * <Grund>"; any other recently active steer is told who steered last and
+ * any advisor, which can never take over) keeps the short "Resume required ·
+ * <reason>"; any other recently active steer is told who steered last and
  * that resuming here takes over coordination.
  */
 export function resumeReminderText(args: {
@@ -135,13 +135,13 @@ export function resumeReminderText(args: {
   advisor: boolean;
   activeSteer: string | null | undefined;
 }): { pill: string; title: string; body: string } {
-  const active = `Resume nötig · ${args.reasonLabel}`;
+  const active = `Resume required · ${args.reasonLabel}`;
   if (args.canFresh || args.advisor) return { pill: active, title: active, body: "" };
-  const who = args.activeSteer ? `Steer ${args.activeSteer}` : "ein anderer Steer";
+  const who = args.activeSteer ? `Steer ${args.activeSteer}` : "Another steer";
   return {
-    pill: `Zuletzt steuerte ${who}`,
-    title: `Zuletzt steuerte ${who}`,
-    body: "Du kannst hier weitermachen; dieser Steer wird dann zum steuernden.",
+    pill: `${who} coordinated last`,
+    title: `${who} coordinated last`,
+    body: "Continuing here makes this the active steer.",
   };
 }
 
@@ -564,14 +564,14 @@ function formatIdle(idleMs: number): string {
   return `${Math.floor(hours / 24)}d`;
 }
 
-/** Short pill/panel line, e.g. "Kontext kalt · 350k · 2h". */
+/** Short pill/panel line, e.g. "Idle chat · 350k · 2h". */
 export function coldHintText(contextTokens: number, idleMs: number): string {
-  return `Kontext kalt · ${Math.round(contextTokens / 1000)}k · ${formatIdle(idleMs)}`;
+  return `Idle chat · ${Math.round(contextTokens / 1000)}k · ${formatIdle(idleMs)}`;
 }
 
-/** Short pill/panel line for a fresh recommendation, e.g. "Fresh empfohlen · 120k · 55m". */
+/** Short pill/panel line for a fresh recommendation, e.g. "Chat refresh recommended · 120k · 55m". */
 export function freshHintText(contextTokens: number, idleMs: number): string {
-  return `Fresh empfohlen · ${Math.round(contextTokens / 1000)}k · ${formatIdle(idleMs)}`;
+  return `Chat refresh recommended · ${Math.round(contextTokens / 1000)}k · ${formatIdle(idleMs)}`;
 }
 
 export interface CleanupEvidence {

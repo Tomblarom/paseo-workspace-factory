@@ -24,6 +24,7 @@ const {
 } = validate;
 const { createConfigLoader, isMissingFileError, loadFileConfig } = await import("../server/config.ts");
 const { validateConfig } = await import("../server/factory/config.ts");
+const { runtime } = await import("../server/factory/runtime.ts");
 
 function settingsDoc(overrides = {}) {
   return { ...factoryConfigSettings.schema.parse({}), ...overrides };
@@ -251,12 +252,14 @@ test("loader with a file keeps file host values unless settings override them", 
   const dir = tempDir();
   try {
     const file = join(dir, "config.json");
-    writeFileSync(file, JSON.stringify(validFileConfig()));
+    writeFileSync(file, JSON.stringify(validFileConfig({ handoffLanguage: "de" })));
     const kept = await withConfigPath(file, () =>
       createConfigLoader(readySettings(settingsDoc())).loadEffectiveConfig(),
     );
     assert.equal(kept.github.owner, "file-owner");
     assert.equal(kept.checkoutRoot, "/file/root");
+    assert.equal(kept.handoffLanguage, "de");
+    assert.equal(runtime().handoffLanguage, "en");
     const over = await withConfigPath(file, () =>
       createConfigLoader(readySettings(settingsDoc({ githubOwner: "ui-owner", checkoutRoot: "/ui/root" }))).loadEffectiveConfig(),
     );
