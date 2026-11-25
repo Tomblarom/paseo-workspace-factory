@@ -10,7 +10,7 @@
 // titles.
 import { LABEL } from './paseo.js';
 import { isAdvisorProfile, slotOrder, validateConfig } from './config.js';
-import { nextFreeSlot, parseProviderModel, resolveProfile, resolveSteerAdd } from './models.js';
+import { buildCandidate, nextFreeSlot, parseProviderModel, resolveProfile, resolveSteerAdd } from './models.js';
 import { bestFamilyAccount, earliestFamilyReset, familyAccounts, profileFamily } from './quota.js';
 import { idempotencyKey, requestDigest } from './planner.js';
 import { suggestAccountPin } from './zerosub.js';
@@ -149,17 +149,9 @@ function resolveOneProfile(config, providerEntries, name, opts, quotaWarnPct, no
   return { profile, skipped: mapped, zerosubAccount, zerosubPin, earliestReset };
 }
 
-function candidateForProviderModel(config, profileName, provider, model, thinking, mode) {
+function candidateForProviderModel(config, profileName, provider, model, thinking, mode, providerEntries, notes) {
   const existing = config.profiles?.[profileName] ?? null;
-  const candidate = { provider, model };
-  if (existing?.pool !== undefined) candidate.pool = existing.pool;
-  if (thinking !== undefined) candidate.thinking = thinking;
-  else if (existing && 'thinking' in existing) candidate.thinking = existing.thinking;
-  else if (!existing) candidate.thinking = null;
-  if (mode !== undefined) candidate.mode = mode;
-  else if (existing && 'mode' in existing) candidate.mode = existing.mode;
-  if (existing && existing.advisor !== undefined) candidate.advisor = existing.advisor;
-  if (existing && existing.sensitive !== undefined) candidate.sensitive = existing.sensitive;
+  const candidate = buildCandidate(existing, provider, model, thinking, mode, { providerEntries, notes, profileName });
   return { candidate, existing };
 }
 
@@ -268,7 +260,7 @@ export function planSteerAdd(config, providerEntries, liveSteers, {
     } else {
       name = `${provider}-${model}`;
     }
-    const { candidate: built, existing } = candidateForProviderModel(config, name, provider, model, thinking, mode);
+    const { candidate: built, existing } = candidateForProviderModel(config, name, provider, model, thinking, mode, providerEntries, notes);
     if (!existing) {
       const assumed = { provider: built.provider, model: built.model, thinking: built.thinking ?? null, mode: built.mode ?? null, advisor: false };
       const merged = findProfileByModelKey(config.profiles, modelKeyWithTags(assumed));

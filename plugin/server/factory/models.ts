@@ -327,14 +327,35 @@ function resolveProfileName(config, slot, provider, model, profileOption) {
   return `${provider}-${model}`;
 }
 
-function buildCandidate(existing, provider, model, thinking, mode) {
+/**
+ * Profile candidate for a provider/model spec. thinking and mode are
+ * provider-specific (thinking even model-specific): values not given
+ * explicitly are carried over from the existing profile only while they stay
+ * valid for the requested provider/model (same provider, offered by the
+ * catalog when known); otherwise the provider default applies and a note
+ * explains the drop.
+ */
+export function buildCandidate(existing, provider, model, thinking, mode, { providerEntries = null, notes = null, profileName = null } = {}) {
   const candidate = { provider, model };
   if (existing?.pool !== undefined) candidate.pool = existing.pool;
+  const entry = (providerEntries ?? []).find((e) => e.provider === provider) ?? null;
+  const sameProvider = existing?.provider === provider;
+  const label = profileName ? `profile "${profileName}"` : 'the existing profile';
   if (thinking !== undefined) candidate.thinking = thinking;
-  else if (existing && 'thinking' in existing) candidate.thinking = existing.thinking;
-  else if (!existing) candidate.thinking = null;
+  else if (existing && 'thinking' in existing) {
+    const catalogModel = entry?.models?.find((m) => m.id === model) ?? null;
+    const valid = existing.thinking === null || existing.thinking === undefined || (sameProvider && (!catalogModel
+      || (catalogModel.thinkingOptions ?? []).some((t) => t.id === existing.thinking)));
+    candidate.thinking = valid ? existing.thinking : null;
+    if (!valid) notes?.push(`Thinking "${existing.thinking}" of ${label} not carried over to ${provider}/${model}; using the provider default (set one with --thinking)`);
+  } else if (!existing) candidate.thinking = null;
   if (mode !== undefined) candidate.mode = mode;
-  else if (existing && 'mode' in existing) candidate.mode = existing.mode;
+  else if (existing && 'mode' in existing) {
+    const valid = existing.mode === null || existing.mode === undefined || (sameProvider && (!entry?.modes
+      || entry.modes.some((m) => m.id === existing.mode)));
+    if (valid) candidate.mode = existing.mode;
+    else notes?.push(`Mode "${existing.mode}" of ${label} not carried over to ${provider}; using the provider default (set one with --mode)`);
+  }
   if (existing && existing.advisor !== undefined) candidate.advisor = existing.advisor;
   if (existing && existing.sensitive !== undefined) candidate.sensitive = existing.sensitive;
   return candidate;
@@ -415,7 +436,7 @@ export function planWorkerSet(config, providerEntries, { n, spec, thinking, mode
     const { provider, model } = parseProviderModel(trimmed);
     profileName = resolveProfileName(config, null, provider, model, profile);
     const existing = config.profiles?.[profileName] ?? null;
-    candidate = buildCandidate(existing, provider, model, thinking, mode);
+    candidate = buildCandidate(existing, provider, model, thinking, mode, { providerEntries, notes, profileName });
     if (candidate.advisor === true) throw new Error(`Profile "${profileName}" is tagged as advisor and cannot be used for workers`);
     const key = modelKey(candidate, { withTags: true });
     if (!existing) {
@@ -543,7 +564,7 @@ export function planSteerSet(config, providerEntries, { target, spec, thinking, 
     const { provider, model } = parseProviderModel(trimmed);
     profileName = resolveProfileName(config, slot, provider, model, profile);
     const existing = config.profiles?.[profileName] ?? null;
-    candidate = buildCandidate(existing, provider, model, thinking, mode);
+    candidate = buildCandidate(existing, provider, model, thinking, mode, { providerEntries, notes, profileName });
     if (!existing) {
       const assumed = { provider: candidate.provider, model: candidate.model, thinking: candidate.thinking ?? null, mode: candidate.mode ?? null, advisor: false };
       const merged = findProfileByKey(config.profiles, modelKey(assumed, { withTags: true }), { withTags: true });

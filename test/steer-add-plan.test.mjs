@@ -13,6 +13,7 @@ import {
   planSteerAdd,
 } from '../src/steer-add.mjs';
 import { normalizeZerosubState } from '../src/zerosub.mjs';
+import { buildCandidate } from '../src/models.mjs';
 
 const NOW = Date.parse('2026-11-24T12:00:00Z');
 const RESET_5H = '2026-11-24T15:00:00Z';
@@ -187,6 +188,30 @@ test('planSteerAdd with provider/model creates, reuses and blocks on catalog', (
   assert.equal(blocked.profile, null);
   assert.equal(blocked.op, null);
   assert.match(blocked.skipped[0].reason, /not offered/);
+});
+
+test('planSteerAdd model override drops mode/thinking the new provider does not offer', () => {
+  const config = structuredClone(CONFIG);
+  config.profiles.alpha = { provider: 'fake-x', model: 'x1', thinking: 'high', mode: 'full-access' };
+  const providers = [
+    { provider: 'fake-x', enabled: true, status: 'ready', models: [{ id: 'x1', thinkingOptions: [{ id: 'high' }] }], modes: [{ id: 'full-access' }] },
+    { provider: 'fake-y', enabled: true, status: 'ready', models: [{ id: 'y1' }, { id: 'y2', thinkingOptions: [{ id: 'max' }] }], modes: [{ id: 'bypassPermissions' }] },
+  ];
+  // Slot A is configured with alpha but has no live steer: the override
+  // rewrites alpha in place for fake-y.
+  const plan = planSteerAdd(config, providers, [], { slot: 'A', spec: 'fake-y/y2', scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW });
+  assert.equal(plan.profileName, 'alpha');
+  assert.deepEqual(plan.config.profiles.alpha, { provider: 'fake-y', model: 'y2', thinking: null });
+  assert.equal(plan.profile.mode ?? null, null);
+  assert.match(plan.notes.join('; '), /Mode "full-access" of profile "alpha" not carried over to fake-y/);
+  assert.match(plan.notes.join('; '), /Thinking "high" of profile "alpha" not carried over/);
+  assert.equal(plan.op.params.config.modeId, undefined);
+  // An explicit --mode wins; the same provider keeps a still valid mode.
+  const explicit = planSteerAdd(config, providers, [], { slot: 'A', spec: 'fake-y/y2', mode: 'bypassPermissions', scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW });
+  assert.equal(explicit.op.params.config.modeId, 'bypassPermissions');
+  const sameProvider = buildCandidate(config.profiles.alpha, 'fake-x', 'x1', undefined, undefined, { providerEntries: providers, notes: [] });
+  assert.equal(sameProvider.mode, 'full-access');
+  assert.equal(sameProvider.thinking, 'high');
 });
 
 test('planSteerAdd pins the roomiest ZeroSub account below warn as creation metadata', () => {
