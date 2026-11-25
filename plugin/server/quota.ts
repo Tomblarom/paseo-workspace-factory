@@ -2,6 +2,16 @@ import { execFileSync } from "node:child_process";
 import { parseUsageJson } from "./factory/quota.js";
 import { paseoBinary } from "./factory/paseo.js";
 
+/**
+ * Per-turn token counters in provider-native meaning: `input` is the reported
+ * input total as the route bills it, `cacheRead` the cache-read portion of it,
+ * `cacheWrite` a separately billed write bucket (Claude only; Paseo exposes no
+ * write field so Paseo-shaped payloads report 0). Uncached input is
+ * `input - cacheRead` on Codex/OpenAI routes (cached tokens are included in
+ * `input`) and `input` on Claude routes (they are not); see
+ * `uncachedInputTokens`. Counters are stored raw, never pre-subtracted, so
+ * accumulation cannot double count.
+ */
 export interface TurnUsage {
   input: number;
   cacheWrite: number;
@@ -84,7 +94,15 @@ export function startQuotaTimer({
 const USAGE_KEYS: Record<keyof TurnUsage, string[]> = {
   input: ["input", "inputTokens", "input_tokens"],
   cacheWrite: ["cacheWrite", "cache_write", "cacheCreationInputTokens", "cache_creation_input_tokens"],
-  cacheRead: ["cacheRead", "cache_read", "cacheReadInputTokens", "cache_read_input_tokens"],
+  cacheRead: [
+    "cacheRead",
+    "cache_read",
+    "cacheReadInputTokens",
+    "cache_read_input_tokens",
+    // Paseo ProviderUsage (plugin types + agent.lastUsage snapshot).
+    "cachedInputTokens",
+    "cached_input_tokens",
+  ],
   output: ["output", "outputTokens", "output_tokens"],
 };
 
@@ -114,6 +132,27 @@ export function extractTurnUsage(payload: any, agent: any = null): TurnUsage | n
     output: numberAt(source, USAGE_KEYS.output),
   };
   return Object.values(usage).some((value) => value > 0) ? usage : null;
+}
+
+/**
+ * Routes whose reported `input` already includes cached tokens. Every other
+ * route (Claude included) reports cached tokens separately from `input`.
+ */
+const INCLUSIVE_INPUT_ROUTES = new Set(["codex", "openai"]);
+
+/**
+ * Uncached input tokens for one turn or cumulative total: `input - cacheRead`
+ * on Codex/OpenAI routes, `input` elsewhere. Clamped at 0 so a skewed
+ * snapshot can never price negative input. Pass the agent/provider route
+ * (e.g. `agent.provider`); unknown routes keep `input` unchanged.
+ */
+export function uncachedInputTokens(
+  usage: TurnUsage | null | undefined,
+  route: string | null | undefined,
+): number {
+  const input = Number(usage?.input) || 0;
+  if (!INCLUSIVE_INPUT_ROUTES.has(String(route ?? "").toLowerCase())) return input;
+  return Math.max(0, input - (Number(usage?.cacheRead) || 0));
 }
 
 export function mergeTurnUsage(previous: any, turn: TurnUsage | null): any {
