@@ -29,7 +29,9 @@ import {
   factorySteerSettings,
   factorySteerSettingsPreview,
   factorySteerSettingsRevert,
+  factoryWorkerList,
   factoryWorkerPick,
+  factoryWorkerStart,
   factoryWorkers,
 } from "../shared/factory.js";
 import {
@@ -66,13 +68,16 @@ import { DRAIN_DEFAULT_TIMEOUT_MS, drain, parseTimeout } from "./core/drain.mjs"
 import { createRunner } from "./core/factory.mjs";
 import { createGh } from "./core/github.mjs";
 import { createGit } from "./core/local.mjs";
-import { formatCatalog, paseoRunFlags, resolveProfile, usedProfilesByLiveSteers } from "./core/models.mjs";
-import { QUOTA_DEFAULTS, readProfileHealth } from "./core/quota.mjs";
+import { formatCatalog, paseoRunFlags, resolveProfile, resolveWorkerPick, usedProfilesByLiveSteers, workerListRows, workerModelLine } from "./core/models.mjs";
+import { QUOTA_DEFAULTS, readProfileHealth, storeProfileFailure } from "./core/quota.mjs";
 import { applySteerAdd, formatSteerAddPreview, planSteerAdd } from "./core/steer-add.mjs";
 import { planHash } from "./core/planner.mjs";
 import { defaultCreateRewindClient } from "./core/rewind.mjs";
 import { deliverSteerBrief, stageSteerBrief } from "./steer-brief.js";
-import { formatWorkersText, readWorkers, workersReport } from "./core/supervision.mjs";
+import { formatWorkersPruneText, formatWorkersText, pruneWorkerRegister, readWorkers, staleWorkerEntries, workersReport } from "./core/supervision.mjs";
+import { discoveryScopeAliases } from "./core/scope-guard.mjs";
+import { startScopedWorker } from "./core/workers.mjs";
+import { formatStatus, scopeCandidates, scopeRows } from "./core/scopes-view.mjs";
 import {
   LABEL,
   METADATA_KEY,
@@ -85,8 +90,7 @@ import {
 import { daemonHost, runtime } from "./core/runtime.mjs";
 import { applyResume } from "./resume-apply.js";
 import { deliverSteer, type SteerDeliveryDeps } from "./steer-delivery.js";
-import { listScopes } from "./core/scope.mjs";
-import { scopeCandidates, scopeRows } from "./core/scopes-view.mjs";
+import { defaultPickAddress, listScopes } from "./core/scope.mjs";
 import { AGENTS_KEY } from "./core/agent-state.mjs";
 import {
   buildResumeBrief,
@@ -95,6 +99,7 @@ import {
   parseCheckpointBlock,
   readGitBrief,
   resolveTargetEntry,
+  restartInterruptions,
   steerStatus,
   switchSteer,
   workerResumeAnswer,
@@ -171,12 +176,18 @@ export async function getStatus(
   { paseo }: PluginHandlerContext,
   loader: ConfigLoader,
 ): Promise<any> {
-  const { discovery, scope, deprecatedAlias, status } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
-  void discovery;
+  const { config, scope, deprecatedAlias, status } = await discoverOne(
+    paseo,
+    loader,
+    input.repo,
+    input.workspaceId,
+    input.agentId ?? null,
+  );
   return {
     ...status,
     scope,
     deprecatedAlias,
+    text: (formatStatus as any)(status, config.usage?.warnContextTokens),
   };
 }
 
@@ -208,26 +219,34 @@ export async function getResume(
   loader: ConfigLoader,
 ): Promise<any> {
   const agentId = input.agentId?.trim() || null;
-  const { config, discovery, scope, status } = await discoverOne(paseo, loader, input.repo?.trim() || undefined, input.workspaceId, agentId);
+  const { config, discovery, scope, deprecatedAlias, status } = await discoverOne(paseo, loader, input.repo?.trim() || undefined, input.workspaceId, agentId);
   const git = createGit();
+  const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;
   const briefOptions: any = {
     agentId,
     workerLastAnswer: await workerResumeAnswer(paseo, status, agentId),
     promptOptions: await loader.loadPromptOptions(paseo),
-    agentState: discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null,
+    agentState,
     git: status.workspace ? readGitBrief(git, status.workspace.directory) : null,
     scope: discovery.scope ?? scope ?? null,
     config,
+    workerModel: (workerModelLine as any)(config, discovery),
     quotaSnapshot: getQuotaSnapshot(),
     quotaWarnPct: config.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct,
   };
   const brief: string = buildResumeBrief(status, briefOptions);
+  const restartInterrupted = status.restartInterrupted ?? restartInterruptions({ checkpoint: status.checkpoint, agentState });
   return {
     scope: scope?.id ?? status.repo,
     kind: scope?.kind ?? null,
     epoch: status.state?.epoch ?? null,
     agentId,
     brief,
+    openWorkers: status.openWorkers ?? [],
+    interrupted: status.checkpoint?.interrupted ?? null,
+    ...(restartInterrupted.length ? { restartInterrupted } : {}),
+    deprecatedAlias,
+    scopeInfo: scope,
   };
 }
 
@@ -753,11 +772,23 @@ async function discoverOne(
   const config = await loader.loadEffectiveConfig();
   const snapshot: any = await readPaseoState(paseo);
   const agent: any = agentId ? (snapshot.agents ?? []).find((a: any) => a?.id === agentId) ?? null : null;
-  const address = repo?.trim() || (agent ? agentScopeId(agent) ?? undefined : undefined);
+  const workerWs = !repo && agentId && !agentScopeId(agent)
+    ? (snapshot.workspaces ?? []).find((w: any) => (readWorkers as any)(w.metadata)[agentId]) ?? null
+    : null;
+  const address = repo?.trim() || (agent ? agentScopeId(agent) ?? (workerWs ? `workspace:${workerWs.id}` : undefined) : undefined);
   const { target, scope, deprecatedAlias } = await resolveEntryForAddress(paseo, address, workspaceId, snapshot);
   const runner = createRunner({ config, client: paseo, gh: createGh(), git: createGit() } as any);
   const [discovery] = await runner.discoverAll([target], { state: snapshot });
-  return { config, runner, discovery, scope, deprecatedAlias, snapshot, agent, status: (steerStatus as any)(discovery) };
+  return {
+    config,
+    runner,
+    discovery,
+    scope,
+    deprecatedAlias,
+    snapshot,
+    agent,
+    status: (steerStatus as any)(discovery, { config, warnContextTokens: config.usage?.warnContextTokens }),
+  };
 }
 
 function switchIdentityOf(dry: any): {
@@ -787,7 +818,7 @@ export async function previewSwitch(
   { paseo }: PluginHandlerContext,
   loader: ConfigLoader,
 ): Promise<any> {
-  const { discovery, scope, deprecatedAlias } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
+  const { config, discovery, scope, deprecatedAlias } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
   const to = checkedSlot(input.to, "--to");
   const switchOptions: any = {
     client: paseo,
@@ -796,6 +827,10 @@ export async function previewSwitch(
     toSlot: to,
     apply: false,
     git: createGit(),
+    config,
+    workerModel: (workerModelLine as any)(config, discovery),
+    callerId: input.callerId ?? null,
+    language: input.language ?? runtime().handoffLanguage,
   };
   const dry: any = await switchSteer(switchOptions);
   return {
@@ -826,7 +861,10 @@ export async function applySwitch(
   const to = checkedSlot(input.to, "--to");
   const git = createGit();
   const promptOptions = await loader.loadPromptOptions(paseo);
-  const dryOptions: any = { client: paseo, discovery, promptOptions, toSlot: to, apply: false, git };
+  const language = input.language ?? runtime().handoffLanguage;
+  const workerModel = (workerModelLine as any)(config, discovery);
+  const callerId = input.callerId ?? null;
+  const dryOptions: any = { client: paseo, discovery, promptOptions, toSlot: to, apply: false, git, config, workerModel, callerId, language };
   const dry: any = await switchSteer(dryOptions);
   const fresh = switchFingerprint(switchIdentityOf(dry));
   if (fresh !== input.fingerprint) {
@@ -841,9 +879,13 @@ export async function applySwitch(
     config,
     toSlot: to,
     apply: true,
-    send: input.deliver !== "stage",
+    send: input.deliver !== "stage" && input.deliver !== "none",
     stage: input.deliver === "stage",
     notifyPrevious: input.notifyPrevious === true,
+    wait: input.wait === true,
+    callerId,
+    language,
+    workerModel,
     git,
     paseoCli: createPaseoCli(),
     deliverSteer: (args: Parameters<typeof deliverSteer>[1]) => deliverSteer(paseo, args, {
@@ -988,7 +1030,13 @@ export async function writeCheckpointRpc(
       "Something changed since the checkpoint preview (steer state or the agent's answer). Run /factory checkpoint again and confirm the new preview.",
     );
   }
-  const writeOptions: any = { client: paseo, discovery, config, ...fields };
+  const writeOptions: any = {
+    client: paseo,
+    discovery,
+    config,
+    ...fields,
+    ...(input.callerId ? { callerId: input.callerId } : {}),
+  };
   const checkpoint = await writeCheckpoint(writeOptions);
   return { checkpoint };
 }
@@ -1064,47 +1112,154 @@ export async function getWorkers(
   { paseo }: PluginHandlerContext,
   loader: ConfigLoader,
 ): Promise<any> {
-  const { discovery, status } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
+  const { discovery, scope, deprecatedAlias, status } = await discoverOne(
+    paseo,
+    loader,
+    input.repo,
+    input.workspaceId,
+    input.agentId ?? null,
+  );
   const scopeId = discovery.scope?.id ?? status.repo;
   const epoch = discovery.mainWorkspace?.metadata?.[METADATA_KEY]?.epoch ?? null;
+  if (input.prune) {
+    const stale = (staleWorkerEntries as any)((readWorkers as any)(discovery.mainWorkspace?.metadata ?? null), discovery.agents ?? []);
+    if (!input.apply) {
+      return {
+        scope: scopeId,
+        epoch,
+        stale,
+        applied: false,
+        deprecatedAlias,
+        scopeInfo: scope,
+        text: (formatWorkersPruneText as any)(scopeId, epoch, stale),
+      };
+    }
+    if (!discovery.mainWorkspace) {
+      throw new Error("workers --prune --apply needs a factory main workspace with worker state");
+    }
+    const pruned: any = await (pruneWorkerRegister as any)({
+      client: paseo,
+      workspaceId: discovery.mainWorkspace.id,
+      agents: discovery.agents ?? [],
+    });
+    return {
+      scope: scopeId,
+      epoch,
+      removed: pruned.removed,
+      applied: true,
+      deprecatedAlias,
+      scopeInfo: scope,
+      text: (formatWorkersPruneText as any)(scopeId, epoch, pruned.removed, { applied: true }),
+    };
+  }
   const report = (workersReport as any)((readWorkers as any)(discovery.mainWorkspace?.metadata ?? null));
   return {
     scope: scopeId,
     epoch,
     workers: report,
+    deprecatedAlias,
+    scopeInfo: scope,
     text: (formatWorkersText as any)(scopeId, epoch, report),
   };
+}
+
+export interface ZerosubHandlerExtra {
+  getZerosub?: () => Promise<any>;
+}
+
+async function readHandlerZerosub(extra?: ZerosubHandlerExtra): Promise<any> {
+  const reader = extra?.getZerosub ?? readZerosubStateSafe;
+  try {
+    return await reader();
+  } catch {
+    return null;
+  }
+}
+
+async function resolveWorkerSelection(
+  paseo: any,
+  loader: ConfigLoader,
+  input: { repo?: string; workspaceId?: string; agentId?: string; cwd?: string; failed?: string; reason?: string },
+  extra?: ZerosubHandlerExtra,
+): Promise<any> {
+  if (input.failed !== undefined && !input.reason) {
+    throw new Error("worker pick --failed needs --reason <text>");
+  }
+  if (input.reason !== undefined && input.failed === undefined) {
+    throw new Error("worker pick --reason needs --failed <profile>");
+  }
+  const config = await loader.loadEffectiveConfig();
+  const snapshot: any = await readPaseoState(paseo);
+  const scopeAddress = input.repo?.trim() || (defaultPickAddress as any)(snapshot, {
+    agentId: input.agentId,
+    workspaceId: input.workspaceId,
+    cwd: input.cwd ?? null,
+  });
+  let entries: any[];
+  let repoPublic: boolean | null = null;
+  let discovery: any = null;
+  let scope: any = null;
+  if (scopeAddress) {
+    const resolved: any = resolveTargetEntry(scopeAddress, snapshot);
+    scope = resolved.scope;
+    const runner = createRunner({ config, client: paseo, gh: createGh(), git: createGit() } as any);
+    [discovery] = await runner.discoverAll([resolved.entry], { state: snapshot });
+    entries = discovery.providers ?? [];
+    let priv = discovery.github?.fork?.repo?.private;
+    const parent = scope?.parent ?? discovery.scope?.parent;
+    const parentAddress = parent?.kind === "github"
+      ? parent.id
+      : typeof parent === "string"
+        ? parent
+        : scopeAddress.includes("@")
+          ? scopeAddress.split("@")[0]
+          : null;
+    if (priv === undefined && parentAddress && parentAddress !== scopeAddress) {
+      try {
+        const parentResolved: any = resolveTargetEntry(parentAddress, snapshot);
+        const [parentDiscovery] = await runner.discoverAll([parentResolved.entry], { state: snapshot });
+        priv = parentDiscovery?.github?.fork?.repo?.private;
+      } catch {
+        // unknown stays unknown (fail-closed)
+      }
+    }
+    repoPublic = priv === false ? true : priv === true ? false : null;
+  } else {
+    entries = snapshot.providers ?? [];
+  }
+  let profileHealth = readProfileHealth(discovery?.mainWorkspace?.metadata);
+  if (input.failed !== undefined) {
+    if (!scopeAddress) throw new Error("worker pick --failed needs a scope so the failure can be recorded");
+    const failed = config.profiles?.[input.failed];
+    if (!failed) throw new Error(`Unknown profile "${input.failed}"`);
+    if (!discovery?.mainWorkspace) {
+      throw new Error("worker pick --failed needs a factory main workspace with worker state");
+    }
+    const record: any = await (storeProfileFailure as any)({
+      client: paseo,
+      workspaceId: discovery.mainWorkspace.id,
+      profile: { ...failed, name: input.failed },
+      text: input.reason,
+    });
+    profileHealth = { ...(profileHealth ?? {}), [record.profile]: record };
+  }
+  const zerosub = await readHandlerZerosub(extra);
+  const selection: any = (resolveWorkerPick as any)(config, entries, {
+    repoPublic,
+    profileHealth,
+    zerosub,
+  });
+  return { config, snapshot, discovery, scope, entries, repoPublic, selection };
 }
 
 export async function pickWorker(
   input: RpcInput<typeof factoryWorkerPick>,
   { paseo }: PluginHandlerContext,
   loader: ConfigLoader,
+  extra?: ZerosubHandlerExtra,
 ): Promise<any> {
-  const config = await loader.loadEffectiveConfig();
-  let entries: any[];
-  let repoPublic: boolean | null = null;
-  let profileHealth = null;
-  if (input.repo || input.workspaceId) {
-    const { discovery, scope, runner, snapshot } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
-    entries = discovery.providers ?? [];
-    profileHealth = readProfileHealth(discovery.mainWorkspace?.metadata);
-    let priv = discovery.github?.fork?.repo?.private;
-    const parent = scope?.parent ?? discovery.scope?.parent;
-    const parentRepo = parent?.kind === "github" ? parent.id : typeof parent === "string" ? parent : null;
-    if (priv === undefined && parentRepo) {
-      const [parentDiscovery] = await runner.discoverAll([parentRepo], { state: snapshot }).catch(() => []);
-      priv = parentDiscovery?.github?.fork?.repo?.private;
-    }
-    repoPublic = priv === false ? true : priv === true ? false : null;
-  } else {
-    entries = ((await paseo.providers.snapshot()) as any)?.entries ?? [];
-  }
-  const zerosub = await readZerosubStateSafe().catch(() => null);
-  const { profile, skipped, zerosubAccount } = (resolveProfile as any)(config, entries, (workerPriority as any)(config), {
-    role: "worker",
-    repoPublic, profileHealth, zerosub,
-  });
+  const { config, repoPublic, selection } = await resolveWorkerSelection(paseo, loader, input, extra);
+  const { profile, skipped, zerosubAccount } = selection;
   if (!profile) {
     const tried = skipped.length
       ? skipped.map((s: any) => `"${s.name}" (${s.reason})`).join("; ")
@@ -1124,11 +1279,72 @@ export async function pickWorker(
     thinking: profile.thinking ?? null,
     mode: profile.mode ?? null,
     sensitive,
-    zerosubAccount,
+    zerosubAccount: zerosubAccount ?? null,
     flags: (paseoRunFlags as any)(profile),
     skipped,
+    repoPublic,
     text,
   };
+}
+
+export async function listWorkersModels(
+  input: RpcInput<typeof factoryWorkerList>,
+  { paseo }: PluginHandlerContext,
+  loader: ConfigLoader,
+  extra?: ZerosubHandlerExtra,
+): Promise<any> {
+  const { config, entries, repoPublic, selection } = await resolveWorkerSelection(paseo, loader, input, extra);
+  const rows: any[] = (workerListRows as any)(config, entries, selection);
+  const priority: string[] = (workerPriority as any)(config);
+  const lines = [`Worker priority (default "${config.workers?.defaultProfile ?? "-"}", → currently picked):`];
+  for (const row of rows) {
+    const tags = `${row.advisor ? " [advisor]" : ""}${row.sensitive ? " [sensitive]" : ""}`;
+    lines.push(`${row.chosen ? "→" : " "} ${row.position}. ${row.profile}${tags} ${row.startable ? "✓" : "✗"} ${row.provider}/${row.model}${row.startable ? "" : ` (${row.issues.join("; ")})`}`);
+  }
+  if (!rows.length) lines.push("(no worker profiles configured)");
+  return {
+    defaultProfile: config.workers?.defaultProfile ?? null,
+    priority,
+    chosen: selection.profile?.name ?? null,
+    repoPublic,
+    entries: rows,
+    text: lines.join("\n"),
+  };
+}
+
+export async function startWorkerRpc(
+  input: RpcInput<typeof factoryWorkerStart>,
+  { paseo }: PluginHandlerContext,
+  loader: ConfigLoader,
+  extra?: ZerosubHandlerExtra,
+): Promise<any> {
+  if (!input.task?.trim()) throw new Error("worker start needs --task <text>");
+  if (!input.callerId?.trim()) throw new Error("Run worker start from the active steer");
+  const { config, discovery, selection } = await resolveWorkerSelection(paseo, loader, input, extra);
+  if (!discovery) throw new Error("worker start needs a Factory scope");
+  const { profile, skipped, zerosubAccount } = selection;
+  if (!profile) {
+    const tried = skipped.length
+      ? skipped.map((s: any) => `"${s.name}" (${s.reason})`).join("; ")
+      : "no worker profiles configured";
+    throw new Error(`No startable worker profile (tried ${tried})`);
+  }
+  const result: any = await (startScopedWorker as any)({
+    client: paseo,
+    status: (steerStatus as any)(discovery, { config }),
+    callerId: input.callerId,
+    aliases: (discoveryScopeAliases as any)(discovery),
+    profile,
+    accountId: zerosubAccount,
+    prompt: input.task,
+    title: input.title,
+    apply: Boolean(input.apply),
+    promptOptions: await loader.loadPromptOptions(paseo),
+  });
+  const text = result.agentId
+    ? `Started worker ${result.agentId} (${result.provider}) in ${result.scope}`
+    : `Dry-run: worker in ${result.scope} (${result.provider})${result.accountId ? ` · account ${result.accountId}` : ""}; add --apply to start`;
+  return { ...result, text };
 }
 
 export async function runDrain(
@@ -1164,27 +1380,45 @@ export async function previewAssign(
   input: RpcInput<typeof factoryAssignPreview>,
   { paseo }: PluginHandlerContext,
   loader: ConfigLoader,
+  extra?: ZerosubHandlerExtra,
 ): Promise<any> {
-  const { discovery, scope } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
-  void scope;
+  const { config, discovery, scope, deprecatedAlias } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
+  const zerosub = await readHandlerZerosub(extra);
   const dry: any = await (assignScope as any)({
     client: paseo,
     discovery,
+    config,
     promptOptions: await loader.loadPromptOptions(paseo),
     task: input.task,
     tests: input.tests ?? [],
     blockers: input.blockers ?? [],
     next: input.next ?? null,
     apply: false,
+    assignedBy: input.callerId ?? null,
+    reportTo: input.reportTo ?? input.callerId ?? null,
+    workerModel: (workerModelLine as any)(config, discovery),
+    quotaSnapshot: getQuotaSnapshot(),
+    quotaWarnPct: config.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct,
+    zerosub,
+    ...(input.expectEpoch !== undefined ? { expectEpoch: input.expectEpoch } : {}),
   });
   return {
     scope: dry.scope,
     epoch: dry.epoch,
     slot: dry.slot,
     steerId: dry.steerId,
+    domain: dry.domain,
+    domainChildren: dry.domainChildren,
+    fields: dry.fields,
+    reportTo: dry.reportTo,
     previous: dry.previous,
     packet: dry.packet,
     packetChars: dry.packetChars,
+    applied: false,
+    delivered: false,
+    deliveryError: null,
+    deprecatedAlias,
+    scopeInfo: scope,
     fingerprint: assignFingerprint({
       scope: dry.scope,
       epoch: dry.epoch,
@@ -1201,9 +1435,14 @@ export async function applyAssign(
   input: RpcInput<typeof factoryAssign>,
   { paseo }: PluginHandlerContext,
   loader: ConfigLoader,
+  extra?: ZerosubHandlerExtra,
 ): Promise<any> {
-  const { config, discovery } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
+  const { config, discovery, snapshot } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
   const promptOptions = await loader.loadPromptOptions(paseo);
+  const zerosub = await readHandlerZerosub(extra);
+  const workerModel = (workerModelLine as any)(config, discovery);
+  const quotaSnapshot = getQuotaSnapshot();
+  const quotaWarnPct = config.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct;
   const dry: any = await (assignScope as any)({
     client: paseo,
     discovery,
@@ -1214,6 +1453,13 @@ export async function applyAssign(
     blockers: input.blockers ?? [],
     next: input.next ?? null,
     apply: false,
+    assignedBy: input.callerId ?? null,
+    reportTo: input.reportTo ?? input.callerId ?? null,
+    workerModel,
+    quotaSnapshot,
+    quotaWarnPct,
+    zerosub,
+    ...(input.expectEpoch !== undefined ? { expectEpoch: input.expectEpoch } : {}),
   });
   const fresh = assignFingerprint({
     scope: dry.scope,
@@ -1229,6 +1475,22 @@ export async function applyAssign(
       "Something changed since the assign preview (for example a switch). Run /factory assign again and confirm the new preview.",
     );
   }
+  let requester: any = null;
+  if (input.callerId) {
+    const caller = (snapshot.agents ?? []).find((agent: any) => agent.id === input.callerId);
+    const source = (listScopes(snapshot) as any[]).find((item: any) => item.workspaceId === caller?.workspaceId);
+    const sourceState = source?.workspace?.metadata?.[METADATA_KEY];
+    if (!caller || !source || !Number.isInteger(sourceState?.epoch)) {
+      throw new Error("The requesting agent has no current factory scope authority");
+    }
+    requester = {
+      workspaceId: source.workspaceId,
+      scopeId: source.id,
+      epoch: sourceState.epoch,
+      agentId: caller.id,
+      aliases: [caller.labels?.[LABEL.scope], caller.labels?.[LABEL.repo]].filter(Boolean),
+    };
+  }
   const applied: any = await (assignScope as any)({
     client: paseo,
     discovery,
@@ -1239,9 +1501,15 @@ export async function applyAssign(
     blockers: input.blockers ?? [],
     next: input.next ?? null,
     apply: true,
-    send: true,
-    expectEpoch: dry.epoch,
-    assignedBy: null,
+    send: input.send !== false,
+    expectEpoch: input.expectEpoch ?? dry.epoch,
+    assignedBy: input.callerId ?? null,
+    requester,
+    reportTo: input.reportTo ?? input.callerId ?? null,
+    workerModel,
+    quotaSnapshot,
+    quotaWarnPct,
+    zerosub,
   });
   return applied;
 }

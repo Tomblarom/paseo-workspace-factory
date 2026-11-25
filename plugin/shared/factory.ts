@@ -27,6 +27,7 @@ export const factoryStatus = defineRpc({
   input: z.object({
     repo: z.string().min(1).optional(),
     workspaceId: z.string().min(1).optional(),
+    agentId: z.string().min(1).optional(),
   }),
   output: z.looseObject({
     repo: z.string(),
@@ -122,6 +123,8 @@ export const factorySwitchPreview = defineRpc({
     repo: z.string().min(1).optional(),
     workspaceId: z.string().min(1).optional(),
     to: z.string().min(1),
+    callerId: z.string().min(1).optional(),
+    language: z.enum(["en", "de"]).optional(),
   }),
   output: z.looseObject({
     repo: z.string(),
@@ -167,10 +170,13 @@ export const factorySwitch = defineRpc({
     workspaceId: z.string().min(1).optional(),
     to: z.string().min(1),
     fingerprint: z.string().min(1),
-    /** "stage" applies without sending; the packet is staged for later delivery. */
-    deliver: z.enum(["send", "stage"]).optional(),
+    /** "stage" applies without sending; "none" applies without sending or staging. */
+    deliver: z.enum(["send", "stage", "none"]).optional(),
     /** Notify the outgoing steer (costs one of its turns). Default false. */
     notifyPrevious: z.boolean().optional(),
+    callerId: z.string().min(1).optional(),
+    language: z.enum(["en", "de"]).optional(),
+    wait: z.boolean().optional(),
   }),
   output: z.looseObject({
     repo: z.string(),
@@ -226,7 +232,11 @@ export const factoryCheckpointPreview = defineRpc({
 
 export const factoryCheckpoint = defineRpc({
   name: "factory.checkpoint",
-  input: z.object({ ...checkpointArgs, fingerprint: z.string().min(1) }),
+  input: z.object({
+    ...checkpointArgs,
+    fingerprint: z.string().min(1),
+    callerId: z.string().min(1).optional(),
+  }),
   output: z.looseObject({ checkpoint: z.unknown() }),
 });
 
@@ -586,11 +596,14 @@ export const factoryWorkers = defineRpc({
   input: z.object({
     repo: z.string().min(1).optional(),
     workspaceId: z.string().min(1).optional(),
+    agentId: z.string().min(1).optional(),
+    prune: z.boolean().optional(),
+    apply: z.boolean().optional(),
   }),
   output: z.looseObject({
     scope: z.string(),
     epoch: z.number().nullable(),
-    workers: z.unknown(),
+    workers: z.unknown().optional(),
     text: z.string(),
   }),
 });
@@ -601,6 +614,10 @@ export const factoryWorkerPick = defineRpc({
   input: z.object({
     repo: z.string().min(1).optional(),
     workspaceId: z.string().min(1).optional(),
+    agentId: z.string().min(1).optional(),
+    cwd: z.string().min(1).optional(),
+    failed: z.string().min(1).optional(),
+    reason: z.string().min(1).optional(),
   }),
   output: z.looseObject({
     profile: z.string(),
@@ -612,6 +629,51 @@ export const factoryWorkerPick = defineRpc({
     flags: z.string(),
     zerosubAccount: z.string().nullable(),
     skipped: z.unknown(),
+    repoPublic: z.boolean().nullable().optional(),
+    text: z.string(),
+  }),
+});
+
+// Scope-aware worker priority list with availability, like `worker list`.
+export const factoryWorkerList = defineRpc({
+  name: "factory.worker.list",
+  input: z.object({
+    repo: z.string().min(1).optional(),
+    workspaceId: z.string().min(1).optional(),
+    agentId: z.string().min(1).optional(),
+    cwd: z.string().min(1).optional(),
+  }),
+  output: z.looseObject({
+    defaultProfile: z.string().nullable(),
+    priority: z.array(z.string()),
+    chosen: z.string().nullable(),
+    repoPublic: z.boolean().nullable(),
+    entries: z.array(z.unknown()),
+    text: z.string(),
+  }),
+});
+
+// Start (or preview) a worker as the active steer's subagent.
+export const factoryWorkerStart = defineRpc({
+  name: "factory.worker.start",
+  input: z.object({
+    repo: z.string().min(1).optional(),
+    workspaceId: z.string().min(1).optional(),
+    agentId: z.string().min(1).optional(),
+    cwd: z.string().min(1).optional(),
+    callerId: z.string().min(1),
+    task: z.string().min(1),
+    title: z.string().min(1).optional(),
+    apply: z.boolean().optional(),
+  }),
+  output: z.looseObject({
+    scope: z.string(),
+    workspaceId: z.string(),
+    parentId: z.string(),
+    profile: z.string(),
+    provider: z.string(),
+    accountId: z.string().nullable(),
+    agentId: z.string().optional(),
     text: z.string(),
   }),
 });
@@ -637,6 +699,9 @@ const assignArgs = {
   tests: z.array(z.string()).optional(),
   blockers: z.array(z.string()).optional(),
   next: z.string().optional(),
+  reportTo: z.string().min(1).optional(),
+  callerId: z.string().min(1).optional(),
+  expectEpoch: z.number().int().optional(),
 };
 
 export const factoryAssignPreview = defineRpc({
@@ -656,7 +721,11 @@ export const factoryAssignPreview = defineRpc({
 
 export const factoryAssign = defineRpc({
   name: "factory.assign",
-  input: z.object({ ...assignArgs, fingerprint: z.string().min(1) }),
+  input: z.object({
+    ...assignArgs,
+    fingerprint: z.string().min(1),
+    send: z.boolean().optional(),
+  }),
   output: z.looseObject({
     scope: z.string(),
     epoch: z.number(),

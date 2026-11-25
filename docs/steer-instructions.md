@@ -65,12 +65,12 @@ A hub steer coordinates scopes; it does not do their content work. Paste this bl
 
 ```text
 You are a hub steer: you coordinate factory scopes from above.
-- Provision and retire scopes with plan/apply; assign models and slots across scopes.
+- Provision and retire scopes with /factory plan and /factory apply; assign models and slots across scopes.
 - Send work with <factory> assign <scope> --task ... --next ... (preview first, then --apply).
 - Read back each scope's CHECKPOINT; treat blockers prefixed "hub:" as escalations.
 - Never message a scope's workers directly; go through its active steer.
 - Relations stay logical (workspace metadata and labels); steers stay
-  parent-free, including yours. Address scopes by id (see `scopes`).
+  parent-free, including yours. Address scopes by id (see `/factory scopes`).
 ```
 
 ## Domain instructions
@@ -78,7 +78,7 @@ You are a hub steer: you coordinate factory scopes from above.
 A domain steer coordinates a group of child scopes (see [domains](configuration.md#domains)). Add this block to the steer block of the domain scope:
 
 ```text
-You also coordinate the child scopes of this domain (see <factory> scopes).
+You also coordinate the child scopes of this domain (see /factory scopes).
 - Send work to a child with <factory> assign <child-scope> --task ... --next ...
   (preview first, then --apply).
 - Answer blockers prefixed "domain:" from your children; pass what you cannot
@@ -90,7 +90,7 @@ Steers of child scopes prefix a blocker with `domain:` when their domain steer s
 
 ## Advisor steers
 
-A steer slot whose profile carries `"advisor": true` is an advisor steer (resolved live from the config; `status` tags it `[advisor]`). Its resume brief starts with `You are an advisor steer: answer only, never coordinate or take over.` That is the whole rule: answer explicit questions, never coordinate, never take over with `switch`, never supervise workers, and never receive supervision wakes. `switch --to` an advisor slot is refused. `fresh` keeps the advisor status.
+A steer slot whose profile carries `"advisor": true` is an advisor steer (resolved live from the config; `status` tags it `[advisor]`). Its resume brief starts with `You are an advisor steer: answer only, never coordinate or take over.` That is the whole rule: answer explicit questions, never coordinate, never take over with `switch`, never supervise workers, and never receive supervision wakes. `switch --to` an advisor slot is refused. `/factory fresh` keeps the advisor status.
 
 ## Worker instructions
 
@@ -129,7 +129,7 @@ Answer: at most <n> lines, then the fenced CHECKPOINT block.
 
 ## Answer format
 
-The CHECKPOINT block is a real Markdown code block (triple backticks). Every factory-generated text (handoff, `switch`/`fresh`/`assign` delivery) carries the checkpoint in this form, and every steer/worker answer ends with it:
+The CHECKPOINT block is a real Markdown code block (triple backticks). Every factory-generated text (handoff, `switch`/`/factory fresh`/`assign` delivery) carries the checkpoint in this form, and every steer/worker answer ends with it:
 
 ````text
 <short result>

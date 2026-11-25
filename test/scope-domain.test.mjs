@@ -185,13 +185,9 @@ const noLock = (_name, fn) => fn({ verify() {} });
 
 const CLI = fileURLToPath(new URL('../src/cli.mjs', import.meta.url));
 
-function runCli(t, args) {
-  const dir = mkdtempSync(join(tmpdir(), 'factory-domain-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  writeFileSync(join(dir, 'config.json'), JSON.stringify(CONFIG));
-  const argv = ['--config', join(dir, 'config.json'), ...args];
+function runCli(_t, args) {
   try {
-    const stdout = execFileSync('node', [CLI, ...argv], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    const stdout = execFileSync('node', [CLI, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
     return { status: 0, stdout, stderr: '' };
   } catch (error) {
     return { status: error.status ?? 1, stdout: error.stdout ?? '', stderr: error.stderr ?? '' };
@@ -447,13 +443,11 @@ test('scopes and status show the domain for the retired scope and its successor'
   assert.equal(steerStatus(stale).domain, 'team-a');
 });
 
-test('CLI --domain validation and usage', (t) => {
-  let out = runCli(t, ['--help']);
-  assert.match(out.stdout, /--domain <id>/);
-  out = runCli(t, ['plan', 'example/a', 'example/b', '--domain', 'team-a']);
+test('CLI --domain is rejected on thin agent CLI', (t) => {
+  let out = runCli(t, ['plan', 'example/a', '--domain', 'team-a']);
   assert.equal(out.status, 1);
-  assert.match(out.stderr, /--domain needs exactly one workspace entry/);
+  assert.match(out.stderr, /\/factory plan/);
   out = runCli(t, ['status', 'example/a', '--domain', 'team-a']);
   assert.equal(out.status, 1);
-  assert.match(out.stderr, /--domain is only accepted with plan/);
+  assert.match(out.stderr, /domain/i);
 });

@@ -58,10 +58,10 @@ ZeroSub accounts are optional: when its daemon plugin is installed, families wit
 
 ## Enrollment safety
 
-- **Dry-run first.** `plan` never writes to GitHub, git or Paseo. It stores the complete plan as an authorization (`plans/<hash>.json`, never overwritten).
-- **Confirmed plan only.** `apply --confirm <hash>` runs only that stored plan. After each step it rediscovers the state; the next operation must match the authorized one in every effect-relevant parameter, otherwise it stops and asks for a new dry-run.
+- **Dry-run first.** `/factory plan` never writes to GitHub, git or Paseo. It stores the complete plan as an authorization (`plans/<hash>.json`, never overwritten).
+- **Confirmed plan only.** `/factory apply <hash>` runs only that stored plan. After each step it rediscovers the state; the next operation must match the authorized one in every effect-relevant parameter, otherwise it stops and asks for a new dry-run.
 - **Idempotent creation.** Steers are created with daemon idempotency keys, with receipt recovery before anything else: recover the id, allow one first execution, or stop.
-- **Parent-free steers.** Steers are created without `parent` and without a prompt; the parent label is verified after creation, and a link inherited from the calling agent is detached again right away. Fresh workers keep their previous parent, never the caller. CLI calls run without `PASEO_AGENT_ID`.
+- **Parent-free steers.** Steers are created without `parent` and without a prompt; the parent label is verified after creation, and a link inherited from the calling agent is detached again right away. Fresh workers keep their previous parent, never the caller. Creation requests carry no caller parent link.
 - **One apply at a time.** A kernel `flock` serializes `apply` runs on the host; switches and checkpoints use a per-workspace lock.
 - **Conflicts are reported, never resolved automatically**: ambiguous checkouts, a missing checkout or main workspace, steers with a parent, duplicate main workspaces, unstartable profiles, unconfirmed adoption of unlabelled agents.
 

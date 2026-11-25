@@ -219,3 +219,28 @@ export function scopeToEntry(scope) {
   const locator = scope.directory ?? scope.locator ?? scope.workspaceId;
   return /^wks_[A-Za-z0-9]+$/.test(String(locator ?? '')) ? { workspace: locator } : { local: locator };
 }
+
+/**
+ * Default scope address for bare `worker pick` / `worker list` / `worker start`:
+ * the calling agent's scope label first, else the calling workspace, else the
+ * workspace of the current directory. Only live scopes count (ambiguous or
+ * unknown addresses fall through); null means the catalog-only pick without
+ * repo visibility. Pure over the state, env/cwd injectable for tests.
+ */
+export function defaultPickAddress(paseoState, { agentId = process.env.PASEO_AGENT_ID, workspaceId = process.env.PASEO_WORKSPACE_ID, cwd = process.cwd() } = {}) {
+  const liveScope = (address) => {
+    try {
+      return resolveScope(address, paseoState);
+    } catch {
+      return null;
+    }
+  };
+  if (agentId) {
+    const scopeId = paseoState?.agents?.find((a) => a.id === agentId)?.labels?.[LABEL.scope];
+    if (typeof scopeId === 'string' && scopeId && liveScope(scopeId)) return scopeId;
+  }
+  if (workspaceId && liveScope(`workspace:${workspaceId}`)) return `workspace:${workspaceId}`;
+  const cwdScope = cwd ? liveScope(cwd) : null;
+  if (cwdScope) return cwdScope.id;
+  return null;
+}

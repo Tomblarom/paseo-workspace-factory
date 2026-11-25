@@ -183,7 +183,7 @@ export function formatScopeRows(rows) {
 }
 
 /** Workspaces without factory metadata: adoption candidates with a plan suggestion. Read-only. */
-export function scopeCandidates(paseoState, { factoryCmd = 'paseo-factory' } = {}) {
+export function scopeCandidates(paseoState, { factoryCmd = '/factory' } = {}) {
   const agents = paseoState?.agents ?? [];
   const byId = new Map(agents.map((a) => [a.id, a]));
   const projects = new Map((paseoState?.projects ?? []).map((p) => [p.projectId, p]));

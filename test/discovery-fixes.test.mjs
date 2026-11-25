@@ -189,35 +189,29 @@ test('#2: a retired entry "checkout" is refused with a pointer to direct enrollm
 
 const CLI = fileURLToPath(new URL('../src/cli.mjs', import.meta.url));
 
-function runCli(t, args) {
-  const dir = mkdtempSync(join(tmpdir(), 'factory-checkout-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  writeFileSync(join(dir, 'config.json'), JSON.stringify(CONFIG));
-  const argv = ['--config', join(dir, 'config.json'), ...args];
+function runCli(_t, args) {
   try {
-    const stdout = execFileSync('node', [CLI, ...argv], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    const stdout = execFileSync('node', [CLI, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
     return { status: 0, stdout, stderr: '' };
   } catch (error) {
     return { status: error.status ?? 1, stdout: error.stdout ?? '', stderr: error.stderr ?? '' };
   }
 }
 
-test('#2: --help names the retired bulk-provisioning flags', (t) => {
+test('#2: --help omits retired bulk-provisioning flags and lists agent commands', (t) => {
   const out = runCli(t, ['--help']);
   assert.equal(out.status, 0);
-  assert.match(out.stdout, /Retired: --repos-file, --allow-fork, --checkout/);
+  assert.doesNotMatch(out.stdout, /--repos-file|--allow-fork|--checkout/);
+  assert.match(out.stdout, /status \[scope\]/);
 });
 
-test('#2: retired --checkout is rejected as an unknown option', (t) => {
-  const out = runCli(t, ['plan', FIRMWARE, '--checkout', '/p/x']);
+test('#2: removed plan command and retired --checkout flag are rejected', (t) => {
+  let out = runCli(t, ['status', FIRMWARE, '--checkout', '/p/x']);
   assert.equal(out.status, 1);
   assert.match(out.stderr, /checkout/i);
-});
-
-test('#2: plan with two entries is rejected (single-workspace enrollment)', (t) => {
-  const out = runCli(t, ['plan', 'Example-Owner/a', 'Example-Owner/b']);
+  out = runCli(t, ['plan', FIRMWARE]);
   assert.equal(out.status, 1);
-  assert.match(out.stderr, /exactly one workspace entry/);
+  assert.match(out.stderr, /\/factory plan/);
 });
 
 // ---------------------------------------------------------------- #4 case-insensitive ids

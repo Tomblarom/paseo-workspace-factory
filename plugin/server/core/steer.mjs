@@ -1232,7 +1232,7 @@ export async function freshSteer({ client, discovery, config, apply = false, sen
   let profileSuggestion = null;
   if (profile.name !== profileName) {
     warnings.push(`Profile "${profileName}" is not startable (${skipped[0]?.reason ?? 'unknown reason'}); using fallback "${profile.name}"`);
-    profileSuggestion = `paseo-factory steer set ${slot} "${profile.name}"`;
+    profileSuggestion = `/factory steer set ${slot} "${profile.name}"`;
   }
   const slotProfile = config.profiles?.[profileName] ?? null;
   if (single && slotProfile && (single.provider !== slotProfile.provider || single.model !== slotProfile.model)) {
@@ -1437,7 +1437,7 @@ async function freshNonActiveSteer({ client, discovery, status, expected, slot, 
   let profileSuggestion = null;
   if (profile.name !== profileName) {
     warnings.push(`Profile "${profileName}" is not startable (${skipped[0]?.reason ?? 'unknown reason'}); using fallback "${profile.name}"`);
-    profileSuggestion = `paseo-factory steer set ${slot} "${profile.name}"`;
+    profileSuggestion = `/factory steer set ${slot} "${profile.name}"`;
   }
   const slotProfile = config.profiles?.[profileName] ?? null;
   if (single && slotProfile && (single.provider !== slotProfile.provider || single.model !== slotProfile.model)) {

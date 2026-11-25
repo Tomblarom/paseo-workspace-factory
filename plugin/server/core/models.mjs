@@ -3,7 +3,7 @@
 // check the planner runs (live catalog shape plus knownLimits).
 import { chmod, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { isAdvisorProfile, isAdvisorSlot, isSensitiveProfile, slotOrder, validateConfig, validateProfilesAgainstCatalog, workerPriority } from './config.mjs';
-import { QUOTA_DEFAULTS, profileIsUnhealthy, quotaExhausted, profilePool, profileFamily, familyAccounts, familyExhausted, bestFamilyAccount, earliestFamilyReset } from './quota.mjs';
+import { QUOTA_DEFAULTS, profileIsUnhealthy, quotaExhausted, profilePool, profileFamily, familyAccounts, familyExhausted, bestFamilyAccount, earliestFamilyReset, readProfileHealth } from './quota.mjs';
 import { suggestAccountPin } from './zerosub.mjs';
 
 /** Split "<provider>/<model>" (model may itself contain "/"). */
@@ -85,7 +85,7 @@ export function suggestSlotProfile(config, provider, model) {
  * Pure text; the caller decides whether to apply it or show it as a
  * preview-only suggestion.
  */
-export function formatSlotProfileSuggestion(config, slot, provider, model, { factoryCmd = 'paseo-factory' } = {}) {
+export function formatSlotProfileSuggestion(config, slot, provider, model, { factoryCmd = '/factory' } = {}) {
   const suggestion = suggestSlotProfile(config, provider, model);
   if (suggestion.kind === 'existing') return `${factoryCmd} steer set ${slot} "${suggestion.profile}"`;
   if (suggestion.kind === 'ambiguous') return `one of ${suggestion.profiles.map((name) => `"${name}"`).join(', ')} via ${factoryCmd} steer set ${slot} <profile>`;
@@ -355,6 +355,23 @@ export function formatWorkerModel(config, profile, { factoryCmd = 'paseo-factory
   let line = `Worker model: ${profile.provider}/${profile.model} (mode ${profile.mode ?? 'default'}) - start workers with \`${factoryCmd} worker pick\``;
   if (isSensitiveProfile(config, profile.name)) line += ' [sensitive: give only sanitized technical tasks]';
   return line;
+}
+
+/**
+ * `Worker model:` line for briefs and handoffs: the resolved worker profile
+ * for this scope (priority, catalog availability, advisor and sensitive rules;
+ * sensitive profiles only run on provably public repos) or a none-startable
+ * note with the reasons. Pure over the discovery, no extra catalog call.
+ */
+export function workerModelLine(config, discovery) {
+  const repoPublic = discovery?.github?.fork?.repo?.private === false;
+  const profileHealth = readProfileHealth(discovery?.mainWorkspace?.metadata);
+  const { profile, skipped } = resolveProfile(config, discovery?.providers ?? [], workerPriority(config), { role: 'worker', repoPublic, profileHealth });
+  if (!profile) {
+    const tried = skipped.length ? skipped.map((s) => `"${s.name}" (${s.reason})`).join('; ') : 'no worker profiles configured';
+    return `Worker model: none startable (${tried})`;
+  }
+  return formatWorkerModel(config, profile);
 }
 
 function resolveProfileName(config, slot, provider, model, profileOption) {

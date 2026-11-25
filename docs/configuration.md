@@ -2,7 +2,7 @@
 
 New to the factory? Start with [Getting started](getting-started.md); this page is the detailed reference.
 
-The config is looked up in this order: `--config <path>`, `$PASEO_FACTORY_CONFIG`, `$XDG_CONFIG_HOME/paseo-workspace-factory/config.json` (default `~/.config/paseo-workspace-factory/config.json`). Start from [`config.example.json`](../config.example.json). Keep it outside the repository; it is personal.
+On the Paseo host, the plugin reads optional file config from `$PASEO_FACTORY_CONFIG` or `$XDG_CONFIG_HOME/paseo-workspace-factory/config.json` (default `~/.config/paseo-workspace-factory/config.json`) beneath the native plugin settings. Start from [`config.example.json`](../config.example.json). Keep it outside the repository; it is personal.
 
 ## Fields
 
@@ -40,7 +40,7 @@ Existing agents can become steers. Unlabelled agents in the main workspace whose
 
 ## Findings in prompts
 
-Only for an install from the git checkout (build from source): the setting "Ask agents to record factory findings" (`findingsInPrompts` in the `factory-display` settings document, on by default) adds a short reminder to resume, switch, fresh, assignment, relocation and worker-start prompts. Agents then record observations about using the factory in `FINDINGS.md` of that checkout and move entries to `TODO.md` only with the user's consent. The plugin detects the install from its own path; a built release has no checkout, so the reminder is never added and the setting is shown disabled. The CLI asks the plugin; without a running plugin it uses its own checkout.
+Only for an install from the git checkout (build from source): the setting "Ask agents to record factory findings" (`findingsInPrompts` in the `factory-display` settings document, on by default) adds a short reminder to resume, switch, fresh, assignment, relocation and worker-start prompts. Agents then record observations about using the factory in `FINDINGS.md` of that checkout and move entries to `TODO.md` only with the user's consent. The plugin detects the install from its own path; a built release has no checkout, so the reminder is never added and the setting is shown disabled.
 
 ## Label and metadata prefix
 
@@ -179,7 +179,7 @@ Optional ZeroSub: when the ZeroSub daemon plugin is installed, no Factory config
 
 ## Managing models from the CLI
 
-Use these commands in the Paseo composer. The catalog and priority checks also apply to the [CLI commands for scripts](#cli-reference-for-scripts).
+Use these commands in the Paseo composer. See [Agent CLI](#agent-cli) for the commands agents run via `paseo-factory`.
 
 ```text
 /factory models
@@ -202,7 +202,7 @@ Migration: configs with only `workers.defaultProfile` read as `workers.priority:
 
 In the Paseo composer, run `/factory model sensitive <profile|provider/model> on|off [--dry-run]` to flip the flag (acts directly, like `/factory model advisor …`; without `--dry-run` it is saved at once in the plugin settings). The same flag is a switch per profile in Settings → Plugins → Factory → Profiles. A profile with `"sensitive": true` only gets sanitized technical tasks: no personal data, accounts, credentials, full chat histories, or private logs — only the public code the task needs.
 
-Profiles with provider `muse` migrate to sensitive unless the flag is set explicitly (explicit `false` wins); every other provider defaults to open. Workers of a sensitive profile are skipped by `worker pick` (`/factory worker pick`) and the `Worker model:` brief line unless GitHub reports the repository as public (private or unknown counts as private); adopting a sensitive agent as a steer follows the same rule. `worker list`, `steer list`, `status` and `scopes` (composer: `/factory worker list`, `/factory steer list`, `/factory status`, `/factory scopes`) tag such entries `[sensitive]`, and a validation warning is shown when an advisor profile is also sensitive. CLI equivalent: `paseo-factory model sensitive <profile|provider/model> on|off [--dry-run]`.
+Profiles with provider `muse` migrate to sensitive unless the flag is set explicitly (explicit `false` wins); every other provider defaults to open. Workers of a sensitive profile are skipped by `worker pick` (`/factory worker pick`) and the `Worker model:` brief line unless GitHub reports the repository as public (private or unknown counts as private); adopting a sensitive agent as a steer follows the same rule. `worker list`, `steer list`, `status` and `/factory scopes` (composer: `/factory worker list`, `/factory steer list`, `/factory status`, `/factory scopes`) tag such entries `[sensitive]`, and a validation warning is shown when an advisor profile is also sensitive. Composer: `/factory model sensitive <profile|provider/model> on|off [--dry-run]`.
 
 ## Known provider exceptions
 
@@ -237,7 +237,7 @@ Idempotency keys use the `wsf:` namespace (`wsf-it:` and `wsf-crash:` in the liv
 
 In the Paseo composer, run `/factory cleanup` for the read-only report over the whole instance, one candidate each with a loss inventory (live agents and running turns, Paseo-owned worktree, git state, archived members): scratch scopes (label `wsf.scratch`, set by the live tests), workspaces with a missing directory, empty projects, several projects on one path, `non_git` projects without a scope, and retired factory scopes. It never writes. Or press **Cleanup** in the Factory panel for the same report.
 
-Each candidate names the native command that archives it — `paseo archive <agent-id>` for agents, `paseo workspace archive <workspace-id>` for workspaces, `paseo project delete <project-id>` for projects — so review the loss inventory (including ignored files with count and first paths) and run the native command yourself. Archived agents alone are recoverable (soft-delete), but deleting their project destroys them permanently. [Script commands](#cli-reference-for-scripts)
+Each candidate names the native command that archives it — `paseo archive <agent-id>` for agents, `paseo workspace archive <workspace-id>` for workspaces, `paseo project delete <project-id>` for projects — so review the loss inventory (including ignored files with count and first paths) and run the native command yourself. Archived agents alone are recoverable (soft-delete), but deleting their project destroys them permanently. [Agent CLI](#agent-cli)
 
 ## Relocate
 
@@ -259,33 +259,22 @@ Not part of `npm test`; each needs an explicit approval variable and keeps every
 | `WSF_LIVE_CRASH=approved node test/integration-crash.mjs` | Real apply runner killed right after a steer create; a new process recovers the id through the receipt. |
 | `WSF_LIVE_CLEANUP=approved node test/integration-live.mjs --cleanup <manifest>` | Fail-closed cleanup: archives only fully verified scratch resources; never deletes files. |
 
-## CLI reference for scripts
+## Agent CLI
 
-The CLI reads its configuration from the host file. Use `paseo-factory --help` for the complete command list, including scripting flags such as `--json` and `--out`.
+`paseo-factory` is a thin RPC client of the running `workspace-factory` plugin for agent-facing commands (`paseo-factory --help` shows the exact options):
 
 ```text
-paseo-factory models [--json]
+paseo-factory status [scope] [--json]
+paseo-factory resume [scope] [--agent <id>] [--json]
+paseo-factory resume [scope] --agent <worker> --apply [--json]
+paseo-factory checkpoint [scope] --task <text> [--test <text>]... [--blocker <text>]... [--next <text>]
+paseo-factory checkpoint [scope] --from-agent <steer-id> [--next <text>]
+paseo-factory switch [scope] --to <slot> [--apply] [--no-send] [--wait] [--notify-previous] [--language en|de]
+paseo-factory assign <scope> --task <text> [--test <text>]... [--blocker <text>]... [--next <text>] [--report-to <agent-id>] [--expect-epoch <n>] [--apply] [--no-send] [--json]
+paseo-factory workers [scope] [--prune] [--apply] [--json]
+paseo-factory worker pick [scope] [--failed <profile> --reason <text>] [--json]
+paseo-factory worker start [scope] --task <text> [--title <title>] [--apply] [--json]
 paseo-factory worker list [scope] [--json]
-paseo-factory worker set <n> <profile|provider/model> [--thinking X] [--mode Y] [--profile name] [--dry-run]
-paseo-factory worker rm <n> [--dry-run]
-paseo-factory worker pick [scope] [--json]
-paseo-factory steer list [--json]
-paseo-factory steer set <n|slot> <profile|provider/model> [--thinking X] [--mode Y] [--profile name] [--dry-run]
-paseo-factory steer rm <n|slot> [--dry-run]
-paseo-factory model advisor|sensitive <profile|provider/model> on|off [--dry-run]
-paseo-factory cleanup [--json]
-paseo-factory apply --confirm <hash>
-paseo-factory drain [--timeout 10m] [--json]
 ```
 
-`drain` returns 0 when the daemon can safely restart and 2 when the timeout marked remaining turns as `planned-restart`. To restart only after a successful drain, use this in a shell on the Paseo host:
-
-```sh
-clear
-if paseo-factory drain --timeout 10m; then
-  paseo daemon restart
-else
-  echo "Agents still running. Check the planned-restart marks before restarting." >&2
-  exit 2
-fi
-```
+Setup, model configuration, and maintenance (`plan`, `apply`, `fresh`, `steer`, `model`, `models`, `scopes`, `cleanup`, `drain`) live in `/factory` in the Paseo composer and Settings → Plugins → Factory.

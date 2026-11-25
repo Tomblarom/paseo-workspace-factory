@@ -401,11 +401,8 @@ test('adopt maps by slot for the single entry ("*" fallback or exact scope id)',
   assert.equal(exact.ops.find((o) => o.key === 'steer.A').params.agentId, one.id);
 });
 
-test('CLI usage documents single-workspace plan, --local, --name and the retired flags', () => {
+test('CLI usage points plan to /factory and omits retired flags', () => {
   const out = execFileSync('node', ['src/cli.mjs', '--help'], { encoding: 'utf8' });
-  assert.match(out, /plan\s+<repo> \[--local <path>\]/);
-  assert.match(out, /--name <id>/);
-  assert.match(out, /exactly one existing Paseo workspace/);
-  assert.match(out, /Retired: --repos-file, --allow-fork, --checkout/);
-  assert.match(out, /input alias only/);
+  assert.match(out, /\/factory in the Paseo composer/);
+  assert.doesNotMatch(out, /--repos-file|--allow-fork|--checkout/);
 });

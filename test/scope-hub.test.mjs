@@ -242,8 +242,6 @@ test('convert keeps the stored id unless --name renames; other kinds refuse', as
   assert.match(refused.conflicts.find((c) => c.key === 'scope.convert').reason, /only dir scopes convert/);
 });
 
-test('CLI usage documents --hub', () => {
-  const out = execFileSync('node', ['src/cli.mjs', '--help'], { encoding: 'utf8' });
-  assert.match(out, /--hub <path\|workspace:id>/);
-  assert.match(out, /at most one live/);
+test('CLI rejects removed plan command with /factory pointer', () => {
+  assert.throws(() => execFileSync('node', ['src/cli.mjs', 'plan', '--hub', '/tmp/hub'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), /\/factory plan/);
 });

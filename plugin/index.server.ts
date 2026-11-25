@@ -19,6 +19,7 @@ import {
   getScopes,
   getStatus,
   getWorkers,
+  listWorkersModels,
   openHistory,
   pickWorker,
   previewAssign,
@@ -29,6 +30,7 @@ import {
   previewSwitch,
   revertSteerSettingsRpc,
   runDrain,
+  startWorkerRpc,
   writeCheckpointRpc,
 } from "./server/handlers.js";
 import { listModels, setModels } from "./server/models-rpc.js";
@@ -89,7 +91,9 @@ import {
   factorySteers,
   factorySwitch,
   factorySwitchPreview,
+  factoryWorkerList,
   factoryWorkerPick,
+  factoryWorkerStart,
   factoryWorkers,
 } from "./shared/factory.js";
 import {
@@ -178,6 +182,8 @@ export default function contribute(server: PluginServerContext) {
   server.handle(factoryWorkers, (input, ctx) => getWorkers(input, ctx, loader));
   server.handle(factoryModelsCatalog, getModelsCatalog);
   server.handle(factoryWorkerPick, (input, ctx) => pickWorker(input, ctx, loader));
+  server.handle(factoryWorkerList, (input, ctx) => listWorkersModels(input, ctx, loader));
+  server.handle(factoryWorkerStart, (input, ctx) => startWorkerRpc(input, ctx, loader));
   server.handle(factoryDrain, runDrain);
   server.handle(factoryQuota, (input, ctx) => getQuota(input, ctx, loader, { getZerosub }));
   server.handle(factoryAssignPreview, (input, ctx) => previewAssign(input, ctx, loader));

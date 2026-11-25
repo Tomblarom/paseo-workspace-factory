@@ -1,880 +1,272 @@
 #!/usr/bin/env node
-// Paseo Workspace Factory. Dry-run is the default; every write needs --apply.
-import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+// Paseo Workspace Factory — thin RPC client of the running Paseo plugin.
+import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
-import { loadConfig, defaultConfigPath, workerPriority, isAdvisorProfile, isAdvisorSlot, isSensitiveProfile, isSensitiveSlot, slotOrder } from '../plugin/server/core/config.mjs';
-import { configureRuntime, runtime } from '../plugin/server/core/runtime.mjs';
-import { createGh } from '../plugin/server/core/github.mjs';
-import { createGit } from '../plugin/server/core/local.mjs';
-import { LABEL, METADATA_KEY, connect, connectPluginRpc, createPaseoCli, daemonStartedAt, lookupCreationReceipt, readPaseoState, restartMessage } from '../plugin/server/core/paseo.mjs';
-import { createRunner } from '../plugin/server/core/factory.mjs';
-import { planHash } from '../plugin/server/core/planner.mjs';
-import { applyPlans, createExecutors, createAuthorization, storeAuthorization, fileProgress, withApplyLock } from '../plugin/server/core/apply.mjs';
-import { CHECKPOINT_KEY, restartInterruptions, steerStatus, switchSteer, freshSteer, writeCheckpoint, parseCheckpointBlock, lastAssistantText, resolveTargetEntry, buildResumeBrief, readGitBrief, workerResumeAnswer } from '../plugin/server/core/steer.mjs';
-import { AGENTS_KEY } from '../plugin/server/core/agent-state.mjs';
-import { listScopes, resolveScope } from '../plugin/server/core/scope.mjs';
-import { DRAIN_DEFAULT_TIMEOUT_MS, drain, parseTimeout } from '../plugin/server/core/drain.mjs';
-import { startScopedWorker } from '../plugin/server/core/workers.mjs';
-import { formatWorkersPruneText, formatWorkersText, pruneWorkerRegister, readWorkers, staleWorkerEntries, workersReport } from '../plugin/server/core/supervision.mjs';
-import { assignScope } from '../plugin/server/core/assign.mjs';
-import { flagValue, formatCatalog, formatWorkerModel, paseoRunFlags, planAdvisorTag, planSensitiveTag, planSteerRemove, planSteerSet, planWorkerRemove, planWorkerSet, previewConfig, resolveProfile, resolveWorkerPick, steerFallbackList, workerListRows, writeConfigAtomic } from '../plugin/server/core/models.mjs';
-import { scopeRows, scopeCandidates, formatScopeRows, formatScopeCandidates, formatStatus } from '../plugin/server/core/scopes-view.mjs';
-import { applyContinuations } from '../plugin/server/core/discovery.mjs';
-import { discoveryScopeAliases } from '../plugin/server/core/scope-guard.mjs';
-import { validateProfilesAgainstCatalog } from '../plugin/server/core/config.mjs';
-import { readProfileHealth, storeProfileFailure } from '../plugin/server/core/quota.mjs';
-import { readZerosubState } from '../plugin/server/core/zerosub.mjs';
-import { defaultCreateRewindClient } from '../plugin/server/core/rewind.mjs';
-import { attachProjectArchivedAgents, collectCleanupCandidates, formatCandidate } from '../plugin/server/core/cleanup.mjs';
-import { FACTORY_PLUGIN_ID, PROMPT_SETTINGS_RPC, findFactoryCheckout } from '../plugin/server/core/findings.mjs';
-
-export async function readCliPromptOptions({ createClient = connectPluginRpc } = {}) {
-  let client;
-  let settings = null;
-  try {
-    client = await createClient();
-    settings = await client.invokePluginRpc(FACTORY_PLUGIN_ID, PROMPT_SETTINGS_RPC, {});
-  } catch {
-    // Standalone CLI or an older plugin: a CLI run from the checkout is itself
-    // a git install, so it keeps the passage pointing at its own checkout.
-  } finally {
-    try { await client?.close?.(); } catch { /* best-effort cleanup */ }
-  }
-  if (settings && typeof settings === 'object') {
-    // The plugin knows how it was installed: only a git-checkout install
-    // reports a factoryRoot, otherwise the passage is left out.
-    const factoryRoot = typeof settings.factoryRoot === 'string' && settings.factoryRoot ? settings.factoryRoot : null;
-    return { factoryRoot, findingsInPrompts: settings.findingsInPrompts !== false };
-  }
-  return { factoryRoot: findFactoryCheckout(fileURLToPath(new URL('..', import.meta.url))), findingsInPrompts: true };
-}
-
-async function connectSteerDelivery() {
-  let client;
-  try {
-    client = await connectPluginRpc();
-    const settings = await client.invokePluginRpc(FACTORY_PLUGIN_ID, PROMPT_SETTINGS_RPC, {});
-    if (settings?.steerDelivery === true) return client;
-  } catch {
-    // A standalone CLI or an older plugin has no steer projection to query.
-  }
-  await client?.close?.().catch(() => {});
-  return null;
-}
+import { connectPluginRpc } from '../plugin/server/core/paseo.mjs';
+import { FACTORY_PLUGIN_ID } from '../plugin/server/core/findings.mjs';
 
 const USAGE = `Usage: paseo-factory <command> [options]
-  plan   <repo> [--local <path>] [--name <id>] [--main workspace:<id>] [--domain <id>] [--hub <path|workspace:id>] [--adopt A=<agent-id>] [--adopt-worker <agent-id>[@A]] [--detach] [--slots A,B] [--json] [--out f.json]
-  apply  --confirm <hash>             run the stored dry-run plan; resumes after a failure
-  status <repo> [--json]
-  checkpoint <repo> --task <text> [--test <text>]... [--blocker <text>]... [--next <text>]
-  checkpoint <repo> --from-agent <steer-id> [--next <text>]   take the CHECKPOINT block of its last answer
-  switch <repo> --to <slot> [--apply] [--no-send] [--wait] [--notify-previous] [--language en|de]
-  fresh <repo> [--slot <S>|--worker <id>] [--apply]   same-tab rewind first, else a new agent (active steer: takeover); --slot/--worker refresh without takeover
-  assign <scope> --task <text> [--test <text>]... [--blocker <text>]... [--next <text>] [--report-to <agent-id>] [--apply] [--no-send]   (report-to defaults to the calling agent)
+  status [scope] [--json]
   resume [scope] [--agent <id>] [--json]   cold-start brief: task, next step, git, workers
-  resume [scope] --agent <worker> --apply   continue an interrupted worker via the plugin
+  resume [scope] --agent <worker> --apply [--json]   continue an interrupted worker via the plugin
+  checkpoint [scope] --task <text> [--test <text>]... [--blocker <text>]... [--next <text>]
+  checkpoint [scope] --from-agent <steer-id> [--next <text>]   take the CHECKPOINT block of its last answer
+  switch [scope] --to <slot> [--apply] [--no-send] [--wait] [--notify-previous] [--language en|de]
+  assign <scope> --task <text> [--test <text>]... [--blocker <text>]... [--next <text>] [--report-to <agent-id>] [--expect-epoch <n>] [--apply] [--no-send] [--json]   (report-to defaults to the calling agent)
   workers [scope] [--prune] [--apply] [--json]   print the worker register (task, state, resumes); --prune removes entries whose agent is gone
-  cleanup [--json]                   read-only scope health report over the whole instance
-  models [--json]                    list the live provider catalog
+  worker pick [scope] [--failed <profile> --reason <text>] [--json]   chosen worker profile plus paseo run flags
+  worker start [scope] --task <text> [--title <title>] [--apply] [--json]   start a worker from the active steer
   worker list [scope] [--json]         worker priority with availability; → marks what worker pick returns
-  worker set <n> <profile|provider/model> [--thinking X] [--mode Y] [--profile name] [--dry-run]
-  worker rm <n> [--dry-run]
-  worker pick [scope] [--json]         chosen worker profile plus paseo run flags
-  worker start [scope] --task <text> [--title <title>] [--apply]   start a worker from the active steer
-  steer list [--json]                  slots in priority order with tags, availability, fallbacks
-  steer set <n|slot> <profile|provider/model> [--thinking X] [--mode Y] [--profile name] [--dry-run]
-  steer rm <n|slot> [--dry-run]
-  model advisor <profile|provider/model> on|off [--dry-run]
-  model sensitive <profile|provider/model> on|off [--dry-run]
-  scopes [--json] [--candidates]   one line per live scope; --candidates lists unadopted workspaces
-  drain [--timeout 10m] [--json]   wait until no factory agent runs; marks leftovers planned-restart (exit 2), never restarts itself
-plan enrolls exactly one existing Paseo workspace as a factory scope (or repairs it); open the workspace natively first, then plan it by scope id, workspace:<id> or --local <path>.
---local plans an existing directory without GitHub; it may carry --name for the scope id.
-local/<folder> stays an input alias only; scopes are addressed by id (owner/repo, folder/--name, <parent>@<branch>).
-A --local worktree directory (or {"workspace": <id>}, "workspace:<id>") adopts that Paseo worktree workspace as the main workspace; status/checkpoint/switch/fresh/workers accept its scope id, local/<folder> alias or workspace id.
---main workspace:<id> adopts that worktree workspace as the main workspace of a github scope (the scope id stays owner/repo).
---domain <id> sets the scope's domain pointer (Hub → Domain → Kind, logical only; --domain "" clears it); blockers prefixed domain: go to the domain steer, hub: further to the hub.
---hub plans a hub-kind scope (at most one live; an existing dir scope converts, steers/epoch/checkpoint untouched).
---adopt-worker labels an agent as scope worker (stays in its workspace); --detach plans a native detach for parented steer candidates.
-Retired: --repos-file, --allow-fork, --checkout, --subject, --retitle, --rename-project and multi-repo plans (bulk provisioning).
-Model lists are ordered by priority, highest first. worker set <n> inserts at position n (later entries move down, an existing copy of the same model moves); worker rm <n> removes and closes the gap. Steer slots never shift: steer set <n|slot> replaces the slot's profile (2 is B). Unavailable models are stored with a warning and skipped by the fallback.
-Options: --config <path> (default: $PASEO_FACTORY_CONFIG or ~/.config/paseo-workspace-factory/config.json); --dry-run previews config writes`;
+  help
 
-/**
- * Default scope for bare `resume`: the calling agent's own scope label first
- * (it also covers workers in foreign workspaces), else the calling workspace.
- */
-async function defaultResumeEntry(client, command = 'resume', agentId = process.env.PASEO_AGENT_ID, paseoState = null) {
-  const workspaceId = process.env.PASEO_WORKSPACE_ID;
-  if (agentId || workspaceId) {
-    const paseo = paseoState ?? await readPaseoState(client);
-    const scopeId = agentId ? paseo.agents.find((a) => a.id === agentId)?.labels?.[LABEL.scope] : null;
-    if (typeof scopeId === 'string' && scopeId) return scopeId;
-    const workerWorkspace = agentId ? paseo.workspaces.find((workspace) => readWorkers(workspace.metadata)[agentId]) : null;
-    if (workerWorkspace) return `workspace:${workerWorkspace.id}`;
-    if (workspaceId) return `workspace:${workspaceId}`;
-  }
-  throw new Error(`${command} needs a scope (or run it inside a factory agent or workspace)`);
+Requires the running workspace-factory Paseo plugin. Setup and management commands (plan, apply, fresh, steer, model, models, scopes, cleanup, drain) live in /factory in the Paseo composer.`;
+
+const REMOVED_COMMANDS = new Set(['plan', 'apply', 'fresh', 'steer', 'model', 'models', 'scopes', 'cleanup', 'drain']);
+
+const BOOL = { type: 'boolean' };
+const STR = { type: 'string' };
+const OPTIONS = {
+  json: BOOL, help: { type: 'boolean', short: 'h' }, to: STR, apply: BOOL, 'no-send': BOOL,
+  wait: BOOL, 'notify-previous': BOOL, language: STR, task: STR,
+  test: { type: 'string', multiple: true }, blocker: { type: 'string', multiple: true }, next: STR,
+  'from-agent': STR, 'from-steer': STR, 'report-to': STR, 'expect-epoch': STR,
+  agent: STR, prune: BOOL, title: STR, failed: STR, reason: STR,
+};
+
+function omit(obj, keys) {
+  const copy = { ...obj };
+  for (const k of keys) delete copy[k];
+  return copy;
 }
 
-/**
- * Default scope address for bare `worker pick`, like `resume`: the calling
- * agent's scope label first, else the calling workspace, else the workspace
- * of the current directory. Only live scopes count (ambiguous or unknown
- * addresses fall through); null means the catalog-only pick without repo
- * visibility. Pure over the state, env/cwd injectable for tests.
- */
-export function defaultPickAddress(paseoState, { agentId = process.env.PASEO_AGENT_ID, workspaceId = process.env.PASEO_WORKSPACE_ID, cwd = process.cwd() } = {}) {
-  const liveScope = (address) => {
-    try {
-      return resolveScope(address, paseoState);
-    } catch {
-      return null;
-    }
-  };
-  if (agentId) {
-    const scopeId = paseoState.agents.find((a) => a.id === agentId)?.labels?.[LABEL.scope];
-    if (typeof scopeId === 'string' && scopeId && liveScope(scopeId)) return scopeId;
+function need(res, method, field = 'text') {
+  if (res?.[field] === undefined) {
+    throw new Error(`Workspace Factory plugin (workspace-factory) is older than this CLI (missing ${method} ${field}); reload it with \`paseo plugin reload workspace-factory\`.`);
   }
-  if (workspaceId && liveScope(`workspace:${workspaceId}`)) return `workspace:${workspaceId}`;
-  const cwdScope = cwd ? liveScope(cwd) : null;
-  if (cwdScope) return cwdScope.id;
-  return null;
+  return res[field];
 }
 
-/**
- * `Worker model:` line for briefs and handoffs: the resolved worker profile
- * for this scope (priority, catalog availability, advisor and sensitive rules;
- * sensitive profiles only run on provably public repos) or a none-startable
- * note with the reasons. Pure over the discovery, no extra catalog call.
- */
-function workerModelLine(config, discovery) {
-  const repoPublic = discovery?.github?.fork?.repo?.private === false;
-  const profileHealth = readProfileHealth(discovery?.mainWorkspace?.metadata);
-  const { profile, skipped } = resolveProfile(config, discovery?.providers ?? [], workerPriority(config), { role: 'worker', repoPublic, profileHealth });
-  if (!profile) {
-    const tried = skipped.length ? skipped.map((s) => `"${s.name}" (${s.reason})`).join('; ') : 'no worker profiles configured';
-    return `Worker model: none startable (${tried})`;
+function noteAlias(res, scopeArg, err) {
+  const scope = res?.scopeInfo ?? (res?.scope && typeof res.scope === 'object' ? res.scope : null);
+  if (scopeArg && res?.deprecatedAlias && scope?.id) {
+    err(`Note: ${JSON.stringify(scopeArg)} is a legacy alias for scope ${JSON.stringify(scope.id)} (${scope.kind}); prefer the scope id.`);
   }
-  return formatWorkerModel(config, profile);
 }
 
-/**
- * Last-turn CHECKPOINT presence per agent (P2 heuristic): true when the last
- * answer carries a CHECKPOINT block, false when it has an answer without one,
- * missing when unreadable (fails closed, never marks). Only the given ids are
- * read; failures per agent are swallowed.
- */
-async function fetchLastTurnCheckpoints(client, agentIds) {
-  const out = {};
-  for (const id of agentIds) {
-    try {
-      const text = lastAssistantText(await client.agents.ref(id).timeline.refetch({ direction: 'tail', limit: 20 }));
-      if (typeof text !== 'string' || !text) continue;
-      out[id] = parseCheckpointBlock(text) !== null;
-    } catch {
-      continue;
-    }
+function formatPluginRpcError(error, method) {
+  const msg = error instanceof Error ? error.message : String(error);
+  if (/Plugin is not available|Plugin service is unavailable/i.test(msg)) {
+    return new Error('Workspace Factory plugin (workspace-factory) is not running; enable or install it in Paseo Settings -> Plugins (or run `paseo plugin ls workspace-factory`).');
   }
-  return out;
+  if (/does not contribute RPC/i.test(msg)) {
+    return new Error(`Workspace Factory plugin (workspace-factory) is older than this CLI (missing ${method}); reload it with \`paseo plugin reload workspace-factory\`.`);
+  }
+  return error instanceof Error ? error : new Error(msg);
 }
 
-/**
- * Heuristic inputs for one scope (P2): daemon start plus last-turn flags for
- * idle candidates whose checkpoint predates the restart and that carry no
- * plugin restart mark. Returns null when the heuristic cannot apply (no
- * daemon time, no checkpoint, checkpoint newer than the daemon), so callers
- * skip timeline reads and show plugin marks only.
- */
-async function heuristicInputsForDiscovery(client, discovery) {
-  let started = null;
+async function openRpc(connectRpc) {
+  let rpc;
   try {
-    started = daemonStartedAt(createPaseoCli());
-  } catch {
-    started = null;
+    rpc = await connectRpc();
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    throw new Error(`Workspace Factory plugin is not reachable (${msg}); start Paseo and ensure workspace-factory is running (\`paseo plugin ls workspace-factory\`).`);
   }
-  if (!started) return null;
-  const checkpoint = discovery.mainWorkspace?.metadata?.[CHECKPOINT_KEY] ?? null;
-  const checkpointAt = checkpoint?.capturedAt ?? checkpoint?.updatedAt ?? null;
-  if (typeof checkpointAt !== 'string' || !checkpointAt) return null;
-  if (!Number.isFinite(Date.parse(checkpointAt)) || Date.parse(started) <= Date.parse(checkpointAt)) return null;
-  const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;
-  const markedIds = new Set(restartInterruptions({ checkpoint, agentState }).map((m) => m.agentId));
-  const candidates = [...(discovery.steers.labelled ?? []), ...(discovery.workers ?? [])]
-    .filter((a) => a && !a.archivedAt && a.status === 'idle' && !markedIds.has(a.id))
-    .map((a) => a.id);
-  if (!candidates.length) return { daemonStartedAt: started, lastTurnCheckpoints: {} };
-  return { daemonStartedAt: started, lastTurnCheckpoints: await fetchLastTurnCheckpoints(client, candidates) };
-}
-
-/**
- * Heuristic inputs across all live scopes (P2): same rule as the single-scope
- * helper, applied per scope. Returns null when no scope can match, so callers
- * skip timeline reads.
- */
-async function heuristicInputsForScopes(client, paseoState) {
-  let started = null;
-  try {
-    started = daemonStartedAt(createPaseoCli());
-  } catch {
-    started = null;
-  }
-  if (!started || !Number.isFinite(Date.parse(started))) return null;
-  const scopes = listScopes(paseoState);
-  const resolved = applyContinuations(paseoState.agents ?? [], paseoState.agents ?? []);
-  const candidates = [];
-  for (const scope of scopes) {
-    const checkpoint = scope.workspace.metadata?.[CHECKPOINT_KEY] ?? null;
-    const checkpointAt = checkpoint?.capturedAt ?? checkpoint?.updatedAt ?? null;
-    if (typeof checkpointAt !== 'string' || !checkpointAt) continue;
-    if (!Number.isFinite(Date.parse(checkpointAt)) || Date.parse(started) <= Date.parse(checkpointAt)) continue;
-    const agentState = scope.workspace.metadata?.[AGENTS_KEY] ?? null;
-    const markedIds = new Set(restartInterruptions({ checkpoint, agentState }).map((m) => m.agentId));
-    for (const a of resolved) {
-      if (!a || a.archivedAt || a.status !== 'idle' || markedIds.has(a.id)) continue;
-      if (a.continuedFrom && markedIds.has(a.continuedFrom)) continue;
-      if (a.labels?.[LABEL.scope] !== scope.id) continue;
-      const role = a.labels?.[LABEL.role];
-      if (role !== 'steer' && role !== 'worker') continue;
-      candidates.push(a.id);
-    }
-  }
-  if (!candidates.length) {
-    const anyOld = scopes.some((s) => {
-      const at = s.workspace.metadata?.[CHECKPOINT_KEY]?.capturedAt ?? s.workspace.metadata?.[CHECKPOINT_KEY]?.updatedAt ?? null;
-      return typeof at === 'string' && Number.isFinite(Date.parse(at)) && Date.parse(started) > Date.parse(at);
-    });
-    return anyOld ? { daemonStartedAt: started, lastTurnCheckpoints: {} } : null;
-  }
-  return { daemonStartedAt: started, lastTurnCheckpoints: await fetchLastTurnCheckpoints(client, [...new Set(candidates)]) };
-}
-
-function printPlans(plans, hash) {
-  for (const plan of plans) {
-    console.log(`\n${plan.repo}  [${plan.status}]`);
-    for (const op of plan.ops) console.log(`  + ${op.key.padEnd(26)} ${op.summary}`);
-    for (const c of plan.conflicts) console.log(`  ! ${c.key.padEnd(26)} ${c.reason}`);
-    for (const n of plan.notes) console.log(`  · ${n}`);
-  }
-  const writes = plans.reduce((sum, p) => sum + p.ops.length, 0);
-  console.log(`\nPlan hash ${hash} · ${writes} write operation(s) · dry-run, nothing changed`);
-  if (writes) console.log(`Stored for review. Apply: paseo-factory apply --confirm ${hash}`);
-}
-
-async function main() {
-  const { values, positionals } = parseArgs({
-    allowPositionals: true,
-    options: {
-      config: { type: 'string' },
-      json: { type: 'boolean' }, confirm: { type: 'string' }, to: { type: 'string' }, apply: { type: 'boolean' },
-      'no-send': { type: 'boolean' }, 'report-to': { type: 'string' }, help: { type: 'boolean' },
-      adopt: { type: 'string', multiple: true }, slots: { type: 'string', multiple: true }, out: { type: 'string' }, task: { type: 'string' },
-      test: { type: 'string', multiple: true }, blocker: { type: 'string', multiple: true },
-      next: { type: 'string' }, 'from-agent': { type: 'string' }, wait: { type: 'boolean' }, 'expect-epoch': { type: 'string' },
-      'notify-previous': { type: 'boolean' }, language: { type: 'string' }, local: { type: 'string', multiple: true }, name: { type: 'string' },
-      hub: { type: 'string', multiple: true },
-      'adopt-worker': { type: 'string', multiple: true }, detach: { type: 'boolean' }, agent: { type: 'string' },
-      main: { type: 'string' }, domain: { type: 'string' },
-      thinking: { type: 'string' }, mode: { type: 'string' }, profile: { type: 'string' }, 'dry-run': { type: 'boolean' },
-      candidates: { type: 'boolean' },
-      timeout: { type: 'string' }, title: { type: 'string' },
-      failed: { type: 'string' }, reason: { type: 'string' },
-      slot: { type: 'string' }, worker: { type: 'string' }, prune: { type: 'boolean' },
+  return {
+    async call(method, input) {
+      try {
+        return await rpc.invokePluginRpc(FACTORY_PLUGIN_ID, method, input);
+      } catch (error) {
+        throw formatPluginRpcError(error, method);
+      }
     },
-  });
+    close: () => rpc?.close?.().catch(() => {}),
+  };
+}
+
+function targetInput(scope, env) {
+  if (scope) return { repo: scope };
+  if (env.PASEO_WORKSPACE_ID) return { workspaceId: env.PASEO_WORKSPACE_ID };
+  return {};
+}
+
+function oneScope(command, args) {
+  if (args.length > 1) throw new Error(`${command} takes at most one scope, got ${args.length}`);
+  return args[0] ?? null;
+}
+
+export async function runCli(argv = process.argv.slice(2), { connectRpc = connectPluginRpc, env = process.env,
+  cwd = process.cwd(), out = console.log, err = console.error,
+  setExitCode = (code) => { process.exitCode = code; } } = {}) {
+  if (REMOVED_COMMANDS.has(argv[0])) {
+    throw new Error(`CLI command "${argv[0]}" was removed; use \`/factory ${argv[0]}\` in the Paseo composer or the Factory panel. Run \`paseo-factory --help\` for CLI commands.`);
+  }
+  if (argv[0] === 'worker' && (argv[1] === 'set' || argv[1] === 'rm')) {
+    throw new Error(`CLI command "worker ${argv[1]}" was removed; use \`/factory worker ${argv[1]}\` in the Paseo composer or the Factory settings.`);
+  }
+  const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: OPTIONS });
   const [command, ...args] = positionals;
-  if (!command || values.help) return console.log(USAGE);
-  if (values.timeout !== undefined && command !== 'drain') throw new Error('--timeout is only accepted with drain');
-  const configPath = values.config ?? defaultConfigPath();
-  const config = await loadConfig(configPath);
-  const { planDir: PLAN_DIR, journalDir: JOURNAL_DIR } = configureRuntime(config);
-  const localFlags = values.local ?? [];
-  for (const flag of localFlags) {
-    if (!flag?.trim()) throw new Error('--local needs a directory path');
-    const abs = resolve(flag);
-    try {
-      if (!statSync(abs).isDirectory()) throw new Error();
-    } catch {
-      throw new Error(`--local path ${flag} does not exist or is not a directory`);
-    }
-  }
-  const hubFlags = values.hub ?? [];
-  const hubEntries = hubFlags.map((flag) => {
-    if (!flag?.trim()) throw new Error('--hub needs a directory path or workspace:<id>');
-    const trimmed = flag.trim();
-    const prefixed = trimmed.match(/^(?:workspace|worktree)\s*:\s*(.+)$/i);
-    if (prefixed) {
-      const workspace = prefixed[1].trim();
-      if (!workspace) throw new Error(`--hub needs a workspace id, got ${flag}`);
-      return { workspace, hub: true };
-    }
-    if (/^wks_[A-Za-z0-9]+$/.test(trimmed)) return { workspace: trimmed, hub: true };
-    const abs = resolve(flag);
-    try {
-      if (!statSync(abs).isDirectory()) throw new Error();
-    } catch {
-      throw new Error(`--hub path ${flag} does not exist or is not a directory`);
-    }
-    return { local: abs, hub: true };
-  });
-  let entries = [...args, ...localFlags.map((p) => ({ local: resolve(p) })), ...hubEntries];
-  if (localFlags.length && (command === 'models' || command === 'model' || command === 'steer' || command === 'worker')) {
-    throw new Error(`--local is not accepted with ${command}`);
-  }
-  if (hubFlags.length && (command === 'models' || command === 'model' || command === 'steer' || command === 'worker')) {
-    throw new Error(`--hub is not accepted with ${command}`);
-  }
-  if (values.name !== undefined) {
-    if (command !== 'plan') throw new Error('--name is only accepted with plan');
-    if (entries.length !== 1) throw new Error('--name needs exactly one workspace entry');
-    const only = entries[0];
-    if (only && typeof only === 'object' && !Array.isArray(only)) {
-      if (only.name !== undefined) throw new Error('--name conflicts with the entry "name"; use one of them');
-      entries = [{ ...only, name: values.name }];
-    } else {
-      entries = [{ repo: only, name: values.name }];
-    }
-  }
-  if (values.main !== undefined) {
-    if (command !== 'plan') throw new Error('--main is only accepted with plan');
-    if (entries.length !== 1) throw new Error('--main needs exactly one workspace entry');
-    if (!values.main?.trim()) throw new Error('--main needs a workspace id (workspace:<id>)');
-    const only = entries[0];
-    if (only && typeof only === 'object' && !Array.isArray(only)) {
-      if (only.main !== undefined) throw new Error('--main conflicts with the entry "main"; use one of them');
-      entries = [{ ...only, main: values.main }];
-    } else {
-      entries = [{ repo: only, main: values.main }];
-    }
-  }
-  if (values.domain !== undefined) {
-    if (command !== 'plan') throw new Error('--domain is only accepted with plan');
-    if (entries.length !== 1) throw new Error('--domain needs exactly one workspace entry');
-    const only = entries[0];
-    if (only && typeof only === 'object' && !Array.isArray(only)) {
-      if (only.domain !== undefined) throw new Error('--domain conflicts with the entry "domain"; use one of them');
-      entries = [{ ...only, domain: values.domain }];
-    } else {
-      entries = [{ repo: only, domain: values.domain }];
-    }
-  }
-  const gh = createGh();
-  const git = createGit();
-  const client = await connect();
-  const runner = createRunner({ config, client, gh, git });
-  try {
-    if (command === 'models' || command === 'model' || command === 'steer' || command === 'worker') {
-      return await runModelCommand({ command, args, values, config, configPath, client, runner });
-    }
-    if (command === 'scopes') {
-      if (entries.length) throw new Error('scopes takes no repository; use paseo-factory scopes [--json] [--candidates]');
-      const paseo = await readPaseoState(client);
-      if (values.candidates) {
-        const rows = scopeCandidates(paseo);
-        return console.log(values.json ? JSON.stringify(rows, null, 2) : formatScopeCandidates(rows));
-      }
-      const heuristic = await heuristicInputsForScopes(client, paseo).catch(() => null);
-      const rows = scopeRows(paseo, { ...(heuristic ?? {}), config });
-      return console.log(values.json ? JSON.stringify(rows, null, 2) : formatScopeRows(rows));
-    }
-    if (command === 'drain') {
-      if (entries.length) throw new Error('drain takes no repository; use paseo-factory drain [--timeout 10m] [--json]');
-      const timeoutMs = values.timeout === undefined ? DRAIN_DEFAULT_TIMEOUT_MS : parseTimeout(values.timeout);
-      const result = await drain({ client, timeoutMs, git, log: values.json ? null : (msg) => console.log(msg) });
-      if (values.json) {
-        console.log(JSON.stringify(result, null, 2));
-      } else {
-        console.log(formatDrain(result));
-      }
-      if (!result.clean) process.exitCode = 2;
-      return;
-    }
-    const adoptPairs = (values.adopt ?? []).flatMap((v) => v.split(',')).filter(Boolean);
-    const legacyAdopts = [];
-    for (const pair of adoptPairs) {
-      const legacy = pair.match(/^([A-Z])=([0-9a-f-]{8,})$/i);
-      if (!legacy) {
-        if (/:/.test(pair)) throw new Error(`--adopt <scope-id>:SLOT=<agent-id> was retired with multi-repo plans; plan one workspace with --adopt SLOT=<agent-id>, got ${pair}`);
-        throw new Error(`--adopt expects SLOT=<agent-id>, got ${pair}`);
-      }
-      legacyAdopts.push([legacy[1].toUpperCase(), legacy[2]]);
-    }
-    const adopt = legacyAdopts.length ? { '*': Object.fromEntries(legacyAdopts) } : {};
-    const workerPairs = (values['adopt-worker'] ?? []).flatMap((v) => v.split(',')).map((s) => s.trim()).filter(Boolean);
-    if (workerPairs.length && command !== 'plan') throw new Error('--adopt-worker is only accepted with plan');
-    if (workerPairs.length && entries.length !== 1) throw new Error('--adopt-worker needs exactly one workspace entry; the worker is labelled for that scope');
-    const adoptWorker = Object.fromEntries(workerPairs.map((pair) => {
-      const match = pair.match(/^([0-9a-f-]{8,})(?:@([A-Za-z]))?$/);
-      if (!match) throw new Error(`--adopt-worker expects <agent-id>[@<slot>], got ${pair}`);
-      return [match[1], match[2] ? match[2].toUpperCase() : null];
-    }));
-    if (values.detach && command !== 'plan') throw new Error('--detach is only accepted with plan');
-    if (values.slot !== undefined && command !== 'fresh') throw new Error('--slot is only accepted with fresh');
-    if (values.worker !== undefined && command !== 'fresh') throw new Error('--worker is only accepted with fresh');
-    if (values.prune && command !== 'workers') throw new Error('--prune is only accepted with workers');
+  if (!command || command === 'help' || values.help) return out(USAGE);
+  if (values.prune && command !== 'workers') throw new Error('--prune is only accepted with workers');
 
-    if (command === 'plan') {
-      if (entries.length !== 1) throw new Error(`plan needs exactly one workspace entry, got ${entries.length}; enroll one existing workspace at a time`);
-      const slots = (values.slots ?? []).flatMap((v) => v.split(',')).map((s) => s.trim()).filter(Boolean).map((s) => s.toUpperCase());
-      for (const slot of slots) {
-        if (!/^[A-Z]$/.test(slot)) throw new Error(`--slots expects comma-separated slot letters A-Z, got ${slot}`);
-      }
-      if (new Set(slots).size !== slots.length) throw new Error('--slots contains duplicates');
-      for (const slot of slots) {
-        if (!config.steers.slots[slot]) throw new Error(`--slots names slot ${slot}, which is not defined in steers.slots`);
-      }
-      const slotsOverride = slots.length ? slots : undefined;
-      const planOptions = { adopt, adoptWorker, detach: Boolean(values.detach), ...(slotsOverride ? { slots: slotsOverride } : {}) };
-      const plans = await runner.runPlans(entries, planOptions);
-      const hash = planHash(plans, config);
-      if (plans.some((p) => p.ops.length)) {
-        const stored = storeAuthorization(PLAN_DIR, createAuthorization(plans, config, { entries, ...planOptions }), config);
-        if (stored.status === 'kept' && !values.json) console.log(`Existing authorization kept (created ${stored.authorization.createdAt}).`);
-      }
-      if (values.out) writeFileSync(values.out, `${JSON.stringify({ generatedAt: new Date().toISOString(), hash, plans }, null, 2)}\n`);
-      return values.json ? console.log(JSON.stringify({ hash, plans }, null, 2)) : printPlans(plans, hash);
-    }
-
-    if (command === 'apply') {
-      if (!values.confirm || !/^[0-9a-f]{16}$/.test(values.confirm)) throw new Error('apply needs --confirm <16-hex plan hash> from a stored dry-run');
-      // One apply at a time: authorization, progress, rediscovery, every operation,
-      // progress/journal writes and the final report all happen inside the lock.
-      const result = await withApplyLock(async (held) => {
-        const authorization = JSON.parse(readFileSync(join(PLAN_DIR, `${values.confirm}.json`), 'utf8'));
-        if (authorization?.kind === 'cleanup') {
-          throw new Error('This is a stored cleanup plan, and cleanup plans are no longer applied; use the read-only cleanup report and archive natively (`paseo archive`, `paseo workspace archive`, `paseo project delete`)');
-        }
-        if (entries.length && JSON.stringify(entries) !== JSON.stringify(authorization.entries)) throw new Error('Repositories differ from the stored plan; omit them or run a new dry-run');
-        mkdirSync(JOURNAL_DIR, { recursive: true, mode: 0o700 });
-        const journalFile = join(JOURNAL_DIR, `${new Date().toISOString().replace(/[:.]/g, '-')}.jsonl`);
-        const outcome = await applyPlans({
-          authorization, config, confirm: values.confirm, lookupReceipt: lookupCreationReceipt,
-          progress: fileProgress(join(PLAN_DIR, `${values.confirm}.progress.json`)),
-          guard: () => held.verify(),
-          runPlans: (list, options) => runner.runPlans(list, options),
-          execute: createExecutors({ client, paseoCli: createPaseoCli() }),
-          journal: (event) => {
-            held.verify();
-            appendFileSync(journalFile, `${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`, { mode: 0o600 });
-          },
-        });
-        held.verify();
-        return { ...outcome, journal: journalFile };
-      });
-      console.log(JSON.stringify(result, null, 2));
-      if (result.report.some((r) => r.status === 'failed')) process.exitCode = 1;
-      return;
-    }
-
-    if (['status', 'switch', 'fresh', 'workers', 'checkpoint', 'assign', 'resume'].includes(command)) {
-      let shared = null;
-      if ((command === 'resume' || command === 'workers') && !entries.length) {
-        shared = await readPaseoState(client);
-        entries.push(await defaultResumeEntry(client, command, values.agent, shared));
-      }
-      if (entries.length !== 1) throw new Error(`${command} needs exactly one repository`);
-      shared ??= await readPaseoState(client);
-      const raw = entries[0];
-      const { entry: target, scope, deprecatedAlias } = resolveTargetEntry(raw, shared);
-      if (scope && deprecatedAlias) {
-        const typed = typeof raw === 'string' ? raw : JSON.stringify(raw);
-        console.error(`Note: ${JSON.stringify(typed)} is a legacy alias for scope ${JSON.stringify(scope.id)} (${scope.kind}); prefer the scope id.`);
-      }
-      const [discovery] = await runner.discoverAll([target], { state: shared });
-      if (command === 'status') {
-        const warnContextTokens = config.usage?.warnContextTokens;
-        const heuristic = await heuristicInputsForDiscovery(client, discovery).catch(() => null);
-        const status = steerStatus(discovery, { warnContextTokens, ...(heuristic ?? {}), config });
-        return console.log(values.json ? JSON.stringify(status, null, 2) : formatStatus(status, warnContextTokens));
-      }
-      if (command === 'fresh') {
-        const result = await freshSteer({
-          client, discovery, config, apply: Boolean(values.apply), git,
-          callerId: process.env.PASEO_AGENT_ID ?? null,
-          slot: values.slot ?? null, workerId: values.worker ?? null,
-          lookupReceipt: lookupCreationReceipt, language: runtime().handoffLanguage,
-          workerModel: workerModelLine(config, discovery), paseoCli: createPaseoCli(),
-          rewindClient: defaultCreateRewindClient,
-          promptOptions: await readCliPromptOptions(),
-        });
-        const mode = result.refreshMode === 'rewind' ? 'rewind' : 'new agent';
-        const target = result.kind === 'worker'
-          ? (result.refreshMode === 'rewind'
-            ? `worker ${result.from} (same tab, rewound, owner Steer ${result.owner}, epoch ${result.epoch}, unchanged)`
-            : `worker ${result.from} → ${result.to ?? '(new agent)'} (owner Steer ${result.owner}, epoch ${result.epoch}, unchanged)`)
-          : (result.refreshMode === 'rewind'
-            ? `Steer ${result.slot} ${result.from} (same tab, rewound, epoch ${result.epoch}, unchanged)`
-            : `Steer ${result.slot} ${result.from} → ${result.to ?? '(new agent)'} (epoch ${result.epoch}${result.epochBumped ? '' : ', unchanged'})`);
-        const model = result.profile ? `profile "${result.profile}" (${result.provider}/${result.model})` : `${result.provider}/${result.model}`;
-        const retired = result.kind === 'worker' ? 'retired worker' : 'retired steer';
-        const note = result.refreshMode === 'rewind'
-          ? `Note: the agent keeps its tab, id and labels${result.applied ? ' (context rewound, brief delivered into the fresh timeline)' : ' (context will be rewound on apply, brief delivered into the fresh timeline)'}.`
-          : `Note: the ${retired} ${result.from} keeps its chat and labels${result.applied ? ' (a short notice was sent)' : ' (a short notice will be sent on apply)'}; archive it in Paseo — until then status marks it superseded (newest wins).`;
-        console.log(`${result.applied ? 'Refreshed' : 'Dry-run'} [${mode}]: ${target} · ${model}${result.fallbackFrom ? ` (fallback for "${result.fallbackFrom}")` : ''} · ${result.epochBumped ? 'handoff' : 'refresh brief'} ${result.packetChars} characters, built without a model call${result.checkpoint ? '' : ' · NO task checkpoint'}${result.reused ? ' · agent reused after receipt' : ''}${result.idempotent ? ` · already refreshed (${result.idempotentReason ?? 'idempotent'})` : ''}${result.delivered ? ' · delivered' : ''}${result.previousNotified ? ` · previous ${result.kind} notified` : ''}${result.deliveryError ? ` · delivery failed: ${result.deliveryError}` : ''}${result.renameError ? ` · title rename failed: ${result.renameError}` : ''}${(result.warnings ?? []).map((w) => `\nWarning: ${w}`).join('')}${result.profileSuggestion ? `\nSuggestion: ${result.profileSuggestion}` : ''}\n${note}\n---\n${result.packet}`);
-        return;
-      }
-      if (command === 'switch') {
-        if (!values.to) throw new Error('switch needs --to <slot>');
-        if (values.language && !['en', 'de'].includes(values.language)) throw new Error('--language must be en or de');
-        const deliveryClient = values.apply && (!values['no-send'] || values['notify-previous'])
-          ? await connectSteerDelivery() : null;
-        let result;
-        try {
-          result = await switchSteer({
-            client, discovery, toSlot: values.to, apply: Boolean(values.apply), send: !values['no-send'], git,
-            callerId: process.env.PASEO_AGENT_ID ?? null,
-            wait: Boolean(values.wait), notifyPrevious: Boolean(values['notify-previous']), language: values.language ?? runtime().handoffLanguage,
-            config, workerModel: workerModelLine(config, discovery), paseoCli: createPaseoCli(),
-            promptOptions: await readCliPromptOptions(),
-            deliverSteer: deliveryClient
-              ? (input) => deliveryClient.invokePluginRpc(FACTORY_PLUGIN_ID, 'factory.steer.delivery', input)
-              : null,
-          });
-        } finally {
-          await deliveryClient?.close?.().catch(() => {});
-        }
-        console.log(`${result.applied ? 'Switched' : 'Dry-run'}: Steer ${result.from} → ${result.to} (epoch ${result.epoch}) · handoff ${result.packetChars} characters, built without a model call${result.checkpoint ? '' : ' · NO task checkpoint'}${result.delivered ? ' · delivered' : ''}${result.deliveryPending ? ' · brief queued pending context renewal' : ''}${result.previousNotified ? ' · previous steer notified' : ''}${result.previousNoticeDetail ? ` · previous steer: ${result.previousNoticeDetail}` : ''}${result.deliveryError ? ` · delivery failed: ${result.deliveryError}` : ''}${result.renameError ? ` · title rename failed: ${result.renameError}` : ''}\n---\n${result.packet}`);
-        if (result.reply !== null) console.log(`--- reply of Steer ${result.to}\n${result.reply ?? '(no answer text)'}`);
-        return;
-      }
-      if (command === 'checkpoint') {
-        let fields;
-        let agentId = null;
-        if (values['from-agent']) {
-          if (values.task) throw new Error('use either --task or --from-agent');
-          const matches = steerStatus(discovery).steers.filter((s) => s.id === values['from-agent'] || s.id.startsWith(values['from-agent']));
-          if (matches.length > 1) throw new Error(`${values['from-agent']} matches several steers; use the full agent id`);
-          const steer = matches[0];
-          if (!steer) throw new Error(`${values['from-agent']} is not a steer of ${discovery.forkName}`);
-          agentId = steer.id;
-          const text = lastAssistantText(await client.agents.ref(steer.id).timeline.refetch({ direction: 'tail', limit: 20 }));
-          fields = parseCheckpointBlock(text);
-          if (!fields) throw new Error(`The last answer of Steer ${steer.slot} has no CHECKPOINT block with a task line`);
-        } else {
-          if (!values.task) throw new Error('checkpoint needs --task or --from-agent');
-          fields = { task: values.task, tests: values.test ?? [], blockers: values.blocker ?? [], next: null };
-        }
-        if (values.next) fields.next = values.next;
-        return console.log(JSON.stringify(await writeCheckpoint({ client, discovery, ...fields, agentId, callerId: process.env.PASEO_AGENT_ID, config }), null, 2));
-      }
-      if (command === 'assign') {
-        if (!values.task) throw new Error('assign needs --task <text>');
-        let expectEpoch;
-        if (values['expect-epoch'] !== undefined) {
-          expectEpoch = Number.parseInt(values['expect-epoch'], 10);
-          if (!Number.isInteger(expectEpoch)) throw new Error('--expect-epoch needs an integer epoch from the preview');
-        }
-        let requester = null;
-        if (process.env.PASEO_AGENT_ID && values.apply) {
-          const caller = shared.agents.find((agent) => agent.id === process.env.PASEO_AGENT_ID);
-          const source = listScopes(shared).find((item) => item.workspaceId === caller?.workspaceId);
-          const sourceState = source?.workspace?.metadata?.[METADATA_KEY];
-          if (!caller || !source || !Number.isInteger(sourceState?.epoch)) throw new Error('The requesting agent has no current factory scope authority');
-          requester = { workspaceId: source.workspaceId, scopeId: source.id, epoch: sourceState.epoch, agentId: caller.id,
-            aliases: [caller.labels?.[LABEL.scope], caller.labels?.[LABEL.repo]].filter(Boolean) };
-        }
-        const result = await assignScope({
-          client, discovery, task: values.task, tests: values.test ?? [], blockers: values.blocker ?? [],
-          next: values.next ?? null, apply: Boolean(values.apply), send: !values['no-send'],
-          assignedBy: process.env.PASEO_AGENT_ID ?? null,
-          requester,
-          config,
-          reportTo: values['report-to'] ?? process.env.PASEO_AGENT_ID ?? null,
-          workerModel: workerModelLine(config, discovery),
-          promptOptions: await readCliPromptOptions(),
-          ...(expectEpoch !== undefined ? { expectEpoch } : {}),
-        });
-        if (values.json) return console.log(JSON.stringify(result, null, 2));
-        console.log(`${result.applied ? 'Assigned' : 'Dry-run'}: ${result.scope} epoch ${result.epoch} · Steer ${result.slot} ${result.steerId}${result.domain ? ` · domain ${result.domain}` : ''}${(result.domainChildren ?? []).length ? ` · domain of ${result.domainChildren.length} (${result.domainChildren.join(', ')})` : ''}${result.previous ? '' : ' · NO previous checkpoint'}${result.delivered ? ' · delivered' : ''}${result.deliveryError ? ` · delivery failed: ${result.deliveryError}` : ''}`);
-        if (result.previous) console.log(`Replaces task: ${result.previous}`);
-        console.log(`---\n${result.packet}`);
-        if (!result.applied) console.log(`---\nNothing written. Apply: paseo-factory assign ${JSON.stringify(entries[0])} --task ${JSON.stringify(values.task)} --apply`);
-        return;
-      }
-      if (command === 'resume') {
-        const agentId = values.agent ?? process.env.PASEO_AGENT_ID ?? null;
-        if (values.apply) {
-          const status = steerStatus(discovery);
-          if (!values.agent || !status.workers.some((worker) => worker.id === agentId)) {
-            throw new Error('resume --apply needs --agent <interrupted worker id>');
-          }
-          const rpc = await connectPluginRpc();
-          try {
-            const applied = await rpc.invokePluginRpc(FACTORY_PLUGIN_ID, 'factory.resume.apply', { workspaceId: status.workspace.id, agentId });
-            console.log(values.json ? JSON.stringify(applied, null, 2) : applied.detail);
-            if (applied.status === 'blocked') process.exitCode = 1;
-          } finally {
-            await rpc.close();
-          }
-          return;
-        }
-        const heuristic = await heuristicInputsForDiscovery(client, discovery).catch(() => null);
-        const status = steerStatus(discovery, { ...(heuristic ?? {}), config });
-        const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;
-        const brief = buildResumeBrief(status, {
-          agentId,
-          agentState,
-          workerLastAnswer: await workerResumeAnswer(client, status, agentId),
-          git: status.workspace ? readGitBrief(git, status.workspace.directory) : null,
-          scope: discovery.scope ?? null,
-          ...(heuristic ?? {}),
-          config, workerModel: workerModelLine(config, discovery),
-          promptOptions: await readCliPromptOptions(),
-        });
-        if (values.json) {
-          const restartInterrupted = status.restartInterrupted ?? restartInterruptions({ checkpoint: status.checkpoint, agentState });
-          return console.log(JSON.stringify({
-            scope: discovery.scope?.id ?? discovery.forkName, kind: discovery.scope?.kind ?? null, epoch: status.state?.epoch ?? null,
-            agentId, brief,
-            openWorkers: status.openWorkers ?? [],
-            interrupted: status.checkpoint?.interrupted ?? null,
-            ...(restartInterrupted.length ? { restartInterrupted } : {}),
-          }, null, 2));
-        }
-        return console.log(brief);
-      }
-      const scopeId = discovery.scope?.id ?? discovery.forkName;
-      const epoch = discovery.mainWorkspace?.metadata?.[METADATA_KEY]?.epoch ?? null;
-      if (values.prune) {
-        const stale = staleWorkerEntries(readWorkers(discovery.mainWorkspace?.metadata ?? null), discovery.agents ?? []);
-        if (!values.apply) {
-          if (values.json) return console.log(JSON.stringify({ scope: scopeId, epoch, stale, applied: false }, null, 2));
-          return console.log(formatWorkersPruneText(scopeId, epoch, stale));
-        }
-        if (!discovery.mainWorkspace) throw new Error('workers --prune --apply needs a factory main workspace with worker state');
-        const pruned = await pruneWorkerRegister({ client, workspaceId: discovery.mainWorkspace.id, agents: discovery.agents ?? [] });
-        if (values.json) return console.log(JSON.stringify({ scope: scopeId, epoch, removed: pruned.removed, applied: true }, null, 2));
-        return console.log(formatWorkersPruneText(scopeId, epoch, pruned.removed, { applied: true }));
-      }
-      const report = workersReport(readWorkers(discovery.mainWorkspace?.metadata ?? null));
-      if (values.json) return console.log(JSON.stringify({ scope: scopeId, epoch, workers: report }, null, 2));
-      return console.log(formatWorkersText(scopeId, epoch, report));
-    }
-
-    if (command === 'cleanup') {
-      if (entries.length) throw new Error('cleanup takes no repository; it reports on the whole instance');
-      const paseo = await attachProjectArchivedAgents(await readPaseoState(client), client);
-      const candidates = collectCleanupCandidates(paseo, { git });
-      if (values.json) return console.log(JSON.stringify({ candidates }, null, 2));
-      if (!candidates.length) return console.log('No cleanup candidates.');
-      return console.log(candidates.map(formatCandidate).join('\n'));
-    }
-    throw new Error(`Unknown command ${command}\n${USAGE}`);
-  } finally {
-    await client.close().catch(() => {});
-  }
-}
-
-async function writePlanned({ planned, configPath, dryRun, hint = null }) {
-  const lines = [
-    dryRun ? `Dry-run: ${planned.summary} (not written)` : planned.summary,
-    ...(planned.notes ?? []).map((n) => `Note: ${n}`),
-    ...(planned.warnings ?? []).map((w) => `Warning: ${w}`),
-    ...(hint ? [hint] : []),
-  ];
-  if (dryRun) return console.log(`${lines.join('\n')}\n${previewConfig(planned.config)}`);
-  await writeConfigAtomic(configPath, planned.config);
-  return console.log(`${lines.join('\n')}\nWrote ${configPath}`);
-}
-
-async function runModelCommand({ command, args, values, config, configPath, client, runner }) {
-  const dryRun = Boolean(values['dry-run']);
-  const catalog = async () => (await client.providers.snapshot())?.entries ?? [];
-  if (command === 'models') {
-    if (args.length) throw new Error('models takes no repository; use paseo-factory models [--json]');
-    return console.log(formatCatalog(await catalog(), { json: Boolean(values.json) }));
-  }
-  if (command === 'model') {
-    const [flag, specArg, onOff, ...rest] = args;
-    if ((flag !== 'advisor' && flag !== 'sensitive') || !specArg || !onOff || rest.length) {
-      throw new Error('model needs advisor|sensitive <profile|provider/model> on|off');
-    }
-    if (onOff !== 'on' && onOff !== 'off') throw new Error(`model ${flag} needs on|off, got ${JSON.stringify(onOff)}`);
-    const plan = flag === 'advisor' ? planAdvisorTag : planSensitiveTag;
-    const planned = plan(config, await catalog(), { spec: specArg, on: onOff === 'on' });
-    return writePlanned({ planned, configPath, dryRun });
-  }
   if (command === 'worker') {
     const [sub, ...rest] = args;
-    if (sub === 'set') {
-      const [nArg, specArg, ...extra] = rest;
-      if (!nArg || !specArg || extra.length) throw new Error('worker set needs <n> <profile|provider/model>');
-      const planned = planWorkerSet(config, await catalog(), {
-        n: nArg, spec: specArg,
-        thinking: flagValue(values.thinking), mode: flagValue(values.mode), profile: values.profile,
+    if (sub === 'set' || sub === 'rm') {
+      throw new Error(`CLI command "worker ${sub}" was removed; use \`/factory worker ${sub}\` in the Paseo composer or the Factory settings.`);
+    }
+    if (!['pick', 'list', 'start'].includes(sub)) {
+      throw new Error(`Unknown worker command ${sub ?? '(none)'}; use \`paseo-factory worker pick|list|start\`, or \`/factory worker\` in the Paseo composer.`);
+    }
+    if (rest.length > 1) throw new Error(`worker ${sub} takes at most one scope`);
+    if (sub !== 'pick' && values.failed !== undefined) throw new Error('--failed is only accepted with worker pick');
+    if (values.failed !== undefined && !values.reason) throw new Error('worker pick --failed needs --reason <text>');
+    if (values.reason !== undefined && values.failed === undefined) throw new Error('worker pick --reason needs --failed <profile>');
+    if (sub === 'start') {
+      if (!values.task?.trim()) throw new Error('worker start needs --task <text>');
+      if (!env.PASEO_AGENT_ID) throw new Error('Run worker start from the active steer');
+    }
+    const client = await openRpc(connectRpc);
+    try {
+      const base = {
+        ...targetInput(rest[0] ?? null, env),
+        ...(env.PASEO_AGENT_ID ? { agentId: env.PASEO_AGENT_ID } : {}),
+        ...(cwd ? { cwd } : {}),
+      };
+      const res = sub === 'pick'
+        ? await client.call('factory.worker.pick', { ...base, ...(values.failed !== undefined ? { failed: values.failed, reason: values.reason } : {}) })
+        : sub === 'list'
+          ? await client.call('factory.worker.list', base)
+          : await client.call('factory.worker.start', {
+            ...base, callerId: env.PASEO_AGENT_ID, task: values.task,
+            ...(values.title ? { title: values.title } : {}), ...(values.apply ? { apply: true } : {}),
+          });
+      return out(values.json ? JSON.stringify(omit(res, ['text']), null, 2) : need(res, `factory.worker.${sub}`));
+    } finally {
+      await client.close();
+    }
+  }
+
+  if (!['status', 'resume', 'checkpoint', 'workers', 'switch', 'assign'].includes(command)) {
+    throw new Error(`Unknown command "${command}"; use \`/factory\` in the Paseo composer for management commands or \`paseo-factory --help\` for CLI commands.`);
+  }
+
+  const scope = oneScope(command, args);
+  const agentId = env.PASEO_AGENT_ID ?? null;
+  const base = targetInput(scope, env);
+
+  if (command === 'switch') {
+    if (!values.to) throw new Error('switch needs --to <slot>');
+    if (values.language && !['en', 'de'].includes(values.language)) throw new Error('--language must be en or de');
+  } else if (command === 'checkpoint') {
+    if (values['from-agent'] && values.task) throw new Error('use either --task or --from-agent');
+    if (!values.task && !values['from-agent'] && !values['from-steer']) throw new Error('checkpoint needs --task or --from-agent');
+  } else if (command === 'assign') {
+    if (!values.task) throw new Error('assign needs --task <text>');
+    if (values['expect-epoch'] !== undefined && !Number.isInteger(Number.parseInt(values['expect-epoch'], 10))) {
+      throw new Error('--expect-epoch needs an integer epoch from the preview');
+    }
+  }
+
+  const client = await openRpc(connectRpc);
+  try {
+    if (command === 'status') {
+      const res = await client.call('factory.status', { ...base, ...(!scope && agentId ? { agentId } : {}) });
+      noteAlias(res, scope, err);
+      return out(values.json ? JSON.stringify(omit(res, ['scope', 'deprecatedAlias', 'text']), null, 2) : need(res, 'factory.status'));
+    }
+    if (command === 'workers') {
+      const res = await client.call('factory.workers', {
+        ...base, ...(!scope && agentId ? { agentId } : {}),
+        ...(values.prune ? { prune: true } : {}), ...(values.apply ? { apply: true } : {}),
       });
-      return writePlanned({ planned, configPath, dryRun });
-    }
-    if (sub === 'rm') {
-      const [nArg, ...extra] = rest;
-      if (!nArg || extra.length) throw new Error('worker rm needs <n>');
-      const planned = planWorkerRemove(config, nArg);
-      return writePlanned({ planned, configPath, dryRun });
-    }
-    if (sub === 'pick' || sub === 'start' || sub === 'list') {
-      const starting = sub === 'start';
-      const listing = sub === 'list';
-      const [scopeArg, ...extra] = rest;
-      if (listing && values.failed !== undefined) throw new Error('--failed is only accepted with worker pick');
-      if (extra.length) throw new Error(`worker ${sub} takes at most one scope`);
-      if (starting && !values.task?.trim()) throw new Error('worker start needs --task <text>');
-      if (starting && values.failed !== undefined) throw new Error('--failed is only accepted with worker pick');
-      if (starting && !process.env.PASEO_AGENT_ID) throw new Error('Run worker start from the active steer');
-      if (values.failed !== undefined && !values.reason) throw new Error('worker pick --failed needs --reason <text>');
-      if (values.reason !== undefined && values.failed === undefined) throw new Error('worker pick --reason needs --failed <profile>');
-      let entries;
-      let repoPublic = null;
-      let discovery = null;
-      let scopeAddress = scopeArg ?? null;
-      let paseoState = null;
-      if (!scopeAddress) {
-        paseoState = await readPaseoState(client);
-        scopeAddress = defaultPickAddress(paseoState);
-      }
-      if (scopeAddress) {
-        paseoState ??= await readPaseoState(client);
-        const { entry: target, scope } = resolveTargetEntry(scopeAddress, paseoState);
-        [discovery] = await runner.discoverAll([target], { state: paseoState });
-        entries = discovery.providers ?? [];
-        const priv = discovery.github?.fork?.repo?.private;
-        repoPublic = priv === false ? true : priv === true ? false : null;
-        // Worktree scopes (owner/repo@branch) carry no fork info of their own: resolve visibility via the parent repo.
-        const parent = scope?.parent ?? discovery.scope?.parent;
-        const parentAddress = parent?.kind === 'github' ? parent.id : typeof parent === 'string' ? parent : scopeAddress.includes('@') ? scopeAddress.split('@')[0] : null;
-        if (repoPublic === null && parentAddress && parentAddress !== scopeAddress) {
-          try {
-            const { entry: parentEntry } = resolveTargetEntry(parentAddress, paseoState);
-            const [parent] = await runner.discoverAll([parentEntry], { state: paseoState });
-            const parentPriv = parent?.github?.fork?.repo?.private;
-            repoPublic = parentPriv === false ? true : parentPriv === true ? false : null;
-          } catch { /* unknown stays unknown (fail-closed) */ }
-        }
-      } else {
-        if (starting) throw new Error('worker start needs a Factory scope');
-        if (values.failed !== undefined) throw new Error('worker pick --failed needs a scope so the failure can be recorded');
-        entries = await catalog();
-      }
-      let profileHealth = readProfileHealth(discovery?.mainWorkspace?.metadata);
-      if (values.failed !== undefined) {
-        const failed = config.profiles?.[values.failed];
-        if (!failed) throw new Error(`Unknown profile "${values.failed}"`);
-        if (!discovery.mainWorkspace) throw new Error('worker pick --failed needs a factory main workspace with worker state');
-        const record = await storeProfileFailure({ client, workspaceId: discovery.mainWorkspace.id, profile: { ...failed, name: values.failed }, text: values.reason });
-        profileHealth = { ...(profileHealth ?? {}), [record.profile]: record };
-      }
-      const zerosub = await readZerosubState().catch(() => null);
-      // Single snapshot/selection for pick and start: start reuses this
-      // result, it never re-reads or re-resolves.
-      const selection = resolveWorkerPick(config, entries, { repoPublic, profileHealth, zerosub });
-      const { profile, skipped, zerosubAccount } = selection;
-      if (listing) {
-        // Same scope, snapshot and selection as pick: the arrow marks exactly
-        // the profile `worker pick` returns.
-        const rows = workerListRows(config, entries, selection);
-        const priority = workerPriority(config);
-        if (values.json) return console.log(JSON.stringify({ defaultProfile: config.workers?.defaultProfile ?? null, priority, chosen: profile?.name ?? null, repoPublic, entries: rows }, null, 2));
-        const lines = [`Worker priority (default "${config.workers?.defaultProfile ?? '-'}", → currently picked):`];
-        for (const row of rows) {
-          const tags = `${row.advisor ? ' [advisor]' : ''}${row.sensitive ? ' [sensitive]' : ''}`;
-          lines.push(`${row.chosen ? '→' : ' '} ${row.position}. ${row.profile}${tags} ${row.startable ? '✓' : '✗'} ${row.provider}/${row.model}${row.startable ? '' : ` (${row.issues.join('; ')})`}`);
-        }
-        if (!rows.length) lines.push('(no worker profiles configured)');
-        return console.log(lines.join('\n'));
-      }
-      if (!profile) {
-        const tried = skipped.length ? skipped.map((s) => `"${s.name}" (${s.reason})`).join('; ') : 'no worker profiles configured';
-        throw new Error(`No startable worker profile (tried ${tried})`);
-      }
-      if (starting) {
-        const result = await startScopedWorker({
-          client, status: steerStatus(discovery, { config }), callerId: process.env.PASEO_AGENT_ID,
-          aliases: discoveryScopeAliases(discovery),
-          profile, accountId: zerosubAccount, prompt: values.task, title: values.title, apply: Boolean(values.apply),
-          promptOptions: await readCliPromptOptions(),
-        });
-        if (values.json) return console.log(JSON.stringify(result, null, 2));
-        if (result.agentId) return console.log(`Started worker ${result.agentId} (${result.provider}) in ${result.scope}`);
-        return console.log(`Dry-run: worker in ${result.scope} (${result.provider})${result.accountId ? ` · account ${result.accountId}` : ''}; add --apply to start`);
-      }
+      noteAlias(res, scope, err);
       if (values.json) {
-        return console.log(JSON.stringify({ profile: profile.name, provider: profile.provider, model: profile.model, thinking: profile.thinking ?? null, mode: profile.mode ?? null, sensitive: isSensitiveProfile(config, profile.name), flags: paseoRunFlags(profile), skipped, repoPublic, zerosubAccount: zerosubAccount ?? null }, null, 2));
+        const payload = values.prune
+          ? (values.apply ? { scope: res.scope, epoch: res.epoch, removed: res.removed, applied: true } : { scope: res.scope, epoch: res.epoch, stale: res.stale, applied: false })
+          : { scope: res.scope, epoch: res.epoch, workers: res.workers };
+        return out(JSON.stringify(payload, null, 2));
       }
-      const lines = [
-        `Worker pick: "${profile.name}" (${profile.provider}/${profile.model})${isSensitiveProfile(config, profile.name) ? ' [sensitive: give only sanitized technical tasks]' : ''}${zerosubAccount ? ` [account ${zerosubAccount}]` : ''}`,
-        `paseo run ${paseoRunFlags(profile)}`,
-        ...skipped.map((s) => `skipped "${s.name}": ${s.reason}`),
-      ];
-      return console.log(lines.join('\n'));
+      return out(need(res, 'factory.workers'));
     }
-    throw new Error(`Unknown worker command ${sub ?? '(none)'}\n${USAGE}`);
-  }
-  if (command === 'steer') {
-    const [sub, ...rest] = args;
-    if (sub === 'list') {
-      if (rest.length) throw new Error('steer list takes no arguments');
-      const entries = await catalog();
-      const rows = slotOrder(config).map((slot, index) => {
-        const name = config.steers.slots[slot];
-        const problems = validateProfilesAgainstCatalog(config, entries, [name]);
-        const { profile } = resolveProfile(config, entries, steerFallbackList(config, slot), { role: 'steer', advisorSlot: isAdvisorSlot(config, slot) });
-        return {
-          position: index + 1, slot, profile: name,
-          provider: config.profiles[name]?.provider ?? '?', model: config.profiles[name]?.model ?? '?',
-          advisor: isAdvisorSlot(config, slot), sensitive: isSensitiveSlot(config, slot),
-          startable: !problems[name], issues: problems[name] ?? [],
-          fallback: profile && profile.name !== name ? profile.name : null,
-        };
-      });
-      if (values.json) return console.log(JSON.stringify({ slots: rows }, null, 2));
-      const lines = ['Steer slots (priority order, no scope: duplicates cannot be excluded):'];
-      for (const row of rows) {
-        const tags = `${row.advisor ? ' [advisor]' : ''}${row.sensitive ? ' [sensitive]' : ''}`;
-        lines.push(`${row.position}. ${row.slot} → "${row.profile}"${tags} ${row.startable ? '✓' : '✗'} ${row.provider}/${row.model}${row.startable ? '' : ` (${row.issues.join('; ')})`}${row.fallback ? ` → fallback "${row.fallback}"` : ''}`);
+    if (command === 'resume') {
+      const targetAgent = values.agent ?? agentId ?? null;
+      if (values.apply) {
+        const status = await client.call('factory.status', { ...base, ...(!scope && targetAgent ? { agentId: targetAgent } : {}) });
+        noteAlias(status, scope, err);
+        if (!values.agent || !(status.workers ?? []).some((w) => w.id === values.agent)) {
+          throw new Error('resume --apply needs --agent <interrupted worker id>');
+        }
+        const applied = await client.call('factory.resume.apply', { workspaceId: status.workspace.id, agentId: values.agent });
+        out(values.json ? JSON.stringify(applied, null, 2) : need(applied, 'factory.resume.apply', 'detail'));
+        if (applied.status === 'blocked') setExitCode(1);
+        return;
       }
-      return console.log(lines.join('\n'));
+      const res = await client.call('factory.resume', { ...base, ...(targetAgent ? { agentId: targetAgent } : {}) });
+      noteAlias(res, scope, err);
+      if (values.json) {
+        return out(JSON.stringify({
+          scope: res.scope, kind: res.kind ?? null, epoch: res.epoch ?? null, agentId: res.agentId ?? null, brief: res.brief,
+          openWorkers: res.openWorkers ?? [], interrupted: res.interrupted ?? null,
+          ...(res.restartInterrupted?.length ? { restartInterrupted: res.restartInterrupted } : {}),
+        }, null, 2));
+      }
+      return out(need(res, 'factory.resume', 'brief'));
     }
-    if (sub === 'set') {
-      const [targetArg, specArg, ...extra] = rest;
-      if (!targetArg || !specArg || extra.length) throw new Error('steer set needs <n|slot> <profile|provider/model>');
-      const planned = planSteerSet(config, await catalog(), {
-        target: targetArg, spec: specArg,
-        thinking: flagValue(values.thinking), mode: flagValue(values.mode), profile: values.profile,
-      });
-      return writePlanned({ planned, configPath, dryRun, hint: planned.hint });
+    if (command === 'checkpoint') {
+      const payload = {
+        ...base,
+        ...(values.task ? { task: values.task } : {}),
+        ...(values['from-agent'] ? { fromAgent: values['from-agent'] } : {}),
+        ...(values['from-steer'] ? { fromSteer: values['from-steer'] } : {}),
+        tests: values.test ?? [],
+        blockers: values.blocker ?? [],
+        ...(values.next ? { next: values.next } : {}),
+      };
+      const preview = await client.call('factory.checkpoint.preview', payload);
+      noteAlias(preview, scope, err);
+      const written = await client.call('factory.checkpoint', { ...payload, fingerprint: preview.fingerprint, ...(agentId ? { callerId: agentId } : {}) });
+      return out(JSON.stringify(need(written, 'factory.checkpoint', 'checkpoint'), null, 2));
     }
-    if (sub === 'rm') {
-      const [targetArg, ...extra] = rest;
-      if (!targetArg || extra.length) throw new Error('steer rm needs <n|slot>');
-      const planned = planSteerRemove(config, targetArg);
-      return writePlanned({ planned, configPath, dryRun });
+    if (command === 'switch') {
+      const common = { ...base, to: values.to, ...(agentId ? { callerId: agentId } : {}), ...(values.language ? { language: values.language } : {}) };
+      const preview = await client.call('factory.switch.preview', common);
+      noteAlias(preview, scope, err);
+      const result = values.apply
+        ? await client.call('factory.switch', {
+          ...common, fingerprint: preview.fingerprint, deliver: values['no-send'] ? 'none' : 'send',
+          notifyPrevious: Boolean(values['notify-previous']), ...(values.wait ? { wait: true } : {}),
+        })
+        : preview;
+      need(result, 'factory.switch', 'packet');
+      out(`${result.applied ? 'Switched' : 'Dry-run'}: Steer ${result.from} → ${result.to} (epoch ${result.epoch}) · handoff ${result.packetChars} characters, built without a model call${result.checkpoint ? '' : ' · NO task checkpoint'}${result.delivered ? ' · delivered' : ''}${result.deliveryPending ? ' · brief queued pending context renewal' : ''}${result.previousNotified ? ' · previous steer notified' : ''}${result.previousNoticeDetail ? ` · previous steer: ${result.previousNoticeDetail}` : ''}${result.deliveryError ? ` · delivery failed: ${result.deliveryError}` : ''}${result.renameError ? ` · title rename failed: ${result.renameError}` : ''}\n---\n${result.packet}`);
+      if (result.reply !== null && result.reply !== undefined) out(`--- reply of Steer ${result.to}\n${result.reply ?? '(no answer text)'}`);
+      return;
     }
-    throw new Error(`Unknown steer command ${sub ?? '(none)'}\n${USAGE}`);
+    const expectEpoch = values['expect-epoch'] !== undefined ? Number.parseInt(values['expect-epoch'], 10) : undefined;
+    const assignInput = {
+      ...base, task: values.task, tests: values.test ?? [], blockers: values.blocker ?? [],
+      ...(values.next ? { next: values.next } : {}), ...(values['report-to'] ? { reportTo: values['report-to'] } : {}),
+      ...(agentId ? { callerId: agentId } : {}), ...(expectEpoch !== undefined ? { expectEpoch } : {}),
+    };
+    const preview = await client.call('factory.assign.preview', assignInput);
+    noteAlias(preview, scope, err);
+    const result = values.apply
+      ? await client.call('factory.assign', { ...assignInput, fingerprint: preview.fingerprint, send: !values['no-send'] })
+      : preview;
+    if (!values.json) need(result, 'factory.assign', 'packet');
+    if (values.json) return out(JSON.stringify(omit(result, ['fingerprint', 'deprecatedAlias', 'scopeInfo']), null, 2));
+    out(`${result.applied ? 'Assigned' : 'Dry-run'}: ${result.scope} epoch ${result.epoch} · Steer ${result.slot} ${result.steerId}${result.domain ? ` · domain ${result.domain}` : ''}${(result.domainChildren ?? []).length ? ` · domain of ${result.domainChildren.length} (${result.domainChildren.join(', ')})` : ''}${result.previous ? '' : ' · NO previous checkpoint'}${result.delivered ? ' · delivered' : ''}${result.deliveryError ? ` · delivery failed: ${result.deliveryError}` : ''}`);
+    if (result.previous) out(`Replaces task: ${result.previous}`);
+    out(`---\n${result.packet}`);
+    if (!result.applied) out(`---\nNothing written. Apply: paseo-factory assign ${JSON.stringify(scope ?? result.scope)} --task ${JSON.stringify(values.task)} --apply`);
+  } finally {
+    await client.close();
   }
-  throw new Error(`Unknown model command ${command}\n${USAGE}`);
 }
 
-function formatDrain(result) {
-  const waited = `${Math.round((result.waitedMs ?? 0) / 1000)}s`;
-  const timeout = `${Math.round((result.timeoutMs ?? 0) / 1000)}s`;
-  const initial = result.initial ?? [];
-  if (result.clean && !initial.length) return 'Drain: no running factory agents — safe to restart.';
-  if (result.clean) return `Drain: ${initial.length} factory agent(s) idle after ${waited} — safe to restart.`;
-  const markedIds = new Set((result.marked ?? []).map((m) => m.agentId));
-  const lines = [`Drain: timeout after ${waited} (limit ${timeout}), ${result.running.length} still running — marked planned-restart, exit 2:`];
-  for (const a of result.running) {
-    const what = a.role === 'steer' && a.slot ? `steer ${a.slot}` : a.role;
-    lines.push(`  - ${a.id} ${what} in ${a.scopeId} ${a.status}${markedIds.has(a.id) ? ' — marked planned-restart' : ' — NOT marked (scope gone)'}`);
-  }
-  lines.push('Restart would interrupt them; run status/resume for the last answer tails.');
-  return lines.join('\n');
-}
-
-// Importable for tests (defaultPickAddress); only run when executed directly.
 const invokedAsMain = typeof process.argv[1] === 'string' && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (invokedAsMain) {
-  main().catch((error) => {
+  runCli().catch((error) => {
     console.error(error.message);
     process.exitCode = 1;
   });

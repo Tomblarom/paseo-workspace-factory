@@ -17,9 +17,9 @@ The plugin can flag long idle chats as cold. Optional `compact-warm` cleanup use
 
 ## Fresh steer
 
-`fresh <repo>` previews a context refresh for the active steer. `fresh <repo> --apply` tries a same-tab rewind and delivers the checkpoint as a resume brief. It uses the previous brief when that brief is available as a user message, or the first user message otherwise. Same-tab refresh keeps the agent, slot and epoch.
+`/factory fresh` previews a context refresh for the active steer and confirms via the Factory panel (or the Steer menu). It tries a same-tab rewind and delivers the checkpoint as a resume brief using the previous brief when available as a user message, or the first user message otherwise. Same-tab refresh keeps the agent, slot and epoch.
 
-`fresh <repo> --slot <S>` refreshes a non-active steer and `fresh <repo> --worker <id>` refreshes a worker. Each uses the agent's own note or the scope checkpoint. The preview names the new-agent fallback when a rewind is unavailable. In that case an active-steer refresh bumps the epoch, and `status` marks the previous holder superseded. A newly created steer has no parent, and a newly created worker keeps its previous parent when it has one. Creation receipts let a retry recover an interrupted creation.
+`/factory fresh` with a slot refreshes a non-active steer (or a worker via `/factory resume <scope> --agent <id> --apply` / panel). Each uses the agent's own note or the scope checkpoint. The preview names the new-agent fallback when a rewind is unavailable. In that case an active-steer refresh bumps the epoch, and `status` marks the previous holder superseded. A newly created steer has no parent, and a newly created worker keeps its previous parent when it has one. Creation receipts let a retry recover an interrupted creation.
 
 ## Lessons from live use
 

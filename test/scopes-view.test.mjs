@@ -118,13 +118,13 @@ test('candidates list unadopted workspaces with agents and a plan suggestion', (
     { id: 'agent-1', title: 'Explore', provider: 'codex', model: 'gpt-6.2-sol', status: 'idle', parentId: null },
     { id: 'agent-2', title: 'Child', provider: 'codex', model: 'gpt-6.2-sol', status: 'idle', parentId: 'agent-1' },
   ]);
-  assert.equal(plain.suggestedPlan, 'paseo-factory plan --local /tmp/scratch');
+  assert.equal(plain.suggestedPlan, '/factory plan --local /tmp/scratch');
   const wt = rows.find((r) => r.workspaceId === 'wks_wt');
   assert.equal(wt.worktree, true);
-  assert.equal(wt.suggestedPlan, 'paseo-factory plan workspace:wks_wt');
+  assert.equal(wt.suggestedPlan, '/factory plan workspace:wks_wt');
   const text = formatScopeCandidates(rows);
   assert.match(text, /wks_plain "Scratch" \/tmp\/scratch/);
-  assert.match(text, /plan: paseo-factory plan workspace:wks_wt/);
+  assert.match(text, /plan: \/factory plan workspace:wks_wt/);
   assert.match(text, /agent-1 "Explore" \(codex\/gpt-6\.2-sol, idle\)/);
   assert.match(text, /agent-2 "Child" \(codex\/gpt-6\.2-sol, idle\) parent agent-1/);
   assert.equal(formatScopeCandidates([]), '(no adoption candidates)');
@@ -133,5 +133,5 @@ test('candidates list unadopted workspaces with agents and a plan suggestion', (
 test('composer candidate suggestions use slash syntax and quote local paths', () => {
   const state = { workspaces: [{ id: 'wks_plain', workspaceDirectory: '/tmp/my project', metadata: {} }] };
   assert.equal(scopeCandidates(state, { factoryCmd: '/factory' })[0].suggestedPlan, '/factory plan --local "/tmp/my project"');
-  assert.equal(scopeCandidates(state)[0].suggestedPlan, "paseo-factory plan --local '/tmp/my project'");
+  assert.equal(scopeCandidates(state, { factoryCmd: 'paseo-factory' })[0].suggestedPlan, "paseo-factory plan --local '/tmp/my project'");
 });

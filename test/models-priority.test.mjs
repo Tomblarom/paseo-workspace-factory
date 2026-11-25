@@ -10,7 +10,7 @@ import {
   formatWorkerModel, paseoRunFlags, planSteerRemove, planSteerSet, planWorkerRemove,
   planWorkerSet, resolveProfile, resolveSteerTarget, steerFallbackList,
 } from '../plugin/server/core/models.mjs';
-import { defaultPickAddress } from '../src/cli.mjs';
+import { defaultPickAddress } from '../plugin/server/core/scope.mjs';
 import { LABEL, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
 
 const CONFIG = {

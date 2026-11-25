@@ -143,7 +143,7 @@ Without a project name, commands use the workspace you are in. The Factory panel
 
 **Chat got too long.** Save the checkpoint and run `/factory fresh`. Review whether the preview will rewind the current tab or create a new agent, then confirm. [Saving context](saving-context.md)
 
-**Back after a break.** The composer pill shows why the chat needs attention, for example **Paseo restarted**. Open it or the **Factory: context** panel for the suggested action. In the steer's own tab, `/factory resume` saves the checkpoint and sends a brief with the task and next step. For providers with `/clear` enabled and verified, it clears the session before delivering the brief. Use CLI `resume` or `/factory resume --brief` for the read-only report. [Cold context and resume](design/cold-context-resume.md)
+**Back after a break.** The composer pill shows why the chat needs attention, for example **Paseo restarted**. Open it or the **Factory: context** panel for the suggested action. In the steer's own tab, `/factory resume` saves the checkpoint and sends a brief with the task and next step. For providers with `/clear` enabled and verified, it clears the session before delivering the brief. Use CLI `paseo-factory resume` or `/factory resume --brief` for the read-only report. [Cold context and resume](design/cold-context-resume.md)
 
 **Many projects.** `/factory scopes` shows one line per project. A hub hands out work with `/factory assign <scope> --task "…"`. [Scopes and the hub](design/scopes-design.md)
 

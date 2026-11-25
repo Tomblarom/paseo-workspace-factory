@@ -281,8 +281,7 @@ test('status and handoff show the foreign worker workspace', async () => {
   assert.match(packet, new RegExp(`workspace ${foreign.id}`));
 });
 
-test('CLI usage documents --adopt-worker and --detach', () => {
+test('CLI usage points plan/setup to /factory', () => {
   const out = execFileSync('node', ['src/cli.mjs', '--help'], { encoding: 'utf8' });
-  assert.match(out, /--adopt-worker <agent-id>\[@A\]/);
-  assert.match(out, /--detach/);
+  assert.match(out, /\/factory in the Paseo composer/);
 });

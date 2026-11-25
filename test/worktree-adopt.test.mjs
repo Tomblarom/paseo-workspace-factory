@@ -428,10 +428,8 @@ test('apply adopts the worktree with fakes and creates no project or workspace',
   assert.equal(after.status, 'complete');
 });
 
-test('CLI usage documents worktree adoption', () => {
-  const out = execFileSync('node', ['src/cli.mjs', '--help'], { encoding: 'utf8' });
-  assert.match(out, /worktree/);
-  assert.match(out, /workspace:<id>/);
+test('CLI rejects removed plan command', () => {
+  assert.throws(() => execFileSync('node', ['src/cli.mjs', 'plan', 'workspace:wks_1'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), /\/factory plan/);
 });
 
 // --------------------------------- github --main adoption (#3): a worktree
@@ -492,18 +490,9 @@ function githubMainWorld() {
 
 const CLI = fileURLToPath(new URL('../src/cli.mjs', import.meta.url));
 
-function runCli(t, args, { reposFile = null } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'factory-main-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  writeFileSync(join(dir, 'config.json'), JSON.stringify(CONFIG));
-  const argv = ['--config', join(dir, 'config.json'), ...args];
-  if (reposFile) {
-    const reposPath = join(dir, 'repos.json');
-    writeFileSync(reposPath, JSON.stringify(reposFile));
-    argv.push('--repos-file', reposPath);
-  }
+function runCli(_t, args) {
   try {
-    const stdout = execFileSync('node', [CLI, ...argv], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    const stdout = execFileSync('node', [CLI, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
     return { status: 0, stdout, stderr: '' };
   } catch (error) {
     return { status: error.status ?? 1, stdout: error.stdout ?? '', stderr: error.stderr ?? '' };
@@ -626,16 +615,11 @@ test('--main: plan and status find the adopted worktree main without the flag', 
   assert.equal(status.workspace?.id, wt.id);
 });
 
-test('--main: CLI flag validation', (t) => {
-  let out = runCli(t, ['--help']);
-  assert.match(out.stdout, /--main workspace:<id>/);
-  out = runCli(t, ['plan', 'example/a', 'example/b', '--main', 'workspace:wks_abc123']);
+test('--main: CLI rejects removed plan and --main flag', (t) => {
+  let out = runCli(t, ['plan', MOBILE, '--main', 'workspace:wks_abc123']);
   assert.equal(out.status, 1);
-  assert.match(out.stderr, /--main needs exactly one workspace entry/);
+  assert.match(out.stderr, /main|\/factory plan/i);
   out = runCli(t, ['status', MOBILE, '--main', 'workspace:wks_abc123']);
   assert.equal(out.status, 1);
-  assert.match(out.stderr, /--main is only accepted with plan/);
-  out = runCli(t, ['plan', MOBILE, '--checkout', '/p/x', '--main', 'workspace:wks_abc123']);
-  assert.equal(out.status, 1);
-  assert.match(out.stderr, /checkout/i);
+  assert.match(out.stderr, /main/i);
 });

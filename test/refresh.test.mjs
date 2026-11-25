@@ -598,8 +598,8 @@ test('suggestSlotProfile distinguishes existing, ambiguous and missing matches',
   const twin = structuredClone(CONFIG);
   twin.profiles.twin = { provider: 'codex', model: 'gpt-6.2-sol', thinking: null, mode: null };
   assert.deepEqual(suggestSlotProfile(twin, 'codex', 'gpt-6.2-sol'), { kind: 'ambiguous', profiles: ['standard', 'twin'] });
-  assert.equal(formatSlotProfileSuggestion(CONFIG, 'B', 'codex', 'gpt-6.2-sol'), 'paseo-factory steer set B "standard"');
-  assert.equal(formatSlotProfileSuggestion(CONFIG, 'B', 'nope', 'nope'), 'paseo-factory steer set B nope/nope');
+  assert.equal(formatSlotProfileSuggestion(CONFIG, 'B', 'codex', 'gpt-6.2-sol'), '/factory steer set B "standard"');
+  assert.equal(formatSlotProfileSuggestion(CONFIG, 'B', 'nope', 'nope'), '/factory steer set B nope/nope');
   assert.match(formatSlotProfileSuggestion(twin, 'B', 'codex', 'gpt-6.2-sol'), /one of "standard", "twin"/);
 });
 
@@ -612,7 +612,7 @@ test('fresh with a fallback suggests aligning the slot profile afterwards', asyn
   const result = await freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, git: fakeGit(), lock: testLock, language: 'en' });
   assert.equal(result.profile, 'cheap');
   assert.equal(result.fallbackFrom, 'standard');
-  assert.equal(result.profileSuggestion, 'paseo-factory steer set A "cheap"');
+  assert.equal(result.profileSuggestion, '/factory steer set A "cheap"');
   assert.ok(result.warnings.some((w) => w.includes('using fallback "cheap"')));
 });
 
@@ -633,7 +633,7 @@ test('fresh warns when the live steer runs another model and suggests keeping it
   const result = await freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', git: fakeGit(), lock: testLock, language: 'en' });
   assert.equal(result.profile, 'cheap', 'fresh recreates with the slot profile');
   assert.ok(result.warnings.some((w) => w.includes('runs codex/gpt-6.2-sol') && w.includes('names muse/muse-spark-1.3-contributor')));
-  assert.equal(result.profileSuggestion, 'paseo-factory steer set B "standard"');
+  assert.equal(result.profileSuggestion, '/factory steer set B "standard"');
 });
 
 // ------------------------------------------------------- planner integration

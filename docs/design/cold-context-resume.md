@@ -209,7 +209,7 @@ New field `wsf.agents[id].needsResume = {reason, at}`, reasons `daemon-restart |
 
 ## Same-tab refresh via rewind
 
-`fresh` (CLI `paseo-factory fresh`, panel Fresh) can refresh a steer or worker in the same tab via `DaemonClient.rewindAgent(agentId, messageId, 'conversation')`, then deliver a refresh packet. Factory reads canonical timeline pages of at most 32 entries and stops at the saved brief anchor or the first usable `user_message`. The agent keeps its tab, id, labels, title, and epoch. The preview names the `refreshMode` and the applied run records `cleared` and `refreshed` with mode `rewind` in `wsf.agents`.
+`fresh` (`/factory fresh`, panel Fresh) can refresh a steer or worker in the same tab via `DaemonClient.rewindAgent(agentId, messageId, 'conversation')`, then deliver a refresh packet. Factory reads canonical timeline pages of at most 32 entries and stops at the saved brief anchor or the first usable `user_message`. The agent keeps its tab, id, labels, title, and epoch. The preview names the `refreshMode` and the applied run records `cleared` and `refreshed` with mode `rewind` in `wsf.agents`.
 
 Only real `user_message` entries are rewind points. A brief sent via `paseo send` from inside an agent (with `PASEO_AGENT_ID`) arrives as a `tool_call` (`paseo-agent-message`), and rewinding to it fails ("could not find user message"). The brief after a rewind therefore goes through `DaemonClient.sendMessage` with an explicit `messageId` and WITHOUT a caller agent id, so it arrives as `user_message` and the next refresh rewinds to exactly that brief. The brief's message id is recorded in `refreshed.briefMessageId` when it landed. (Keeping earlier agents' history in the tab is a later package; not implemented.)
 
