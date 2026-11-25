@@ -56,6 +56,8 @@ export interface SteerPillRow {
   liveStatus: string | null;
   advisor: boolean;
   active: boolean;
+  permissionNeeded: boolean;
+  stagedBrief: boolean;
   successor: string | null;
   state: SteerFaceState;
   warmth: string;
@@ -137,6 +139,8 @@ export function steerRowsOf(event: unknown): SteerPillRow[] {
       liveStatus: textOrNull(row.liveStatus),
       advisor: row.advisor === true,
       active: row.active === true,
+      permissionNeeded: row.permissionNeeded === true,
+      stagedBrief: row.stagedBrief === true,
       successor: textOrNull(row.successor),
       state: isSteerState(row.state) ? row.state : "unknown",
       warmth: typeof row.warmth === "string" && row.warmth !== "" ? row.warmth : "unknown",

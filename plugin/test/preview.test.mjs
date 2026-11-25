@@ -38,8 +38,17 @@ test("fingerprintOf ignores key order but not values or array order", () => {
   assert.notEqual(fingerprintOf({ a: 1 }), fingerprintOf({ a: 1, b: null }));
 });
 
-test("switchFingerprint binds repo, slots and epoch", () => {
-  const id = { repo: "o/r", from: "A", to: "B", epoch: 3 };
+test("switchFingerprint binds repo, slots, holders, workspace, epoch and checkpoint", () => {
+  const id = {
+    repo: "o/r",
+    workspaceId: "wks_main",
+    from: "A",
+    to: "B",
+    fromId: "agt_from",
+    toId: "agt_to",
+    epoch: 3,
+    checkpointAt: "2026-11-25T10:00:00.000Z",
+  };
   const base = switchFingerprint(id);
   assert.match(base, /^[0-9a-f]{16}$/);
   assert.equal(switchFingerprint({ ...id }), base);
@@ -47,6 +56,11 @@ test("switchFingerprint binds repo, slots and epoch", () => {
   assert.notEqual(switchFingerprint({ ...id, to: "C" }), base);
   assert.notEqual(switchFingerprint({ ...id, from: "B" }), base);
   assert.notEqual(switchFingerprint({ ...id, repo: "o/other" }), base);
+  assert.notEqual(switchFingerprint({ ...id, workspaceId: "wks_other" }), base);
+  assert.notEqual(switchFingerprint({ ...id, fromId: "agt_new" }), base);
+  assert.notEqual(switchFingerprint({ ...id, toId: "agt_new" }), base);
+  assert.notEqual(switchFingerprint({ ...id, checkpointAt: "2026-11-25T11:00:00.000Z" }), base);
+  assert.notEqual(switchFingerprint({ ...id, checkpointAt: null }), base);
 });
 
 test("checkpointFingerprint binds workspace, epoch and fields", () => {
@@ -70,14 +84,30 @@ test("checkpointFingerprint binds workspace, epoch and fields", () => {
   assert.notEqual(checkpointFingerprint({ ...id, epoch: null }), base);
 });
 
-test("freshFingerprint binds repo, slot and epoch", () => {
-  const id = { repo: "o/r", slot: "A", epoch: 3 };
+test("freshFingerprint binds repo, slot, holder, route, settings, epoch and checkpoint", () => {
+  const id = {
+    repo: "o/r",
+    workspaceId: "wks_main",
+    slot: "A",
+    from: "agt_old",
+    epoch: 3,
+    refreshMode: "rewind",
+    provider: "codex",
+    model: "gpt-6.2-sol",
+    checkpointAt: "2026-11-25T10:00:00.000Z",
+  };
   const base = freshFingerprint(id);
   assert.match(base, /^[0-9a-f]{16}$/);
   assert.equal(freshFingerprint({ ...id }), base);
   assert.notEqual(freshFingerprint({ ...id, epoch: 4 }), base);
   assert.notEqual(freshFingerprint({ ...id, slot: "B" }), base);
   assert.notEqual(freshFingerprint({ ...id, repo: "o/other" }), base);
+  assert.notEqual(freshFingerprint({ ...id, workspaceId: "wks_other" }), base);
+  assert.notEqual(freshFingerprint({ ...id, from: "agt_new" }), base);
+  assert.notEqual(freshFingerprint({ ...id, refreshMode: "new-agent" }), base);
+  assert.notEqual(freshFingerprint({ ...id, provider: "claude" }), base);
+  assert.notEqual(freshFingerprint({ ...id, model: "other" }), base);
+  assert.notEqual(freshFingerprint({ ...id, checkpointAt: null }), base);
 });
 
 test("switch and checkpoint fingerprints live in separate domains", () => {

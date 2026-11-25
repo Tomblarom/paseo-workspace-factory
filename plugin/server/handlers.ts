@@ -27,6 +27,7 @@ import {
   factoryScopes,
   factoryScopesCandidates,
   factoryStatus,
+  factorySteerBrief,
   factorySwitch,
   factorySwitchPreview,
   factorySteerAdd,
@@ -80,6 +81,7 @@ import { formatCatalog, paseoRunFlags, resolveProfile, usedProfilesByLiveSteers 
 import { applySteerAdd, formatSteerAddPreview, planSteerAdd } from "./factory/steer-add.js";
 import { planHash } from "./factory/planner.js";
 import { defaultCreateRewindClient } from "./factory/rewind.js";
+import { deliverSteerBrief, stageSteerBrief } from "./steer-brief.js";
 import { relocateScope } from "./factory/relocate.js";
 import { formatWorkersText, readWorkers, workersReport } from "./factory/supervision.js";
 import { assessWorker, readGitState } from "./factory/workers.js";
@@ -400,6 +402,7 @@ export async function previewFresh(
   const dry: any = await freshSteer(freshOptions);
   return {
     repo: dry.repo,
+    workspaceId: dry.workspaceId,
     slot: dry.slot,
     from: dry.from,
     epoch: dry.epoch,
@@ -409,11 +412,61 @@ export async function previewFresh(
     packet: dry.packet,
     packetChars: dry.packetChars,
     checkpoint: dry.checkpoint,
+    checkpointAt: dry.checkpointAt ?? null,
+    warnings: Array.isArray(dry.warnings) ? dry.warnings : [],
     refreshMode: dry.refreshMode ?? "new-agent",
-    fingerprint: freshFingerprint({ repo: dry.repo, slot: dry.slot, epoch: dry.epoch }),
+    fingerprint: freshFingerprint(freshIdentityOf(dry)),
     scope,
     deprecatedAlias,
   };
+}
+
+function freshIdentityOf(dry: any): {
+  repo: string;
+  workspaceId: string | null;
+  slot: string;
+  from: string | null;
+  epoch: number;
+  refreshMode: string | null;
+  provider: string | null;
+  model: string | null;
+  checkpointAt: string | null;
+} {
+  return {
+    repo: dry.repo,
+    workspaceId: typeof dry.workspaceId === "string" ? dry.workspaceId : null,
+    slot: dry.slot,
+    from: typeof dry.from === "string" ? dry.from : null,
+    epoch: dry.epoch,
+    refreshMode: typeof dry.refreshMode === "string" ? dry.refreshMode : null,
+    provider: typeof dry.provider === "string" ? dry.provider : null,
+    model: typeof dry.model === "string" ? dry.model : null,
+    checkpointAt: typeof dry.checkpointAt === "string" ? dry.checkpointAt : null,
+  };
+}
+
+/**
+ * Stages the applied packet for later delivery: on deliver=stage, or after a
+ * send that was attempted and failed (partial apply: the state stands, the
+ * retry stays available through factory.steer.brief). A staging failure never
+ * fails the apply; it is only reported.
+ */
+async function stageAppliedPacket(
+  paseo: any,
+  args: { workspaceId: unknown; agentId: unknown; packet: unknown; kind: string; deliver: unknown; deliveryError: unknown },
+): Promise<{ staged: boolean; stagedTo: string | null; stagingError: string | null }> {
+  const quiet = { staged: false, stagedTo: null, stagingError: null };
+  const packet = typeof args.packet === "string" && args.packet.trim() ? args.packet : null;
+  const agentId = typeof args.agentId === "string" && args.agentId ? args.agentId : null;
+  const workspaceId = typeof args.workspaceId === "string" && args.workspaceId ? args.workspaceId : null;
+  if (!packet || !agentId || !workspaceId) return quiet;
+  if (args.deliver !== "stage" && (args.deliveryError === null || args.deliveryError === undefined)) return quiet;
+  try {
+    await stageSteerBrief(paseo, { workspaceId, agentId, packet, kind: args.kind });
+  } catch (error) {
+    return { staged: false, stagedTo: null, stagingError: error instanceof Error ? error.message : String(error) };
+  }
+  return { staged: true, stagedTo: agentId, stagingError: null };
 }
 
 export async function applyFresh(
@@ -426,7 +479,7 @@ export async function applyFresh(
   const promptOptions = await loader.loadPromptOptions(paseo);
   const dryOptions: any = { client: paseo, discovery, config, apply: false, slot: input.slot ?? null, git, rewindClient: defaultCreateRewindClient, promptOptions };
   const dry: any = await freshSteer(dryOptions);
-  const fresh = freshFingerprint({ repo: dry.repo, slot: dry.slot, epoch: dry.epoch });
+  const fresh = freshFingerprint(freshIdentityOf(dry));
   if (fresh !== input.fingerprint) {
     throw new Error(
       "Something changed since the fresh preview (for example another switch). Open the preview again and confirm the new one.",
@@ -444,6 +497,8 @@ export async function applyFresh(
     promptOptions,
     config,
     apply: true,
+    send: input.deliver !== "stage",
+    notifyPrevious: input.notifyPrevious !== false,
     slot: input.slot ?? null,
     git,
     lookupReceipt: lookupCreationReceipt,
@@ -452,7 +507,30 @@ export async function applyFresh(
     rewindClient: defaultCreateRewindClient,
   };
   const applied: any = await freshSteer(applyOptions);
-  return applied;
+  if (!applied.applied) return applied;
+  const destination = typeof applied.to === "string" && applied.to ? applied.to : applied.from;
+  return {
+    ...applied,
+    ...(await stageAppliedPacket(paseo, {
+      workspaceId: dry.workspaceId,
+      agentId: destination,
+      packet: applied.packet,
+      kind: "fresh",
+      deliver: input.deliver,
+      deliveryError: applied.deliveryError,
+    })),
+  };
+}
+
+export async function deliverSteerBriefRpc(
+  input: RpcInput<typeof factorySteerBrief>,
+  { paseo }: PluginHandlerContext,
+): Promise<any> {
+  return deliverSteerBrief(paseo, {
+    workspaceId: input.workspaceId,
+    agentId: input.agentId,
+    action: input.action,
+  });
 }
 
 export async function openHistory(
@@ -614,6 +692,28 @@ async function discoverOne(
   return { config, runner, discovery, scope, deprecatedAlias };
 }
 
+function switchIdentityOf(dry: any): {
+  repo: string;
+  workspaceId: string | null;
+  from: string;
+  to: string;
+  fromId: string | null;
+  toId: string | null;
+  epoch: number;
+  checkpointAt: string | null;
+} {
+  return {
+    repo: dry.repo,
+    workspaceId: typeof dry.workspaceId === "string" ? dry.workspaceId : null,
+    from: dry.from,
+    to: dry.to,
+    fromId: typeof dry.fromId === "string" ? dry.fromId : null,
+    toId: typeof dry.toId === "string" ? dry.toId : null,
+    epoch: dry.epoch,
+    checkpointAt: typeof dry.checkpointAt === "string" ? dry.checkpointAt : null,
+  };
+}
+
 export async function previewSwitch(
   input: RpcInput<typeof factorySwitchPreview>,
   { paseo }: PluginHandlerContext,
@@ -632,13 +732,17 @@ export async function previewSwitch(
   const dry: any = await switchSteer(switchOptions);
   return {
     repo: dry.repo,
+    workspaceId: dry.workspaceId,
     from: dry.from,
     to: dry.to,
+    fromId: dry.fromId ?? null,
+    toId: dry.toId,
     epoch: dry.epoch,
     packet: dry.packet,
     packetChars: dry.packetChars,
     checkpoint: dry.checkpoint,
-    fingerprint: switchFingerprint({ repo: dry.repo, from: dry.from, to: dry.to, epoch: dry.epoch }),
+    checkpointAt: dry.checkpointAt ?? null,
+    fingerprint: switchFingerprint(switchIdentityOf(dry)),
     scope,
     deprecatedAlias,
   };
@@ -655,15 +759,37 @@ export async function applySwitch(
   const promptOptions = await loader.loadPromptOptions(paseo);
   const dryOptions: any = { client: paseo, discovery, promptOptions, toSlot: to, apply: false, git };
   const dry: any = await switchSteer(dryOptions);
-  const fresh = switchFingerprint({ repo: dry.repo, from: dry.from, to: dry.to, epoch: dry.epoch });
+  const fresh = switchFingerprint(switchIdentityOf(dry));
   if (fresh !== input.fingerprint) {
     throw new Error(
       "Something changed since the switch preview (for example another switch or checkpoint). Run /factory switch again and confirm the new preview.",
     );
   }
-  const applyOptions: any = { client: paseo, discovery, promptOptions, config, toSlot: to, apply: true, send: true, git, paseoCli: createPaseoCli() };
+  const applyOptions: any = {
+    client: paseo,
+    discovery,
+    promptOptions,
+    config,
+    toSlot: to,
+    apply: true,
+    send: input.deliver !== "stage",
+    notifyPrevious: input.notifyPrevious === true,
+    git,
+    paseoCli: createPaseoCli(),
+  };
   const applied: any = await switchSteer(applyOptions);
-  return applied;
+  if (!applied.applied) return applied;
+  return {
+    ...applied,
+    ...(await stageAppliedPacket(paseo, {
+      workspaceId: dry.workspaceId,
+      agentId: dry.toId,
+      packet: applied.packet,
+      kind: "switch",
+      deliver: input.deliver,
+      deliveryError: applied.deliveryError,
+    })),
+  };
 }
 
 interface CheckpointArgs {

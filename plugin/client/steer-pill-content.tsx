@@ -10,6 +10,8 @@ import { STEER_STATE_LABELS } from "../shared/steer-state.js";
 import { ResultView, type FactoryResultStyles } from "./factory-panel.js";
 import { getFactoryResult, subscribeFactoryResult } from "./factory-store.js";
 import { READONLY_FACTORY_RESULT_ACTIONS } from "./result-pill.js";
+import { SteerMenu } from "./steer-menu-content.js";
+import { getSteerResult, registerSteerHost, subscribeSteerResult } from "./steer-results.js";
 import {
   describeRoute,
   formatContextTokens,
@@ -55,12 +57,16 @@ function useSteerStyles(theme: PluginHostProps["theme"], compact: boolean) {
 }
 
 function SteerBody({
+  hostId,
   agentId,
+  workspaceId,
   theme,
   compact,
   close,
 }: {
+  hostId: string;
   agentId: string;
+  workspaceId: string;
   theme: PluginHostProps["theme"];
   compact: boolean;
   close: () => void;
@@ -84,8 +90,18 @@ function SteerBody({
     const timer = setTimeout(() => setNowMs(Date.now()), delay);
     return () => clearTimeout(timer);
   }, [nextBoundaryAt, nowMs]);
+  useEffect(() => {
+    registerSteerHost(hostId);
+  }, [hostId]);
   const [result, setResult] = useState(() => getFactoryResult());
   useEffect(() => subscribeFactoryResult(() => setResult(getFactoryResult())), []);
+  // This tab's own result wins; without one the last global /factory result shows.
+  const [ownResult, setOwnResult] = useState(() => getSteerResult(hostId, agentId));
+  useEffect(
+    () => subscribeSteerResult(hostId, agentId, () => setOwnResult(getSteerResult(hostId, agentId))),
+    [hostId, agentId],
+  );
+  const shown = ownResult ?? result;
   const resultStyles = useMemo<FactoryResultStyles>(
     () => ({
       label: styles.label,
@@ -173,8 +189,21 @@ function SteerBody({
         <Text style={styles.label}>
           Next step: {STEER_PRIMARY_ACTION_LABELS[self.primaryAction]}
         </Text>
-        <Text style={styles.section}>Last /factory result</Text>
-        <ResultView result={result} styles={resultStyles} actions={READONLY_FACTORY_RESULT_ACTIONS} />
+        <SteerMenu
+          hostId={hostId}
+          agentId={agentId}
+          workspaceId={workspaceId}
+          rows={rows}
+          self={self}
+          theme={theme}
+          compact={compact}
+          nowMs={nowMs}
+          close={close}
+        />
+        <Text style={styles.section}>
+          {ownResult ? "Last result for this steer" : "Last /factory result"}
+        </Text>
+        <ResultView result={shown} styles={resultStyles} actions={READONLY_FACTORY_RESULT_ACTIONS} />
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Close steer menu"
@@ -194,7 +223,9 @@ export function FactorySteerPillContent(props: PluginButtonContentProps) {
   return (
     <SteerBody
       key={props.agentId}
+      hostId={props.host.id}
       agentId={props.agentId}
+      workspaceId={props.workspaceId}
       theme={props.theme}
       compact={props.layout.compact}
       close={props.close}

@@ -134,12 +134,16 @@ export const factorySwitchPreview = defineRpc({
   }),
   output: z.looseObject({
     repo: z.string(),
+    workspaceId: z.string(),
     from: z.string(),
     to: z.string(),
+    fromId: z.string().nullable(),
+    toId: z.string(),
     epoch: z.number(),
     packet: z.string(),
     packetChars: z.number(),
     checkpoint: z.boolean(),
+    checkpointAt: z.string().nullable(),
     fingerprint: z.string(),
     scope: z.unknown().optional(),
     deprecatedAlias: z.boolean().optional(),
@@ -153,6 +157,10 @@ export const factorySwitch = defineRpc({
     workspaceId: z.string().min(1).optional(),
     to: z.string().min(1),
     fingerprint: z.string().min(1),
+    /** "stage" applies without sending; the packet is staged for later delivery. */
+    deliver: z.enum(["send", "stage"]).optional(),
+    /** Notify the outgoing steer (costs one of its turns). Default false. */
+    notifyPrevious: z.boolean().optional(),
   }),
   output: z.looseObject({
     repo: z.string(),
@@ -161,6 +169,10 @@ export const factorySwitch = defineRpc({
     epoch: z.number(),
     applied: z.boolean(),
     delivered: z.boolean(),
+    /** True when the packet was staged (deliver=stage or a failed send). */
+    staged: z.boolean().optional(),
+    stagedTo: z.string().nullable().optional(),
+    packet: z.string().optional(),
     packetChars: z.number().optional(),
     checkpoint: z.boolean().optional(),
     deliveryError: z.unknown().optional(),
@@ -306,15 +318,19 @@ export const factoryFreshPreview = defineRpc({
   }),
   output: z.looseObject({
     repo: z.string(),
+    workspaceId: z.string(),
     slot: z.string(),
     from: z.unknown().optional(),
     epoch: z.number(),
     profile: z.unknown().optional(),
     provider: z.unknown().optional(),
     model: z.unknown().optional(),
+    refreshMode: z.string().optional(),
     packet: z.string(),
     packetChars: z.number(),
     checkpoint: z.boolean(),
+    checkpointAt: z.string().nullable(),
+    warnings: z.array(z.string()).optional(),
     fingerprint: z.string(),
     scope: z.unknown().optional(),
     deprecatedAlias: z.boolean().optional(),
@@ -328,6 +344,10 @@ export const factoryFresh = defineRpc({
     repo: z.string().min(1).optional(),
     workspaceId: z.string().min(1).optional(),
     fingerprint: z.string().min(1),
+    /** "stage" applies without sending; the packet is staged for later delivery. */
+    deliver: z.enum(["send", "stage"]).optional(),
+    /** Notify the retired agent (costs one of its turns). Default true. */
+    notifyPrevious: z.boolean().optional(),
   }),
   output: z.looseObject({
     repo: z.string(),
@@ -337,11 +357,38 @@ export const factoryFresh = defineRpc({
     epoch: z.number(),
     applied: z.boolean(),
     delivered: z.boolean(),
+    /** The applied packet (for composer staging); empty on idempotent applies. */
+    packet: z.string().optional(),
+    refreshMode: z.string().optional(),
+    idempotent: z.boolean().optional(),
+    idempotentReason: z.string().nullable().optional(),
+    /** True when the packet was staged (deliver=stage or a failed send). */
+    staged: z.boolean().optional(),
+    stagedTo: z.string().nullable().optional(),
     packetChars: z.number().optional(),
     checkpoint: z.boolean().optional(),
     deliveryError: z.unknown().optional(),
     previousNotified: z.boolean().optional(),
     reused: z.boolean().optional(),
+  }),
+});
+
+// Sends or dismisses a staged steer brief (see factory.switch/factory.fresh
+// with deliver=stage, or a packet left staged after a failed send). Sending
+// is exactly-once: the stored packet is taken before the send, so a second
+// call reports that nothing is staged instead of duplicating the brief.
+export const factorySteerBrief = defineRpc({
+  name: "factory.steer.brief",
+  input: z.object({
+    workspaceId: z.string().min(1),
+    agentId: z.string().min(1),
+    action: z.enum(["send", "dismiss"]),
+  }),
+  output: z.looseObject({
+    agentId: z.string(),
+    delivered: z.boolean(),
+    dismissed: z.boolean().optional(),
+    detail: z.string(),
   }),
 });
 
@@ -728,6 +775,10 @@ const steerStateRow = z.looseObject({
   liveStatus: z.unknown().optional(),
   advisor: z.boolean().optional(),
   active: z.boolean().optional(),
+  /** A permission request is waiting on this tab ("Review request"). */
+  permissionNeeded: z.boolean().optional(),
+  /** A brief is staged for this tab (initialize it from the steer menu). */
+  stagedBrief: z.boolean().optional(),
   /** Live continuation or current slot holder for a superseded tab. */
   successor: z.string().nullable().optional(),
   state: z.enum([

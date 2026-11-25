@@ -230,6 +230,12 @@ function clip(text, max) {
   return value.length > max ? `${value.slice(0, max)} […]` : value;
 }
 
+/** Checkpoint revision for preview binding: the capture stamp, else the update stamp, else null. */
+function checkpointStamp(checkpoint) {
+  const stamped = checkpoint?.capturedAt ?? checkpoint?.updatedAt;
+  return typeof stamped === 'string' && stamped ? stamped : null;
+}
+
 const TEXT = {
   de: {
     head: (repo, e) => `Steer-Übergabe für ${repo}: Epoch ${e} → ${e + 1}.`,
@@ -854,8 +860,10 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
   const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory) : null;
   const packet = handoffWithBrief(status, { from: fromInfo, to, epoch: expected.epoch, git: gitSnapshot, lastMessage, language }, { discovery, git, language, workerModel, quotaSnapshot, quotaWarnPct, zerosub, promptOptions });
   const result = {
-    repo: status.repo, from: fromInfo.slot, to: toSlot, epoch: expected.epoch + 1, packet,
-    packetChars: packet.length, checkpoint: Boolean(status.checkpoint?.task), applied: false, delivered: false, deliveryError: null, reply: null, previousNotified: false, selfTakeover, renameError: null,
+    repo: status.repo, workspaceId: status.workspace.id, from: fromInfo.slot, to: toSlot,
+    fromId: from?.id ?? null, toId: to.id, epoch: expected.epoch + 1, packet,
+    packetChars: packet.length, checkpoint: Boolean(status.checkpoint?.task), checkpointAt: checkpointStamp(status.checkpoint),
+    applied: false, delivered: false, deliveryError: null, reply: null, previousNotified: false, selfTakeover, renameError: null,
   };
   if (!apply) return result;
 
@@ -926,10 +934,11 @@ function rewindFallbackWarning(fromId, outcomeStatus) {
  * rewind outcome; `failed` throws (nothing sent, nothing recorded, no new
  * agent), anything but `rewound` means the caller falls back to the new-agent
  * path. A landed rewind is recorded even when the brief send failed (the
- * rewind stands; resend the packet manually).
+ * rewind stands; resend the packet manually). With `send: false` the rewind
+ * lands without a brief (stage-only: the caller stages the returned packet).
  */
-async function runTabRewind({ client, workspaceId, agentId, packet, checkpoint, lock, now, rewindClient, previousBriefId }) {
-  const outcome = await rewindAndBrief(agentId, packet, { createClient: rewindClient, previousBriefId });
+async function runTabRewind({ client, workspaceId, agentId, packet, checkpoint, lock, now, rewindClient, previousBriefId, send = true }) {
+  const outcome = await rewindAndBrief(agentId, packet, { createClient: rewindClient, previousBriefId, ...(send ? {} : { skipBrief: true }) });
   if (outcome.status === 'failed') {
     throw new SwitchRefused(`Rewind of ${agentId} failed (${outcome.error ?? 'unknown error'}); nothing sent, nothing recorded, no new agent created`);
   }
@@ -948,7 +957,7 @@ async function runTabRewind({ client, workspaceId, agentId, packet, checkpoint, 
  * applied, or idempotent double-click), or `{ fallback }` when the caller
  * must continue with the new-agent path.
  */
-async function tryActiveRewind({ client, discovery, status, expected, slot, from, apply, language, git, lock, now, workerModel, rewindClient, promptOptions }) {
+async function tryActiveRewind({ client, discovery, status, expected, slot, from, apply, send = true, language, git, lock, now, workerModel, rewindClient, promptOptions }) {
   const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;
   const entry = agentState?.[from.id] ?? null;
   const previousBriefId = entry?.refreshed?.briefMessageId;
@@ -963,9 +972,10 @@ async function tryActiveRewind({ client, discovery, status, expected, slot, from
       lastMessage: await hintOf(client, from.id), language, workerModel, rewound: true, promptOptions,
     });
     return {
-      repo: status.repo, slot, kind: 'steer', from: from.id, to: from.id, epoch: expected.epoch, epochBumped: false, profile: null,
+      repo: status.repo, workspaceId: status.workspace.id, slot, kind: 'steer', from: from.id, to: from.id, epoch: expected.epoch, epochBumped: false, profile: null,
       provider: from.provider, model: from.model, idempotencyKey: null, packet, packetChars: packet.length,
-      checkpoint, applied: false, delivered: false, deliveryError: null, previousNotified: false, reused: false, renameError: null,
+      checkpoint, checkpointAt: checkpointStamp(status.checkpoint),
+      applied: false, delivered: false, deliveryError: null, previousNotified: false, reused: false, renameError: null,
       warnings: [], fallbackFrom: null, profileSuggestion: null, refreshMode: 'rewind', rewindPoint: point,
     };
   }
@@ -984,12 +994,12 @@ async function tryActiveRewind({ client, discovery, status, expected, slot, from
     note: entry?.note ?? null, noteAt: entry?.noteAt ?? null,
     lastMessage: await hintOf(client, from.id), language, workerModel, rewound: true, promptOptions,
   });
-  const { outcome } = await runTabRewind({ client, workspaceId: status.workspace.id, agentId: from.id, packet, checkpoint: status.checkpoint, lock, now, rewindClient, previousBriefId });
+  const { outcome } = await runTabRewind({ client, workspaceId: status.workspace.id, agentId: from.id, packet, checkpoint: status.checkpoint, lock, now, rewindClient, previousBriefId, send });
   if (outcome.status !== 'rewound') return { fallback: outcome.status };
   return {
     repo: status.repo, slot, kind: 'steer', from: from.id, to: from.id, epoch: expected.epoch, epochBumped: false, profile: null,
     provider: from.provider, model: from.model, idempotencyKey: null, packet, packetChars: packet.length,
-    checkpoint, applied: true, delivered: !outcome.sendError, deliveryError: outcome.sendError ?? null,
+    checkpoint, applied: true, delivered: send && !outcome.sendError, deliveryError: outcome.sendError ?? null,
     previousNotified: false, reused: false, renameError: null,
     warnings: [], fallbackFrom: null, profileSuggestion: null, refreshMode: 'rewind',
     rewindPoint: outcome.messageId ?? null, briefMessageId: outcome.briefMessageId ?? null,
@@ -1009,7 +1019,8 @@ async function tryActiveRewind({ client, discovery, status, expected, slot, from
  * is marked superseded (newest by creation wins) and selections ignore it.
  * `--slot <S>` refreshes a non-active steer and `--worker <id>` a worker the
  * same way but without any takeover: same slot/role, brief from the agent's
- * own note or the checkpoint, no epoch change, no active-steer write. Every
+ * own note or the checkpoint, no epoch change, no active-steer write. Pass
+ * `notifyPrevious: false` to skip the notice to the retired agent. Every
  * fresh agent is created without a parent link (a fresh worker keeps its
  * previous parent, never the caller). The packet preview names a placeholder
  * id; the applied packet carries the real one.
@@ -1017,8 +1028,11 @@ async function tryActiveRewind({ client, discovery, status, expected, slot, from
  * same-tab rewind first and only falls back to a new agent when no rewind
  * point exists or the provider lacks rewind; the preview names `rewind` vs
  * `new agent` in `refreshMode`.
+ * `send: false` stages the packet instead of delivering it (the caller sends
+ * or stages it, e.g. into the composer); `notifyPrevious: false` skips the
+ * notice to the retired agent (the efficient path shows a UI notice instead).
  */
-export async function freshSteer({ client, discovery, config, apply = false, slot: slotArg = null, workerId = null, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, now = () => new Date(), workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 90, zerosub = null, paseoCli = null, rewindClient = null, promptOptions }) {
+export async function freshSteer({ client, discovery, config, apply = false, send = true, notifyPrevious = true, slot: slotArg = null, workerId = null, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, now = () => new Date(), workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 90, zerosub = null, paseoCli = null, rewindClient = null, promptOptions }) {
   const status = steerStatus(discovery);
   if (!status.workspace || !status.state) throw new SwitchRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
@@ -1027,12 +1041,12 @@ export async function freshSteer({ client, discovery, config, apply = false, slo
   const wantWorker = workerId !== null && workerId !== undefined && String(workerId).trim() !== '';
   if (wantSlot && wantWorker) throw new SwitchRefused('fresh takes either --slot or --worker, not both');
   if (wantWorker) {
-    return freshWorkerAgent({ client, discovery, status, expected, workerId: String(workerId).trim(), config, apply, language, git, lookupReceipt, execute, workerModel, lock, now, rewindClient, promptOptions });
+    return freshWorkerAgent({ client, discovery, status, expected, workerId: String(workerId).trim(), config, apply, send, notifyPrevious, language, git, lookupReceipt, execute, workerModel, lock, now, rewindClient, promptOptions });
   }
   const target = wantSlot ? String(slotArg).trim().toUpperCase() : expected.activeSteer;
   if (!/^[A-Z]$/.test(target ?? '')) throw new SwitchRefused(`Not a steer slot: ${JSON.stringify(slotArg)}`);
   if (target !== expected.activeSteer) {
-    return freshNonActiveSteer({ client, discovery, status, expected, slot: target, config, apply, language, git, lookupReceipt, execute, workerModel, quotaSnapshot, quotaExhaustedPct, zerosub, lock, now, rewindClient, promptOptions });
+    return freshNonActiveSteer({ client, discovery, status, expected, slot: target, config, apply, send, notifyPrevious, language, git, lookupReceipt, execute, workerModel, quotaSnapshot, quotaExhaustedPct, zerosub, lock, now, rewindClient, promptOptions });
   }
   const slot = expected.activeSteer;
   const holders = status.steers.filter((s) => s.slot === slot);
@@ -1050,7 +1064,7 @@ export async function freshSteer({ client, discovery, config, apply = false, slo
   // fallback when no rewind point exists or the provider lacks rewind.
   let rewindFallback = null;
   if (typeof rewindClient === 'function' && single) {
-    const rewound = await tryActiveRewind({ client, discovery, status, expected, slot, from: single, config, apply, language, git, lock, now, workerModel, rewindClient, promptOptions });
+    const rewound = await tryActiveRewind({ client, discovery, status, expected, slot, from: single, config, apply, send, language, git, lock, now, workerModel, rewindClient, promptOptions });
     if (rewound && !rewound.fallback) return rewound;
     if (rewound?.fallback) rewindFallback = rewound.fallback;
   }
@@ -1096,9 +1110,10 @@ export async function freshSteer({ client, discovery, config, apply = false, slo
 
   const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory) : null;
   const result = {
-    repo: status.repo, slot, kind: 'steer', from: single?.id ?? null, to: null, epoch: expected.epoch + 1, epochBumped: true, profile: profile.name,
+    repo: status.repo, workspaceId: status.workspace.id, slot, kind: 'steer', from: single?.id ?? null, to: null, epoch: expected.epoch + 1, epochBumped: true, profile: profile.name,
     provider: profile.provider, model: profile.model, idempotencyKey: key, packet: '', packetChars: 0,
-    checkpoint: Boolean(status.checkpoint?.task), applied: false, delivered: false, deliveryError: null, previousNotified: false, reused: false, renameError: null,
+    checkpoint: Boolean(status.checkpoint?.task), checkpointAt: checkpointStamp(status.checkpoint),
+    applied: false, delivered: false, deliveryError: null, previousNotified: false, reused: false, renameError: null,
     warnings, fallbackFrom: profile.name !== profileName ? profileName : null, profileSuggestion,
     refreshMode: 'new-agent', ...(rewindFallback ? { rewindFallback } : {}),
   };
@@ -1155,17 +1170,21 @@ export async function freshSteer({ client, discovery, config, apply = false, slo
   });
   result.packet = handoffWithBrief(status, { from, to: { slot, id: freshId }, epoch: expected.epoch, git: gitSnapshot, lastMessage: await hintOf(client, from.id), language }, { discovery, git, language, workerModel, quotaSnapshot, quotaWarnPct, zerosub, promptOptions });
   result.packetChars = result.packet.length;
-  try {
-    await client.agents.ref(freshId).send(result.packet);
-    result.delivered = true;
-  } catch (error) {
-    result.deliveryError = error.message; // the fresh steer stands; resend the packet manually
+  if (send) {
+    try {
+      await client.agents.ref(freshId).send(result.packet);
+      result.delivered = true;
+    } catch (error) {
+      result.deliveryError = error.message; // the fresh steer stands; resend the packet manually
+    }
   }
-  try {
-    await client.agents.ref(from.id).send(previousSteerNotice({ slot, id: freshId }, expected.epoch + 1, language)); // costs one turn of the retired steer
-    result.previousNotified = true;
-  } catch {
-    result.previousNotified = false;
+  if (notifyPrevious) {
+    try {
+      await client.agents.ref(from.id).send(previousSteerNotice({ slot, id: freshId }, expected.epoch + 1, language)); // costs one turn of the retired steer
+      result.previousNotified = true;
+    } catch {
+      result.previousNotified = false;
+    }
   }
   return result;
 }
@@ -1177,7 +1196,7 @@ export async function freshSteer({ client, discovery, config, apply = false, slo
  * must continue with the new-agent path. `packetArgs` carries the
  * kind-specific buildRefreshPacket fields (slot or owner/title).
  */
-async function tryTabRewind({ client, discovery, status, expected, from, kind, packetArgs, apply, language, git, lock, now, workerModel, rewindClient, resultBase, promptOptions }) {
+async function tryTabRewind({ client, discovery, status, expected, from, kind, packetArgs, apply, send = true, language, git, lock, now, workerModel, rewindClient, resultBase, promptOptions }) {
   const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;
   const entry = agentState?.[from.id] ?? null;
   const previousBriefId = entry?.refreshed?.briefMessageId;
@@ -1194,9 +1213,10 @@ async function tryTabRewind({ client, discovery, status, expected, from, kind, p
     if (!point) return { fallback: 'unavailable' };
     const packet = await packetOf();
     return {
-      ...resultBase, from: from.id, to: from.id, epoch: expected.epoch, epochBumped: false, profile: null,
+      ...resultBase, workspaceId: status.workspace.id, from: from.id, to: from.id, epoch: expected.epoch, epochBumped: false, profile: null,
       provider: from.provider, model: from.model, idempotencyKey: null, packet, packetChars: packet.length,
-      checkpoint, applied: false, delivered: false, deliveryError: null, previousNotified: false, reused: false, renameError: null,
+      checkpoint, checkpointAt: checkpointStamp(status.checkpoint),
+      applied: false, delivered: false, deliveryError: null, previousNotified: false, reused: false, renameError: null,
       warnings: [], fallbackFrom: null, profileSuggestion: null, refreshMode: 'rewind', rewindPoint: point,
     };
   }
@@ -1211,12 +1231,12 @@ async function tryTabRewind({ client, discovery, status, expected, from, kind, p
     };
   }
   const packet = await packetOf();
-  const { outcome } = await runTabRewind({ client, workspaceId: status.workspace.id, agentId: from.id, packet, checkpoint: status.checkpoint, lock, now, rewindClient, previousBriefId });
+  const { outcome } = await runTabRewind({ client, workspaceId: status.workspace.id, agentId: from.id, packet, checkpoint: status.checkpoint, lock, now, rewindClient, previousBriefId, send });
   if (outcome.status !== 'rewound') return { fallback: outcome.status };
   return {
     ...resultBase, from: from.id, to: from.id, epoch: expected.epoch, epochBumped: false, profile: null,
     provider: from.provider, model: from.model, idempotencyKey: null, packet, packetChars: packet.length,
-    checkpoint, applied: true, delivered: !outcome.sendError, deliveryError: outcome.sendError ?? null,
+    checkpoint, applied: true, delivered: send && !outcome.sendError, deliveryError: outcome.sendError ?? null,
     previousNotified: false, reused: false, renameError: null,
     warnings: [], fallbackFrom: null, profileSuggestion: null, refreshMode: 'rewind',
     rewindPoint: outcome.messageId ?? null, briefMessageId: outcome.briefMessageId ?? null,
@@ -1230,7 +1250,7 @@ async function tryTabRewind({ client, discovery, status, expected, from, kind, p
  * agent id, so retries reuse the receipt while later refreshes get a new
  * key. The new agent is created without the active marker and parent-free.
  */
-async function freshNonActiveSteer({ client, discovery, status, expected, slot, config, apply, language, git, lookupReceipt, execute, workerModel, quotaSnapshot, quotaExhaustedPct, zerosub, lock = withLock, now = () => new Date(), rewindClient = null, promptOptions }) {
+async function freshNonActiveSteer({ client, discovery, status, expected, slot, config, apply, send = true, notifyPrevious = true, language, git, lookupReceipt, execute, workerModel, quotaSnapshot, quotaExhaustedPct, zerosub, lock = withLock, now = () => new Date(), rewindClient = null, promptOptions }) {
   const holders = status.steers.filter((s) => s.slot === slot);
   if (!holders.length) throw new SwitchRefused(`No live Steer ${slot} to refresh for ${status.repo}; plan and apply one first`);
   const live = holders.filter((h) => !h.superseded);
@@ -1238,7 +1258,7 @@ async function freshNonActiveSteer({ client, discovery, status, expected, slot, 
   if (single && BUSY.has(single.status)) throw new SwitchRefused(`Steer ${slot} is ${single.status}; stop it or wait for its turn to end first`);
   let rewindFallback = null;
   if (typeof rewindClient === 'function' && single) {
-    const rewound = await tryTabRewind({ client, discovery, status, expected, from: single, kind: 'steer', packetArgs: { slot }, apply, language, git, lock, now, workerModel, rewindClient, promptOptions, resultBase: { repo: status.repo, slot, kind: 'steer' } });
+    const rewound = await tryTabRewind({ client, discovery, status, expected, from: single, kind: 'steer', packetArgs: { slot }, apply, send, language, git, lock, now, workerModel, rewindClient, promptOptions, resultBase: { repo: status.repo, slot, kind: 'steer' } });
     if (rewound && !rewound.fallback) return rewound;
     if (rewound?.fallback) rewindFallback = rewound.fallback;
   }
@@ -1282,9 +1302,10 @@ async function freshNonActiveSteer({ client, discovery, status, expected, slot, 
   const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory) : null;
   const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;
   const result = {
-    repo: status.repo, slot, kind: 'steer', from: single?.id ?? null, to: null, epoch: expected.epoch, epochBumped: false, profile: profile.name,
+    repo: status.repo, workspaceId: status.workspace.id, slot, kind: 'steer', from: single?.id ?? null, to: null, epoch: expected.epoch, epochBumped: false, profile: profile.name,
     provider: profile.provider, model: profile.model, idempotencyKey: key, packet: '', packetChars: 0,
-    checkpoint: Boolean(status.checkpoint?.task), applied: false, delivered: false, deliveryError: null, previousNotified: false, reused: false, renameError: null,
+    checkpoint: Boolean(status.checkpoint?.task), checkpointAt: checkpointStamp(status.checkpoint),
+    applied: false, delivered: false, deliveryError: null, previousNotified: false, reused: false, renameError: null,
     warnings, fallbackFrom: profile.name !== profileName ? profileName : null, profileSuggestion,
     refreshMode: 'new-agent', ...(rewindFallback ? { rewindFallback } : {}),
   };
@@ -1331,17 +1352,21 @@ async function freshNonActiveSteer({ client, discovery, status, expected, slot, 
     lastMessage: await hintOf(client, from.id), language, workerModel, promptOptions,
   });
   result.packetChars = result.packet.length;
-  try {
-    await client.agents.ref(freshId).send(result.packet);
-    result.delivered = true;
-  } catch (error) {
-    result.deliveryError = error.message; // the fresh steer stands; resend the packet manually
+  if (send) {
+    try {
+      await client.agents.ref(freshId).send(result.packet);
+      result.delivered = true;
+    } catch (error) {
+      result.deliveryError = error.message; // the fresh steer stands; resend the packet manually
+    }
   }
-  try {
-    await client.agents.ref(from.id).send(refreshSteerNotice({ id: freshId }, slot, language)); // costs one turn of the retired steer
-    result.previousNotified = true;
-  } catch {
-    result.previousNotified = false;
+  if (notifyPrevious) {
+    try {
+      await client.agents.ref(from.id).send(refreshSteerNotice({ id: freshId }, slot, language)); // costs one turn of the retired steer
+      result.previousNotified = true;
+    } catch {
+      result.previousNotified = false;
+    }
   }
   return result;
 }
@@ -1353,7 +1378,7 @@ async function freshNonActiveSteer({ client, discovery, status, expected, slot, 
  * otherwise the provider defaults apply. The new worker keeps the
  * previous parent (the owning steer), never the calling agent.
  */
-async function freshWorkerAgent({ client, discovery, status, expected, workerId, config, apply, language, git, lookupReceipt, execute, workerModel, lock = withLock, now = () => new Date(), rewindClient = null, promptOptions }) {
+async function freshWorkerAgent({ client, discovery, status, expected, workerId, config, apply, send = true, notifyPrevious = true, language, git, lookupReceipt, execute, workerModel, lock = withLock, now = () => new Date(), rewindClient = null, promptOptions }) {
   const matches = (status.workers ?? []).filter((w) => w.id === workerId || w.id.startsWith(workerId));
   if (!matches.length) throw new SwitchRefused(`${workerId} is not a live worker of ${status.repo}`);
   if (matches.length > 1) throw new SwitchRefused(`Worker ${JSON.stringify(workerId)} is ambiguous (${matches.map((w) => w.id).join(', ')}); pass the full agent id`);
@@ -1363,7 +1388,7 @@ async function freshWorkerAgent({ client, discovery, status, expected, workerId,
   const title = from.title ?? 'Worker';
   let rewindFallback = null;
   if (typeof rewindClient === 'function') {
-    const rewound = await tryTabRewind({ client, discovery, status, expected, from, kind: 'worker', packetArgs: { owner, title }, apply, language, git, lock, now, workerModel, rewindClient, promptOptions, resultBase: { repo: status.repo, kind: 'worker', workerId: from.id, owner } });
+    const rewound = await tryTabRewind({ client, discovery, status, expected, from, kind: 'worker', packetArgs: { owner, title }, apply, send, language, git, lock, now, workerModel, rewindClient, promptOptions, resultBase: { repo: status.repo, kind: 'worker', workerId: from.id, owner } });
     if (rewound && !rewound.fallback) return rewound;
     if (rewound?.fallback) rewindFallback = rewound.fallback;
   }
@@ -1425,17 +1450,21 @@ async function freshWorkerAgent({ client, discovery, status, expected, workerId,
     lastMessage: await hintOf(client, from.id), language, workerModel, promptOptions,
   });
   result.packetChars = result.packet.length;
-  try {
-    await client.agents.ref(freshId).send(result.packet);
-    result.delivered = true;
-  } catch (error) {
-    result.deliveryError = error.message; // the fresh worker stands; resend the packet manually
+  if (send) {
+    try {
+      await client.agents.ref(freshId).send(result.packet);
+      result.delivered = true;
+    } catch (error) {
+      result.deliveryError = error.message; // the fresh worker stands; resend the packet manually
+    }
   }
-  try {
-    await client.agents.ref(from.id).send(refreshWorkerNotice({ id: freshId }, language)); // costs one turn of the retired worker
-    result.previousNotified = true;
-  } catch {
-    result.previousNotified = false;
+  if (notifyPrevious) {
+    try {
+      await client.agents.ref(from.id).send(refreshWorkerNotice({ id: freshId }, language)); // costs one turn of the retired worker
+      result.previousNotified = true;
+    } catch {
+      result.previousNotified = false;
+    }
   }
   return result;
 }

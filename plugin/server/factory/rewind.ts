@@ -160,15 +160,18 @@ export async function rewindSameTab(agentId, { url = null, cliPath = null, creat
  * - { status: 'rewound', messageId, briefMessageId: null, sendError }: the
  *   rewind landed but the brief did not; the caller records the rewind and
  *   reports the delivery error (resend manually), like a failed fresh send.
+ * - { status: 'rewound', messageId, briefMessageId: null }: with `skipBrief`
+ *   the rewind landed and no brief was attempted (stage-only: the caller
+ *   stages the packet itself, e.g. into the composer or for later delivery).
  * - { status: 'no-point' | 'unsupported' | 'unavailable', error? }: nothing
  *   was sent; the caller falls back to a new parent-free agent.
  * - { status: 'failed', error }: the rewind point exists but the rewind call
  *   failed; nothing was sent, and the caller must abort without side effects
  *   (no record, no new agent).
  */
-export async function rewindAndBrief(agentId, briefText, { url = null, cliPath = null, createClient = defaultCreateRewindClient, messageId: briefId = null, previousBriefId = null } = {}) {
+export async function rewindAndBrief(agentId, briefText, { url = null, cliPath = null, createClient = defaultCreateRewindClient, messageId: briefId = null, previousBriefId = null, skipBrief = false } = {}) {
   if (typeof agentId !== 'string' || !agentId) return { status: 'failed', error: 'missing agent id' };
-  if (typeof briefText !== 'string' || !briefText.trim()) return { status: 'failed', error: 'missing brief text' };
+  if (skipBrief !== true && (typeof briefText !== 'string' || !briefText.trim())) return { status: 'failed', error: 'missing brief text' };
   let client = null;
   try {
     const target = url ?? runtime().paseo.url;
@@ -193,6 +196,7 @@ export async function rewindAndBrief(agentId, briefText, { url = null, cliPath =
       if (isRewindUnsupportedError(error)) return { status: 'unsupported', error: error?.message ?? String(error) };
       return { status: 'failed', error: error?.message ?? String(error) };
     }
+    if (skipBrief === true) return { status: 'rewound', messageId, briefMessageId: null };
     const send = client.sendMessage ?? client.sendAgentMessage;
     const briefMessageId = typeof briefId === 'string' && briefId ? briefId : randomUUID();
     if (typeof send !== 'function') {

@@ -36,9 +36,13 @@ export function fingerprintOf(value: unknown): string {
 
 export interface SwitchPreviewIdentity {
   repo: string;
+  workspaceId: string | null;
   from: string;
   to: string;
+  fromId: string | null;
+  toId: string | null;
   epoch: number;
+  checkpointAt: string | null;
 }
 
 export function switchFingerprint(identity: SwitchPreviewIdentity): string {
@@ -61,8 +65,15 @@ export function checkpointFingerprint(identity: CheckpointPreviewIdentity): stri
 
 export interface FreshPreviewIdentity {
   repo: string;
+  workspaceId: string | null;
   slot: string;
+  /** Source holder agent id (new-agent) or the kept tab (rewind). */
+  from: string | null;
   epoch: number;
+  refreshMode: string | null;
+  provider: string | null;
+  model: string | null;
+  checkpointAt: string | null;
 }
 
 export function freshFingerprint(identity: FreshPreviewIdentity): string {

@@ -11,6 +11,7 @@ import {
   applySteerAddRpc,
   applySwitch,
   createResumeBriefBuilder,
+  deliverSteerBriefRpc,
   getCleanup,
   getModelsCatalog,
   getPlan,
@@ -88,6 +89,7 @@ import {
   factoryStatus,
   factorySteerAdd,
   factorySteerAddPreview,
+  factorySteerBrief,
   factorySteers,
   factorySwitch,
   factorySwitchPreview,
@@ -99,6 +101,7 @@ import {
   factoryConfigSettings,
   factoryDisplaySettings,
   factoryResumeSettings,
+  factorySteerMenuSettings,
   factorySupervisionSettings,
 } from "./shared/settings.js";
 
@@ -107,6 +110,7 @@ export default function contribute(server: PluginServerContext) {
   const cleanupSettings = server.registerSettings(factoryCleanupSettings);
   const supervisionSettings = server.registerSettings(factorySupervisionSettings);
   const resumeSettings = server.registerSettings(factoryResumeSettings);
+  server.registerSettings(factorySteerMenuSettings);
   const displaySettings = server.registerSettings(factoryDisplaySettings);
   const loader = createConfigLoader(hostSettings, registerPromptSettings(server, displaySettings));
   const readSettings = () => readCleanupSettings(cleanupSettings);
@@ -187,6 +191,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(factoryModelsSet, (input, ctx) => setModels(input, ctx, loader, hostSettings));
   server.handle(factorySteerAddPreview, (input, ctx) => previewSteerAdd(input, ctx, loader, hostSettings));
   server.handle(factorySteerAdd, (input, ctx) => applySteerAddRpc(input, ctx, loader));
+  server.handle(factorySteerBrief, deliverSteerBriefRpc);
   server.handle(factoryResumeApply, (input, ctx) => {
     bootOnce(ctx.paseo);
     return applyResumeRpc(input, ctx, loader, {

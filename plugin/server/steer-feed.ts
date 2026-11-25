@@ -57,6 +57,9 @@ export interface SteerFeedRow {
   liveStatus: string | null;
   advisor: boolean;
   active: boolean;
+  permissionNeeded: boolean;
+  /** A brief is staged for this tab (initialize it from the steer menu). */
+  stagedBrief: boolean;
   successor: string | null;
   state: string;
   warmth: string;
@@ -198,6 +201,8 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
     const membership: SteerMembership = ambiguous ? "ambiguous" : "resolved";
     const entry = asRecord(reads.entries[agent.id]);
     const status = typeof agent.status === "string" ? agent.status : null;
+    const permissionNeeded =
+      Array.isArray(agent.pendingPermissions) && agent.pendingPermissions.length > 0;
     const lastTurnEndedAt =
       typeof entry?.lastTurnEndedAt === "string" ? (entry.lastTurnEndedAt as string) : null;
     const lastEnd = stampMs(lastTurnEndedAt);
@@ -227,8 +232,7 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
       superseded,
       liveStatus: status,
       openTurn,
-      permissionNeeded:
-        Array.isArray(agent.pendingPermissions) && agent.pendingPermissions.length > 0,
+      permissionNeeded,
       provider,
       model,
       lastTurnEndedAt,
@@ -267,6 +271,10 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
       liveStatus: status,
       advisor: slot !== null && isAdvisorSlotOf(deps.config, slot),
       active: slot !== null && slot === reads.activeSteer,
+      permissionNeeded,
+      stagedBrief:
+        typeof asRecord(entry?.stagedBrief)?.packet === "string" &&
+        ((asRecord(entry?.stagedBrief)?.packet as string).trim() !== ""),
       successor: contLive ?? (superseded ? uniqueHolder : null),
       state: projection.state,
       warmth: projection.warmth,

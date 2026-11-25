@@ -142,6 +142,19 @@ export const factoryResumeSettings = defineSettings({
   }),
 });
 
+// Steer menu (step 3): how a new or replaced steer's brief is delivered, and
+// whether Refresh keeps the chat history (rewind) or clears it in place.
+// Defaults: the brief goes into the Paseo composer, refresh clears.
+export const factorySteerMenuSettings = defineSettings({
+  id: "factory-steer-menu",
+  scope: "host",
+  version: 1,
+  schema: z.object({
+    initializeNewSteer: z.enum(["send", "composer", "later"]).default("composer"),
+    keepChatHistory: z.boolean().default(false),
+  }),
+});
+
 // Worker supervision (S-B): wake cadence, watchdog, and failover.
 // Defaults mirror SUPERVISION_SETTINGS_DEFAULTS in shared/supervise.ts; {}
 // parses into a complete document. `enabled` off silences the whole

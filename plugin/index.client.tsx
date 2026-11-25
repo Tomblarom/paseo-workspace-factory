@@ -19,6 +19,9 @@ import { FactorySidebarItem } from "./client/factory-sidebar-item.js";
 import { submitFactoryCommand } from "./client/factory-submit.js";
 import { dismissFactoryResultPill, showFactoryResultPill } from "./client/result-pill.js";
 import { FactorySettings } from "./client/settings-factory.js";
+import { getFactoryResult } from "./client/factory-store.js";
+import { subscribeOpenFactory } from "./client/steer-nav.js";
+import { currentSteerHost, setSteerResult } from "./client/steer-results.js";
 import { FactorySteerPillContent } from "./client/steer-pill-content.js";
 import {
   attentionPillId,
@@ -73,6 +76,9 @@ export default function contribute(client: PluginClientContext) {
         workspaceId: workspace.id,
         agentId: agent.id,
       });
+      // The originating steer keeps its own result for its pill menu.
+      const own = getFactoryResult();
+      if (own) setSteerResult(currentSteerHost(), agent.id, own);
       if (outcome.openPanel) {
         openPanel("factory");
       } else if (outcome.pill) {
@@ -238,7 +244,17 @@ export default function contribute(client: PluginClientContext) {
   });
   const stopCheckpointDisplay = initCheckpointDisplay(client);
   void syncCheckpointDisplayFromSettings();
+  // "Open Factory" from a pill popover: the popover cannot open the panel
+  // itself, so the entry opens it (the panel defaults to this workspace).
+  const stopOpenFactory = subscribeOpenFactory((target) => {
+    try {
+      client.openPanel("factory", { workspaceId: target.workspaceId, agentId: target.agentId });
+    } catch {
+      // The panel surface is gone; the pill menu still holds the result.
+    }
+  });
   return () => {
+    stopOpenFactory();
     stopCheckpointDisplay();
     void attentionFeed.release().catch(() => {});
     for (const pill of attentionPills.values()) {

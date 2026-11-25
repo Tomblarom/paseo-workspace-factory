@@ -14,6 +14,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Text, View } from "react-native";
 import { CleanupSettingsSection } from "./settings-cleanup.js";
 import { ResumeSettingsSection } from "./settings-resume.js";
+import { SteerMenuSettingsSection } from "./settings-steer-menu.js";
 import { factoryModelsList } from "../shared/factory.js";
 import { formatModelList, profileBadges } from "../shared/models-format.js";
 import { factoryPromptSettings } from "../shared/prompt-settings.js";
@@ -100,6 +101,7 @@ export function FactorySettings(props: PluginSurfaceProps) {
       <FactoryConfigSections {...props} />
       <CleanupSettingsSection />
       <ResumeSettingsSection />
+      <SteerMenuSettingsSection />
       <DisplaySettingsSection />
     </View>
   );

@@ -69,6 +69,8 @@ test("a live steer projects a warm row with identity and flags", () => {
     liveStatus: "idle",
     advisor: false,
     active: true,
+    permissionNeeded: false,
+    stagedBrief: false,
     successor: null,
     state: "warm",
     warmth: "warm",
@@ -205,6 +207,34 @@ test("the feed tolerates missing settings, scopes and identities", () => {
   );
   assert.deepEqual(rows.map((row) => row.agentId), ["steer-a"]);
   assert.equal(collectSteerStates({ agents: [], workspaces: [] }, { settings: null, nowMs: NOW }).length, 0);
+});
+
+test("the feed exposes pending permissions and staged briefs", () => {
+  const rows = feed(
+    paseoState(
+      [
+        agent("steer-a", { pendingPermissions: [{ id: "perm-1" }] }),
+        agent("steer-b", { labels: { "wsf.scope": SCOPE, "wsf.role": "steer", "wsf.slot": "B" } }),
+      ],
+      {
+        entries: {
+          "steer-a": { ...TURN },
+          "steer-b": { ...TURN, stagedBrief: { packet: "PACKET", at: iso(NOW), kind: "switch" } },
+        },
+      },
+    ),
+  );
+  const byId = Object.fromEntries(rows.map((row) => [row.agentId, row]));
+  assert.equal(byId["steer-a"].permissionNeeded, true);
+  assert.equal(byId["steer-a"].stagedBrief, false);
+  assert.equal(byId["steer-b"].permissionNeeded, false);
+  assert.equal(byId["steer-b"].stagedBrief, true);
+  const empty = feed(
+    paseoState([agent("steer-a")], {
+      entries: { "steer-a": { ...TURN, stagedBrief: { packet: "  ", at: iso(NOW), kind: "switch" } } },
+    }),
+  );
+  assert.equal(empty[0].stagedBrief, false);
 });
 
 test("rows sort by scope, slot and agent", () => {

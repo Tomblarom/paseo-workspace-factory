@@ -165,6 +165,15 @@ Use the absolute binary path when `paseo-factory` is not on the hook's `PATH`; i
 
 The idle cleanup can execute its `fresh-recommended` hint the same way for Codex chats (no native `/clear`): Settings → Plugins → Factory → Idle agents → “Rewind ‘fresh’ Codex chats in place” (default off; Claude chats always keep their native `/clear`). Details: [cold context design](design/cold-context-resume.md#same-tab-refresh-via-rewind).
 
+## Steer menu
+
+Every steer tab carries a persistent Factory pill (for example `A · Warm`). Opening it shows the state, context size, cache estimate and quota windows, plus the steer menu: **Create steer…**, **Hand over to…** (submenu of holders A, B, C … with a reason on unavailable rows), **Resume… / Refresh context…** and **Open Factory**. Every write previews first, confirms, then applies through the same operations as `/factory steer add`, `/factory switch`, `/factory resume` and `/factory fresh`; an expired preview is re-requested for review. Handover and replacement send exactly one brief to the destination and no prompt to the outgoing tab. **Resume…** clears the context in place (Claude: native `/clear`); with **Keep chat history** it rewinds instead. Codex has no native clear, so a Codex refresh always rewinds.
+
+Settings → Plugins → Factory → Steer menu:
+
+- **Initialize new steer** (`initializeNewSteer` in the `factory-steer-menu` settings document): how a new or replaced steer's brief is delivered — send the brief at once, place the brief in the Paseo composer (default; goes out with the next own prompt, falls back to sending when no composer tab is open), or leave the composer empty and initialize later from the steer menu.
+- **Keep chat history** (`keepChatHistory`, default off): Refresh rewinds instead of clearing. Always on for Codex (no native clear).
+
 ## Advisors
 
 Second opinions ("Advisor") are policy only: the factory creates no advisor agents itself. Steers brief advisors through the native Paseo advisor mechanism (skill `paseo-advisor`); workers that get stuck end their answer with an `ADVISOR-REQUEST` block and stop, and the steer decides whether to answer, reject, or consult an advisor. Format and limits (read-only, close after the answer, sanitized context only) live in [steer instructions](steer-instructions.md#advisor-policy).
