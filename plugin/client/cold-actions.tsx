@@ -96,6 +96,7 @@ export function ColdActions({
       },
       freshText: { color: "#ffffff", fontSize: 13 },
       body: { color: theme.colors.foreground, fontSize: 14 },
+      hint: { color: theme.colors.foregroundMuted, fontSize: 12, lineHeight: 16, height: 64 },
       muted: { color: theme.colors.foregroundMuted, fontSize: 13 },
       error: { color: theme.colors.statusDanger, fontSize: 14 },
       ok: { color: theme.colors.statusSuccess, fontSize: 14 },
@@ -243,11 +244,9 @@ export function ColdActions({
           </Pressable>
         ) : null}
       </View>
-      {hover ? (
-        <Text style={styles.muted}>
-          {hover === "fresh" ? FRESH_HINT : hover === "cold" ? COLD_HINT : RESUME_HINT}
-        </Text>
-      ) : null}
+      <Text style={styles.hint} numberOfLines={4}>
+        {hover === "fresh" ? FRESH_HINT : hover === "cold" ? COLD_HINT : hover === "resume" ? RESUME_HINT : " "}
+      </Text>
       {error ? <Text style={styles.error}>{error}</Text> : null}
       {notice ? <Text style={styles.ok}>{notice}</Text> : null}
       {brief ? <Text style={styles.body}>{brief}</Text> : null}
