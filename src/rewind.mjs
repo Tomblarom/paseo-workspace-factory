@@ -1,8 +1,7 @@
 // Same-tab refresh via Paseo rewind (fresh --slot/--worker, auto-cleanup).
 // Rewinds the agent's conversation to its first user message instead of
 // creating a new agent: DaemonClient.rewindAgent(agentId, firstUserMessageId,
-// 'conversation'), where the message id comes from fetchAgentTimeline(id,
-// { limit: 0, projection: 'canonical' }). Agents driven only via `send` have
+// 'conversation'), using bounded canonical timeline pages. Agents driven only via `send` have
 // no user_message with a messageId and therefore no rewind point: callers fall
 // back to a new parent-free agent. Providers without rewind support answer the
 // rewind call with an unsupported error: callers fall back as well.
@@ -51,6 +50,35 @@ function selectRewindPoint(timelinePayload, previousBriefId) {
   return first;
 }
 
+const REWIND_PAGE_SIZE = 32;
+
+async function findRewindPoint(client, agentId, previousBriefId = null) {
+  const options = { limit: REWIND_PAGE_SIZE, projection: 'canonical' };
+  if (previousBriefId) {
+    let page = await client.fetchAgentTimeline(agentId, { ...options, direction: 'tail' });
+    let earliest = null;
+    while (true) {
+      const point = selectRewindPoint(page, previousBriefId);
+      if (point === previousBriefId) return point;
+      earliest = point ?? earliest;
+      if (!page?.hasOlder) return earliest;
+      const cursor = page.startCursor;
+      if (!cursor) throw new Error('Missing rewind timeline cursor');
+      page = await client.fetchAgentTimeline(agentId, { ...options, direction: 'before', cursor });
+      if (page?.staleCursor || page?.startCursor?.seq >= cursor.seq) throw new Error('Rewind timeline changed while paging');
+    }
+  }
+  let cursor;
+  while (true) {
+    const page = await client.fetchAgentTimeline(agentId, { ...options, direction: 'after', ...(cursor ? { cursor } : {}) });
+    if (page?.staleCursor) throw new Error('Rewind timeline changed while paging');
+    const point = firstRewindPoint(page);
+    if (point || !page?.hasNewer) return point;
+    if (!page.endCursor || (cursor && page.endCursor.seq <= cursor.seq)) throw new Error('Missing or unchanged rewind timeline cursor');
+    cursor = page.endCursor;
+  }
+}
+
 /**
  * Default client factory: the internal DaemonClient that ships with the
  * installed CLI (the high-level client has no rewind RPC). Mirrors the load
@@ -91,8 +119,7 @@ export async function readRewindPoint(agentId, { url = null, cliPath = null, cre
     const target = url ?? runtime().paseo.url;
     const bin = cliPath ?? paseoBinary();
     client = await createClient({ url: target, cliPath: bin });
-    const timeline = await client.fetchAgentTimeline(agentId, { limit: 0, projection: 'canonical' });
-    return selectRewindPoint(timeline, previousBriefId);
+    return await findRewindPoint(client, agentId, previousBriefId);
   } catch {
     return null;
   } finally {
@@ -126,13 +153,12 @@ export async function rewindSameTab(agentId, { url = null, cliPath = null, creat
     } catch (error) {
       return { status: 'unavailable', error: error?.message ?? String(error) };
     }
-    let timeline;
+    let messageId;
     try {
-      timeline = await client.fetchAgentTimeline(agentId, { limit: 0, projection: 'canonical' });
+      messageId = await findRewindPoint(client, agentId);
     } catch (error) {
       return { status: 'unavailable', error: error?.message ?? String(error) };
     }
-    const messageId = firstRewindPoint(timeline);
     if (!messageId) return { status: 'no-point' };
     if (typeof client.rewindAgent !== 'function') return { status: 'unsupported', error: 'daemon has no rewindAgent' };
     try {
@@ -179,13 +205,12 @@ export async function rewindAndBrief(agentId, briefText, { url = null, cliPath =
     } catch (error) {
       return { status: 'unavailable', error: error?.message ?? String(error) };
     }
-    let timeline;
+    let messageId;
     try {
-      timeline = await client.fetchAgentTimeline(agentId, { limit: 0, projection: 'canonical' });
+      messageId = await findRewindPoint(client, agentId, previousBriefId);
     } catch (error) {
       return { status: 'unavailable', error: error?.message ?? String(error) };
     }
-    const messageId = selectRewindPoint(timeline, previousBriefId);
     if (!messageId) return { status: 'no-point' };
     if (typeof client.rewindAgent !== 'function') return { status: 'unsupported', error: 'daemon has no rewindAgent' };
     try {

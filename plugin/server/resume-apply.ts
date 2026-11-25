@@ -2,11 +2,16 @@
 import { AGENTS_KEY } from "./factory/agent-state.js";
 import { withLock, workspaceLockName } from "./factory/lock.js";
 import { LEGACY_PREFIX, METADATA_KEY, readPaseoState } from "./factory/paseo.js";
-import { listScopes } from "./factory/scope.js";
+import { listScopes, sameScopeId } from "./factory/scope.js";
 import { lastAssistantText, parseCheckpointBlock } from "./factory/steer.js";
-import { cleanupIdentity, type ResumeClearSettings } from "../shared/idle-cleanup.js";
-import { deliverSteer, type DeliveryResult, type SteerDeliveryDeps } from "./steer-delivery.js";
+import { WORKERS_KEY } from "./factory/supervision.js";
+import { CLEANUP_DEFAULTS, cleanupIdentity, formatResumeMessage, type ResumeClearSettings } from "../shared/idle-cleanup.js";
+import { decideSteerDelivery, deliverSteer, type DeliveryResult, type SteerDeliveryDeps } from "./steer-delivery.js";
 import { resumeFingerprint } from "../shared/preview.js";
+import { agentContextInputs } from "./agent-context.js";
+import { projectAgentContext } from "../shared/steer-state.js";
+import { resolveZerosub } from "./zerosub-runtime.js";
+import { workerIdentityFromMetadata } from "../shared/supervise.js";
 
 const CHECKPOINT_KEY = `${METADATA_KEY}.checkpoint`;
 const LEGACY_CHECKPOINT_KEY = `${LEGACY_PREFIX}.checkpoint`;
@@ -28,6 +33,62 @@ export interface ResumeApplyInput {
 export interface ResumeApplyDeps extends SteerDeliveryDeps {
   note?: string;
   beforeDelivery?: () => Promise<void>;
+  refreshWorker?: (workspaceId: string, agentId: string) => Promise<{
+    to: string; delivered: boolean; deliveryError?: string | null; refreshMode: string;
+  }>;
+}
+
+async function applyWorkerResume(paseo: any, mainId: string, agentId: string, scopeId: string, deps: ResumeApplyDeps, lock: NonNullable<ResumeApplyDeps["lock"]>): Promise<ResumeApplyResult> {
+  return lock(`worker-resume-${agentId}`, async () => {
+    const ref = paseo.agents.ref(agentId);
+    const [workspace, snapshot, cleanup, routes] = await Promise.all([
+      paseo.workspaces.ref(mainId).refresh(), ref.refresh(), deps.getCleanupSettings?.(), resolveZerosub(deps),
+    ]);
+    const agent = snapshot?.agent;
+    const meta = workspace?.metadata ?? {};
+    const scope = asRecord(meta[METADATA_KEY]) ?? asRecord(meta[LEGACY_PREFIX]);
+    if (!scope || scope.retired === true) throw new Error("The worker scope is no longer active.");
+    const identity = cleanupIdentity(agent?.labels) ?? workerIdentityFromMetadata(agent);
+    const entry = asRecord(meta[AGENTS_KEY]?.[agentId]);
+    const worker = meta[WORKERS_KEY]?.[agentId];
+    if (typeof entry?.replacedBy === "string") {
+      return { agentId: entry.replacedBy, status: "blocked", cleared: false, detail: `Continue in replacement worker ${entry.replacedBy}.` };
+    }
+    if (identity?.role !== "worker" || !sameScopeId(identity.scopeId, scopeId) || agent.archivedAt || agent.background === true || (!entry?.interrupted && worker?.state !== "interrupted")) {
+      throw new Error("/factory resume is available for steers and interrupted workers.");
+    }
+    if (entry?.pendingAction || agent.activeTurn || agent.pendingPermissions?.length || agent.status === "initializing" || agent.status === "running") {
+      return { agentId, status: "blocked", cleared: false, detail: "The worker is busy. Try again after the current operation." };
+    }
+    const context = agentContextInputs(agent, entry, cleanup ?? CLEANUP_DEFAULTS, routes, deps.now ? Date.parse(deps.now()) : Date.now());
+    const { warmth, large } = projectAgentContext(context);
+    const replacementMessageId = !context.lastTurnEndedAt && typeof entry?.workerResumeMessageId === "string" ? entry.workerResumeMessageId : null;
+    const alreadyRenewed = context.cleanedAfter || replacementMessageId !== null;
+    if (alreadyRenewed && asRecord(entry?.refreshed)?.briefMessageId) {
+      return { agentId, status: "sent", cleared: false, renewed: true, detail: "The renewed worker already received its brief." };
+    }
+    const mode = decideSteerDelivery({ warmth: warmth.warmth, large, recovery: true, settings: null, keepChatHistory: true });
+    if (!alreadyRenewed && mode !== "send") {
+      if (!deps.refreshWorker) throw new Error("Worker context renewal is unavailable. Use fresh --worker for this worker.");
+      const refreshed = await deps.refreshWorker(mainId, agentId);
+      return {
+        agentId: refreshed.to,
+        status: refreshed.delivered ? "sent" : "blocked",
+        cleared: false,
+        renewed: true,
+        detail: refreshed.delivered
+          ? refreshed.refreshMode === "rewind" ? "Worker context rewound and resume brief sent." : `Resume brief sent to replacement worker ${refreshed.to}.`
+          : `Resume brief needs delivery in worker ${refreshed.to}${refreshed.deliveryError ? ` (${refreshed.deliveryError})` : ""}. Run /factory resume in that tab to retry.`,
+      };
+    }
+    const brief = await deps.buildBrief?.(paseo, mainId, agentId);
+    if (!brief) throw new Error("No worker resume brief is available.");
+    const at = asRecord(entry?.interrupted)?.at ?? worker?.pendingWake?.queuedAt ?? context.lastTurnEndedAt;
+    const messageId = replacementMessageId ?? (typeof at === "string" ? `wsf-worker-resume-${agentId}-${at}` : null);
+    if (messageId) await ref.send(formatResumeMessage(brief), { messageId });
+    else await ref.send(formatResumeMessage(brief));
+    return { agentId, status: "sent", cleared: false, detail: "Worker resume brief sent." };
+  });
 }
 
 export interface ResumeApplyResult extends DeliveryResult {
@@ -129,18 +190,18 @@ export async function applyResume(
   const state: any = await readPaseoState(paseo);
   const agent: any = (state.agents ?? []).find((a: any) => a?.id === agentId) ?? null;
   if (!agent) throw new Error(`Unknown agent ${JSON.stringify(agentId)}`);
-  const identity = cleanupIdentity(agent.labels ?? null);
-  if (!identity || identity.role !== "steer") {
+  const identity = cleanupIdentity(agent.labels ?? null) ?? workerIdentityFromMetadata(agent);
+  if (!identity) {
     throw new Error(
-      `/factory resume is only for steers; ${agentId} is not a steer. Open a steer tab (Steer A, B, …) and run it there.`,
+      `/factory resume is available for steers and interrupted workers; ${agentId} is outside that scope.`,
     );
   }
   if (agent.status === "running" || agent.status === "initializing") {
     throw new Error(
-      `Steer ${agentId} is running; try again after the turn ends (or stop it first, then resume).`,
+      `${identity.role === "steer" ? "Steer" : "Worker"} ${agentId} is running; try again after the turn ends (or stop it first, then resume).`,
     );
   }
-  const scope: any = listScopes(state).find((s: any) => s.id === identity.scopeId) ?? null;
+  const scope: any = listScopes(state).find((s: any) => sameScopeId(s.id, identity.scopeId)) ?? null;
   if (!scope) throw new Error(`Agent ${agentId} has no live factory scope`);
   const mainId: string = scope.workspaceId;
   const meta = scope.workspace?.metadata ?? {};
@@ -165,6 +226,7 @@ export async function applyResume(
       );
     }
   }
+  if (identity.role === "worker") return applyWorkerResume(paseo, mainId, agentId, identity.scopeId, deps, lock);
   if (entry?.pendingAction) {
     const kind = asRecord(entry.pendingAction)?.kind;
     return {

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { execFileSync } from 'node:child_process';
 import {
-  buildResumeBrief, BRIEF_BUDGET, readGitBrief, switchSteer, freshSteer,
+  buildHandoff, buildRefreshPacket, buildResumeBrief, BRIEF_BUDGET, parseCheckpointBlock, readGitBrief, switchSteer, freshSteer,
   writeCheckpoint, steerStatus,
 } from '../src/steer.mjs';
 import { updateAgentEntry, flagCheckpointInterrupted, AGENTS_KEY, clipText } from '../src/agent-state.mjs';
@@ -185,9 +185,55 @@ test('brief budget holds on adversarial input', () => {
     agentState, scope: d.scope, now: () => NOW,
     git: { branch: 'main', sha: 'a'.repeat(40), ahead: 0, behind: 0, changed: 10, paths: Array.from({ length: 10 }, (_, i) => `src/deeply/nested/module${i}/file.ts`) },
   });
-  assert.equal(brief.length, BRIEF_BUDGET);
+  assert.ok(brief.length <= BRIEF_BUDGET);
+  assert.match(brief, /See the stored scope CHECKPOINT/);
   assert.match(brief, /\[…brief truncated to 6000 characters\]$/);
   assert.equal(BRIEF_BUDGET, 6000);
+});
+
+test('an interrupted worker resumes its register task and latest checkpoint', () => {
+  const worker = { id: 'w-1', title: 'PWM', owner: 'A' };
+  const status = {
+    repo: REPO, state: { activeSteer: 'A', epoch: 3 }, steers: [], workers: [worker],
+    checkpoint: { task: 'Scope rollout', next: 'Publish the release' },
+    openWorkers: [{ id: worker.id, task: 'Repair PWM', state: 'interrupted' }],
+  };
+  const old = 'CHECKPOINT\ntask: Previous worker progress\nnext: Read the board';
+  const current = '```text\nCHECKPOINT\ntask: PWM fix implemented\ntests: npm test\nblockers: need the board\nnext: Run the hardware check\nstatus: partial\n```';
+  const agentState = { [worker.id]: { note: old, interrupted: { at: hoursAgo(1) } } };
+  const resume = buildResumeBrief(status, { agentId: worker.id, agentState, workerLastAnswer: current });
+  assert.match(resume, /Task: Repair PWM/);
+  assert.match(resume, /Worker interrupted/);
+  assert.deepEqual(parseCheckpointBlock(resume), {
+    task: 'PWM fix implemented', tests: ['npm test'], blockers: ['need the board'], next: 'Run the hardware check', status: 'partial',
+  });
+  assert.doesNotMatch(resume, /Scope rollout|Publish the release|Previous worker progress/);
+  assert.match(buildResumeBrief(status, { agentId: worker.id, agentState }), /Next step: Read the board/);
+  assert.match(buildResumeBrief(status, { agentId: worker.id }), /Worker CHECKPOINT: none recorded/);
+});
+
+test('handoff and refresh bound the packet while keeping the checkpoint, paths and unfinished workers', () => {
+  const status = {
+    repo: REPO,
+    state: { activeSteer: 'A', epoch: 3 },
+    workspace: { id: 'ws', directory: '/p/demo' },
+    checkpoint: { task: 'scope task '.repeat(3000), tests: ['npm test '.repeat(3000)], blockers: ['board '.repeat(3000)], next: 'verify the board '.repeat(3000) },
+    openWorkers: [{ id: 'unfinished-worker', state: 'interrupted', task: 'repair PWM' }],
+    workers: Array.from({ length: 120 }, (_, i) => ({ id: `w-${i}`, title: 'worker '.repeat(200), status: 'idle' })),
+  };
+  const args = { from: { id: 'a', slot: 'A' }, to: { id: 'b', slot: 'B' }, epoch: 3, git: { branch: 'main', sha: 'abc', changes: 1, paths: ['src/board.ts'] } };
+  for (const packet of [buildHandoff(status, args), buildRefreshPacket(status, { ...args, kind: 'steer', slot: 'A' })]) {
+    assert.ok(packet.length <= BRIEF_BUDGET);
+    assert.match(packet, /See the stored scope CHECKPOINT/);
+    assert.match(packet, /\[…brief truncated to 6000 characters\]$/);
+    assert.match(packet, /src\/board\.ts/);
+    assert.match(packet, /unfinished-worker/);
+    const checkpoint = parseCheckpointBlock(packet);
+    assert.match(checkpoint.task, /^scope task/);
+    assert.match(checkpoint.tests[0], /^npm test/);
+    assert.match(checkpoint.blockers[0], /^board/);
+    assert.match(checkpoint.next, /^verify the board/);
+  }
 });
 
 test('brief caps long sections without losing the tail', () => {

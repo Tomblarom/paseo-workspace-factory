@@ -126,10 +126,12 @@ export default function contribute(server: PluginServerContext) {
   const readSupervision = () => readSupervisionSettings(supervisionSettings);
   const readQuotaSettings = () => readSupervisionSettings(supervisionSettings);
   const readResume = () => readResumeSettings(resumeSettings);
+  const getZerosub = () => readZerosubStateSafe();
   const buildResumeBrief = createResumeBriefBuilder(loader);
   const delivery: SteerDeliveryDeps = {
     getCleanupSettings: readSettings,
     getResumeSettings: readResume,
+    getZerosub,
     buildBrief: buildResumeBrief,
     onTakeoverDelivered: async (paseo, batch, agentId) => {
       await recordTakeoverDelivery(paseo, batch, agentId);
@@ -151,7 +153,6 @@ export default function contribute(server: PluginServerContext) {
   let bootChained = false;
   // Fail-soft ZeroSub state for supervision wakes, failover, and the turn-end
   // hint; without ZeroSub every call resolves null and keeps legacy behavior.
-  const getZerosub = () => readZerosubStateSafe();
   const bootOnce = (paseo: unknown): void => {
     captureSupervisionPaseo(paseo);
     if (bootChained) {
@@ -221,7 +222,7 @@ export default function contribute(server: PluginServerContext) {
   });
   const serveAttention = (input: unknown, ctx: { paseo: any; push: (event: any) => Promise<void>; signal: AbortSignal }) => {
     bootOnce(ctx.paseo);
-    serveColdSubscription(input, ctx, { readSettings, getConfig: () => loader.loadEffectiveConfig() });
+    serveColdSubscription(input, ctx, { readSettings, getZerosub, getConfig: () => loader.loadEffectiveConfig() });
   };
   server.handle(factoryCold, serveAttention);
   server.handle(factoryAttention, serveAttention);

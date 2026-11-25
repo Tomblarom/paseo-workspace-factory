@@ -19,7 +19,7 @@ import {
   needsResumeForFailedTurn,
   scanCleanupEvidence,
 } from "../shared/idle-cleanup.js";
-import { firstUserText } from "../shared/supervise.js";
+import { firstUserText, workerIdentityFromMetadata } from "../shared/supervise.js";
 import { decideAssignmentReport } from "../shared/assignment-report.js";
 import { ASSIGNMENT_KEY } from "./factory/assign.js";
 import { extractTurnUsage, mergeTurnUsage } from "./quota.js";
@@ -125,7 +125,7 @@ async function runTurnBefore(payload: TurnBeforePayload, paseo: any, deps: TurnH
   const snap: any = await paseo.agents.ref(agentId).refresh().catch(() => null);
   const agent: any = snap?.agent ?? null;
   if (!agent || agent.archivedAt) return;
-  const identity = factoryIdentity(agent.labels ?? null);
+  const identity = factoryIdentity(agent.labels ?? null) ?? workerIdentityFromMetadata(agent);
   if (!identity) return;
   const paseoState: any = await readPaseoState(paseo);
   const scope: any = listScopes(paseoState).find((s: any) => s.id === identity.scopeId) ?? null;
@@ -134,6 +134,7 @@ async function runTurnBefore(payload: TurnBeforePayload, paseo: any, deps: TurnH
   const meta = scope.workspace?.metadata ?? {};
   const wsf = asRecord(meta[METADATA_KEY]);
   if (!wsf) return;
+  if (identity.role === "worker" && asRecord(asRecord(meta[AGENTS_KEY])?.[agentId])?.replacedBy) return;
   const now = deps.now ? deps.now() : new Date().toISOString();
   const update = updateAgentEntry as unknown as (args: any) => Promise<any>;
   await update({
@@ -320,8 +321,8 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
     console.log(`[factory] turn hook: agent ${agentId} gone; skip`);
     return;
   }
-  // Labels decide factory membership (hook payload carries none); usage feeds contextTokens.
-  const identity = factoryIdentity(agent.labels ?? null);
+  // Native workers can carry their scope in worker metadata instead of labels.
+  const identity = factoryIdentity(agent.labels ?? null) ?? workerIdentityFromMetadata(agent);
   if (!identity) return;
   const paseoState: any = await readPaseoState(paseo);
   const scope: any = listScopes(paseoState).find((s: any) => s.id === identity.scopeId) ?? null;
@@ -339,6 +340,7 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
   const agents = asRecord(meta[AGENTS_KEY]) ?? {};
   const checkpoint = asRecord(meta[CHECKPOINT_KEY]);
   const previous = asRecord(agents[agentId]);
+  if (identity.role === "worker" && previous?.replacedBy) return;
 
   let entries: unknown[] = [];
   try {

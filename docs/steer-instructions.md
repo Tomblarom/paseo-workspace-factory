@@ -35,8 +35,9 @@ Exactly one steer coordinates at a time.
   Stay in the turn until the work is done or every remaining item needs user
   input. On a wake-up run `<factory> resume` and check the worker register.
   A worker without a CHECKPOINT is not done: continue it
-  once or twice with the brief, then ask an advisor, then escalate with a
-  `domain:` or `hub:` blocker. Use a `user:` blocker only as the last step.
+  once or twice via `<factory> resume <scope> --agent <worker-id> --apply`. Then
+  ask an advisor and escalate with a `domain:` or `hub:` blocker if needed.
+  Use a `user:` blocker only as the last step.
 - A takeover request after a failed steer: run
   `<factory> switch <scope> --to <your slot> --apply`; if it is refused, stop.
   The caller may be the target itself: `switch` recognises it by `PASEO_AGENT_ID`,
@@ -115,7 +116,7 @@ If a worker fails with a capacity/quota/limit error, record it with `<factory> w
 
 ## Worker completion
 
-A worker without a CHECKPOINT block in its last answer, or with an interrupted record, is not done — even when it looks idle. Continue it with `paseo send` carrying the resume brief, then verify its result against the assignment.
+A worker without a CHECKPOINT block in its last answer, or with an interrupted record, is still unfinished. Run `<factory> resume <scope> --agent <worker-id> --apply` to deliver its own task and last CHECKPOINT through the plugin. Factory rewinds a cold or large context where possible and may create a replacement if rewind is unavailable. Verify the resulting worker's answer against the assignment.
 
 ## Task template
 

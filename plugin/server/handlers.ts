@@ -113,12 +113,14 @@ import {
   resolveTargetEntry,
   steerStatus,
   switchSteer,
+  workerResumeAnswer,
   writeCheckpoint,
 } from "./factory/steer.js";
 import type { ConfigLoader, HostSettingsReader } from "./config.js";
 import { getQuotaSampledAt, getQuotaSnapshot } from "./quota.js";
 import { settingsFromConfig, validateFactorySettings, type FactorySettingsValues } from "../shared/settings-validate.js";
 import { readZerosubStateSafe } from "./zerosub-runtime.js";
+import { workerIdentityFromMetadata } from "../shared/supervise.js";
 import { loadCatalog } from "./models-rpc.js";
 import { applySteerSettings, previewSteerSettings, revertSteerSettings } from "./steer-settings.js";
 
@@ -238,7 +240,7 @@ export async function getResume(
     const found: any = (await readPaseoState(paseo)).agents.find((a: any) => a.id === agentId);
     const scopeId =
     found?.labels?.[LABEL.scope] ?? found?.labels?.[`${LEGACY_PREFIX}.scope`] ??
-    found?.labels?.[LABEL.repo] ?? found?.labels?.[`${LEGACY_PREFIX}.repo`];
+    found?.labels?.[LABEL.repo] ?? found?.labels?.[`${LEGACY_PREFIX}.repo`] ?? workerIdentityFromMetadata(found)?.scopeId;
     if (typeof scopeId === "string" && scopeId) address = scopeId;
   }
   const config = await loader.loadEffectiveConfig();
@@ -254,6 +256,7 @@ export async function getResume(
   const git = createGit();
   const briefOptions: any = {
     agentId,
+    workerLastAnswer: await workerResumeAnswer(paseo, status, agentId),
     promptOptions: await loader.loadPromptOptions(paseo),
     agentState: discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null,
     git: status.workspace ? readGitBrief(git, status.workspace.directory) : null,
@@ -273,7 +276,7 @@ export async function getResume(
 }
 
 /**
- * Builds the resume brief for one steer (shared by the resume RPC and the
+ * Builds the resume brief for one agent (shared by the resume RPC and the
  * turn hook, which sends the brief after a verified resume clear). Scope
  * resolution mirrors getResume: the agent's scope label wins, else the
  * workspace address.
@@ -283,7 +286,7 @@ export function createResumeBriefBuilder(loader: ConfigLoader) {
     const found: any = (await readPaseoState(paseo)).agents.find((a: any) => a.id === agentId);
     const scopeId =
     found?.labels?.[LABEL.scope] ?? found?.labels?.[`${LEGACY_PREFIX}.scope`] ??
-    found?.labels?.[LABEL.repo] ?? found?.labels?.[`${LEGACY_PREFIX}.repo`];
+    found?.labels?.[LABEL.repo] ?? found?.labels?.[`${LEGACY_PREFIX}.repo`] ?? workerIdentityFromMetadata(found)?.scopeId;
     const address =
       typeof scopeId === "string" && scopeId ? scopeId : `workspace:${workspaceId}`;
     const config = await loader.loadEffectiveConfig();
@@ -295,6 +298,7 @@ export function createResumeBriefBuilder(loader: ConfigLoader) {
     const git = createGit();
     const briefOptions: any = {
       agentId,
+      workerLastAnswer: await workerResumeAnswer(paseo, status, agentId),
       promptOptions: await loader.loadPromptOptions(paseo),
       agentState: discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null,
       git: status.workspace ? readGitBrief(git, status.workspace.directory) : null,
@@ -322,6 +326,18 @@ export async function applyResumeRpc(
     {
       ...extra,
       buildBrief: extra?.buildBrief ?? createResumeBriefBuilder(loader),
+      refreshWorker: async (workspaceId, workerId) => {
+        const { config, discovery } = await discoverOne(paseo, loader, undefined, workspaceId);
+        const git = createGit();
+        return freshSteer({
+          client: paseo, discovery, config, workerId, git,
+          apply: true, notifyPrevious: false,
+          lookupReceipt: lookupCreationReceipt,
+          execute: createExecutors({ client: paseo, gh: createGh(), git, paseoCli: createPaseoCli() }),
+          rewindClient: extra?.rewindClient ?? defaultCreateRewindClient,
+          promptOptions: await loader.loadPromptOptions(paseo),
+        } as any);
+      },
       beforeDelivery: input.takeover === true ? async () => {
         try {
           tookOver = await takeoverIfNonActive(paseo, loader, input.agentId);

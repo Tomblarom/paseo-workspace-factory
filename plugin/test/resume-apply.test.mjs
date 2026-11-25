@@ -10,8 +10,11 @@ register("./ts-resolve-hooks.mjs", import.meta.url);
 
 const resumeApply = await import("../server/resume-apply.ts");
 const sweep = await import("../server/cold-sweep.ts");
+const { deliverSteer } = await import("../server/steer-delivery.ts");
+const { collectSteerStates } = await import("../server/steer-feed.ts");
 const {
   CLEAR_COMMAND,
+  CLEANUP_DEFAULTS,
   COMPACT_COMMAND,
   RESUME_CLEAR_DEFAULTS,
   RESUME_PENDING_REASON,
@@ -22,9 +25,10 @@ const {
 import { resumeFingerprint } from "../shared/preview.ts";
 import { factoryResumeSettings } from "../shared/settings.ts";
 import { factoryAttention, factoryCold, factoryResumeApply } from "../shared/factory.ts";
-import { LABEL, METADATA_KEY } from "../../src/paseo.mjs";
+import { LABEL, METADATA_KEY, readPaseoState } from "../../src/paseo.mjs";
 import { AGENTS_KEY } from "../../src/agent-state.mjs";
-import { CHECKPOINT_KEY } from "../../src/steer.mjs";
+import { CHECKPOINT_KEY, buildResumeBrief, freshSteer, steerStatus, workerResumeAnswer } from "../../src/steer.mjs";
+import { WORKERS_KEY } from "../../src/supervision.mjs";
 
 const REPO = "example-owner/example-repo";
 const NOW = new Date("2026-11-24T12:00:00.000Z").getTime();
@@ -284,7 +288,7 @@ test("applyResume guards workers and unknown agents, refuses running steers", as
   const paseo = fakeClient(world);
   await assert.rejects(
     resumeApply.applyResume(paseo, { workspaceId: ws.id, agentId: worker.id }, { lock: noLock }),
-    /only for steers/,
+    /steers and interrupted workers/,
   );
   await assert.rejects(
     resumeApply.applyResume(paseo, { workspaceId: ws.id, agentId: "agent-gone" }, { lock: noLock }),
@@ -296,6 +300,120 @@ test("applyResume guards workers and unknown agents, refuses running steers", as
     /running/,
   );
   assert.equal(world.calls.filter((c) => c[0] === "agent.send").length, 0);
+});
+
+function interruptedWorker({ minutes = 8, tokens = 2000, native = false } = {}) {
+  const world = makeWorld();
+  const { ws, steer } = provisioned(world);
+  const metadata = native ? { "wsf.worker": { scopeId: REPO, task: "Repair PWM" } } : {};
+  const labels = native ? {} : { [LABEL.role]: "worker", [LABEL.scope]: REPO, [LABEL.owner]: "A" };
+  const worker = addAgent(world, { title: "PWM", workspaceId: ws.id, provider: "claude", labels, metadata, lastUsage: { contextWindowUsedTokens: tokens } });
+  const stamp = at(NOW - minutes * MIN);
+  world.timelines[worker.id] = [{ item: { type: "assistant_message", text: CHECKPOINT_TEXT("PWM repair is ready") } }];
+  ws.metadata[WORKERS_KEY] = { [worker.id]: { task: "Repair PWM", state: "interrupted", pendingWake: { state: "interrupted", queuedAt: stamp } } };
+  ws.metadata[AGENTS_KEY] = { [worker.id]: { lastTurnEndedAt: stamp, interrupted: { at: stamp, outcome: "canceled" } } };
+  const discovery = () => ({ forkName: REPO, mainWorkspace: ws, steers: { labelled: [steer] }, workers: [worker], scope: { id: REPO } });
+  return { world, ws, worker, discovery, paseo: fakeClient(world) };
+}
+
+test("interrupted worker resume reuses a small, warm native worker and sends its brief", async () => {
+  const { world, ws, worker, discovery, paseo } = interruptedWorker({ minutes: 1, native: true });
+  const applied = await resumeApply.applyResume(paseo, { workspaceId: ws.id, agentId: worker.id }, {
+    lock: noLock, now: () => at(NOW),
+    refreshWorker: async () => assert.fail("warm worker should reuse context"),
+    buildBrief: async () => {
+      const status = steerStatus(discovery());
+      return buildResumeBrief(status, { agentId: worker.id, agentState: ws.metadata[AGENTS_KEY], workerLastAnswer: await workerResumeAnswer(paseo, status, worker.id) });
+    },
+  });
+  assert.equal(applied.status, "sent");
+  const [brief] = sendsTo(world, worker.id);
+  assert.match(brief, /Task: Repair PWM/);
+  assert.match(brief, /Next step: ship/);
+  assert.doesNotMatch(brief, /ship it/);
+  assert.equal(ws.metadata[CHECKPOINT_KEY].task, "ship it");
+});
+
+test("cold and large interrupted workers use fresh --worker before receiving their brief", async () => {
+  for (const options of [{ minutes: 8, tokens: 2000 }, { minutes: 1, tokens: 70_000 }]) {
+    const { world, ws, worker, discovery, paseo } = interruptedWorker(options);
+    const now = () => at(NOW);
+    const applied = await resumeApply.applyResume(paseo, { workspaceId: ws.id, agentId: worker.id }, {
+      lock: noLock, now,
+      buildBrief: async () => assert.fail("no brief on the old context"),
+      refreshWorker: (workspaceId, agentId) => {
+        assert.equal(workspaceId, ws.id);
+        return freshSteer({
+          client: paseo, discovery: discovery(), config: {}, workerId: agentId, apply: true, notifyPrevious: false, lock: noLock,
+          now: () => new Date(now()),
+          rewindClient: async () => ({
+            fetchAgentTimeline: async () => ({ entries: [{ item: { type: "user_message", messageId: "user-first" } }] }),
+            rewindAgent: async (...args) => world.calls.push(["rewind", ...args]),
+            sendMessage: async (id, brief) => world.calls.push(["rewind.brief", id, brief]),
+          }),
+        });
+      },
+    });
+    assert.equal(applied.status, "sent");
+    assert.deepEqual(sendsTo(world, worker.id), []);
+    const effects = world.calls.filter(([kind]) => kind.startsWith("rewind"));
+    assert.deepEqual(effects[0], ["rewind", worker.id, "user-first", "conversation"]);
+    assert.match(effects[1][2], /Task: Repair PWM[\s\S]*Next step: ship/);
+    assert.doesNotMatch(effects[1][2], /ship it/);
+  }
+});
+
+test("worker fresh fallback transfers supervision before sending to the replacement", async () => {
+  const { world, ws, worker, discovery, paseo } = interruptedWorker();
+  const applied = await resumeApply.applyResume(paseo, { workspaceId: ws.id, agentId: worker.id }, {
+    lock: noLock, now: () => at(NOW),
+    refreshWorker: (_workspaceId, agentId) => freshSteer({
+      client: paseo, discovery: discovery(), config: {}, workerId: agentId, apply: true, lock: noLock,
+      lookupReceipt: async () => null,
+      execute: async () => ({ agentId: addAgent(world, { workspaceId: ws.id, labels: worker.labels }).id }),
+      rewindClient: async () => ({ fetchAgentTimeline: async () => ({ entries: [] }) }),
+    }),
+  });
+  assert.equal(applied.status, "sent");
+  assert.notEqual(applied.agentId, worker.id);
+  assert.deepEqual(sendsTo(world, worker.id), []);
+  assert.match(sendsTo(world, applied.agentId)[0], /Task: Repair PWM[\s\S]*Next step: ship/);
+  assert.equal(ws.metadata[WORKERS_KEY][worker.id], undefined);
+  assert.equal(ws.metadata[WORKERS_KEY][applied.agentId].task, "Repair PWM");
+  assert.equal(ws.metadata[WORKERS_KEY][applied.agentId].pendingWake.state, "interrupted");
+  assert.equal(ws.metadata[AGENTS_KEY][worker.id].replacedBy, applied.agentId);
+  const old = await resumeApply.applyResume(paseo, { workspaceId: ws.id, agentId: worker.id }, { lock: noLock });
+  assert.equal(old.status, "blocked");
+  assert.equal(old.agentId, applied.agentId);
+  assert.deepEqual(sendsTo(world, worker.id), []);
+});
+
+test("the steer pill, attention feed and delivery agree on the account cache boundary", async () => {
+  for (const [auth, minutes, expected] of [
+    ["subscription", 5, "warm"], ["subscription", 60, "cold"],
+    ["api", 4, "cooling"], ["api", 5, "cold"], [null, 4, "cooling"], [null, 5, "cold"],
+  ]) {
+    const world = makeWorld();
+    const { ws, steer } = provisioned(world);
+    steer.lastUsage = { contextWindowUsedTokens: 2000 };
+    const stamp = at(NOW - minutes * MIN);
+    ws.metadata[AGENTS_KEY] = { [steer.id]: { lastTurnEndedAt: stamp, needsResume: { reason: "failed", at: stamp } } };
+    const paseo = fakeClient(world);
+    const routes = auth ? { accounts: [{ id: "route", family: "claude", auth }], agentAccount: { [steer.id]: "route" }, pending: {} } : null;
+    const [pill] = collectSteerStates(await readPaseoState(paseo), { settings: CLEANUP_DEFAULTS, nowMs: NOW, zerosub: routes });
+    const [attention] = await sweep.collectColdAgents(paseo, CLEANUP_DEFAULTS, NOW, null, routes);
+    assert.equal(pill.warmth, expected);
+    assert.equal(attention.warmth, expected);
+    assert.equal(pill.headerFacts.includes("Billing path unconfirmed"), auth === null);
+    const renewals = [];
+    const result = await deliverSteer(paseo, { workspaceId: ws.id, agentId: steer.id, text: "wake" }, {
+      lock: noLock, now: () => at(NOW), zerosub: routes,
+      runCleanupFn: async (...args) => { renewals.push(args); return {}; },
+    });
+    assert.equal(result.status, expected === "cold" ? "pending" : "sent");
+    assert.equal(renewals.length, expected === "cold" ? 1 : 0);
+    assert.deepEqual(sendsTo(world, steer.id), expected === "cold" ? [] : ["wake"]);
+  }
 });
 
 test("applyResume is idempotent while a cleanup is pending", async () => {

@@ -3,14 +3,12 @@ import type {
   PluginHostProps,
 } from "@getpaseo/plugin/client";
 import type { PluginButtonContentProps } from "@getpaseo/plugin/client";
-import { useAgent, useSettings, useSubscription } from "@getpaseo/plugin/client";
+import { useAgent, useSubscription } from "@getpaseo/plugin/client";
 import { useCallback, useMemo, useState } from "react";
 import { ScrollView, Text, View } from "react-native";
-import { CACHE_GROUPS, groupForProviderModel } from "../shared/cache-profiles.js";
+import type { CacheWarmth } from "../shared/cache-profiles.js";
 import { attentionStatus, contextActionFor, type AttentionReason } from "../shared/context-continuation.js";
 import { factoryCold } from "../shared/factory.js";
-import { CLEANUP_DEFAULTS } from "../shared/idle-cleanup.js";
-import { factoryCleanupSettings } from "../shared/settings.js";
 import { ColdActions } from "./cold-actions.js";
 
 const NO_INPUT = {};
@@ -20,6 +18,8 @@ interface AttentionRow {
   agentId: string;
   contextTokens: number;
   idleMinutes: number;
+  warmth?: CacheWarmth;
+  large?: boolean;
   hasHistory: boolean;
   reason?: AttentionReason;
   freshHint: string | null;
@@ -50,6 +50,8 @@ export function attentionRowsOf(event: unknown): AttentionRow[] {
       agentId: row.agentId,
       contextTokens: typeof row.contextTokens === "number" ? row.contextTokens : 0,
       idleMinutes: typeof row.idleMinutes === "number" ? row.idleMinutes : 0,
+      ...(row.warmth === "warm" || row.warmth === "cooling" || row.warmth === "cold" || row.warmth === "unknown" ? { warmth: row.warmth } : {}),
+      ...(typeof row.large === "boolean" ? { large: row.large } : {}),
       hasHistory: row.hasHistory === true,
       ...(isAttentionReason(row.reason) ? { reason: row.reason } : {}),
       freshHint:
@@ -96,8 +98,7 @@ function ColdBody({
 }) {
   const styles = useColdStyles(theme, compact);
   const self = useColdSelf(agentId);
-  const agent = useAgent(agentId, ({ provider, model, status }) => ({ provider, model, status }));
-  const cleanup = useSettings(factoryCleanupSettings);
+  const agent = useAgent(agentId, ({ status }) => ({ status }));
   if (self === undefined) {
     return (
       <View style={styles.screen}>
@@ -105,11 +106,7 @@ function ColdBody({
       </View>
     );
   }
-  const ttlMinutes = CACHE_GROUPS[groupForProviderModel(agent?.provider, agent?.model)].ttlMinutes;
-  const minTokens = cleanup.status === "ready"
-    ? cleanup.values.minContextTokens
-    : CLEANUP_DEFAULTS.minContextTokens;
-  const action = contextActionFor(self, { ttlMinutes, minContextTokens: minTokens });
+  const action = contextActionFor(self);
   return (
     <View style={styles.screen}>
       {self ? <Text style={styles.title}>{attentionStatus(self)}</Text> : null}

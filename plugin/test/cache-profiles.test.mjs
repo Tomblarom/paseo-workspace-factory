@@ -2,6 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   CACHE_GROUPS,
+  CACHE_CHECK_INTERVAL_MS,
+  cacheTtlForAgent,
+  resolveCacheTtl,
   EFFICIENCY_MIN_CONTEXT_TOKENS,
   compactAtMinutes,
   effectiveMinContextTokens,
@@ -18,7 +21,7 @@ test("cache reference table pins one TTL per model group", () => {
   assert.equal(CACHE_GROUPS.other.ttlMinutes, 30);
   assert.equal(CACHE_GROUPS.claude.cachedInput, "~0.1×");
   assert.equal(CACHE_GROUPS["openai-new"].cachedInput, "0.05× (Sol)");
-  assert.match(CACHE_GROUPS.other.note, /conservatively/);
+  assert.match(CACHE_GROUPS.other.note, /unknown warmth/);
 });
 
 test("parseGptVersion reads major/minor from model ids", () => {
@@ -73,23 +76,23 @@ test("isCleanupProfile accepts the three cost profiles", () => {
 });
 
 test("balanced compacts shortly before the cache cools (claude keeps 50)", () => {
-  assert.equal(compactAtMinutes("balanced", "claude"), 50);
-  assert.equal(compactAtMinutes("balanced", "openai-new"), 25);
-  assert.equal(compactAtMinutes("balanced", "other"), 25);
-  assert.equal(compactAtMinutes("balanced", "openai-old"), 8);
+  assert.equal(compactAtMinutes("balanced", CACHE_GROUPS["claude"]), 50);
+  assert.equal(compactAtMinutes("balanced", CACHE_GROUPS["openai-new"]), 25);
+  assert.equal(compactAtMinutes("balanced", CACHE_GROUPS["other"]), 25);
+  assert.equal(compactAtMinutes("balanced", CACHE_GROUPS["openai-old"]), 8);
 });
 
 test("efficiency compacts at half the TTL, comfort just before it", () => {
-  assert.equal(compactAtMinutes("efficiency", "claude"), 30);
-  assert.equal(compactAtMinutes("efficiency", "openai-new"), 15);
-  assert.equal(compactAtMinutes("efficiency", "openai-old"), 5);
-  assert.equal(compactAtMinutes("comfort", "claude"), 58);
-  assert.equal(compactAtMinutes("comfort", "openai-new"), 28);
-  assert.equal(compactAtMinutes("comfort", "openai-old"), 8);
+  assert.equal(compactAtMinutes("efficiency", CACHE_GROUPS["claude"]), 30);
+  assert.equal(compactAtMinutes("efficiency", CACHE_GROUPS["openai-new"]), 15);
+  assert.equal(compactAtMinutes("efficiency", CACHE_GROUPS["openai-old"]), 5);
+  assert.equal(compactAtMinutes("comfort", CACHE_GROUPS["claude"]), 58);
+  assert.equal(compactAtMinutes("comfort", CACHE_GROUPS["openai-new"]), 28);
+  assert.equal(compactAtMinutes("comfort", CACHE_GROUPS["openai-old"]), 8);
   for (const group of ["claude", "openai-new", "openai-old", "other"]) {
     for (const profile of ["efficiency", "balanced", "comfort"]) {
-      const at = compactAtMinutes(profile, group);
-      assert.ok(at >= 5, `${profile}/${group} respects the sweep cadence`);
+      const at = compactAtMinutes(profile, CACHE_GROUPS[group]);
+      assert.ok(at * 60_000 >= CACHE_CHECK_INTERVAL_MS, `${profile}/${group} respects the sweep cadence`);
       assert.ok(at < CACHE_GROUPS[group].ttlMinutes, `${profile}/${group} stays warm`);
     }
   }
@@ -101,4 +104,23 @@ test("efficiency lowers the context floor, balanced and comfort keep it", () => 
   assert.equal(effectiveMinContextTokens("efficiency", 2_000), 2_000);
   assert.equal(effectiveMinContextTokens("balanced", 60_000), 60_000);
   assert.equal(effectiveMinContextTokens("comfort", 60_000), 60_000);
+});
+
+test("a five-minute route leaves time for each cleanup profile before expiry", () => {
+  const ttl = resolveCacheTtl({ provider: "claude", claudeBilling: "api-5m" });
+  for (const profile of ["efficiency", "balanced", "comfort"]) {
+    assert.ok((ttl.ttlMinutes - compactAtMinutes(profile, ttl)) * 60_000 > CACHE_CHECK_INTERVAL_MS);
+  }
+});
+
+test("a pending account move cannot extend the confirmed cache window", () => {
+  const agent = { id: "worker", provider: "claude" };
+  const routes = {
+    agentAccount: { worker: "subscription" },
+    accounts: [{ id: "subscription", family: "claude", auth: "subscription" }],
+  };
+  assert.equal(cacheTtlForAgent(agent, routes).ttlMinutes, 60);
+  const pending = cacheTtlForAgent(agent, { ...routes, pending: { worker: "another-account" } });
+  assert.equal(pending.ttlMinutes, 5);
+  assert.equal(pending.billingUnconfirmed, true);
 });

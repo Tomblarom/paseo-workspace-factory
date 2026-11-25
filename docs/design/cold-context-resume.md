@@ -75,6 +75,8 @@ Hybrid tracking: a resolved compact spends one warm compaction (counter, capped 
 - Open items: `hub:` blockers.
 - Budget: ≤ 6000 characters, enforced by truncation and a test.
 
+Worker briefs carry the worker register assignment, the latest CHECKPOINT in the worker's answer or saved note, and its next step. Handoff and refresh packets also have a 6000-character cap. Their task, tests, blockers, next step, changed paths and unfinished worker entries are placed before optional notes. The truncation marker points to the stored CHECKPOINT and register.
+
 Commands: `paseo-factory resume [scope] [--agent <id>] [--json]` (scope and agent default to the caller's workspace and `PASEO_AGENT_ID`), `/factory resume --brief`, RPC `factory.resume`. All three only read: same agent, context untouched. The CLI semantics never change, because the AGENTS.md resume rule points at this read path. The clearing restart path is `/factory resume` (section R).
 
 ## C4 Instruction rule
@@ -92,7 +94,7 @@ Verify in C1 that a cleared Claude session still loads the project instructions 
 
 ## C5 Idle cleanup (plugin timer)
 
-Plugin server interval every 5 minutes (cleared in cleanup). All conditions must hold, checked again right before sending:
+The plugin checks once per minute. All conditions must hold, checked again right before sending:
 
 - provider in `providers` (default `["claude"]`), role in `roles` (steers and workers),
 - status idle, no pending permission, no `pendingAction`,
@@ -111,14 +113,14 @@ Automatic `fresh` (new agent) is not offered: creating agents stays behind plan 
 
 ### Cache reference and cost profiles
 
-The factory keeps a simplified prompt-cache reference per model group (constants in `plugin/shared/cache-profiles.ts`, pinned by tests; keep both in sync):
+`plugin/shared/cache-profiles.ts` resolves the provider and account cache window for the steer pill, attention feed, delivery and cleanup. A confirmed Claude subscription uses the 60-minute estimate. Claude API, Claude models routed through another provider and unconfirmed Claude accounts use five minutes. An unconfirmed route skips automatic warm compaction. The independent `idleMinutes` setting schedules native `/clear` in clear mode.
 
 | Group | Cache TTL | Cached input | Notes |
 |---|---|---|---|
-| Claude | 60 min (5 min on some billing paths) | ~0.1× | native `/clear` and `/compact` |
+| Claude | 60 min on a confirmed subscription, otherwise 5 min | ~0.1× | native `/clear` and `/compact` |
 | OpenAI GPT-5.6+ (gpt-6.x Sol/Terra/Astra) | 30 min (docs say 30 or more; measured <30min ~96%, 30–180min ~82%, >3h ≤30%) | 0.05× (Sol) | auto-compact around 360–420k; `/clear` is not native |
 | OpenAI ≤5.5 | 10 min (upper bound of the 5–10 min in_memory window; the ~30 min 24h variant behaves like GPT-5.6+) | model-dependent | |
-| Others (Muse, Copilot, …) | 30 min (conservative, like GPT-5.6+) | unknown | a Claude model on another provider follows the Claude row |
+| Others (Muse, Copilot, …) | Unknown on unsupported routes | unknown | a Claude model on another provider follows the short Claude window |
 
 The `profile` setting (default `balanced`) derives the per-group compact threshold — the idle time after which a still-warm agent is compacted:
 
@@ -127,6 +129,8 @@ The `profile` setting (default `balanced`) derives the per-group compact thresho
 | Maximum efficiency | half the TTL (Claude 30, GPT-5.6+ 15, ≤5.5 5 min) | from 10k tokens |
 | Balanced (default) | shortly before the TTL (Claude 50, GPT-5.6+ 25, ≤5.5 8 min) | configured floor (60k) |
 | Comfort (side product, as-is) | just before the TTL (Claude 58, GPT-5.6+ 28, ≤5.5 8 min) | configured floor (60k) |
+
+On a five-minute route, efficiency becomes eligible at two minutes. Balanced and comfort become eligible at three minutes.
 
 Hybrid compact/fresh rule (from the Codex compact-vs-fresh measurements): mid-package agents compact while warm, because the working detail survives; at package boundaries a fresh agent plus the brief is cheaper than another compact. In order: an already-cold context is never compacted (always `fresh-recommended`); after 2 warm compactions or with a post-compact base above ~60k tokens the decision is `fresh-recommended`; at a package boundary — a valid checkpoint/note with no open workers (running/blocked/interrupted) for steers, an idle worker with a fresh note — the decision is `fresh-recommended`. The hint is recorded on the entry (once per idle period) and never auto-creates an agent. Otherwise the compact needs quota on the agent's own account: the sweep checks the ZeroSub account the agent runs on (falling back to the provider pool only when no route is known) and blocks the compact on proven exhaustion, as does a flagged `needsResume: limit`; the hint itself is free and ignores both. Unknown quota fails closed: the sweep skips the compact when no reading shows headroom, so cleanup never spends unproven quota. Agents without a valid package state (no task checkpoint or note) are left to cool untouched: cooling costs nothing, and resume creates a fresh agent when needed. Guiding rule: no agent with a large context should go cold; a small, compacted context may go cold, because that is cheaper than keeping it warm forever.
 
@@ -149,14 +153,14 @@ The composer pill and **Factory: context** panel show the reason the chat needs 
 | Way | Agent | Context | When |
 |---|---|---|---|
 | `resume` (CLI / `/factory resume --brief`) | same | kept | only read, e.g. worker or user |
-| **`/factory resume`** | same | warm reuse, verified clear, or rewind | steer after restart, crash, limit, or cold |
+| **`/factory resume`** | same when possible | warm reuse, verified clear, or rewind/Fresh | steer after restart, crash, limit, or cold, or an interrupted worker |
 | `fresh` | same tab (rewind) or new tab (fallback) | empty | agent broken or model change |
 | `switch` | other slot | — | handover |
 | C5 compact/clear | same | auto | idle, without user |
 
 ### Flow and safety (E2)
 
-1. Guard: steers only. Workers get an error toast.
+1. The steer follows the flow below. An interrupted worker gets its own brief. A small warm worker reuses its tab. A cold, large, or unknown worker context goes through `fresh --worker` for rewind or a replacement worker. When a replacement is needed, the register assignment follows it. Coordinators can apply the same policy with `paseo-factory resume <scope> --agent <worker-id> --apply`.
 2. Preview fingerprint as in switch/fresh (agent status, sessionId, checkpoint time). `/factory resume` in the steer's own tab counts as confirmation, because the target is the caller itself. For a foreign agent (`--agent <id>`): preview in the panel, confirm by button.
 3. **Running → no clearing.** The RPC answers "running; retry after the turn ends" as an error toast. No auto-stop; the user can `stop` first.
 4. Save the checkpoint: the agent's last answer is read with the `auto-checkpoint` parser (as `checkpoint --from-agent`). A valid CHECKPOINT block newer than the scope checkpoint is written; otherwise the scope checkpoint stays and the brief carries `interrupted` if needed. The delivery decision follows checkpoint capture.
@@ -200,7 +204,7 @@ New field `wsf.agents[id].needsResume = {reason, at}`, reasons `daemon-restart |
 
 ## Same-tab refresh via rewind
 
-`fresh` (CLI `paseo-factory fresh`, panel Fresh) refreshes steers and workers in the same tab via Paseo rewind instead of creating a new agent: `DaemonClient.rewindAgent(agentId, firstUserMessageId, 'conversation')` with the first `user_message` from `fetchAgentTimeline(id, { limit: 0, projection: 'canonical' })`, then the refresh packet as the resume brief. The agent keeps its tab, id, labels and title; no epoch change, no takeover, no retire notice, no superseded twin. The preview names `rewind` vs `new agent` (`refreshMode`); the applied run records `cleared`/`refreshed` with mode `rewind` in `wsf.agents`.
+`fresh` (CLI `paseo-factory fresh`, panel Fresh) can refresh a steer or worker in the same tab via `DaemonClient.rewindAgent(agentId, messageId, 'conversation')`, then deliver a refresh packet. Factory reads canonical timeline pages of at most 32 entries and stops at the saved brief anchor or the first usable `user_message`. The agent keeps its tab, id, labels, title, and epoch. The preview names the `refreshMode` and the applied run records `cleared` and `refreshed` with mode `rewind` in `wsf.agents`.
 
 Only real `user_message` entries are rewind points. A brief sent via `paseo send` from inside an agent (with `PASEO_AGENT_ID`) arrives as a `tool_call` (`paseo-agent-message`), and rewinding to it fails ("could not find user message"). The brief after a rewind therefore goes through `DaemonClient.sendMessage` with an explicit `messageId` and WITHOUT a caller agent id, so it arrives as `user_message` and the next refresh rewinds to exactly that brief. The brief's message id is recorded in `refreshed.briefMessageId` when it landed. (Keeping earlier agents' history in the tab is a later package; not implemented.)
 

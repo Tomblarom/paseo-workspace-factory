@@ -490,25 +490,25 @@ test("collectColdAgents surfaces a valid freshHint below the cold threshold", as
     labels: steerLabels("E"),
   });
   world.workspaces[0].metadata[AGENTS_KEY] = {
-    // Warm by the generic threshold (55m < 60m idleMinutes) but recommended.
+    // Still cooling on the short Claude route, with a stored recommendation.
     [hinted.id]: {
-      lastTurnEndedAt: at(NOW - 55 * MIN),
-      freshHint: { at: at(NOW - 10 * MIN), reason: hint },
+      lastTurnEndedAt: at(NOW - 4 * MIN),
+      freshHint: { at: at(NOW - 2 * MIN), reason: hint },
     },
     // Recorded before the last turn: stale, stays hidden.
     [stale.id]: {
-      lastTurnEndedAt: at(NOW - 55 * MIN),
+      lastTurnEndedAt: at(NOW - 4 * MIN),
       freshHint: { at: at(NOW - 2 * HOUR), reason: hint },
     },
     // Valid hint, but the agent is not idle.
     [running.id]: {
-      lastTurnEndedAt: at(NOW - 55 * MIN),
-      freshHint: { at: at(NOW - 10 * MIN), reason: hint },
+      lastTurnEndedAt: at(NOW - 4 * MIN),
+      freshHint: { at: at(NOW - 2 * MIN), reason: hint },
     },
     // A pending C5 action hides the hint like a plain cold row.
     [pending.id]: {
-      lastTurnEndedAt: at(NOW - 55 * MIN),
-      freshHint: { at: at(NOW - 10 * MIN), reason: hint },
+      lastTurnEndedAt: at(NOW - 4 * MIN),
+      freshHint: { at: at(NOW - 2 * MIN), reason: hint },
       pendingAction: { kind: "compact", at: at(NOW - MIN), reason: "idle" },
     },
     // needsResume keeps its reason; the hint rides along for after the resume.
@@ -773,6 +773,17 @@ test("quotaAvailableForCleanup checks the routed ZeroSub account before the pool
   );
 });
 
+function subscriptionRoute(agentId, usedPct) {
+  return {
+    agentAccount: { [agentId]: "claude-subscription" },
+    accounts: [{
+      id: "claude-subscription", family: "claude", auth: "subscription",
+      windows: usedPct === null ? [] : [{ usedPct }],
+    }],
+    pending: {},
+  };
+}
+
 function sweepWorld({ provider = "claude", model = "m", idleMs = 55 * MIN, usage = 120_000, workers = {} } = {}) {
   const nowMs = Date.now();
   const stamp = (ms) => new Date(ms).toISOString();
@@ -803,6 +814,7 @@ test("sweepOnce skips the compact when the provider quota is unknown (fail close
     paseo: fakeClient(world),
     settings: { ...CLEANUP_DEFAULTS, mode: "compact-warm" },
     nowMs,
+    zerosub: subscriptionRoute(agent.id, null),
     quotaSnapshot: null,
     lock: noLock,
     log: () => {},
@@ -817,6 +829,7 @@ test("sweepOnce compacts an eligible agent when quota shows headroom", async () 
     paseo: fakeClient(world),
     settings: { ...CLEANUP_DEFAULTS, mode: "compact-warm" },
     nowMs,
+    zerosub: subscriptionRoute(agent.id, 40),
     quotaSnapshot: { claude: { sessionPct: 40 } },
     lock: noLock,
     log: () => {},
@@ -835,6 +848,7 @@ test("sweepOnce skips the compact when the provider quota is exhausted", async (
     paseo: fakeClient(world),
     settings: { ...CLEANUP_DEFAULTS, mode: "compact-warm" },
     nowMs,
+    zerosub: subscriptionRoute(agent.id, 95),
     quotaSnapshot: { claude: { sessionPct: 95 } },
     lock: noLock,
     log: () => {},
@@ -850,6 +864,7 @@ test("sweepOnce records fresh-recommended once per idle period, without sending"
     paseo: fakeClient(world),
     settings,
     nowMs,
+    zerosub: subscriptionRoute(agent.id, null),
     quotaSnapshot: null,
     lock: noLock,
     log: () => {},

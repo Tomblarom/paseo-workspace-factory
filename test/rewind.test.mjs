@@ -197,13 +197,39 @@ test('isRewindUnsupportedError matches provider-capability failures only', () =>
 test('readRewindPoint returns the id and fails soft to null', async () => {
   const daemon = fakeDaemon({ timeline: userTimeline('msg-x') });
   assert.equal(await readRewindPoint('agent-1', { createClient: daemon }), 'msg-x');
-  assert.deepEqual(daemon.calls[1], ['fetchAgentTimeline', 'agent-1', { limit: 0, projection: 'canonical' }]);
+  assert.deepEqual(daemon.calls[1], ['fetchAgentTimeline', 'agent-1', { limit: 32, projection: 'canonical', direction: 'after' }]);
   assert.deepEqual(daemon.calls.at(-1), ['close']);
 
   assert.equal(await readRewindPoint('agent-1', { createClient: fakeDaemon({ timeline: { entries: [] } }) }), null);
   assert.equal(await readRewindPoint('agent-1', { createClient: fakeDaemon({ fetchFails: new Error('gone') }) }), null);
   assert.equal(await readRewindPoint('agent-1', { createClient: async () => { throw new Error('refused'); } }), null);
   assert.equal(await readRewindPoint('', { createClient: fakeDaemon() }), null);
+});
+
+test('rewind loads bounded canonical pages and stops when it finds the requested prompt', async () => {
+  const row = (messageId) => ({ item: { type: 'user_message', messageId } });
+  const cursor = (seq) => ({ epoch: 'timeline', seq });
+  const options = { limit: 32, projection: 'canonical' };
+  const pages = [
+    [{ ...options, direction: 'after' }, { entries: [], hasNewer: true, endCursor: cursor(32) }],
+    [{ ...options, direction: 'after', cursor: cursor(32) }, { entries: [row('first')], hasNewer: true }],
+    [{ ...options, direction: 'tail' }, { entries: [row('recent')], hasOlder: true, startCursor: cursor(100) }],
+    [{ ...options, direction: 'before', cursor: cursor(100) }, { entries: [row('anchor')], hasOlder: true, startCursor: cursor(68) }],
+    [{ ...options, direction: 'tail' }, { entries: [row('earliest-user')], hasOlder: true, startCursor: cursor(50) }],
+    [{ ...options, direction: 'before', cursor: cursor(50) }, { entries: [], hasOlder: true, startCursor: cursor(18) }],
+    [{ ...options, direction: 'before', cursor: cursor(18) }, { entries: [], hasOlder: false }],
+  ];
+  const calls = [];
+  const createClient = async () => ({
+    fetchAgentTimeline: async (id, opts) => {
+      calls.push(opts);
+      return pages[calls.length - 1][1];
+    },
+  });
+  assert.equal(await readRewindPoint('agent', { createClient }), 'first');
+  assert.equal(await readRewindPoint('agent', { createClient, previousBriefId: 'anchor' }), 'anchor');
+  assert.equal(await readRewindPoint('agent', { createClient, previousBriefId: 'missing' }), 'earliest-user');
+  assert.deepEqual(calls, pages.map(([opts]) => opts));
 });
 
 test('rewindSameTab rewinds to the first user message and closes', async () => {

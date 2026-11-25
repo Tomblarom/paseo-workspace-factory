@@ -12,7 +12,7 @@ import { LABEL, METADATA_KEY, connect, connectPluginRpc, createPaseoCli, daemonS
 import { createRunner } from './factory.mjs';
 import { planHash } from './planner.mjs';
 import { applyPlans, createExecutors, createAuthorization, storeAuthorization, fileProgress, withApplyLock } from './apply.mjs';
-import { CHECKPOINT_KEY, restartInterruptions, steerStatus, switchSteer, freshSteer, writeCheckpoint, parseCheckpointBlock, lastAssistantText, resolveTargetEntry, buildResumeBrief, readGitBrief } from './steer.mjs';
+import { CHECKPOINT_KEY, restartInterruptions, steerStatus, switchSteer, freshSteer, writeCheckpoint, parseCheckpointBlock, lastAssistantText, resolveTargetEntry, buildResumeBrief, readGitBrief, workerResumeAnswer } from './steer.mjs';
 import { AGENTS_KEY } from './agent-state.mjs';
 import { listScopes, resolveScope, domainFirstPlanOrder } from './scope.mjs';
 import { planLabelFixes, formatLabelFixes } from './labels.mjs';
@@ -76,6 +76,7 @@ const USAGE = `Usage: paseo-factory <command> [options]
   relocate <scope> --to <path|project> [--apply]
   assign <scope> --task <text> [--test <text>]... [--blocker <text>]... [--next <text>] [--report-to <agent-id>] [--apply] [--no-send]   (report-to defaults to the calling agent)
   resume [scope] [--agent <id>] [--json]   cold-start brief: task, next step, git, workers
+  resume [scope] --agent <worker> --apply   continue an interrupted worker via the plugin
   workers [scope] [--prune] [--apply] [--json]   print the worker register (task, state, resumes); --prune removes entries whose agent is gone
   retire <agent-id>                  preview only; archiving is disabled
   cleanup [--json]                   read-only cleanup report over the whole instance
@@ -113,13 +114,14 @@ Options: --config <path> (default: $PASEO_FACTORY_CONFIG or ~/.config/paseo-work
  * Default scope for bare `resume`: the calling agent's own scope label first
  * (it also covers workers in foreign workspaces), else the calling workspace.
  */
-async function defaultResumeEntry(client, command = 'resume') {
-  const agentId = process.env.PASEO_AGENT_ID;
+async function defaultResumeEntry(client, command = 'resume', agentId = process.env.PASEO_AGENT_ID) {
   const workspaceId = process.env.PASEO_WORKSPACE_ID;
   if (agentId || workspaceId) {
     const paseo = await readPaseoState(client);
     const scopeId = agentId ? paseo.agents.find((a) => a.id === agentId)?.labels?.[LABEL.scope] : null;
     if (typeof scopeId === 'string' && scopeId) return scopeId;
+    const workerWorkspace = agentId ? paseo.workspaces.find((workspace) => readWorkers(workspace.metadata)[agentId]) : null;
+    if (workerWorkspace) return `workspace:${workerWorkspace.id}`;
     if (workspaceId) return `workspace:${workspaceId}`;
   }
   throw new Error(`${command} needs a scope (or run it inside a factory agent or workspace)`);
@@ -555,7 +557,7 @@ async function main() {
     }
 
     if (['status', 'switch', 'fresh', 'workers', 'checkpoint', 'assign', 'resume'].includes(command)) {
-      if ((command === 'resume' || command === 'workers') && !entries.length) entries.push(await defaultResumeEntry(client, command));
+      if ((command === 'resume' || command === 'workers') && !entries.length) entries.push(await defaultResumeEntry(client, command, values.agent));
       if (entries.length !== 1) throw new Error(`${command} needs exactly one repository`);
       const raw = entries[0];
       const { entry: target, scope, deprecatedAlias } = resolveTargetEntry(raw, await readPaseoState(client));
@@ -658,12 +660,29 @@ async function main() {
         return;
       }
       if (command === 'resume') {
+        const agentId = values.agent ?? process.env.PASEO_AGENT_ID ?? null;
+        if (values.apply) {
+          const status = steerStatus(discovery);
+          if (!values.agent || !status.workers.some((worker) => worker.id === agentId)) {
+            throw new Error('resume --apply needs --agent <interrupted worker id>');
+          }
+          const rpc = await connectPluginRpc();
+          try {
+            const applied = await rpc.invokePluginRpc(FACTORY_PLUGIN_ID, 'factory.resume.apply', { workspaceId: status.workspace.id, agentId });
+            console.log(values.json ? JSON.stringify(applied, null, 2) : applied.detail);
+            if (applied.status === 'blocked') process.exitCode = 1;
+          } finally {
+            await rpc.close();
+          }
+          return;
+        }
         const heuristic = await heuristicInputsForDiscovery(client, discovery).catch(() => null);
         const status = steerStatus(discovery, { ...(heuristic ?? {}), config });
         const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;
         const brief = buildResumeBrief(status, {
-          agentId: values.agent ?? process.env.PASEO_AGENT_ID ?? null,
+          agentId,
           agentState,
+          workerLastAnswer: await workerResumeAnswer(client, status, agentId),
           git: status.workspace ? readGitBrief(git, status.workspace.directory) : null,
           scope: discovery.scope ?? null,
           ...(heuristic ?? {}),
@@ -674,7 +693,7 @@ async function main() {
           const restartInterrupted = status.restartInterrupted ?? restartInterruptions({ checkpoint: status.checkpoint, agentState });
           return console.log(JSON.stringify({
             scope: discovery.scope?.id ?? discovery.forkName, kind: discovery.scope?.kind ?? null, epoch: status.state?.epoch ?? null,
-            agentId: values.agent ?? process.env.PASEO_AGENT_ID ?? null, brief,
+            agentId, brief,
             openWorkers: status.openWorkers ?? [],
             interrupted: status.checkpoint?.interrupted ?? null,
             ...(restartInterrupted.length ? { restartInterrupted } : {}),

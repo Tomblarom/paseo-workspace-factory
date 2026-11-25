@@ -83,6 +83,7 @@ import {
   hasAdvisorRequest,
   isDrainMarkerActive,
   isWorkerMetadata,
+  workerIdentityFromMetadata,
   maxStampMs,
   scopeLastWakeAt,
   selectDoneIds,
@@ -420,14 +421,6 @@ export interface CreateAfterResult {
   epoch?: number | null;
   startedBy?: string | null;
   metaWritten?: boolean;
-}
-
-/** Worker identity from the plugin's worker metadata (scope id), else null. */
-function workerIdentityFromMetadata(agent: any): { scopeId: string; role: string; slot: string | null } | null {
-  const meta = asRecord(agent?.metadata)?.[WORKER_METADATA_KEY];
-  if (!isWorkerMetadata(meta)) return null;
-  const scopeId = (meta as { scopeId?: unknown }).scopeId;
-  return typeof scopeId === "string" && scopeId ? { scopeId, role: "worker", slot: null } : null;
 }
 
 /**
@@ -817,9 +810,10 @@ export async function runWorkerTurnAfter(
   const wsf = wsfOf(meta);
   if (!wsf) return { ok: true, action: "skipped", reason: "no-wsf" };
   let register = readWorkers(meta);
+  const workerAgentState = asRecord(asRecord(meta[AGENTS_KEY])?.[agentId]);
+  if (workerAgentState?.replacedBy) return { ok: true, action: "skipped", reason: "worker-replaced" };
   if (!register[agentId]) {
-    const agentState = asRecord(meta[AGENTS_KEY]) ?? {};
-    await backfillWorker(paseo, scope, agent, wsf, asRecord(agentState[agentId]), deps);
+    await backfillWorker(paseo, scope, agent, wsf, workerAgentState, deps);
     meta = await refreshWorkspaceMeta(paseo, mainId);
     register = readWorkers(meta);
     log(`[factory] supervise: backfilled worker ${agentId} of ${scope.id}`);
@@ -1079,6 +1073,7 @@ export async function runBootFinished(
       if (!scope) continue;
       const meta = await refreshWorkspaceMeta(paseo, scope.workspaceId);
       const register = readWorkers(meta);
+      if (asRecord(asRecord(meta[AGENTS_KEY])?.[agentId])?.replacedBy) continue;
       const supervised = identity?.role === "worker" || !!register[agentId];
       if (!supervised) continue;
       const wsf = wsfOf(meta);
@@ -1573,7 +1568,7 @@ export async function watchdogScan(paseo: any, deps: SuperviseDeps & { state?: a
       let agentState = asRecord(meta[AGENTS_KEY]) ?? {};
       for (const worker of workerAgents(paseoState, scope.id)) {
         if (!worker || worker.archivedAt || worker.background === true) continue;
-        if (register[worker.id]) continue;
+        if (register[worker.id] || asRecord(agentState[worker.id])?.replacedBy) continue;
         await backfillWorker(paseo, scope, worker, wsf, asRecord(agentState[worker.id]), deps);
         result.backfilled.push(worker.id);
       }

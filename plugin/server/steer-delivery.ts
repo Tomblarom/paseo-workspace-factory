@@ -8,6 +8,7 @@ import { buildRewindRecord } from "./factory/steer.js";
 import { markWakeSent, updateWorkerEntry } from "./factory/supervision.js";
 import { runCleanup } from "./cold-sweep.js";
 import { collectSteerStates } from "./steer-feed.js";
+import { resolveZerosub, type ZerosubSource } from "./zerosub-runtime.js";
 import {
   cleanupIdentity, formatResumeMessage, mayResumeClear, RESUME_PENDING_REASON,
   type CleanupSettings, type ResumeClearSettings,
@@ -18,7 +19,7 @@ type Renewal = "clear" | "rewind";
 type Phase = "renewing" | "ready" | "blocked" | "sent";
 type WakeEvent = { workerId: string; state: string };
 
-export interface SteerDeliveryDeps {
+export interface SteerDeliveryDeps extends ZerosubSource {
   getCleanupSettings?: () => Promise<CleanupSettings | null>;
   getResumeSettings?: () => Promise<ResumeClearSettings | null>;
   keepChatHistory?: () => Promise<boolean>;
@@ -272,13 +273,14 @@ export async function deliverSteer(
   paseo: any, input: DeliveryInput, deps: SteerDeliveryDeps = {},
 ): Promise<DeliveryResult> {
   const lock = deps.lock ?? productionLock;
-  const [state, fresh, snapshot, settings, cleanup, keepChatHistory] = await Promise.all([
+  const [state, fresh, snapshot, settings, cleanup, keepChatHistory, zerosub] = await Promise.all([
     input.state ?? readPaseoState(paseo),
     paseo.workspaces.ref(input.workspaceId).refresh(),
     paseo.agents.ref(input.agentId).refresh(),
     deps.getResumeSettings?.() ?? null,
     deps.getCleanupSettings?.() ?? null,
     deps.keepChatHistory?.() ?? false,
+    resolveZerosub(deps),
   ]);
   const meta = fresh?.metadata ?? {};
   const agent = snapshot?.agent ?? state.agents?.find((a: any) => a.id === input.agentId);
@@ -311,7 +313,7 @@ export async function deliverSteer(
   const targetScope = listScopes(projectionState).find((candidate: any) =>
     candidate.workspaceId === input.workspaceId && sameScopeId(candidate.id, identity.scopeId));
   if (!targetScope || scope.retired === true) return blocked("The target does not belong to this live Factory scope.");
-  const projected = collectSteerStates(projectionState, { settings: cleanup, nowMs: deps.now ? Date.parse(deps.now()) : undefined })
+  const projected = collectSteerStates(projectionState, { settings: cleanup, zerosub, nowMs: deps.now ? Date.parse(deps.now()) : undefined })
     .find((row) => row.agentId === input.agentId && row.workspaceId === input.workspaceId);
   const at = deps.now?.() ?? new Date().toISOString();
   const mode = decideSteerDelivery({

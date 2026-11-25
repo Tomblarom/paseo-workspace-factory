@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { attentionStatus, contextActionFor } from "../shared/context-continuation.ts";
 
-const policy = { ttlMinutes: 30, minContextTokens: 60_000 };
 const warm = {
   slot: "A",
   reason: "failed",
@@ -12,26 +11,26 @@ const warm = {
 };
 
 test("unflagged or warm chats can continue after a failure or a limit", () => {
-  assert.equal(contextActionFor(null, policy), "continue");
-  assert.equal(contextActionFor(warm, policy), "continue");
-  assert.equal(contextActionFor({ ...warm, reason: "limit" }, policy), "continue");
+  assert.equal(contextActionFor(null), "continue");
+  assert.equal(contextActionFor(warm), "continue");
+  assert.equal(contextActionFor({ ...warm, reason: "limit" }), "continue");
 });
 
 test("cold or large contexts refresh even when a failure or limit supplies the pill label", () => {
-  assert.equal(contextActionFor({ ...warm, idleMinutes: 30 }, policy), "refresh");
-  assert.equal(contextActionFor({ ...warm, reason: "limit", contextTokens: 60_000 }, policy), "refresh");
-  assert.equal(contextActionFor({ ...warm, reason: "cold" }, policy), "refresh");
-  assert.equal(contextActionFor({ ...warm, reason: undefined }, policy), "refresh");
+  assert.equal(contextActionFor({ ...warm, warmth: "cold" }), "refresh");
+  assert.equal(contextActionFor({ ...warm, reason: "limit", large: true }), "refresh");
+  assert.equal(contextActionFor({ ...warm, reason: "cold" }), "refresh");
+  assert.equal(contextActionFor({ ...warm, reason: undefined }), "refresh");
 });
 
 test("a restart or saved refresh recommendation refreshes even a small, recent context", () => {
-  assert.equal(contextActionFor({ ...warm, reason: "daemon-restart" }, policy), "refresh");
-  assert.equal(contextActionFor({ ...warm, freshHint: "package boundary" }, policy), "refresh");
+  assert.equal(contextActionFor({ ...warm, reason: "daemon-restart" }), "refresh");
+  assert.equal(contextActionFor({ ...warm, freshHint: "package boundary" }), "refresh");
 });
 
 test("an agent without a refresh target never offers ordinary continuation for flagged cold context", () => {
-  assert.equal(contextActionFor({ ...warm, reason: "cold", slot: null }, policy), "unavailable");
-  assert.equal(contextActionFor({ ...warm, slot: null }, policy), "continue");
+  assert.equal(contextActionFor({ ...warm, reason: "cold", slot: null }), "unavailable");
+  assert.equal(contextActionFor({ ...warm, slot: null }), "continue");
 });
 
 test("status reports a plain-language reason without exposing stored cleanup diagnostics", () => {

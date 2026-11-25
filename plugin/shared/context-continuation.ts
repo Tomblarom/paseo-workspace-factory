@@ -1,24 +1,23 @@
+import type { CacheWarmth } from "./cache-profiles.js";
+
 export type AttentionReason = "daemon-restart" | "limit" | "failed" | "cold";
 
 export type ContextAction = "continue" | "refresh" | "unavailable";
 
 interface ContextAttention {
   reason?: AttentionReason;
-  idleMinutes: number;
-  contextTokens: number;
+  warmth?: CacheWarmth;
+  large?: boolean;
   freshHint: string | null;
   slot: string | null;
 }
 
-export function contextActionFor(
-  attention: ContextAttention | null,
-  { ttlMinutes, minContextTokens }: { ttlMinutes: number; minContextTokens: number },
-): ContextAction {
+export function contextActionFor(attention: ContextAttention | null): ContextAction {
   if (!attention) return "continue";
-  const { reason, idleMinutes, contextTokens, freshHint, slot } = attention;
+  const { reason, warmth, large, freshHint, slot } = attention;
   const refresh =
     !reason || reason === "cold" || reason === "daemon-restart" ||
-    idleMinutes >= ttlMinutes || contextTokens >= minContextTokens || Boolean(freshHint);
+    warmth === "cold" || warmth === "unknown" || large === true || Boolean(freshHint);
   if (!refresh) return "continue";
   return slot ? "refresh" : "unavailable";
 }

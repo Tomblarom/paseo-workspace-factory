@@ -80,6 +80,11 @@ export function isWorkerMetadata(value: unknown): value is WorkerMetadata {
   return typeof record.scopeId === "string" && !!record.scopeId && typeof record.task === "string";
 }
 
+export function workerIdentityFromMetadata(agent: { metadata?: Record<string, unknown> } | null) {
+  const worker = agent?.metadata?.[WORKER_METADATA_KEY];
+  return isWorkerMetadata(worker) ? { scopeId: worker.scopeId, role: "worker" as const, slot: null } : null;
+}
+
 /**
  * True when the answer carries an ADVISOR-REQUEST block (fenced or bare),
  * mirroring the CHECKPOINT header scan in core steer.mjs.

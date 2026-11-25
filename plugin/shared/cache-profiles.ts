@@ -1,13 +1,13 @@
-// Prompt-cache reference per model group and the cleanup cost profiles.
-// Pure module: no imports, so plain node:test can use it. idle-cleanup.ts
-// derives its compact thresholds from here; docs/design/cold-context-resume.md
-// carries the same table for humans (keep both in sync).
+// Prompt-cache timing and cleanup profiles shared by display and delivery.
 
 /** Simplified cache groups from the user spec (2026-11-24). */
 export type CacheGroup = "claude" | "openai-new" | "openai-old" | "other";
 
 /** Cost profile: when to compact before the cache cools. */
 export type CleanupProfile = "efficiency" | "balanced" | "comfort";
+
+const SHORT_CACHE_TTL_MINUTES = 5;
+export const CACHE_CHECK_INTERVAL_MS = 60_000;
 
 export interface CacheGroupInfo {
   group: CacheGroup;
@@ -41,7 +41,7 @@ export const CACHE_GROUPS: Record<CacheGroup, CacheGroupInfo> = {
     group: "other",
     ttlMinutes: 30,
     cachedInput: "unknown",
-    note: "Unknown providers (Muse, Copilot, …) are treated conservatively like openai-new.",
+    note: "Conservative reference only. Unsupported routes have unknown warmth.",
   },
 };
 
@@ -89,14 +89,14 @@ export function isCleanupProfile(value: unknown): value is CleanupProfile {
  * Minutes of idleness after which the profile compacts this group — while the
  * cache is still warm. Balanced compacts shortly before the TTL expires
  * (claude 60 → 50, the previous default); efficiency compacts at half the TTL
- * (never below the 5-minute sweep cadence); comfort compacts just before the
+ * (never below the sweep cadence); comfort compacts just before the
  * TTL (a side product, provided as-is). Values are pinned by tests.
  */
-export function compactAtMinutes(profile: CleanupProfile, group: CacheGroup): number {
-  const ttl = CACHE_GROUPS[group].ttlMinutes;
-  if (profile === "efficiency") return Math.max(5, Math.floor(ttl / 2));
-  if (profile === "comfort") return Math.max(5, ttl - 2);
-  return ttl - Math.max(2, Math.min(10, Math.round(ttl / 6)));
+export function compactAtMinutes(profile: CleanupProfile, { ttlMinutes }: Pick<CacheTtl, "ttlMinutes">): number {
+  const cadence = CACHE_CHECK_INTERVAL_MS / 60_000;
+  if (profile === "efficiency") return Math.max(cadence, Math.floor(ttlMinutes / 2));
+  if (profile === "comfort") return ttlMinutes - Math.max(cadence, 2);
+  return ttlMinutes - Math.max(2, coolingMinutesForTtl(ttlMinutes));
 }
 
 /**
@@ -112,4 +112,132 @@ export function effectiveMinContextTokens(
   return profile === "efficiency"
     ? Math.min(configuredMin, EFFICIENCY_MIN_CONTEXT_TOKENS)
     : configuredMin;
+}
+
+/**
+ * Confirmed Claude billing route. "subscription" is the Factory subscription
+ * baseline (or a confirmed 1h path); "api-5m" is a known 5-minute path
+ * (including default Anthropic API caching); "unknown" keeps the conservative
+ * 5-minute estimate and flags the header.
+ */
+export type ClaudeBilling = "subscription" | "api-5m" | "unknown";
+
+export interface CacheTtl {
+  ttlMinutes: number;
+  group: CacheGroup;
+  /** True only for Claude on an unconfirmed route (show "Billing path unconfirmed"). */
+  billingUnconfirmed: boolean;
+}
+
+/**
+ * Estimated prompt-cache TTL for the provider model and account route.
+ * The group follows groupForProviderModel, including unversioned model ids
+ * from an identified Codex/OpenAI provider.
+ */
+export function resolveCacheTtl(args: {
+  provider: unknown;
+  model: unknown;
+  claudeBilling?: ClaudeBilling;
+  openaiExtendedRetention?: boolean;
+}): CacheTtl {
+  const group = groupForProviderModel(args.provider, args.model);
+  if (group === "claude") {
+    return {
+      ttlMinutes: args.claudeBilling === "subscription" ? CACHE_GROUPS.claude.ttlMinutes : SHORT_CACHE_TTL_MINUTES,
+      group,
+      billingUnconfirmed: args.claudeBilling !== "subscription" && args.claudeBilling !== "api-5m",
+    };
+  }
+  const retentionGroup = group === "openai-old" && args.openaiExtendedRetention === true ? "openai-new" : group;
+  return { ttlMinutes: CACHE_GROUPS[retentionGroup].ttlMinutes, group, billingUnconfirmed: false };
+}
+
+type CacheRoutes = {
+  accounts: { id?: unknown; family?: unknown; auth?: unknown }[];
+  agentAccount: Record<string, string>;
+  pending?: Record<string, string>;
+} | null;
+
+export function cacheTtlForAgent(agent: { id: string; provider?: unknown; model?: unknown }, routes: CacheRoutes): CacheTtl {
+  const route = routes?.agentAccount[agent.id];
+  const pending = routes?.pending?.[agent.id];
+  const account = route && (!pending || pending === route)
+    ? routes?.accounts.find(({ id }) => id === route) : null;
+  // Only native Claude with a confirmed Claude account exposes its billing
+  // route. A Claude model served by another provider has a short estimate.
+  const auth = norm(agent.provider) === "claude" && account?.family === "claude" ? account.auth : null;
+  const claudeBilling = auth === "subscription" ? "subscription" : auth === "api" ? "api-5m" : "unknown";
+  return resolveCacheTtl({ provider: agent.provider, model: agent.model, claudeBilling });
+}
+
+/** Cooling-window width in minutes: max(1, min(10, round(TTL / 6))). */
+export function coolingMinutesForTtl(ttlMinutes: number): number {
+  return Math.max(1, Math.min(10, Math.round(ttlMinutes / 6)));
+}
+
+/**
+ * Cache age in ms. A confirmed cache request start (Claude measures its TTL
+ * from request start) wins over the turn end; missing or future stamps are
+ * unknown (null). The caller passes a start only once request evidence is
+ * available; until then the turn end overestimates warmth.
+ */
+export function cacheAgeMs(args: {
+  nowMs: number;
+  lastTurnEndedAt: unknown;
+  cacheStartAt?: unknown;
+}): number | null {
+  const stampMs = (stamp: unknown) => typeof stamp === "string" ? Date.parse(stamp) : NaN;
+  const start = stampMs(args.cacheStartAt);
+  if (Number.isFinite(start)) return start > args.nowMs ? null : args.nowMs - start;
+  const end = stampMs(args.lastTurnEndedAt);
+  if (!Number.isFinite(end) || end > args.nowMs) return null;
+  return args.nowMs - end;
+}
+
+export type CacheWarmth = "warm" | "cooling" | "cold" | "unknown";
+
+export interface WarmthResult {
+  warmth: CacheWarmth;
+  /** "ttl" states are estimates (header); "prefix-break" cold is a known break. */
+  source: "ttl" | "prefix-break" | "none";
+  /** Epoch ms of the next TTL boundary (cooling start / TTL end), else null. */
+  boundaryAtMs: number | null;
+}
+
+/**
+ * Warmth from a valid age and matching baseline: warm is [0, TTL - cooling),
+ * cooling is [TTL - cooling, TTL), cold starts at TTL. A known prefix break
+ * with retained history is cold for the new configuration. Missing or future
+ * ages, a missing baseline, or an unsupported route yield unknown.
+ */
+export function resolveWarmth(args: {
+  nowMs: number;
+  ageMs: number | null;
+  ttlMinutes: number;
+  baselineValid: boolean;
+  supported?: boolean;
+  prefixBreakRetained?: boolean;
+}): WarmthResult {
+  if (args.prefixBreakRetained === true) return { warmth: "cold", source: "prefix-break", boundaryAtMs: null };
+  const age = args.ageMs;
+  if (
+    args.supported === false ||
+    args.baselineValid !== true ||
+    age === null ||
+    !Number.isFinite(age) ||
+    age < 0 ||
+    !Number.isFinite(args.ttlMinutes) ||
+    args.ttlMinutes <= 0
+  ) {
+    return { warmth: "unknown", source: "none", boundaryAtMs: null };
+  }
+  const ttlMs = args.ttlMinutes * 60_000;
+  const coolingMs = coolingMinutesForTtl(args.ttlMinutes) * 60_000;
+  if (age < ttlMs - coolingMs) {
+    return { warmth: "warm", source: "ttl", boundaryAtMs: args.nowMs + (ttlMs - coolingMs - age) };
+  }
+  if (age < ttlMs) {
+    return { warmth: "cooling", source: "ttl", boundaryAtMs: args.nowMs + (ttlMs - age) };
+  }
+  return { warmth: "cold", source: "ttl", boundaryAtMs: null };
 }

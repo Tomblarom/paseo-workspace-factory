@@ -25,6 +25,10 @@ import {
 } from "../shared/idle-cleanup.js";
 import { MAX_FRESH_REASON } from "../shared/auto-checkpoint.js";
 import { resolveZerosub, type ZerosubState } from "./zerosub-runtime.js";
+import { agentContextInputs } from "./agent-context.js";
+import { CACHE_CHECK_INTERVAL_MS } from "../shared/cache-profiles.js";
+import { projectAgentContext, type CacheWarmth } from "../shared/steer-state.js";
+import { workerIdentityFromMetadata } from "../shared/supervise.js";
 
 const CHECKPOINT_KEY = `${METADATA_KEY}.checkpoint`;
 const LEGACY_CHECKPOINT_KEY = `${LEGACY_PREFIX}.checkpoint`;
@@ -340,6 +344,7 @@ async function sweepAgent(
     cleanupInputOf({
       agent,
       entry,
+      ...agentContextInputs(agent, entry, settings, quotaCtx.zerosub ?? null, nowMs),
       checkpoint: reads.checkpoint,
       activeSteer: reads.activeSteer,
       settings,
@@ -393,22 +398,24 @@ async function sweepAgent(
   const freshEntries = asRecord(freshMeta[AGENTS_KEY]) ?? {};
   const freshEntry = asRecord(freshEntries[agent.id]);
   const freshWorkers = asRecord((freshMeta as Record<string, unknown>)[WORKERS_KEY as string]) ?? {};
+  const recheckAt = Date.now();
   const recheck = decideCleanupAction(
     cleanupInputOf({
       agent: freshAgent,
       entry: freshEntry,
+      ...agentContextInputs(freshAgent, freshEntry, settings, quotaCtx.zerosub ?? null, recheckAt),
       checkpoint: asRecord(freshMeta[CHECKPOINT_KEY]) ?? asRecord(freshMeta[LEGACY_CHECKPOINT_KEY]),
       activeSteer: freshWsf.activeSteer,
       settings,
-      actionsToday: actionsToday(Date.now()),
+      actionsToday: actionsToday(recheckAt),
       effectBlocked: isEffectBlocked(),
-      nowMs: Date.now(),
+      nowMs: recheckAt,
       workerState: workerStateOf(freshWorkers, agent.id),
       quotaAvailable: quotaAvailableForCleanup(freshAgent?.provider, quota, {
         agentId: typeof agent?.id === "string" ? agent.id : null,
         zerosub: quotaCtx.zerosub ?? null,
         exhaustedPct: quotaCtx.exhaustedPct,
-        nowMs: Date.now(),
+        nowMs: recheckAt,
       }),
       openWorkers: openWorkerCount(freshWorkers),
     }),
@@ -640,14 +647,16 @@ async function sweepThreshold(getQuotaSettings?: () => Promise<any>): Promise<nu
  */
 export function startCleanupTimer({
   readSettings,
-  intervalMs = 5 * 60_000,
+  intervalMs = CACHE_CHECK_INTERVAL_MS,
   log = console.log,
   getZerosub,
   getQuotaSettings,
 }: TimerDeps): () => void {
   let stopped = false;
+  let sweeping = false;
   const timer = setInterval(() => {
-    if (stopped || !sweepPaseo) return;
+    if (stopped || sweeping || !sweepPaseo) return;
+    sweeping = true;
     const paseo: any = sweepPaseo;
     void (async () => {
       try {
@@ -665,6 +674,8 @@ export function startCleanupTimer({
         log(
           `[factory] idle cleanup tick failed (${error instanceof Error ? error.message : String(error)})`,
         );
+      } finally {
+        sweeping = false;
       }
     })();
   }, intervalMs);
@@ -683,6 +694,8 @@ export interface ColdAgent {
   title: string | null;
   contextTokens: number;
   idleMinutes: number;
+  warmth: CacheWarmth;
+  large: boolean;
   hasHistory: boolean;
   canFresh: boolean;
   /** Why the row needs attention; plain cold rows carry "cold". */
@@ -702,6 +715,7 @@ export interface ColdFeedDeps {
   intervalMs?: number;
   /** Effective config for the advisor flag; absent means no advisor known. */
   getConfig?: () => Promise<unknown>;
+  getZerosub?: () => Promise<ZerosubState>;
 }
 
 /**
@@ -723,7 +737,8 @@ export function serveColdSubscription(
       const settings = await deps.readSettings();
       if (!settings) return;
       const config = deps.getConfig ? await deps.getConfig().catch(() => null) : null;
-      const cold = await collectColdAgents(context.paseo, settings, Date.now(), config);
+      const zerosub = await resolveZerosub(deps);
+      const cold = await collectColdAgents(context.paseo, settings, Date.now(), config, zerosub);
       await context.push({
         attention: cold,
         cold,
@@ -735,7 +750,7 @@ export function serveColdSubscription(
     }
   };
   void push();
-  const timer = setInterval(() => void push(), deps.intervalMs ?? 60_000);
+  const timer = setInterval(() => void push(), deps.intervalMs ?? CACHE_CHECK_INTERVAL_MS);
   if (typeof (timer as unknown as { unref?: unknown }).unref === "function") {
     (timer as unknown as { unref: () => void }).unref();
   }
@@ -760,18 +775,20 @@ export async function collectColdAgents(
   settings: CleanupSettings,
   nowMs: number = Date.now(),
   config: unknown = null,
+  zerosub: ZerosubState = null,
 ): Promise<ColdAgent[]> {
   const state: any = await readPaseoState(paseo);
   const lookup: ScopeLookup = { scopes: listScopes(state), byId: new Map() };
   for (const scope of lookup.scopes) lookup.byId.set(scope.id, scope);
   const cold: ColdAgent[] = [];
   for (const agent of state.agents ?? []) {
-    const identity = cleanupIdentity(agent?.labels ?? null);
+    const identity = cleanupIdentity(agent?.labels ?? null) ?? workerIdentityFromMetadata(agent);
     if (!identity) continue;
     const scope = lookup.byId.get(identity.scopeId) ?? null;
     const reads = scope ? scopeReads(scope) : null;
     if (!scope || !reads) continue;
     const entry = asRecord(reads.entries[agent.id]);
+    if (agent.archivedAt || entry?.replacedBy) continue;
     const needsResume = asRecord(entry?.needsResume);
     const needsReason = isNeedsResumeReason(needsResume?.reason)
       ? (needsResume.reason as NeedsResumeReason)
@@ -779,25 +796,8 @@ export async function collectColdAgents(
     // A resume in flight still shows its pill (the RPC is idempotent); plain
     // cold rows with a pending C5 action stay hidden as before.
     if (!needsReason && entry?.pendingAction) continue;
-    const used = agent?.lastUsage?.contextWindowUsedTokens;
-    const contextTokens =
-      typeof used === "number" && Number.isFinite(used)
-        ? used
-        : typeof entry?.contextTokens === "number"
-          ? (entry.contextTokens as number)
-          : null;
-    const lastTurnEndedAt =
-      typeof entry?.lastTurnEndedAt === "string" ? (entry.lastTurnEndedAt as string) : null;
-    const coldNow =
-      contextTokens !== null &&
-      lastTurnEndedAt !== null &&
-      isCold({
-        lastTurnEndedAt,
-        contextTokens,
-        idleMinutes: settings.idleMinutes,
-        minContextTokens: settings.minContextTokens,
-        nowMs,
-      });
+    const projected = projectAgentContext(agentContextInputs(agent, entry, settings, zerosub, nowMs));
+    const coldNow = isCold(projected.warmth.warmth, projected.large);
     // A valid stored recommendation surfaces its idle agent even when the
     // generic cold threshold is not met. Non-idle agents keep the old shape:
     // cold/needsResume rows without the hint.
@@ -810,11 +810,10 @@ export async function collectColdAgents(
       workspaceId: reads.mainId,
       agentId: agent.id,
       title: typeof agent.title === "string" ? agent.title : null,
-      contextTokens: contextTokens ?? 0,
-      idleMinutes:
-        lastTurnEndedAt !== null
-          ? Math.max(0, Math.floor((nowMs - Date.parse(lastTurnEndedAt)) / 60_000))
-          : 0,
+      contextTokens: projected.tokens ?? 0,
+      idleMinutes: Math.floor((projected.ageMs ?? 0) / 60_000),
+      warmth: projected.warmth.warmth,
+      large: projected.large,
       hasHistory: Array.isArray(previous) && previous.length > 0,
       canFresh: slot !== null && slot === activeSteer,
       reason: needsReason ?? "cold",

@@ -189,7 +189,7 @@ test('instruction docs document the status line and worker completion', () => {
   assert.ok(instructions.includes('`status: done|partial|blocked`'), 'optional status line documented');
   assert.match(instructions, /worker without a CHECKPOINT block/i, 'unfinished without CHECKPOINT');
   assert.match(instructions, /interrupted/, 'interrupted counts as unfinished');
-  assert.match(instructions, /paseo send/, 'resume via paseo send');
+  assert.match(instructions, /resume <scope> --agent <worker-id> --apply/, 'resume uses Factory delivery');
   assert.match(instructions, /resume brief/i, 'resume brief is carried');
   assert.match(instructions, /verify .* against the assignment/i, 'result checked against the task');
 });

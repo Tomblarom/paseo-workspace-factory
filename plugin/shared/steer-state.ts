@@ -12,7 +12,12 @@
 // config values). All UI text is English.
 import {
   effectiveMinContextTokens,
-  groupForProviderModel,
+  cacheAgeMs,
+  resolveCacheTtl,
+  resolveWarmth,
+  type CacheTtl,
+  type CacheWarmth,
+  type ClaudeBilling,
   isCleanupProfile,
   type CacheGroup,
   type CleanupProfile,
@@ -90,119 +95,8 @@ function finiteNumber(value: unknown): number | null {
 // Cache TTL and warmth
 // ---------------------------------------------------------------------------
 
-/**
- * Confirmed Claude billing route. "subscription" is the Factory subscription
- * baseline (or a confirmed 1h path); "api-5m" is a known 5-minute path
- * (including default Anthropic API caching); "unknown" keeps the conservative
- * 5-minute estimate and flags the header.
- */
-export type ClaudeBilling = "subscription" | "api-5m" | "unknown";
-
-export interface CacheTtl {
-  ttlMinutes: number;
-  group: CacheGroup;
-  /** True only for Claude on an unconfirmed route (show "Billing path unconfirmed"). */
-  billingUnconfirmed: boolean;
-}
-
-/**
- * Estimated prompt-cache TTL for the pill, per the design's route table.
- * The group follows groupForProviderModel, including unversioned model ids
- * from an identified Codex/OpenAI provider.
- */
-export function resolveCacheTtl(args: {
-  provider: unknown;
-  model: unknown;
-  claudeBilling?: ClaudeBilling;
-  openaiExtendedRetention?: boolean;
-}): CacheTtl {
-  const group = groupForProviderModel(args.provider, args.model);
-  if (group === "claude") {
-    if (args.claudeBilling === "subscription") return { ttlMinutes: 60, group, billingUnconfirmed: false };
-    if (args.claudeBilling === "api-5m") return { ttlMinutes: 5, group, billingUnconfirmed: false };
-    return { ttlMinutes: 5, group, billingUnconfirmed: true };
-  }
-  if (group === "openai-new") return { ttlMinutes: 30, group, billingUnconfirmed: false };
-  if (group === "openai-old") {
-    return {
-      ttlMinutes: args.openaiExtendedRetention === true ? 30 : 10,
-      group,
-      billingUnconfirmed: false,
-    };
-  }
-  return { ttlMinutes: 30, group, billingUnconfirmed: false };
-}
-
-/** Cooling-window width in minutes: max(1, min(10, round(TTL / 6))). */
-export function coolingMinutesForTtl(ttlMinutes: number): number {
-  return Math.max(1, Math.min(10, Math.round(ttlMinutes / 6)));
-}
-
-/**
- * Cache age in ms. A confirmed cache request start (Claude measures its TTL
- * from request start) wins over the turn end; missing or future stamps are
- * unknown (null). The caller passes a start only once request evidence is
- * available; until then the turn end overestimates warmth.
- */
-export function cacheAgeMs(args: {
-  nowMs: number;
-  lastTurnEndedAt: unknown;
-  cacheStartAt?: unknown;
-}): number | null {
-  const start = args.cacheStartAt === undefined || args.cacheStartAt === null ? null : stampMs(args.cacheStartAt);
-  if (start !== null) return start > args.nowMs ? null : args.nowMs - start;
-  const end = stampMs(args.lastTurnEndedAt);
-  if (end === null || end > args.nowMs) return null;
-  return args.nowMs - end;
-}
-
-export type CacheWarmth = "warm" | "cooling" | "cold" | "unknown";
-
-export interface WarmthResult {
-  warmth: CacheWarmth;
-  /** "ttl" states are estimates (header); "prefix-break" cold is a known break. */
-  source: "ttl" | "prefix-break" | "none";
-  /** Epoch ms of the next TTL boundary (cooling start / TTL end), else null. */
-  boundaryAtMs: number | null;
-}
-
-/**
- * Warmth from a valid age and matching baseline: warm is [0, TTL - cooling),
- * cooling is [TTL - cooling, TTL), cold starts at TTL. A known prefix break
- * with retained history is cold for the new configuration. Missing or future
- * ages, a missing baseline, or an unsupported route yield unknown.
- */
-export function resolveWarmth(args: {
-  nowMs: number;
-  ageMs: number | null;
-  ttlMinutes: number;
-  baselineValid: boolean;
-  supported?: boolean;
-  prefixBreakRetained?: boolean;
-}): WarmthResult {
-  if (args.prefixBreakRetained === true) return { warmth: "cold", source: "prefix-break", boundaryAtMs: null };
-  const age = args.ageMs;
-  if (
-    args.supported === false ||
-    args.baselineValid !== true ||
-    age === null ||
-    !Number.isFinite(age) ||
-    age < 0 ||
-    !Number.isFinite(args.ttlMinutes) ||
-    args.ttlMinutes <= 0
-  ) {
-    return { warmth: "unknown", source: "none", boundaryAtMs: null };
-  }
-  const ttlMs = args.ttlMinutes * 60_000;
-  const coolingMs = coolingMinutesForTtl(args.ttlMinutes) * 60_000;
-  if (age < ttlMs - coolingMs) {
-    return { warmth: "warm", source: "ttl", boundaryAtMs: args.nowMs + (ttlMs - coolingMs - age) };
-  }
-  if (age < ttlMs) {
-    return { warmth: "cooling", source: "ttl", boundaryAtMs: args.nowMs + (ttlMs - age) };
-  }
-  return { warmth: "cold", source: "ttl", boundaryAtMs: null };
-}
+export { cacheAgeMs, coolingMinutesForTtl, resolveCacheTtl, resolveWarmth } from "./cache-profiles.js";
+export type { ClaudeBilling, CacheTtl, CacheWarmth, WarmthResult } from "./cache-profiles.js";
 
 // ---------------------------------------------------------------------------
 // Context size
@@ -684,6 +578,7 @@ export interface SteerProjectionInput {
   prefixBreakRetained?: boolean;
   claudeBilling?: ClaudeBilling;
   openaiExtendedRetention?: boolean;
+  cacheTtl?: CacheTtl;
   /** "Other" providers stay Unknown unless their route/baseline is supported. */
   otherRouteSupported?: boolean;
   liveUsedTokens?: unknown;
@@ -758,22 +653,21 @@ export function formatCountdown(ms: number): string {
   return `${minutes}m`;
 }
 
-/**
- * One steer tab's face state. For a connected host with resolved membership
- * the first matching state-table row wins; otherwise the face is Unknown.
- * Lower-priority facts (large context, pending reset, warmth expiry,
- * estimates) stay in headerFacts.
- */
-export function projectSteer(input: SteerProjectionInput): SteerProjection {
+/** Cache and size projection also used by cleanup, attention, and worker resume. */
+export function projectAgentContext(input: Pick<SteerProjectionInput,
+  "nowMs" | "provider" | "model" | "claudeBilling" | "openaiExtendedRetention" |
+  "cacheTtl" | "otherRouteSupported" | "lastTurnEndedAt" | "cacheStartAt" |
+  "baselineValid" | "prefixBreakRetained" | "liveUsedTokens" | "storedTokens" |
+  "storedSameSession" | "cleanupProfile" | "minContextTokens"
+>) {
   const nowMs = input.nowMs;
-  const ttl = resolveCacheTtl({
+  const ttl = input.cacheTtl ?? resolveCacheTtl({
     provider: input.provider ?? null,
     model: input.model ?? null,
     claudeBilling: input.claudeBilling ?? "unknown",
     openaiExtendedRetention: input.openaiExtendedRetention === true,
   });
-  const group = ttl.group;
-  const supported = group === "other" ? input.otherRouteSupported === true : true;
+  const supported = ttl.group === "other" ? input.otherRouteSupported === true : true;
   const ageMs = cacheAgeMs({
     nowMs,
     lastTurnEndedAt: input.lastTurnEndedAt ?? null,
@@ -797,6 +691,19 @@ export function projectSteer(input: SteerProjectionInput): SteerProjection {
     input.cleanupProfile,
     Number.isFinite(input.minContextTokens) ? (input.minContextTokens as number) : STEER_MIN_CONTEXT_TOKENS,
   );
+  return { ttl, warmth, ageMs, tokens, large };
+}
+
+/**
+ * One steer tab's face state. For a connected host with resolved membership
+ * the first matching state-table row wins; otherwise the face is Unknown.
+ * Lower-priority facts (large context, pending reset, warmth expiry,
+ * estimates) stay in headerFacts.
+ */
+export function projectSteer(input: SteerProjectionInput): SteerProjection {
+  const nowMs = input.nowMs;
+  const { ttl, warmth, ageMs, tokens, large } = projectAgentContext(input);
+  const group = ttl.group;
   const quota = resolveQuota({
     nowMs,
     agentId: input.agentId,

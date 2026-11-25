@@ -5,13 +5,16 @@
 // client renders isCold/coldHintText results. Timeline fetching, locks,
 // metadata writes, and the timer live server-side.
 import {
-  CACHE_GROUPS,
+  cacheAgeMs,
   compactAtMinutes,
   effectiveMinContextTokens,
   groupForProviderModel,
   isCleanupProfile,
   isCompactOnlyGroup,
-  type CacheGroup,
+  resolveCacheTtl,
+  resolveWarmth,
+  type CacheTtl,
+  type CacheWarmth,
   type CleanupProfile,
 } from "./cache-profiles.js";
 import { FRESH_BASE_TOKENS, MAX_WARM_COMPACTIONS } from "./auto-checkpoint.js";
@@ -256,6 +259,9 @@ export interface CleanupInput {
   provider: string;
   /** Model id for the cache-group classifier; null falls back to the provider. */
   model: string | null;
+  cacheTtl?: CacheTtl;
+  cacheStartAt?: string | null;
+  prefixBreakRetained?: boolean;
   /**
    * Quota for the compact gate: true allows the compact, false blocks it as
    * exhausted, unknown (null/undefined) skips it. Unknown fails closed on
@@ -353,6 +359,9 @@ export function cleanupInputOf(args: {
   actionsToday: number;
   effectBlocked: boolean;
   nowMs: number;
+  cacheTtl?: CacheTtl;
+  cacheStartAt?: string | null;
+  prefixBreakRetained?: boolean;
   /** The agent's wsf.workers register state, if any. */
   workerState?: string | null;
   /** Quota for the compact gate (null/undefined = unknown, skipped). */
@@ -366,6 +375,9 @@ export function cleanupInputOf(args: {
     labels: args.agent.labels ?? null,
     provider: args.agent.provider,
     model: typeof args.agent.model === "string" ? args.agent.model : null,
+    cacheTtl: args.cacheTtl,
+    cacheStartAt: args.cacheStartAt,
+    prefixBreakRetained: args.prefixBreakRetained,
     quotaAvailable: args.quotaAvailable ?? null,
     openWorkers: args.openWorkers ?? null,
     status: args.agent.status,
@@ -399,7 +411,8 @@ export function cleanupInputOf(args: {
 export function decideCleanupAction(input: CleanupInput): CleanupDecision {
   const { settings } = input;
   const deny = (reason: string): CleanupDecision => ({ action: null, command: null, reason });
-  const group: CacheGroup = groupForProviderModel(input.provider, input.model ?? null);
+  const ttl = input.cacheTtl ?? resolveCacheTtl(input);
+  const { group, ttlMinutes } = ttl;
   const compactOnly = isCompactOnlyGroup(group);
   const compacting = settings.mode === "compact-warm" || (settings.mode === "clear" && compactOnly);
   const profile: CleanupProfile = isCleanupProfile(settings.profile) ? settings.profile : "balanced";
@@ -428,11 +441,14 @@ export function decideCleanupAction(input: CleanupInput): CleanupDecision {
   if (input.entry?.lastActionFailed) {
     return deny("the last cleanup action failed; a new real turn is required first");
   }
-  const thresholdMinutes = compacting ? compactAtMinutes(profile, group) : settings.idleMinutes;
+  const thresholdMinutes = compacting ? compactAtMinutes(profile, ttl) : settings.idleMinutes;
   const lastEnd = stampMs(input.lastTurnEndedAt);
   if (lastEnd === null) return deny("the last turn end is unknown");
   const idleMs = input.nowMs - lastEnd;
-  if (idleMs < thresholdMinutes * 60_000) {
+  const ageMs = cacheAgeMs(input);
+  const elapsedMs = compacting ? ageMs : idleMs;
+  if (elapsedMs === null || idleMs < 0) return deny("the cache age is unknown");
+  if (elapsedMs < thresholdMinutes * 60_000 && !(compacting && input.prefixBreakRetained)) {
     return deny(`idle ${Math.max(0, Math.floor(idleMs / 60_000))}m is below ${thresholdMinutes}m`);
   }
   if (input.contextTokens === null || input.contextTokens === undefined) {
@@ -464,12 +480,13 @@ export function decideCleanupAction(input: CleanupInput): CleanupDecision {
     return deny("already cleaned after the last turn");
   }
   if (hasKeepContext(input.labels)) return deny("wsf.keepContext is set");
+  const { warmth } = resolveWarmth({ nowMs: input.nowMs, ageMs, ttlMinutes, baselineValid: true, supported: group !== "other", prefixBreakRetained: input.prefixBreakRetained });
   // Hybrid rule: cold, over-compacted, or boundary agents get a fresh hint
   // instead of a compact. Unknown counts fail open toward compacting.
   const freshHintReason = (): string | null => {
-    const ttlMinutes = CACHE_GROUPS[group].ttlMinutes;
-    if (idleMs >= ttlMinutes * 60_000) {
-      return `idle ${Math.max(0, Math.floor(idleMs / 60_000))}m already passed the ${ttlMinutes}m ${group} cache`;
+    if (input.prefixBreakRetained) return "the saved context belongs to a different model or settings";
+    if (warmth === "cold") {
+      return `idle ${Math.max(0, Math.floor(elapsedMs / 60_000))}m already passed the ${ttlMinutes}m ${group} cache`;
     }
     const compactions = input.entry?.compactions;
     if (typeof compactions === "number" && compactions >= MAX_WARM_COMPACTIONS) {
@@ -504,6 +521,7 @@ export function decideCleanupAction(input: CleanupInput): CleanupDecision {
     if (input.quotaAvailable !== true) return deny("provider quota is unknown");
     const flagged = (input.entry?.needsResume ?? null) as { reason?: unknown } | null;
     if (flagged?.reason === "limit") return deny("a provider limit is flagged for this agent");
+    if (ttl.billingUnconfirmed || warmth === "unknown") return deny("the account cache window is unconfirmed");
   }
   if (input.actionsToday >= settings.dailyCap) return deny("the daily cap is reached");
   if (compacting) {
@@ -536,23 +554,9 @@ export function shouldRewindFresh(args: {
   return isCompactOnlyGroup(groupForProviderModel(args.provider, args.model ?? null));
 }
 
-export interface ColdInput {
-  lastTurnEndedAt: string | null;
-  contextTokens: number | null;
-  idleMinutes: number;
-  minContextTokens: number;
-  nowMs: number;
-}
-
 /** Cold for C6: idle past the threshold with a context worth cleaning. */
-export function isCold(input: ColdInput): boolean {
-  const lastEnd = stampMs(input.lastTurnEndedAt);
-  if (lastEnd === null) return false;
-  if (input.contextTokens === null || input.contextTokens === undefined) return false;
-  return (
-    input.nowMs - lastEnd >= input.idleMinutes * 60_000 &&
-    input.contextTokens >= input.minContextTokens
-  );
+export function isCold(warmth: CacheWarmth, large: boolean): boolean {
+  return warmth === "cold" && large;
 }
 
 function formatIdle(idleMs: number): string {

@@ -270,6 +270,8 @@ const coldAgent = z.looseObject({
   title: z.unknown().optional(),
   contextTokens: z.number(),
   idleMinutes: z.number(),
+  warmth: z.enum(["warm", "cooling", "cold", "unknown"]).optional(),
+  large: z.boolean().optional(),
   hasHistory: z.boolean(),
   canFresh: z.boolean(),
   slot: z.string().nullable().optional(),

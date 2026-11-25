@@ -18,27 +18,20 @@ import {
   isNeedsResumeReason,
   type CleanupSettings,
 } from "../shared/idle-cleanup.js";
+import { agentContextInputs } from "./agent-context.js";
+import { CACHE_CHECK_INTERVAL_MS } from "../shared/cache-profiles.js";
 import { projectSteer, type SteerMembership } from "../shared/steer-state.js";
 import {
   efficiencySettingsLock,
   normalizeModel,
   normalizeProvider,
   normalizeThinking,
-  speedOfLiveOptions,
-  tupleFromLive,
-  tuplesEqual,
 } from "../shared/steer-settings.js";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
-}
-
-function stampMs(value: unknown): number | null {
-  if (typeof value !== "string" || !value) return null;
-  const ms = Date.parse(value);
-  return Number.isFinite(ms) ? ms : null;
 }
 
 /** Advisor flag for the row; unknown config means not advisor. */
@@ -148,11 +141,6 @@ function scopeReads(scope: any): ScopeReads | null {
   };
 }
 
-function usedTokensOf(agent: any): unknown {
-  const snapshot = agent?.lastUsage ?? agent?.LastUsage ?? null;
-  return snapshot?.contextWindowUsedTokens ?? snapshot?.ContextWindowUsedTokens ?? null;
-}
-
 /**
  * Pure assembly of one feed event from an already-read daemon state (see
  * readPaseoState). Counts every known steer tab: live holders (ZeroSub
@@ -234,50 +222,7 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
     const status = typeof agent.status === "string" ? agent.status : null;
     const permissionNeeded =
       Array.isArray(agent.pendingPermissions) && agent.pendingPermissions.length > 0;
-    const lastTurnEndedAt =
-      typeof entry?.lastTurnEndedAt === "string" ? (entry.lastTurnEndedAt as string) : null;
-    const lastEnd = stampMs(lastTurnEndedAt);
-    const clearedAt = stampMs(asRecord(entry?.cleared)?.at);
-    const cleanedAfter = clearedAt !== null && (lastEnd === null || clearedAt >= lastEnd);
-    const pendingDelivery = asRecord(entry?.pendingWakeBrief);
-    const deliveryPhase = pendingDelivery?.phase ??
-      (pendingDelivery ? entry?.pendingAction ? "renewing" : entry?.actionVerified === true ? "ready" : "blocked" : null);
-    const resumeFallback = deliveryPhase === "blocked"
-      ? typeof pendingDelivery?.lastError === "string" ? pendingDelivery.lastError : "Context renewal needs attention."
-      : null;
-    const pendingOperation = entry?.pendingAction != null ||
-      deliveryPhase === "renewing" || deliveryPhase === "ready" || deliveryPhase === "sent";
     const openTurn = entry?.openTurnId !== null && entry?.openTurnId !== undefined;
-    const baselineValid = lastEnd !== null && !cleanedAfter && !pendingOperation;
-    const provider = typeof agent.provider === "string" && agent.provider ? agent.provider : null;
-    const model = typeof agent.model === "string" && agent.model ? agent.model : null;
-    // Step-4 live tuple and turn-end baseline for prefix-break detection and
-    // the observed-change warning. Without a stored baseline the projection
-    // keeps its v1 behavior (prefix break stays false).
-    const liveThinkingRaw = typeof agent.effectiveThinkingOptionId === "string"
-      ? agent.effectiveThinkingOptionId
-      : (typeof agent.thinkingOptionId === "string" ? agent.thinkingOptionId : null);
-    const liveThinking = normalizeThinking(liveThinkingRaw);
-    const liveSpeed = speedOfLiveOptions(provider, model, agent.options ?? null);
-    const liveSessionId = typeof agent?.persistence?.sessionId === "string" && agent.persistence.sessionId
-      ? agent.persistence.sessionId
-      : null;
-    const liveTuple = tupleFromLive({ provider, model, thinking: liveThinking, speed: liveSpeed });
-    const baselineRaw = asRecord(entry?.settingsBaseline);
-    const baselineSession = typeof baselineRaw?.sessionId === "string" && baselineRaw.sessionId
-      ? baselineRaw.sessionId
-      : null;
-    const baseline = baselineRaw && baselineSession
-      ? {
-        provider: normalizeProvider(baselineRaw.provider),
-        model: normalizeModel(baselineRaw.model),
-        thinking: normalizeThinking(baselineRaw.thinking),
-        speed: typeof baselineRaw.speed === "string" && baselineRaw.speed.trim()
-          ? baselineRaw.speed.trim().toLowerCase()
-          : null,
-        sessionId: baselineSession,
-      }
-      : null;
     const confirmedRaw = asRecord(entry?.settingsConfirmed);
     const confirmed = confirmedRaw &&
         (typeof confirmedRaw.provider === "string" || typeof confirmedRaw.model === "string")
@@ -290,20 +235,12 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
           : null,
       }
       : null;
-    const comparable = baseline !== null && liveSessionId !== null && baseline.sessionId === liveSessionId;
-    const prefixBreakRetained = comparable && baseline !== null && !tuplesEqual(liveTuple, {
-      provider: baseline.provider,
-      model: baseline.model,
-      thinking: baseline.thinking,
-      speed: baseline.speed,
-    });
-    const storedTokens = finiteNumber(entry?.contextTokens);
+    const context = agentContextInputs(agent, entry, settings, deps.zerosub ?? null, nowMs);
+    const { provider, model, lastTurnEndedAt, cleanedAfter, liveThinking, liveSpeed, liveSessionId, baseline } = context;
     const needsResume = isNeedsResumeReason(asRecord(entry?.needsResume)?.reason)
       ? ((asRecord(entry?.needsResume)?.reason as "daemon-restart" | "limit" | "failed" | "cold"))
       : null;
     const projection = projectSteer({
-      nowMs,
-      agentId: agent.id,
       membership,
       scopeRetired: reads.retired,
       replacedHolder:
@@ -314,22 +251,11 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
       liveStatus: status,
       openTurn,
       permissionNeeded,
-      provider,
-      model,
-      lastTurnEndedAt,
-      baselineValid,
-      prefixBreakRetained,
-      liveUsedTokens: cleanedAfter ? null : usedTokensOf(agent),
-      storedTokens,
-      storedSameSession: baselineValid,
-      cleanupProfile: settings.profile,
-      minContextTokens: settings.minContextTokens,
+      ...context,
       freshHint: status === "idle" ? currentFreshHint(entry) : null,
-      pendingOperation,
-      resumeFallback,
       queuedWake: queuedWakeFor(agent.id),
-      historyFree: lastEnd === null && !openTurn && status === "idle",
-      resetAwaitingBrief: cleanedAfter && !pendingOperation && !openTurn && status === "idle",
+      historyFree: lastTurnEndedAt === null && !openTurn && status === "idle",
+      resetAwaitingBrief: cleanedAfter && !context.pendingOperation && !openTurn && status === "idle",
       needsResume,
       needsResumeAt: typeof asRecord(entry?.needsResume)?.at === "string"
         ? (asRecord(entry?.needsResume)?.at as string)
@@ -438,7 +364,7 @@ export function serveSteerSubscription(
     }
   };
   void push();
-  const timer = setInterval(() => void push(), deps.intervalMs ?? 60_000);
+  const timer = setInterval(() => void push(), deps.intervalMs ?? CACHE_CHECK_INTERVAL_MS);
   if (typeof (timer as unknown as { unref?: unknown }).unref === "function") {
     (timer as unknown as { unref: () => void }).unref();
   }

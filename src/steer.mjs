@@ -21,7 +21,7 @@ import { createExecutors } from './apply.mjs';
 import { resolveScope, scopeToEntry, sameScopeId, domainOfScope } from './scope.mjs';
 import { STEER_TITLE, activeMarker, markSteerTitle, stripActiveMarker } from './discovery.mjs';
 import { AGENTS_KEY, currentFreshHint, updateAgentEntry } from './agent-state.mjs';
-import { SUPERVISION_DEFAULTS, failoverChain, openWorkers as openRegisterWorkers, readWorkers, zerosubMoveDecision } from './supervision.mjs';
+import { SUPERVISION_DEFAULTS, WORKERS_KEY, failoverChain, openWorkers as openRegisterWorkers, readWorkers, zerosubMoveDecision } from './supervision.mjs';
 import { QUOTA_DEFAULTS, accountExhausted, accountForAgent, formatQuotaLine, freshMaxUsedPct, profilePool } from './quota.mjs';
 import { readRewindPoint, rewindAndBrief } from './rewind.mjs';
 import { findingsPassage } from './findings.mjs';
@@ -194,11 +194,15 @@ export function readGitSnapshot(git, path) {
   try {
     const branch = git(path, ['rev-parse', '--abbrev-ref', 'HEAD']).trim();
     const sha = git(path, ['rev-parse', 'HEAD']).trim();
-    const changes = git(path, ['status', '--porcelain']).split('\n').filter(Boolean).length;
-    return { branch, sha, changes };
+    const lines = git(path, ['status', '--porcelain']).split('\n').filter(Boolean);
+    return { branch, sha, changes: lines.length, paths: changedPaths(lines) };
   } catch {
     return null;
   }
+}
+
+function changedPaths(lines) {
+  return lines.slice(0, 10).map((line) => line.length > 3 ? line.slice(3) : line);
 }
 
 /** Richer git read for the resume brief: ahead/behind plus up to 10 changed paths; null when unreadable. */
@@ -218,7 +222,7 @@ export function readGitBrief(git, path) {
       ahead = null;
       behind = null;
     }
-    return { branch, sha, ahead, behind, changed: lines.length, paths: lines.slice(0, 10).map((l) => (l.length > 3 ? l.slice(3) : l)) };
+    return { branch, sha, ahead, behind, changed: lines.length, paths: changedPaths(lines) };
   } catch {
     return null;
   }
@@ -314,34 +318,73 @@ export function checkpointRules({ reportTo = null } = {}) {
   ].join('\n');
 }
 
-export function formatCheckpointBlock({ task, tests = [], blockers = [], next = null }) {
+export function formatCheckpointBlock({ task, tests = [], blockers = [], next = null, status }) {
   const oneLine = (value) => String(value ?? '').replace(/\s*\n\s*/g, ' ').trim();
   const list = (values) => (values?.length ? values.map(oneLine).filter(Boolean).join('; ') : 'none');
-  return ['```text', 'CHECKPOINT', `task: ${oneLine(task)}`, `tests: ${list(tests)}`, `blockers: ${list(blockers)}`, `next: ${next ? oneLine(next) : 'none'}`, '```'].join('\n');
+  return ['```text', 'CHECKPOINT', `task: ${oneLine(task)}`, `tests: ${list(tests)}`, `blockers: ${list(blockers)}`, `next: ${next ? oneLine(next) : 'none'}`, ...(status ? [`status: ${status}`] : []), '```'].join('\n');
+}
+
+function boundBrief(lines, { budget = BRIEF_BUDGET, worker = false, truncated = false } = {}) {
+  const marker = `\n${worker ? 'See the worker register and last saved CHECKPOINT.' : 'See the stored scope CHECKPOINT and worker register.'}\n[…brief truncated to ${budget} characters]`;
+  const text = lines.join('\n');
+  if (!truncated && text.length <= budget) return text;
+  const kept = [];
+  let used = marker.length;
+  for (const line of lines) {
+    if (used + line.length + 1 > budget) break;
+    kept.push(line);
+    used += line.length + 1;
+  }
+  return kept.join('\n') + marker;
+}
+
+function packetCheckpoint(lines, cp, epoch, t) {
+  if (!cp?.task) {
+    lines.push(t.noCheckpoint);
+    return false;
+  }
+  const fields = { task: cp.task, tests: cp.tests?.join('; ') ?? '', blockers: cp.blockers?.join('; ') ?? '', next: cp.next ?? '' };
+  const bounded = Object.fromEntries(Object.entries(fields).map(([key, value]) => [key, clip(value, key === 'task' ? 500 : 300)]));
+  lines.push(t.checkpoint(cp, cp.epoch != null && cp.epoch !== epoch));
+  lines.push(`- ${t.task}: ${bounded.task}`, `- ${t.tests}: ${bounded.tests || t.none}`, `- ${t.blockers}: ${bounded.blockers || t.none}`, `- ${t.next}: ${bounded.next || t.noNext}`);
+  if (cp.source === 'failover' && cp.failover) lines.push(clip(`- Failover: takeover from ${cp.failover.previousSteer ?? '?'} (${cp.failover.reason ?? 'no reason recorded'})`, 240));
+  lines.push(formatCheckpointBlock({ ...bounded, tests: bounded.tests ? [bounded.tests] : [], blockers: bounded.blockers ? [bounded.blockers] : [], status: cp.status }));
+  return Object.keys(fields).some((key) => fields[key].trim().length > (key === 'task' ? 500 : 300));
+}
+
+function workerCheckpoint(status, id, { note, lastMessage, interrupted } = {}) {
+  const entry = status.openWorkers?.find((worker) => worker.id === id);
+  return {
+    task: entry?.task || null,
+    block: parseCheckpointBlock(lastMessage) ?? parseCheckpointBlock(interrupted?.excerpt) ?? parseCheckpointBlock(note),
+    interrupted: interrupted ?? (entry?.state === 'interrupted' ? {} : null),
+  };
+}
+
+function appendWorkerCheckpoint(lines, worker, t, epoch) {
+  if (worker.task) lines.push(`${t.task}: ${worker.task}`);
+  if (worker.interrupted) lines.push(`! Worker interrupted${worker.interrupted.at ? ` at ${worker.interrupted.at}` : ''}.`);
+  if (worker.block) return packetCheckpoint(lines, worker.block, epoch, t);
+  lines.push('Worker CHECKPOINT: none recorded.');
+  if (!worker.task) lines.push(t.noCheckpoint);
+  return false;
+}
+
+function appendPacketPaths(lines, git) {
+  if (!git?.paths?.length) return;
+  lines.push('Changed paths:');
+  for (const path of git.paths.slice(0, 10)) lines.push(`- ${clip(path, 120)}`);
 }
 
 /**
  * Deterministic handoff text from Paseo/git state. No model call is made to build
  * it; the receiving steer still reads it as normal input on its next turn.
  */
-export function buildHandoff(status, { from, to, epoch, git, lastMessage, maxLastChars = 800, language = 'en', workerModel = null, promptOptions }) {
+export function buildHandoff(status, { from, to, epoch, git, lastMessage, maxLastChars = 800, language = 'en', workerModel = null, promptOptions, budget }) {
   const t = TEXT[language] ?? TEXT.en;
-  const lines = [t.head(status.repo, epoch), t.active(to, from), `Workspace ${status.workspace.id} · ${status.workspace.directory}`, git ? t.git(git) : t.noGit];
-  if (workerModel) lines.push(workerModel);
-  const findings = findingsPassage(promptOptions);
-  if (findings) lines.push(findings);
-  const cp = status.checkpoint;
-  if (!cp?.task) {
-    lines.push(t.noCheckpoint);
-  } else {
-    lines.push(t.checkpoint(cp, cp.epoch !== epoch));
-    lines.push(`- ${t.task}: ${cp.task}`);
-    lines.push(`- ${t.tests}: ${cp.tests?.length ? cp.tests.join('; ') : t.none}`);
-    lines.push(`- ${t.blockers}: ${cp.blockers?.length ? cp.blockers.join('; ') : t.none}`);
-    lines.push(`- ${t.next}: ${cp.next ? cp.next : t.noNext}`);
-    if (cp.source === 'failover' && cp.failover) lines.push(`- Failover: takeover from ${cp.failover.previousSteer ?? '?'} (${cp.failover.reason ?? 'no reason recorded'})`);
-    lines.push(formatCheckpointBlock(cp));
-  }
+  const lines = [clip(t.head(status.repo, epoch), 350), t.active(to, from), clip(`Workspace ${status.workspace.id} · ${status.workspace.directory}`, 450), clip(git ? t.git(git) : t.noGit, 220)];
+  const truncated = packetCheckpoint(lines, status.checkpoint, epoch, t);
+  appendPacketPaths(lines, git);
   const supervised = new Map((status.openWorkers ?? []).map((e) => [e.id, e]));
   const supervisedSuffix = (id) => {
     const e = supervised.get(id);
@@ -349,13 +392,17 @@ export function buildHandoff(status, { from, to, epoch, git, lastMessage, maxLas
   };
   if (status.workers.length || supervised.size) {
     lines.push(t.workers);
-    for (const w of status.workers) lines.push(`- ${w.id} „${w.title}“ ${w.provider}/${w.model} · ${w.status}${w.parentSlot ? ` · ${t.parent} ${w.parentSlot}` : ''}${!w.parentSlot && w.parentCandidate ? ` · ${t.parent} candidate "${w.parentCandidate.title}" ${w.parentCandidate.id}` : ''}${w.owner && !w.parentSlot ? ` · owner ${w.owner}` : ''}${w.workspaceId && status.workspace && w.workspaceId !== status.workspace.id ? ` · workspace ${w.workspaceId}` : ''}${supervisedSuffix(w.id)}`);
+    const sorted = [...status.workers].sort((a, b) => Number(supervised.has(b.id)) - Number(supervised.has(a.id)));
     for (const e of [...supervised.values()].filter((entry) => !status.workers.some((w) => w.id === entry.id))) lines.push(`- ${e.id} (agent not live) · supervised ${e.state}: ${clip(e.task ?? '', 120) || '(no task)'}`);
+    for (const w of sorted) lines.push(`- ${w.id} „${clip(w.title, 100)}“ ${w.provider}/${w.model} · ${w.status}${w.parentSlot ? ` · ${t.parent} ${w.parentSlot}` : ''}${!w.parentSlot && w.parentCandidate ? ` · ${t.parent} candidate "${w.parentCandidate.title}" ${w.parentCandidate.id}` : ''}${w.owner && !w.parentSlot ? ` · owner ${w.owner}` : ''}${w.workspaceId && status.workspace && w.workspaceId !== status.workspace.id ? ` · workspace ${w.workspaceId}` : ''}${supervisedSuffix(w.id)}`);
   } else {
     lines.push(t.noWorkers);
   }
+  if (workerModel) lines.push(workerModel);
+  const findings = findingsPassage(promptOptions);
+  if (findings) lines.push(findings);
   if (lastMessage) lines.push(t.hint(from.slot), clip(lastMessage, maxLastChars));
-  return lines.join('\n');
+  return boundBrief(lines, { budget, truncated });
 }
 
 export function previousSteerNotice(to, epoch, language = 'en') {
@@ -375,13 +422,13 @@ export function refreshWorkerNotice(to, language = 'en') {
 /**
  * Refresh packet for a non-active steer or a worker: same agent role in a
  * new agent, no takeover and no epoch change. The brief comes from the
- * agent's own `wsf.agents` note (or the checkpoint when no note was
- * recorded); workers are intentionally not listed (see `resume`).
+ * agent's own `wsf.agents` note and the task checkpoint. Workers use their
+ * assignment and checkpoint only.
  * Deterministic like buildHandoff; no model call is made to build it.
  * With `rewound: true` the packet heads the same tab after a Paseo rewind
  * (from.id is kept, no new agent, no retire notice).
  */
-export function buildRefreshPacket(status, { kind, slot = null, owner = null, title = null, from, to, epoch, git, note = null, noteAt = null, lastMessage = null, maxLastChars = 800, language = 'en', workerModel = null, rewound = false, promptOptions }) {
+export function buildRefreshPacket(status, { kind, slot = null, owner = null, title = null, from, to, epoch, git, note = null, noteAt = null, interrupted = null, lastMessage = null, maxLastChars = 800, language = 'en', workerModel = null, rewound = false, promptOptions }) {
   const t = TEXT[language] ?? TEXT.en;
   const active = status.state?.activeSteer ?? '?';
   const lines = [
@@ -397,30 +444,25 @@ export function buildRefreshPacket(status, { kind, slot = null, owner = null, ti
       : (slot && slot === active ? t.refreshRoleActive(slot) : t.refreshRole(slot)),
     `Workspace ${status.workspace.id} · ${status.workspace.directory}`,
     git ? t.git(git) : t.noGit,
-  ];
-  if (workerModel) lines.push(workerModel);
+  ].map((line) => clip(line, 450));
+  const worker = kind === 'worker' ? workerCheckpoint(status, from.id, { note, lastMessage, interrupted }) : null;
+  const truncated = worker ? appendWorkerCheckpoint(lines, worker, t, epoch) : packetCheckpoint(lines, status.checkpoint, epoch, t);
+  appendPacketPaths(lines, git);
+  if (!worker && status.openWorkers?.length) {
+    lines.push(t.workers);
+    for (const entry of status.openWorkers) lines.push(`- ${entry.id} · supervised ${entry.state}: ${clip(entry.task ?? '', 120)}`);
+  }
+  if (workerModel && !worker) lines.push(workerModel);
   const findings = findingsPassage(promptOptions);
   if (findings) lines.push(findings);
-  if (typeof note === 'string' && note.trim()) {
+  if (!worker?.block && typeof note === 'string' && note.trim()) {
     lines.push(t.refreshNote(from.id, noteAt));
     lines.push(clip(note, 1500));
-  } else {
+  } else if (!worker) {
     lines.push(t.noNote);
   }
-  const cp = status.checkpoint;
-  if (!cp?.task) {
-    lines.push(t.noCheckpoint);
-  } else {
-    lines.push(t.checkpoint(cp, cp.epoch !== epoch));
-    lines.push(`- ${t.task}: ${cp.task}`);
-    lines.push(`- ${t.tests}: ${cp.tests?.length ? cp.tests.join('; ') : t.none}`);
-    lines.push(`- ${t.blockers}: ${cp.blockers?.length ? cp.blockers.join('; ') : t.none}`);
-    lines.push(`- ${t.next}: ${cp.next ? cp.next : t.noNext}`);
-    if (cp.source === 'failover' && cp.failover) lines.push(`- Failover: takeover from ${cp.failover.previousSteer ?? '?'} (${cp.failover.reason ?? 'no reason recorded'})`);
-    lines.push(formatCheckpointBlock(cp));
-  }
-  if (lastMessage) lines.push(kind === 'worker' ? t.workerHint() : t.hint(slot), clip(lastMessage, maxLastChars));
-  return lines.join('\n');
+  if (lastMessage && !worker?.block) lines.push(worker ? t.workerHint() : t.hint(slot), clip(lastMessage, maxLastChars));
+  return boundBrief(lines, { worker: Boolean(worker), truncated });
 }
 
 /** Shared receipt lookup for every fresh path: missing lookup or failed exchange refuses, never recreates blindly. */
@@ -549,20 +591,28 @@ function ageAgo(when, now) {
  * the last turn had no CHECKPOINT) enable the heuristic restart guess; without
  * them only plugin-marked interruptions are shown.
  */
-export function buildResumeBrief(status, { agentId = null, agentState = null, git = null, scope = null, now = () => Date.now(), daemonStartedAt = null, lastTurnCheckpoints = null, config = null, workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, zerosub = null, promptOptions } = {}) {
+export function buildResumeBrief(status, { agentId = null, agentState = null, workerLastAnswer = null, git = null, scope = null, now = () => Date.now(), daemonStartedAt = null, lastTurnCheckpoints = null, config = null, workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, zerosub = null, promptOptions, budget = BRIEF_BUDGET } = {}) {
   const id = scope?.id ?? status.repo;
   const kind = scope?.kind ?? 'unknown';
   const epoch = status.state?.epoch ?? '?';
   const domain = scope?.domain ?? status.domain ?? null;
   const active = status.steers.find((s) => s.slot === status.state?.activeSteer) ?? null;
-  const lines = [`Resume brief for ${id} (${kind}) · epoch ${epoch} · active steer ${status.state?.activeSteer ?? '?'}${active ? ` (${active.id})` : ''}${domain ? ` · domain ${domain}` : ''}.`];
+  const lines = [clip(`Resume brief for ${id} (${kind}) · epoch ${epoch} · active steer ${status.state?.activeSteer ?? '?'}${active ? ` (${active.id})` : ''}${domain ? ` · domain ${domain}` : ''}.`, 450)];
   const callerSteer = agentId ? status.steers.find((s) => s.id === agentId) ?? null : null;
   const callerWorker = !callerSteer && agentId ? (status.workers ?? []).find((w) => w.id === agentId) ?? null : null;
   if (config && callerSteer && isAdvisorSlot(config, callerSteer.slot)) lines.push('You are an advisor steer: answer only, never coordinate or take over.');
   else if (callerSteer && callerSteer.id === active?.id) lines.push('You are the active steer of this scope.');
   else if (callerSteer) lines.push('You are not active: answer only, do not coordinate.');
-  else if (callerWorker) lines.push(`You are worker "${callerWorker.title}"; your owner is Steer ${callerWorker.owner ?? callerWorker.parentSlot ?? '?'} — continue from the checkpoint below.`);
+  else if (callerWorker) lines.push(`You are worker "${clip(callerWorker.title, 100)}"; your owner is Steer ${callerWorker.owner ?? callerWorker.parentSlot ?? '?'} — continue from the checkpoint below.`);
   else lines.push('Caller unknown; treat this brief as read-only context.');
+  if (callerWorker) {
+    const worker = workerCheckpoint(status, agentId, { ...agentState?.[agentId], lastMessage: workerLastAnswer });
+    const truncated = appendWorkerCheckpoint(lines, worker, TEXT.en, epoch);
+    appendPacketPaths(lines, git);
+    const findings = findingsPassage(promptOptions);
+    if (findings) lines.push(findings);
+    return boundBrief(lines, { worker: true, truncated, budget });
+  }
   if (workerModel) lines.push(workerModel);
   const findings = findingsPassage(promptOptions);
   if (findings) lines.push(findings);
@@ -653,9 +703,8 @@ export function buildResumeBrief(status, { agentId = null, agentState = null, gi
     }
   }
   const text = lines.join('\n');
-  if (text.length <= BRIEF_BUDGET) return text;
-  const marker = `\n[…brief truncated to ${BRIEF_BUDGET} characters]`;
-  return text.slice(0, BRIEF_BUDGET - marker.length) + marker;
+  if (text.length <= budget) return text;
+  return boundBrief(lines, { budget });
 }
 
 /**
@@ -664,9 +713,9 @@ export function buildResumeBrief(status, { agentId = null, agentState = null, gi
  * exactly buildHandoff.
  */
 function handoffWithBrief(status, args, { discovery, git, language, workerModel = null, quotaSnapshot = null, quotaWarnPct = 75, zerosub = null, promptOptions }) {
-  const packet = buildHandoff(status, { ...args, workerModel, promptOptions });
   const at = status.checkpoint?.interrupted?.at ?? null;
-  if (at === null && !status.checkpoint?.interrupted) return packet;
+  if (at === null && !status.checkpoint?.interrupted) return buildHandoff(status, { ...args, workerModel, promptOptions });
+  const packet = buildHandoff(status, { ...args, workerModel, promptOptions, budget: 3500 });
   const receivingStatus = {
     ...status,
     state: { ...status.state, activeSteer: args.to.slot, epoch: args.epoch + 1 },
@@ -681,12 +730,13 @@ function handoffWithBrief(status, args, { discovery, git, language, workerModel 
     quotaSnapshot,
     quotaWarnPct,
     zerosub,
+    budget: 2150,
     promptOptions: { findingsInPrompts: false }, // the outer handoff already carries the passage
   });
   const line = language === 'de'
     ? `Der vorherige Steer wurde um ${at ?? 'unbekannter Zeit'} unterbrochen; Git-Stand vor dem Weitermachen prüfen.`
     : `Previous steer was interrupted at ${at ?? 'unknown time'}; verify git state before continuing.`;
-  return `${packet}\n---\n${line}\n--- resume brief ---\n${brief}`;
+  return boundBrief([packet, '---', clip(line, 200), '--- resume brief ---', brief]);
 }
 
 const NONE = /^(keine?|none|n\/a|-)\.?$/i;
@@ -978,7 +1028,7 @@ function rewindFallbackWarning(fromId, outcomeStatus) {
  * rewind stands; resend the packet manually). With `send: false` the rewind
  * lands without a brief (stage-only: the caller stages the returned packet).
  */
-async function runTabRewind({ client, workspaceId, agentId, packet, checkpoint, lock, now, rewindClient, previousBriefId, send = true }) {
+async function runTabRewind({ client, workspaceId, agentId, packet, checkpoint, lock, now, rewindClient, previousBriefId, send = true, note = null }) {
   const outcome = await rewindAndBrief(agentId, packet, { createClient: rewindClient, previousBriefId, ...(send ? {} : { skipBrief: true }) });
   if (outcome.status === 'failed') {
     throw new SwitchRefused(`Rewind of ${agentId} failed (${outcome.error ?? 'unknown error'}); nothing sent, nothing recorded, no new agent created`);
@@ -989,6 +1039,7 @@ async function runTabRewind({ client, workspaceId, agentId, packet, checkpoint, 
     patch: {
       ...buildRewindRecord({ checkpoint, messageId: outcome.messageId ?? null, briefMessageId: outcome.briefMessageId ?? null, now }),
       pendingWakeBrief: null,
+      ...(note ? { note, noteAt: checkpoint?.capturedAt ?? null } : {}),
     },
     liveIds: null,
   });
@@ -1259,10 +1310,11 @@ async function tryTabRewind({ client, discovery, status, expected, from, kind, p
   const entry = agentState?.[from.id] ?? null;
   const previousBriefId = entry?.refreshed?.briefMessageId;
   const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory) : null;
-  const checkpoint = Boolean(status.checkpoint?.task);
+  const taskCheckpoint = kind === 'worker' ? workerCheckpoint(status, from.id, entry ?? {}) : null;
+  const checkpoint = Boolean(taskCheckpoint ? taskCheckpoint.task || taskCheckpoint.block : status.checkpoint?.task);
   const packetOf = async () => buildRefreshPacket(status, {
     kind, from, to: { id: from.id }, epoch: expected.epoch, git: gitSnapshot,
-    note: entry?.note ?? null, noteAt: entry?.noteAt ?? null,
+    note: entry?.note ?? null, noteAt: entry?.noteAt ?? null, interrupted: entry?.interrupted ?? null,
     lastMessage: await hintOf(client, from.id), language, workerModel, rewound: true, promptOptions,
     ...packetArgs,
   });
@@ -1289,7 +1341,9 @@ async function tryTabRewind({ client, discovery, status, expected, from, kind, p
     };
   }
   const packet = await packetOf();
-  const { outcome } = await runTabRewind({ client, workspaceId: status.workspace.id, agentId: from.id, packet, checkpoint: status.checkpoint, lock, now, rewindClient, previousBriefId, send });
+  const savedCheckpoint = kind === 'worker' ? { capturedAt: entry?.noteAt } : status.checkpoint;
+  const block = kind === 'worker' ? parseCheckpointBlock(packet) : null;
+  const { outcome } = await runTabRewind({ client, workspaceId: status.workspace.id, agentId: from.id, packet, checkpoint: savedCheckpoint, lock, now, rewindClient, previousBriefId, send, note: block ? formatCheckpointBlock(block) : null });
   if (outcome.status !== 'rewound') {
     if (requireRefreshMode === 'rewind') {
       const error = new SwitchRefused(`Bound rewind route failed (${outcome.status}${outcome.error ? `: ${outcome.error}` : ''}); nothing sent, nothing recorded, no new agent created. The brief is kept.`);
@@ -1481,19 +1535,22 @@ async function freshWorkerAgent({ client, discovery, status, expected, workerId,
 
   const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory) : null;
   const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;
+  const entry = agentState?.[from.id] ?? null;
+  const lastMessage = await hintOf(client, from.id);
+  const worker = workerCheckpoint(status, from.id, { ...entry, lastMessage });
   const result = {
     repo: status.repo, kind: 'worker', workerId: from.id, owner, from: from.id, to: null, epoch: expected.epoch, epochBumped: false,
     profile: twins.length === 1 ? twins[0][0] : null, provider: from.provider, model: from.model,
     idempotencyKey: key, packet: '', packetChars: 0,
-    checkpoint: Boolean(status.checkpoint?.task), applied: false, delivered: false, deliveryError: null, previousNotified: false, reused: false, renameError: null,
+    checkpoint: Boolean(worker.task || worker.block), applied: false, delivered: false, deliveryError: null, previousNotified: false, reused: false, renameError: null,
     warnings, fallbackFrom: null, profileSuggestion: null,
     refreshMode: 'new-agent', ...(rewindFallback ? { rewindFallback } : {}),
   };
   if (!apply) {
     result.packet = buildRefreshPacket(status, {
       kind: 'worker', owner, title: request.title, from, to: { id: 'new agent, created on apply' }, epoch: expected.epoch, git: gitSnapshot,
-      note: agentState?.[from.id]?.note ?? null, noteAt: agentState?.[from.id]?.noteAt ?? null,
-      lastMessage: await hintOf(client, from.id), language, workerModel, promptOptions,
+      note: entry?.note ?? null, noteAt: entry?.noteAt ?? null, interrupted: entry?.interrupted ?? null,
+      lastMessage, language, workerModel, promptOptions,
     });
     result.packetChars = result.packet.length;
     return result;
@@ -1516,19 +1573,51 @@ async function freshWorkerAgent({ client, discovery, status, expected, workerId,
   result.to = freshId;
   result.packet = buildRefreshPacket(status, {
     kind: 'worker', owner, title: request.title, from, to: { id: freshId }, epoch: expected.epoch, git: gitSnapshot,
-    note: agentState?.[from.id]?.note ?? null, noteAt: agentState?.[from.id]?.noteAt ?? null,
-    lastMessage: await hintOf(client, from.id), language, workerModel, promptOptions,
+    note: entry?.note ?? null, noteAt: entry?.noteAt ?? null, interrupted: entry?.interrupted ?? null,
+    lastMessage, language, workerModel, promptOptions,
   });
   result.packetChars = result.packet.length;
+  const resumeMessageId = worker.interrupted ? `wsf-worker-refresh-${freshId}` : null;
+  if (worker.interrupted) {
+    const workspace = client.workspaces.ref(status.workspace.id);
+    await lock(workspaceLockName(status.workspace.id), async (held) => {
+      const metadata = (await workspace.refresh())?.metadata ?? {};
+      if (metadata[METADATA_KEY]?.epoch !== expected.epoch) throw new SwitchRefused('The scope moved before the worker could be refreshed');
+      const workers = readWorkers(metadata);
+      const entries = metadata[AGENTS_KEY] ?? {};
+      if (entries[from.id]?.replacedBy === freshId) return;
+      if (workers[from.id]) {
+        workers[freshId] = { ...workers[freshId], ...workers[from.id] };
+        delete workers[from.id];
+      }
+      const block = parseCheckpointBlock(result.packet);
+      held.verify();
+      await workspace.setMetadata({
+        [WORKERS_KEY]: workers,
+        [AGENTS_KEY]: {
+          ...entries,
+          [from.id]: { ...entries[from.id], replacedBy: freshId },
+          [freshId]: {
+            workerResumeMessageId: resumeMessageId,
+            interrupted: entry?.interrupted ?? { at: now().toISOString() },
+            ...(block ? { note: formatCheckpointBlock(block), noteAt: entry?.noteAt ?? null } : {}),
+            ...entries[freshId],
+          },
+        },
+      });
+    });
+  }
   if (send) {
     try {
-      await client.agents.ref(freshId).send(result.packet);
+      const ref = client.agents.ref(freshId);
+      if (resumeMessageId) await ref.send(result.packet, { messageId: resumeMessageId });
+      else await ref.send(result.packet);
       result.delivered = true;
     } catch (error) {
       result.deliveryError = error.message; // the fresh worker stands; resend the packet manually
     }
   }
-  if (notifyPrevious) {
+  if (notifyPrevious && !worker.interrupted) {
     try {
       await client.agents.ref(from.id).send(refreshWorkerNotice({ id: freshId }, language)); // costs one turn of the retired worker
       result.previousNotified = true;
@@ -1545,6 +1634,10 @@ export async function hintOf(client, agentId) {
   } catch {
     return null;
   }
+}
+
+export function workerResumeAnswer(client, status, agentId) {
+  return (status.workers ?? []).some((worker) => worker.id === agentId) ? hintOf(client, agentId) : null;
 }
 
 /** Records a short task checkpoint for the current epoch (same lock as switches). A fresh checkpoint clears the interrupted flag — except source `auto`, which never clears it. Source `failover` logs a takeover with the previous steer and reason. */

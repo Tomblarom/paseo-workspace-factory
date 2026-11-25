@@ -77,6 +77,7 @@ export function normalizeZerosubState(raw, { now = Date.now() } = {}) {
     accounts.push({
       id,
       family: typeof entry.family === 'string' ? entry.family.toLowerCase() : '',
+      ...(entry.auth === 'subscription' || entry.auth === 'api' ? { auth: entry.auth } : {}),
       label: typeof entry.label === 'string' ? entry.label : '',
       status,
       limitedUntil,

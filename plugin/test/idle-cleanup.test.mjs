@@ -4,6 +4,7 @@ import { register } from "node:module";
 
 register("./ts-resolve-hooks.mjs", import.meta.url);
 
+const { resolveCacheTtl } = await import("../shared/cache-profiles.ts");
 const { currentFreshHint } = await import("../server/factory/agent-state.ts");
 
 const {
@@ -51,6 +52,7 @@ function input(overrides = {}) {
     actionsToday: 0,
     effectBlocked: false,
     nowMs: NOW,
+    cacheTtl: resolveCacheTtl({ provider: overrides.provider ?? "claude", model: overrides.model, claudeBilling: "subscription" }),
     ...overrides,
   };
 }
@@ -241,15 +243,10 @@ test("already cleaned and opted-out agents are skipped", () => {
 });
 
 test("isCold and coldHintText describe the C6 hint", () => {
-  const base = { idleMinutes: 60, minContextTokens: 60_000, nowMs: NOW };
-  assert.equal(
-    isCold({ ...base, lastTurnEndedAt: at(NOW - 2 * HOUR), contextTokens: 120_000 }),
-    true,
-  );
-  assert.equal(isCold({ ...base, lastTurnEndedAt: at(NOW - 10 * 60_000), contextTokens: 120_000 }), false);
-  assert.equal(isCold({ ...base, lastTurnEndedAt: at(NOW - 2 * HOUR), contextTokens: 1000 }), false);
-  assert.equal(isCold({ ...base, lastTurnEndedAt: null, contextTokens: 120_000 }), false);
-  assert.equal(isCold({ ...base, lastTurnEndedAt: at(NOW - 2 * HOUR), contextTokens: null }), false);
+  assert.equal(isCold("cold", true), true);
+  assert.equal(isCold("warm", true), false);
+  assert.equal(isCold("cold", false), false);
+  assert.equal(isCold("unknown", true), false);
   assert.equal(coldHintText(350_000, 2 * HOUR), "Idle chat · 350k · 2h");
   assert.equal(coldHintText(61_200, 45 * 60_000), "Idle chat · 61k · 45m");
 });
@@ -445,6 +442,23 @@ test("compact thresholds follow the profile and the model group", () => {
     decideCleanupAction(input({ ...old, lastTurnEndedAt: at(NOW - 7 * MIN) })).reason,
     /below 8m/,
   );
+});
+
+test("a short Claude route reaches cold at five minutes and an unconfirmed route skips warm compaction", () => {
+  for (const claudeBilling of ["api-5m", "unknown"]) {
+    const cacheTtl = resolveCacheTtl({ provider: "claude", claudeBilling });
+    const checkpoint = { task: "Ship it", capturedAt: at(NOW - MIN) };
+    const cooling = decideCleanupAction(input({ cacheTtl, checkpoint, lastTurnEndedAt: at(NOW - 4 * MIN) }));
+    if (claudeBilling === "unknown") {
+      assert.equal(cooling.action, null);
+      assert.match(cooling.reason, /unconfirmed/);
+    } else {
+      assert.equal(cooling.action, "compact-warm");
+    }
+    const cold = decideCleanupAction(input({ cacheTtl, checkpoint, lastTurnEndedAt: at(NOW - 5 * MIN) }));
+    assert.equal(cold.action, "fresh-recommended");
+    assert.match(cold.reason, /5m claude cache/);
+  }
 });
 
 test("already cold contexts get fresh-recommended, never a compact", () => {
