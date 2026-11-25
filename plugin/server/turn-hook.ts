@@ -21,6 +21,7 @@ import {
 import { firstUserText, workerIdentityFromMetadata } from "../shared/supervise.js";
 import { decideAssignmentReport } from "../shared/assignment-report.js";
 import { ASSIGNMENT_KEY } from "./factory/assign.js";
+import { QUOTA_DEFAULTS } from "./factory/quota.js";
 import { extractTurnUsage, mergeTurnUsage } from "./quota.js";
 import {
   proactiveHintDecision,
@@ -217,8 +218,8 @@ async function proactiveHintForTurn(args: {
       agentId: args.agentId,
       zerosub,
       nowMs: args.nowMs,
-      warnPct: config?.quota?.warnPct ?? supervision?.quota?.warnPct ?? 75,
-      exhaustedPct: config?.quota?.exhaustedPct ?? supervision?.quota?.exhaustedPct ?? 95,
+      warnPct: config?.quota?.warnPct ?? supervision?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct,
+      exhaustedPct: config?.quota?.exhaustedPct ?? supervision?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct,
     });
     if (hint.decision !== "hint" || !hint.text) return null;
     const last = asRecord(args.previous?.proactiveHint);

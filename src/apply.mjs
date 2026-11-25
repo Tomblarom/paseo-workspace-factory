@@ -521,7 +521,7 @@ export function createExecutors({ client, gh, git, paseoCli, sleep = (ms) => new
       // calling agent; plan/apply keeps failing closed with PARENT VIOLATION.
       const handle = await client.workspaces.ref(workspaceId).agents.create({ config: agentConfig, title, labels, idempotencyKey, ...(metadata ? { metadata } : {}) });
       let agent = (await handle.refresh())?.agent;
-      if (clearParent) agent = await detachInheritedParent(paseoCli, handle, agent);
+      if (clearParent) agent = await detachInheritedParent(handle, agent);
       verifySteer(agent, { workspaceId, labels });
       return { agentId: agent.id, parent: null };
     },
@@ -540,7 +540,7 @@ export function createExecutors({ client, gh, git, paseoCli, sleep = (ms) => new
         ...(metadata ? { metadata } : {}),
       });
       let agent = (await handle.refresh())?.agent;
-      if (!parent && clearParent) agent = await detachInheritedParent(paseoCli, handle, agent);
+      if (!parent && clearParent) agent = await detachInheritedParent(handle, agent);
       if (!agent) throw new Error('Agent snapshot missing after write');
       if (agent.archivedAt) throw new Error(`Agent ${agent.id} is archived (an old idempotency receipt?)`);
       if (agent.workspaceId !== workspaceId) throw new Error(`Agent ${agent.id} landed in ${agent.workspaceId}, expected ${workspaceId}`);
@@ -813,15 +813,13 @@ async function listProjectWorkspaces(client, projectId) {
 /**
  * Clears a parent link the daemon inherited from the calling agent context:
  * steer creates never pass `parent`, so any parent on the fresh snapshot is
- * unintended. Detaches once through the CLI (which runs without
- * PASEO_AGENT_ID, so no parent can be inherited again) and re-reads.
- * Without a CLI the agent is returned unchanged and the caller verifies
- * (verifySteer refuses a remaining parent).
+ * unintended. Detaches once through the public SDK handle (the same native
+ * call the CLI uses) and re-reads. Without a parent the agent is returned
+ * unchanged and the caller verifies (verifySteer refuses a remaining parent).
  */
-async function detachInheritedParent(paseoCli, handle, agent) {
+async function detachInheritedParent(handle, agent) {
   if (!agent || !parentOf(agent)) return agent;
-  if (typeof paseoCli !== 'function') return agent;
-  paseoCli(['agent', 'detach', agent.id]);
+  await handle.detach();
   return (await handle.refresh())?.agent ?? agent;
 }
 

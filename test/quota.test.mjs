@@ -109,3 +109,4 @@ test('usage JSON parsing is fail-soft and extracts the 5h window', () => {
   assert.deepEqual(parseUsageJson('{broken'), {});
   assert.deepEqual(parseUsageJson(null), {});
 });
+

@@ -3,7 +3,7 @@
 // check the planner runs (live catalog shape plus knownLimits).
 import { chmod, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { isAdvisorProfile, isAdvisorSlot, isSensitiveProfile, slotOrder, validateConfig, validateProfilesAgainstCatalog, workerPriority } from './config.mjs';
-import { profileIsUnhealthy, quotaExhausted, profilePool, profileFamily, familyAccounts, familyExhausted, bestFamilyAccount, earliestFamilyReset } from './quota.mjs';
+import { QUOTA_DEFAULTS, profileIsUnhealthy, quotaExhausted, profilePool, profileFamily, familyAccounts, familyExhausted, bestFamilyAccount, earliestFamilyReset } from './quota.mjs';
 import { suggestAccountPin } from './zerosub.mjs';
 
 /** Split "<provider>/<model>" (model may itself contain "/"). */
@@ -138,7 +138,7 @@ export function usedProfilesByLiveSteers(config, steers) {
  * `zerosubExhaustedPct` (default `quotaExhaustedPct`) judges accounts only;
  * pools without accounts keep `quotaExhaustedPct`.
  */
-export function resolveProfile(config, providerEntries, list, { role = 'worker', advisorSlot = false, usedProfiles = [], repoPublic = null, quotaSnapshot = null, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 95, profileHealth = null, now = Date.now(), zerosub = null, zerosubExhaustedPct = quotaExhaustedPct } = {}) {
+export function resolveProfile(config, providerEntries, list, { role = 'worker', advisorSlot = false, usedProfiles = [], repoPublic = null, quotaSnapshot = null, quotaExhaustedPct = config?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct, profileHealth = null, now = Date.now(), zerosub = null, zerosubExhaustedPct = quotaExhaustedPct } = {}) {
   const skipped = [];
   const used = new Set(usedProfiles ?? []);
   const names = Array.isArray(list) ? list : [];
@@ -260,7 +260,7 @@ export function workerListRows(config, providerEntries, selection) {
  * earliestReset }`. Throws on a bad slot/profile, an occupied slot, a gap,
  * or a full A-Z.
  */
-export function resolveSteerAdd(config, providerEntries, { slot = null, profile = null, advisorSlot = null, usedProfiles = [], quotaSnapshot = null, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 95, quotaWarnPct = config?.quota?.warnPct ?? 75, profileHealth = null, now = Date.now(), zerosub = null, allowGap = false } = {}) {
+export function resolveSteerAdd(config, providerEntries, { slot = null, profile = null, advisorSlot = null, usedProfiles = [], quotaSnapshot = null, quotaExhaustedPct = config?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, profileHealth = null, now = Date.now(), zerosub = null, allowGap = false } = {}) {
   const order = slotOrder(config);
   const slots = config?.steers?.slots ?? {};
   let target;

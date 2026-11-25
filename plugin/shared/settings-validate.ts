@@ -1,5 +1,7 @@
 // Validation and config layering for the factory settings documents.
-// Pure module: no imports, so both the plugin bundles and plain node:test use it.
+// Pure module: its only import is the generated defaults (single source:
+// src/defaults.mjs), so both the plugin bundles and plain node:test use it.
+import { KNOWN_UNSUPPORTED as CORE_KNOWN_UNSUPPORTED, QUOTA_DEFAULTS } from "./defaults.js";
 
 export interface FactoryProfileValue {
   provider: string;
@@ -65,7 +67,7 @@ export function settingsFromConfig(config: any, current: FactorySettingsValues):
     prepare: [...(config.steers?.prepare ?? current.prepare)],
     initialActive: config.steers?.initialActive ?? current.initialActive,
     workerPriority: priority,
-    quota: current.quota ?? { exhaustedPct: 95, warnPct: 75 },
+    quota: current.quota ?? { exhaustedPct: QUOTA_DEFAULTS.exhaustedPct, warnPct: QUOTA_DEFAULTS.warnPct },
     githubOwner: current.githubOwner ?? null,
     checkoutRoot: current.checkoutRoot ?? null,
   };
@@ -87,20 +89,13 @@ export interface KnownLimit {
   reason: string;
 }
 
-/** Settings the catalog advertises but a provider rejects at creation. Mirrors src/config.mjs. */
-export const KNOWN_UNSUPPORTED: {
+/** Settings the catalog advertises but a provider rejects at creation. Single source is src/defaults.mjs. */
+export const KNOWN_UNSUPPORTED = CORE_KNOWN_UNSUPPORTED as {
   provider: string;
   modelPattern: string;
   field: "thinking" | "mode";
   reason: string;
-}[] = [
-  {
-    provider: "copilot",
-    modelPattern: "^claude-",
-    field: "thinking",
-    reason: "Copilot rejects a reasoning effort for Claude models; use thinking: null",
-  },
-];
+}[];
 
 export interface CleanupSettingsValues {
   mode: string;

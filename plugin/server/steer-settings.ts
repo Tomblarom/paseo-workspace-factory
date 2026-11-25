@@ -9,7 +9,7 @@ import { LEGACY_PREFIX, METADATA_KEY, paseoBinary, readPaseoState } from "./fact
 import { runtime } from "./factory/runtime.js";
 import { listScopes } from "./factory/scope.js";
 import { buildRewindRecord, freshRewindIdempotent } from "./factory/steer.js";
-import { defaultCreateRewindClient, rewindAndBrief } from "./factory/rewind.js";
+import { defaultCreateRewindClient, rewindAndBrief, sendUserBrief } from "./factory/rewind.js";
 import { cleanupIdentity } from "../shared/idle-cleanup.js";
 import { settingsFingerprint } from "../shared/preview.js";
 import { resolveQuota } from "../shared/steer-state.js";
@@ -393,21 +393,22 @@ async function sendBriefAsUser(
   brief: string,
   deps: SteerSettingsDeps,
 ): Promise<void> {
-  // Prefer the daemon client so the brief arrives as a user message (the
-  // next refresh rewinds to exactly that brief); without a rewind client
-  // fall back to the high-level send (the server carries no caller id).
+  // Prefer the rewind transport so the brief arrives as a user message (the
+  // next refresh rewinds to exactly that brief); without a rewind client,
+  // or when the client has no send transport, fall back to the high-level
+  // send (the server carries no caller id).
   if (deps.rewindClient) {
-    let client: any = null;
-    try {
-      client = await deps.rewindClient({ url: factoryRuntime().paseo.url, cliPath: paseoBin() });
-      const send = client.sendMessage ?? client.sendAgentMessage;
-      if (typeof send === "function") {
-        await send.call(client, agentId, brief, {});
-        return;
-      }
-    } finally {
-      await client?.close?.().catch(() => {});
-    }
+    const sendBrief = sendUserBrief as unknown as (
+      agentId: string,
+      brief: string,
+      opts: { url: string; cliPath: string; createClient: (args: { url: string; cliPath: string }) => Promise<any> },
+    ) => Promise<boolean>;
+    const sent = await sendBrief(agentId, brief, {
+      url: factoryRuntime().paseo.url,
+      cliPath: paseoBin(),
+      createClient: deps.rewindClient,
+    });
+    if (sent) return;
   }
   await paseo.agents.ref(agentId).send(brief);
 }

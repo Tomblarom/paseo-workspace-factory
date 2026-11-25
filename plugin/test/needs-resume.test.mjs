@@ -23,7 +23,9 @@ const {
   countActiveResumeRows,
   resumeReminderText,
 } = await import("../shared/idle-cleanup.ts");
-import { factoryResumeSettings } from "../shared/settings.ts";
+// Shared modules import the generated defaults through `.js` specifiers, so
+// they must load dynamically after the resolve hook is registered.
+const { factoryResumeSettings } = await import("../shared/settings.ts");
 import { LABEL, METADATA_KEY } from "../../src/paseo.mjs";
 import { AGENTS_KEY } from "../../src/agent-state.mjs";
 import { WORKERS_KEY } from "../../src/supervision.mjs";

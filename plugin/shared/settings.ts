@@ -1,5 +1,6 @@
 import { defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
+import { QUOTA_DEFAULTS } from "./defaults.js";
 
 /**
  * factory-config v1 -> v2: workerDefault becomes workerPriority=[workerDefault];
@@ -67,9 +68,9 @@ export const factoryConfigSettings = defineSettings({
     initialActive: z.string().default("A"),
     workerPriority: z.array(z.string()).min(1).default(["factory-default"]),
     quota: z.object({
-      exhaustedPct: z.number().min(0).max(100).default(90),
-      warnPct: z.number().min(0).max(100).default(75),
-    }).default({ exhaustedPct: 95, warnPct: 75 }),
+      exhaustedPct: z.number().min(0).max(100).default(QUOTA_DEFAULTS.exhaustedPct),
+      warnPct: z.number().min(0).max(100).default(QUOTA_DEFAULTS.warnPct),
+    }).default({ exhaustedPct: QUOTA_DEFAULTS.exhaustedPct, warnPct: QUOTA_DEFAULTS.warnPct }),
     githubOwner: z.string().nullable().default(null),
     checkoutRoot: z.string().nullable().default(null),
   }),
@@ -172,9 +173,9 @@ export const factorySupervisionSettings = defineSettings({
     answerMinutes: z.number().int().min(1).default(10),
     maxAutoResumes: z.number().int().min(0).default(2),
     quota: z.object({
-      exhaustedPct: z.number().min(0).max(100).default(90),
-      warnPct: z.number().min(0).max(100).default(75),
-    }).default({ exhaustedPct: 95, warnPct: 75 }),
+      exhaustedPct: z.number().min(0).max(100).default(QUOTA_DEFAULTS.exhaustedPct),
+      warnPct: z.number().min(0).max(100).default(QUOTA_DEFAULTS.warnPct),
+    }).default({ exhaustedPct: QUOTA_DEFAULTS.exhaustedPct, warnPct: QUOTA_DEFAULTS.warnPct }),
     quotaSampleMinutes: z.number().int().min(10).default(10),
   }),
 });

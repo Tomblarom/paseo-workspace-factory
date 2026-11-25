@@ -622,6 +622,20 @@ test("pool fallback limits on thresholds and holds, never on ordinary resets", (
   assert.equal(stale.awaitingUpdate, true);
 });
 
+test("the default exhaustion boundary is 95% unless configured otherwise", () => {
+  const at = (sessionPct, over = {}) => resolveQuota({
+    nowMs: NOW,
+    agentId: "steer-a",
+    pool: "codex",
+    quotaSnapshot: { codex: { sessionPct } },
+    poolSampledAtMs: NOW,
+    ...over,
+  });
+  assert.equal(at(94).limited, false, "94% is usable at the default threshold");
+  assert.equal(at(95).limited, true, "95% is exhausted at the default threshold");
+  assert.equal(at(94, { exhaustedPct: 90 }).limited, true, "an explicit threshold still wins");
+});
+
 test("a past reset or newer usable evidence retires the limit inference", () => {
   const zerosub = {
     accounts: [account("acc-1", { windows: [window("five_hour", 20, iso(NOW + 60 * MIN))] })],

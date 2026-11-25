@@ -320,6 +320,7 @@ test('the fresh executor flag detaches an inherited parent; without it creation 
   const { ws } = provisioned(world);
   const agents = new Map();
   let seq = 0;
+  const detached = [];
   const client = {
     workspaces: {
       ref: (id) => ({
@@ -327,17 +328,18 @@ test('the fresh executor flag detaches an inherited parent; without it creation 
           create: async (opts) => {
             const agentId = `fresh-${++seq}`;
             agents.set(agentId, { id: agentId, workspaceId: id, archivedAt: null, labels: { ...opts.labels, [PARENT_LABEL]: 'caller-agent' } });
-            return { id: agentId, refresh: async () => ({ agent: structuredClone(agents.get(agentId)) }) };
+            return {
+              id: agentId,
+              refresh: async () => ({ agent: structuredClone(agents.get(agentId)) }),
+              detach: async () => {
+                detached.push(agentId);
+                delete agents.get(agentId).labels[PARENT_LABEL];
+              },
+            };
           },
         },
       }),
     },
-  };
-  const cliCalls = [];
-  const paseoCli = (args) => {
-    cliCalls.push(args);
-    delete agents.get(args[2]).labels[PARENT_LABEL];
-    return {};
   };
   const op = (clear) => ({
     key: 'steer.A.fresh', kind: 'paseo.agent.create', summary: 'fresh', params: {
@@ -345,10 +347,10 @@ test('the fresh executor flag detaches an inherited parent; without it creation 
       ...(clear ? { clearInheritedParent: true } : {}), idempotencyKey: 'k',
     },
   });
-  const run = createExecutors({ client, paseoCli });
+  const run = createExecutors({ client });
   const cleared = await run(op(true));
   assert.equal(cleared.parent, null);
-  assert.deepEqual(cliCalls, [['agent', 'detach', cleared.agentId]]);
+  assert.deepEqual(detached, [cleared.agentId]);
   await assert.rejects(run(op(false)), /PARENT VIOLATION/);
 });
 

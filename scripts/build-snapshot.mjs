@@ -31,7 +31,7 @@ import {
   statSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const PLUGIN_ID = 'workspace-factory';
@@ -42,6 +42,8 @@ export const SNAPSHOT_EXCLUDE = new Set(['node_modules', 'package-lock.json', 't
 // Must stay in sync with scripts/plugin-sync.mjs (single source of truth is
 // src/; this is only the --check equivalent, never a second sync writer).
 const SYNC_SKIP = new Set(['cli.mjs']);
+// Must stay in sync with SHARED_MIRROR in scripts/plugin-sync.mjs.
+const SHARED_MIRROR = [['defaults.mjs', join('shared', 'defaults.ts')]];
 const SYNC_HEADER = (file) =>
   `// @ts-nocheck\n// GENERATED from src/${file} by npm run plugin:sync. Do not edit.\n`;
 
@@ -91,8 +93,9 @@ export function generatedContent(srcFile, source) {
 
 // Equivalent of `plugin-sync.mjs --check`: compare the mirror against freshly
 // generated content without touching the working tree. Returns a list of stale
-// entries (empty when fresh).
-export function checkMirrorStale({ srcDir, factoryDir }) {
+// entries (empty when fresh). The shared mirror is checked only when
+// sharedDir (the plugin dir) is passed.
+export function checkMirrorStale({ srcDir, factoryDir, sharedDir = null }) {
   const stale = [];
   if (!existsSync(factoryDir)) return ['missing directory: plugin/server/factory/ (run npm run plugin:sync)'];
   const generated = new Map(); // dest name -> expected content
@@ -111,6 +114,15 @@ export function checkMirrorStale({ srcDir, factoryDir }) {
     const content = readFileSync(join(factoryDir, entry), 'utf8');
     const match = content.match(/^\/\/ GENERATED from src\/(\S+) by npm run plugin:sync\./m);
     if (match && !existsSync(join(srcDir, match[1]))) stale.push(`orphan: plugin/server/factory/${entry} (src/${match[1]} gone)`);
+  }
+  if (sharedDir !== null) {
+    for (const [file, dest] of SHARED_MIRROR) {
+      const expected = generatedContent(file, readFileSync(join(srcDir, file), 'utf8'));
+      const path = join(sharedDir, dest);
+      const label = `plugin/${dest.split(sep).join('/')}`;
+      if (!existsSync(path)) stale.push(`missing: ${label}`);
+      else if (readFileSync(path, 'utf8') !== expected) stale.push(`modified: ${label}`);
+    }
   }
   return stale;
 }
@@ -368,7 +380,7 @@ export function main(argv, deps = {}) {
   if (args.install && (!args.confirmGiven || !args.confirm)) return fail('--install requires --confirm <hash12> naming the built snapshot hash');
   if (!existsSync(pluginDir)) return fail(`plugin directory not found: ${pluginDir}`);
   if (!args.skipChecks) {
-    const stale = checkMirrorStale({ srcDir: join(repoRoot, 'src'), factoryDir: join(pluginDir, 'server', 'factory') });
+    const stale = checkMirrorStale({ srcDir: join(repoRoot, 'src'), factoryDir: join(pluginDir, 'server', 'factory'), sharedDir: pluginDir });
     if (stale.length > 0) {
       return fail(`plugin/server/factory/ mirror is stale (run npm run plugin:sync):\n  ${stale.join('\n  ')}`);
     }

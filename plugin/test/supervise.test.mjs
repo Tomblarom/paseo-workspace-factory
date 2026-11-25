@@ -12,7 +12,9 @@ register("./ts-resolve-hooks.mjs", import.meta.url);
 
 const supervise = await import("../server/supervise.ts");
 const { LockBusy } = await import("../server/factory/lock.ts");
-import {
+// Shared modules import the generated defaults through `.js` specifiers, so
+// they must load dynamically after the resolve hook is registered.
+const {
   DRAIN_METADATA_KEY,
   SUPERVISION_SETTINGS_DEFAULTS,
   WORKER_METADATA_KEY,
@@ -30,8 +32,8 @@ import {
   selectDoneIds,
   steerWakeResponse,
   withArchiveHint,
-} from "../shared/supervise.ts";
-import { factorySupervisionSettings } from "../shared/settings.ts";
+} = await import("../shared/supervise.ts");
+const { factorySupervisionSettings } = await import("../shared/settings.ts");
 import { LABEL, METADATA_KEY, readPaseoState } from "../../src/paseo.mjs";
 import { WORKERS_KEY } from "../../src/supervision.mjs";
 import { AGENTS_KEY } from "../../src/agent-state.mjs";

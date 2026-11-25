@@ -8,35 +8,22 @@
 import { isDeepStrictEqual } from 'node:util';
 import { LABEL, METADATA_KEY, readPaseoState } from './paseo.mjs';
 import { withLock, workspaceLockName } from './lock.mjs';
+import { DRAIN_GRACE_MS, isDrainMarkerActive } from './defaults.mjs';
 import { listScopes } from './scope.mjs';
 import { AGENTS_KEY, buildRestartInterrupted, flagCheckpointInterrupted, updateAgentEntry } from './agent-state.mjs';
 import { CHECKPOINT_KEY, lastAssistantText, readGitSnapshot } from './steer.mjs';
+
+export { DRAIN_GRACE_MS, isDrainMarkerActive };
 
 const BUSY = new Set(['running', 'initializing']);
 
 export const DRAIN_DEFAULT_TIMEOUT_MS = 10 * 60_000;
 export const DRAIN_POLL_MS = 2000;
 export const DRAIN_KEY = `${METADATA_KEY}.drain`;
-/** Markers past timeoutAt + this grace are ignored (a crashed drain self-expires). */
-export const DRAIN_GRACE_MS = 60_000;
 
 /** Builds the `wsf.drain` marker drain stores while it waits ({ startedAt, timeoutAt, pid }). */
 export function buildDrainMarker({ startedAt = null, timeoutAt = null, pid = null } = {}) {
   return { startedAt, timeoutAt, pid };
-}
-
-/**
- * True while the marker claims a live drain (now <= timeoutAt + 1 min).
- * Malformed or expired markers are ignored (no quiet), so a crashed drain
- * self-expires; the plugin mirrors this rule (shared/supervise.ts).
- */
-export function isDrainMarkerActive(marker, nowMs = Date.now()) {
-  if (!marker || typeof marker !== 'object' || Array.isArray(marker)) return false;
-  const timeoutMs = typeof marker.timeoutAt === 'string' ? Date.parse(marker.timeoutAt) : NaN;
-  if (!Number.isFinite(timeoutMs)) return false;
-  const now = typeof nowMs === 'string' ? Date.parse(nowMs) : nowMs;
-  if (!Number.isFinite(now)) return false;
-  return now <= timeoutMs + DRAIN_GRACE_MS;
 }
 
 /**

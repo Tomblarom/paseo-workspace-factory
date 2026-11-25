@@ -1,14 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
-import {
+
+register("./ts-resolve-hooks.mjs", import.meta.url);
+
+// Shared modules import the generated defaults through `.js` specifiers, so
+// they must load dynamically after the resolve hook is registered.
+const {
   validateCleanupSettings,
   validateFactorySettings,
   mergeFactoryConfig,
   validateProfilesAgainstCatalogLocal,
-} from "../shared/settings-validate.ts";
-
-register("./ts-resolve-hooks.mjs", import.meta.url);
+} = await import("../shared/settings-validate.ts");
 
 const { CLEANUP_DEFAULTS } = await import("../shared/idle-cleanup.ts");
 

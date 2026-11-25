@@ -113,22 +113,59 @@ export function isRewindUnsupportedError(error) {
 }
 
 /**
+ * One rewind transport: connects a DaemonClient, runs `fn(client)`, always
+ * closes. Throws on connect failure (callers map it to fail-soft statuses);
+ * `fn` decides its own error mapping. This is the only client lifecycle in
+ * this module — every export below funnels through it.
+ */
+async function useRewindClient({ url = null, cliPath = null, createClient = defaultCreateRewindClient } = {}, fn) {
+  const target = url ?? runtime().paseo.url;
+  const bin = cliPath ?? paseoBinary();
+  let client = null;
+  try {
+    client = await createClient({ url: target, cliPath: bin });
+    return await fn(client);
+  } finally {
+    await client?.close?.().catch(() => {});
+  }
+}
+
+/**
+ * Anchor lookup plus the rewind RPC on an open client. Returns the fail-soft
+ * outcome ({ status: 'rewound' | 'no-point' | 'no-op' | 'unsupported' |
+ * 'failed' | 'deferred' }); throws only for timeline/paging failures, which
+ * the caller reports as 'unavailable'. Anchor semantics are unchanged:
+ * without keepBrief the previous brief itself is the target, with keepBrief
+ * the first usable prompt of a later turn is (Codex deletes the target turn).
+ */
+async function rewindOnClient(client, agentId, { previousBriefId = null, keepBrief = false, beforeRewind = null } = {}) {
+  const point = await findRewindPoint(client, agentId, previousBriefId, { keepBrief });
+  if (!point) return { status: 'no-point' };
+  const { messageId, briefMessageId } = point;
+  if (!messageId) return { status: 'no-op' };
+  if (typeof client.rewindAgent !== 'function') return { status: 'unsupported', error: 'daemon has no rewindAgent' };
+  try {
+    if (beforeRewind && !await beforeRewind()) return { status: 'deferred' };
+    await client.rewindAgent(agentId, messageId, 'conversation');
+  } catch (error) {
+    if (isRewindUnsupportedError(error)) return { status: 'unsupported', error: error?.message ?? String(error) };
+    return { status: 'failed', error: error?.message ?? String(error) };
+  }
+  return { status: 'rewound', messageId, ...(briefMessageId ? { briefMessageId } : {}) };
+}
+
+/**
  * Best-effort read of the first rewind point. Returns the messageId string, or
  * null on any failure (no daemon, no timeline, no user message). Never throws
  * for daemon failures; production callers treat null as "new agent".
  */
 export async function readRewindPoint(agentId, { url = null, cliPath = null, createClient = defaultCreateRewindClient, previousBriefId = null } = {}) {
   if (typeof agentId !== 'string' || !agentId) return null;
-  let client = null;
   try {
-    const target = url ?? runtime().paseo.url;
-    const bin = cliPath ?? paseoBinary();
-    client = await createClient({ url: target, cliPath: bin });
-    return (await findRewindPoint(client, agentId, previousBriefId))?.messageId ?? null;
+    return (await useRewindClient({ url, cliPath, createClient },
+      (client) => findRewindPoint(client, agentId, previousBriefId)))?.messageId ?? null;
   } catch {
     return null;
-  } finally {
-    await client?.close?.().catch(() => {});
   }
 }
 
@@ -150,35 +187,11 @@ export async function readRewindPoint(agentId, { url = null, cliPath = null, cre
  */
 export async function rewindSameTab(agentId, { url = null, cliPath = null, createClient = defaultCreateRewindClient, previousBriefId = null, beforeRewind = null } = {}) {
   if (typeof agentId !== 'string' || !agentId) return { status: 'failed', error: 'missing agent id' };
-  let client = null;
   try {
-    const target = url ?? runtime().paseo.url;
-    const bin = cliPath ?? paseoBinary();
-    try {
-      client = await createClient({ url: target, cliPath: bin });
-    } catch (error) {
-      return { status: 'unavailable', error: error?.message ?? String(error) };
-    }
-    let point;
-    try {
-      point = await findRewindPoint(client, agentId, previousBriefId, { keepBrief: true });
-    } catch (error) {
-      return { status: 'unavailable', error: error?.message ?? String(error) };
-    }
-    if (!point) return { status: 'no-point' };
-    const { messageId, briefMessageId } = point;
-    if (!messageId) return { status: 'no-op' };
-    if (typeof client.rewindAgent !== 'function') return { status: 'unsupported', error: 'daemon has no rewindAgent' };
-    try {
-      if (beforeRewind && !await beforeRewind()) return { status: 'deferred' };
-      await client.rewindAgent(agentId, messageId, 'conversation');
-    } catch (error) {
-      if (isRewindUnsupportedError(error)) return { status: 'unsupported', error: error?.message ?? String(error) };
-      return { status: 'failed', error: error?.message ?? String(error) };
-    }
-    return { status: 'rewound', messageId, ...(briefMessageId ? { briefMessageId } : {}) };
-  } finally {
-    await client?.close?.().catch(() => {});
+    return await useRewindClient({ url, cliPath, createClient },
+      (client) => rewindOnClient(client, agentId, { previousBriefId, keepBrief: true, beforeRewind }));
+  } catch (error) {
+    return { status: 'unavailable', error: error?.message ?? String(error) };
   }
 }
 
@@ -205,45 +218,47 @@ export async function rewindSameTab(agentId, { url = null, cliPath = null, creat
 export async function rewindAndBrief(agentId, briefText, { url = null, cliPath = null, createClient = defaultCreateRewindClient, messageId: briefId = null, previousBriefId = null, skipBrief = false, beforeRewind = null } = {}) {
   if (typeof agentId !== 'string' || !agentId) return { status: 'failed', error: 'missing agent id' };
   if (skipBrief !== true && (typeof briefText !== 'string' || !briefText.trim())) return { status: 'failed', error: 'missing brief text' };
-  let client = null;
   try {
-    const target = url ?? runtime().paseo.url;
-    const bin = cliPath ?? paseoBinary();
-    try {
-      client = await createClient({ url: target, cliPath: bin });
-    } catch (error) {
-      return { status: 'unavailable', error: error?.message ?? String(error) };
-    }
-    let messageId;
-    try {
-      messageId = (await findRewindPoint(client, agentId, previousBriefId))?.messageId;
-    } catch (error) {
-      return { status: 'unavailable', error: error?.message ?? String(error) };
-    }
-    if (!messageId) return { status: 'no-point' };
-    if (typeof client.rewindAgent !== 'function') return { status: 'unsupported', error: 'daemon has no rewindAgent' };
-    try {
-      if (beforeRewind && !await beforeRewind()) return { status: 'deferred' };
-      await client.rewindAgent(agentId, messageId, 'conversation');
-    } catch (error) {
-      if (isRewindUnsupportedError(error)) return { status: 'unsupported', error: error?.message ?? String(error) };
-      return { status: 'failed', error: error?.message ?? String(error) };
-    }
-    if (skipBrief === true) return { status: 'rewound', messageId, briefMessageId: null };
-    const send = client.sendMessage ?? client.sendAgentMessage;
-    const briefMessageId = typeof briefId === 'string' && briefId ? briefId : randomUUID();
-    if (typeof send !== 'function') {
-      return { status: 'rewound', messageId, briefMessageId: null, sendError: 'daemon has no sendMessage' };
-    }
-    try {
-      // No sourceAgentId: with a caller id the brief would arrive as a
-      // tool_call and the next refresh could not rewind to it.
-      await send.call(client, agentId, briefText, { messageId: briefMessageId });
-    } catch (error) {
-      return { status: 'rewound', messageId, briefMessageId: null, sendError: error?.message ?? String(error) };
-    }
-    return { status: 'rewound', messageId, briefMessageId };
-  } finally {
-    await client?.close?.().catch(() => {});
+    return await useRewindClient({ url, cliPath, createClient }, async (client) => {
+      const outcome = await rewindOnClient(client, agentId, { previousBriefId, beforeRewind });
+      if (outcome.status !== 'rewound') return outcome;
+      const { messageId } = outcome;
+      if (skipBrief === true) return { status: 'rewound', messageId, briefMessageId: null };
+      const send = client.sendMessage ?? client.sendAgentMessage;
+      const briefMessageId = typeof briefId === 'string' && briefId ? briefId : randomUUID();
+      if (typeof send !== 'function') {
+        return { status: 'rewound', messageId, briefMessageId: null, sendError: 'daemon has no sendMessage' };
+      }
+      try {
+        // No sourceAgentId: with a caller id the brief would arrive as a
+        // tool_call and the next refresh could not rewind to it.
+        await send.call(client, agentId, briefText, { messageId: briefMessageId });
+      } catch (error) {
+        return { status: 'rewound', messageId, briefMessageId: null, sendError: error?.message ?? String(error) };
+      }
+      return { status: 'rewound', messageId, briefMessageId };
+    });
+  } catch (error) {
+    return { status: 'unavailable', error: error?.message ?? String(error) };
   }
+}
+
+/**
+ * Delivers one brief through the rewind transport so it arrives as a real
+ * user_message (no caller agent id — a caller id would make it a tool_call
+ * and the next refresh could not rewind to it). Returns true when the brief
+ * was sent, false when the client has no send transport (the caller falls
+ * back to the high-level send); connect and send failures throw, like a
+ * direct send would.
+ */
+export async function sendUserBrief(agentId, briefText, { url = null, cliPath = null, createClient = defaultCreateRewindClient, messageId = null } = {}) {
+  if (typeof agentId !== 'string' || !agentId) throw new Error('sendUserBrief needs an agent id');
+  if (typeof briefText !== 'string' || !briefText.trim()) throw new Error('sendUserBrief needs brief text');
+  return useRewindClient({ url, cliPath, createClient }, async (client) => {
+    const send = client.sendMessage ?? client.sendAgentMessage;
+    if (typeof send !== 'function') return false;
+    const options = typeof messageId === 'string' && messageId ? { messageId } : {};
+    await send.call(client, agentId, briefText, options);
+    return true;
+  });
 }

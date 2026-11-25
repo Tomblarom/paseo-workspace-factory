@@ -80,7 +80,7 @@ import { createGh } from "./factory/github.js";
 import { formatLabelFixes, planLabelFixes } from "./factory/labels.js";
 import { createGit } from "./factory/local.js";
 import { formatCatalog, paseoRunFlags, resolveProfile, usedProfilesByLiveSteers } from "./factory/models.js";
-import { readProfileHealth } from "./factory/quota.js";
+import { QUOTA_DEFAULTS, readProfileHealth } from "./factory/quota.js";
 import { applySteerAdd, formatSteerAddPreview, planSteerAdd } from "./factory/steer-add.js";
 import { planHash } from "./factory/planner.js";
 import { defaultCreateRewindClient } from "./factory/rewind.js";
@@ -263,7 +263,7 @@ export async function getResume(
     scope: discovery.scope ?? scope ?? null,
     config,
     quotaSnapshot: getQuotaSnapshot(),
-    quotaWarnPct: config.quota?.warnPct ?? 75,
+    quotaWarnPct: config.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct,
   };
   const brief: string = buildResumeBrief(status, briefOptions);
   return {

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
 register("./ts-resolve-hooks.mjs", import.meta.url);
-const { extractTurnUsage, mergeTurnUsage, resetQuotaForTests, sampleQuota, uncachedInputTokens } = await import("../server/quota.ts");
+const { extractTurnUsage, mergeTurnUsage, resetQuotaForTests, sampleQuotaAsync, uncachedInputTokens } = await import("../server/quota.ts");
 const { validateQuotaSettings } = await import("../shared/settings-validate.ts");
 const { failoverChain } = await import("../server/factory/supervision.ts");
 
@@ -118,16 +118,39 @@ test("cumulative totals accumulate raw counters across mixed routes", () => {
   assert.deepEqual(mergeTurnUsage(stored, null), stored);
 });
 
-test("quota sampling parses paseo usage without host arguments and fails soft", () => {
+test("quota sampling parses paseo usage without host arguments and fails soft", async () => {
   resetQuotaForTests();
   const calls = [];
-  const snapshot = sampleQuota((binary, args) => {
+  const snapshot = await sampleQuotaAsync((binary, args) => {
     calls.push({ binary, args });
     return JSON.stringify([{ sourceId: "claude", report: { windows: [{ id: "5h", usedPct: 78 }] } }]);
   });
   assert.equal(snapshot.claude.sessionPct, 78);
   assert.deepEqual(calls[0].args, ["usage", "--json"]);
-  assert.equal(sampleQuota(() => { throw new Error("offline"); }, () => {}).claude.sessionPct, 78);
+  const kept = await sampleQuotaAsync(() => { throw new Error("offline"); }, () => {});
+  assert.equal(kept.claude.sessionPct, 78);
+});
+
+test("concurrent quota samples share a single in-flight run", async () => {
+  resetQuotaForTests();
+  let runs = 0;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const run = async () => {
+    runs += 1;
+    await gate;
+    return JSON.stringify([{ sourceId: "codex", report: { windows: [{ id: "5h", usedPct: 11 }] } }]);
+  };
+  const first = sampleQuotaAsync(run, () => {});
+  const second = sampleQuotaAsync(run, () => {});
+  release();
+  const [a, b] = await Promise.all([first, second]);
+  assert.equal(runs, 1);
+  assert.equal(a.codex.sessionPct, 11);
+  assert.equal(b.codex.sessionPct, 11);
+  // After the run settles, the next sample runs again.
+  assert.equal((await sampleQuotaAsync(run, () => {})).codex.sessionPct, 11);
+  assert.equal(runs, 2);
 });
 
 test("quota settings validate thresholds", () => {

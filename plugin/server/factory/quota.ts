@@ -4,8 +4,9 @@
 import { isDeepStrictEqual } from 'node:util';
 import { withLock, workspaceLockName } from './lock.js';
 import { METADATA_KEY } from './paseo.js';
+import { QUOTA_DEFAULTS } from './defaults.js';
 
-export const QUOTA_DEFAULTS = { warnPct: 75, exhaustedPct: 95 };
+export { QUOTA_DEFAULTS };
 export const PROFILE_UNHEALTHY_MINUTES = 10;
 
 /** Own top-level workspace metadata key for profile failure marks (native patches are top-level). */
@@ -263,32 +264,54 @@ function findReport(record) {
   return record?.lastSuccessful?.report ?? record?.report ?? null;
 }
 
+function usageRecords(input) {
+  let value = input;
+  if (typeof input === 'string') {
+    try { value = JSON.parse(input); } catch { return []; }
+  }
+  if (Array.isArray(value)) return value;
+  if (Array.isArray(value?.sources)) return value.sources;
+  return [];
+}
+
+function windowText(window) {
+  return `${window?.id ?? ''} ${window?.label ?? ''} ${window?.shortLabel ?? ''}`;
+}
+
+function windowPctOf(window) {
+  return quotaPct(window) ?? (window?.remainingPct != null && Number.isFinite(Number(window.remainingPct)) ? 100 - Number(window.remainingPct) : null);
+}
+
+/** Session (5h) and weekly window of one usage report; missing stays undefined. */
+function selectUsageWindows(report) {
+  const windows = Array.isArray(report?.windows) ? report.windows : [];
+  const session = windows.find((window) => {
+    const text = windowText(window).toLowerCase();
+    return text.includes('5h') || text.includes('5 h') || text.includes('session');
+  }) ?? windows[0];
+  const weekly = windows.find((window) => /week|7\s*d/i.test(windowText(window)));
+  return { session, weekly };
+}
+
+/** Pool key of one usage record (sourceId, else sourceLabel); '' when unknown. */
+function usagePoolOf(record) {
+  return typeof record?.sourceId === 'string' && record.sourceId.trim()
+    ? record.sourceId.trim()
+    : (typeof record?.sourceLabel === 'string' ? record.sourceLabel.trim() : '');
+}
+
 /**
  * Converts the JSON emitted by `paseo usage --json` to { [pool]: quota }.
  * Provider/source names are intentionally treated as opaque; malformed records
  * are skipped rather than making usage sampling fatal.
  */
 export function parseUsageJson(input) {
-  let value = input;
-  if (typeof input === 'string') {
-    try { value = JSON.parse(input); } catch { return {}; }
-  }
-  const records = Array.isArray(value) ? value : Array.isArray(value?.sources) ? value.sources : [];
   const snapshot = {};
-  for (const record of records) {
-    const report = findReport(record);
-    const windows = Array.isArray(report?.windows) ? report.windows : [];
-    const session = windows.find((window) => {
-      const text = `${window?.id ?? ''} ${window?.label ?? ''} ${window?.shortLabel ?? ''}`.toLowerCase();
-      return text.includes('5h') || text.includes('5 h') || text.includes('session');
-    }) ?? windows[0];
-    const windowPct = (window) => quotaPct(window) ?? (window?.remainingPct != null && Number.isFinite(Number(window.remainingPct)) ? 100 - Number(window.remainingPct) : null);
-    const pct = windowPct(session);
-    const weekly = windows.find((window) => /week|7\s*d/i.test(`${window?.id ?? ''} ${window?.label ?? ''} ${window?.shortLabel ?? ''}`));
-    const weeklyPct = windowPct(weekly);
-    const pool = typeof record?.sourceId === 'string' && record.sourceId.trim()
-      ? record.sourceId.trim()
-      : (typeof record?.sourceLabel === 'string' ? record.sourceLabel.trim() : '');
+  for (const record of usageRecords(input)) {
+    const { session, weekly } = selectUsageWindows(findReport(record));
+    const pct = windowPctOf(session);
+    const weeklyPct = windowPctOf(weekly);
+    const pool = usagePoolOf(record);
     if (!pool || pct === null) continue;
     snapshot[pool] = {
       sessionPct: pct,

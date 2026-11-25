@@ -23,7 +23,9 @@ const {
   mayResumeClear,
 } = await import("../shared/idle-cleanup.ts");
 import { resumeFingerprint } from "../shared/preview.ts";
-import { factoryResumeSettings } from "../shared/settings.ts";
+// Shared modules import the generated defaults through `.js` specifiers, so
+// they must load dynamically after the resolve hook is registered.
+const { factoryResumeSettings } = await import("../shared/settings.ts");
 import { factoryCold, factoryResumeApply } from "../shared/factory.ts";
 import { LABEL, METADATA_KEY, readPaseoState } from "../../src/paseo.mjs";
 import { AGENTS_KEY } from "../../src/agent-state.mjs";

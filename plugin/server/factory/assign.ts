@@ -8,7 +8,7 @@
 import { CHECKPOINT_KEY, checkpointRules, formatCheckpointBlock, steerStatus } from './steer.js';
 import { METADATA_KEY } from './paseo.js';
 import { withLock, workspaceLockName } from './lock.js';
-import { formatQuotaLine } from './quota.js';
+import { QUOTA_DEFAULTS, formatQuotaLine } from './quota.js';
 import { findingsPassage } from './findings.js';
 
 export class AssignRefused extends Error {}
@@ -24,7 +24,7 @@ export const ASSIGNMENT_KEY = `${METADATA_KEY}.assignment`;
 const none = 'none recorded';
 
 /** Deterministic assignment packet (pass the same `now` so preview == delivery). */
-export function buildAssignment(status, { slot, steerId, epoch, task, tests, blockers, next, workerModel = null, config = null, quotaSnapshot = null, quotaWarnPct = 75, zerosub = null, reportTo = null, promptOptions, now = Date.now() }) {
+export function buildAssignment(status, { slot, steerId, epoch, task, tests, blockers, next, workerModel = null, config = null, quotaSnapshot = null, quotaWarnPct = QUOTA_DEFAULTS.warnPct, zerosub = null, reportTo = null, promptOptions, now = Date.now() }) {
   const findings = findingsPassage(promptOptions);
   const quotaLine = formatQuotaLine(config, quotaSnapshot, { warnPct: quotaWarnPct, zerosub, now });
   const lines = [
@@ -53,7 +53,7 @@ export function buildAssignment(status, { slot, steerId, epoch, task, tests, blo
  * --expect-epoch from the preview), write, read back, release; delivery
  * happens after the lock is released.
  */
-export async function assignScope({ client, discovery, task, tests = [], blockers = [], next = null, apply = false, send = true, expectEpoch, assignedBy = null, reportTo = assignedBy, lock = withLock, now = () => new Date(), workerModel = null, config = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, zerosub = null, promptOptions }) {
+export async function assignScope({ client, discovery, task, tests = [], blockers = [], next = null, apply = false, send = true, expectEpoch, assignedBy = null, reportTo = assignedBy, lock = withLock, now = () => new Date(), workerModel = null, config = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, zerosub = null, promptOptions }) {
   const status = steerStatus(discovery);
   if (!status.workspace || !status.state) throw new AssignRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;

@@ -6,7 +6,10 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
+import { KNOWN_UNSUPPORTED, knownUnsupportedReason } from './defaults.js';
 import { profilePool } from './quota.js';
+
+export { KNOWN_UNSUPPORTED };
 
 /** --config > PASEO_FACTORY_CONFIG > $XDG_CONFIG_HOME/paseo-workspace-factory/config.json */
 export function defaultConfigPath() {
@@ -14,14 +17,6 @@ export function defaultConfigPath() {
   return join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'paseo-workspace-factory', 'config.json');
 }
 
-/**
- * Settings the catalog advertises but a provider rejects when an agent is created.
- * Observed 2026-11-23: copilot/claude-sonnet-5.5 lists thinking options, yet
- * creation fails with "setReasoningEffort ... not supported".
- */
-export const KNOWN_UNSUPPORTED = [
-  { provider: 'copilot', model: /^claude-/, field: 'thinking', reason: 'Copilot rejects a reasoning effort for Claude models; use thinking: null' },
-];
 export const KNOWN_LIMIT_FIELDS = ['thinking', 'mode'];
 
 /**
@@ -315,9 +310,8 @@ export function validateProfilesAgainstCatalog(config, providerEntries, profileN
           issues.push(`thinking "${profile.thinking}" is not available for ${profile.model} (available: ${options.join(', ') || 'none'})`);
         }
       }
-      for (const rule of KNOWN_UNSUPPORTED) {
-        if (rule.provider === profile.provider && rule.model.test(profile.model) && profile[rule.field]) issues.push(rule.reason);
-      }
+      const unsupported = knownUnsupportedReason(profile);
+      if (unsupported) issues.push(unsupported);
       for (const rule of configKnownLimits(config)) {
         if (rule.provider !== profile.provider || !profile[rule.field]) continue;
         if (rule.model !== undefined && profile.model !== rule.model) continue;

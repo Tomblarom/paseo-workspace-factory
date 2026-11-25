@@ -61,7 +61,7 @@ const {
 } = S;
 const { AGENTS_KEY } = AS;
 const { lastAssistantText, parseCheckpointBlock, proactiveSwitchDecision } = ST;
-const { accountForAgent, formatQuotaLine, profilePool, quotaExhausted } = Q;
+const { QUOTA_DEFAULTS, accountForAgent, formatQuotaLine, profilePool, quotaExhausted } = Q;
 import { factoryIdentity } from "../shared/auto-checkpoint.js";
 import { getQuotaSnapshot } from "./quota.js";
 import {
@@ -579,7 +579,7 @@ async function deliverScopeWake(paseo: any, args: ScopeWakeInput, deps: Supervis
   const activeRow = rows.find((row: any) => row.id === target) ?? null;
   const activeProfile = active && config?.profiles?.[config?.steers?.slots?.[active]];
   const activePool = activeProfile ? profilePool(activeProfile) : null;
-  const exhaustedPct = config?.quota?.exhaustedPct ?? settings?.quota?.exhaustedPct ?? 95;
+  const exhaustedPct = config?.quota?.exhaustedPct ?? settings?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct;
   const exhausted = activePool && quotaExhausted(
     getQuotaSnapshot(),
     activePool,
@@ -628,7 +628,7 @@ async function deliverScopeWake(paseo: any, args: ScopeWakeInput, deps: Supervis
   );
   const quotaLine = formatQuotaLine(config, getQuotaSnapshot(), {
     currentPool: activeProfile ? profilePool(activeProfile) : null,
-    warnPct: config?.quota?.warnPct ?? settings?.quota?.warnPct ?? 75,
+    warnPct: config?.quota?.warnPct ?? settings?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct,
     zerosub,
     now: stampsOf(deps).nowMs,
   });
@@ -1335,7 +1335,7 @@ export async function runFailoverCheck(
   }
   const scopes = deps.scopes ?? listScopes(paseoState);
   const retired = retiredAgentId(wsf);
-  const exhaustedPct = config?.quota?.exhaustedPct ?? settings?.quota?.exhaustedPct ?? 95;
+  const exhaustedPct = config?.quota?.exhaustedPct ?? settings?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct;
   const chain = failoverChain({
     steers: rows,
     activeSlot,
@@ -1525,7 +1525,7 @@ export function proactiveHintDecision(args: {
       to: decision.to,
       accountId: decision.accountId ?? account?.id ?? "?",
       usedPct: decision.usedPct ?? 0,
-      warnPct: decision.warnPct ?? args.warnPct ?? 75,
+      warnPct: decision.warnPct ?? args.warnPct ?? QUOTA_DEFAULTS.warnPct,
       factoryCmd: args.factoryCmd ?? FACTORY_CMD,
     }),
   };

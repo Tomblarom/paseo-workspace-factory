@@ -1,4 +1,5 @@
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { QUOTA_SAMPLE_MINUTES } from "./factory/defaults.js";
 import { parseUsageJson } from "./factory/quota.js";
 import { paseoBinary } from "./factory/paseo.js";
 
@@ -19,8 +20,13 @@ export interface TurnUsage {
   output: number;
 }
 
+/** Quota subprocess budget; a timeout keeps the last sample (fail soft). */
+export const QUOTA_SAMPLE_TIMEOUT_MS = 15_000;
+
 let quotaSnapshot: Record<string, any> | null = null;
 let lastSampleAt = 0;
+/** Single in-flight sample: concurrent callers share one subprocess run. */
+let inFlight: Promise<Record<string, any> | null> | null = null;
 
 export function getQuotaSnapshot(): Record<string, any> | null {
   return quotaSnapshot;
@@ -34,26 +40,47 @@ export function getQuotaSampledAt(): number | null {
 export function resetQuotaForTests(): void {
   quotaSnapshot = null;
   lastSampleAt = 0;
+  inFlight = null;
 }
 
-export function sampleQuota(
-  run: (binary: string, args: string[]) => string = (binary, args) =>
-    execFileSync(binary, args, {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 15_000,
-    }) as string,
+/** Runner for one `paseo usage --json` call; tests inject a fake. May be sync. */
+export type QuotaRun = (binary: string, args: string[]) => string | Promise<string>;
+
+function defaultRun(binary: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(binary, args, { encoding: "utf8", timeout: QUOTA_SAMPLE_TIMEOUT_MS }, (error, stdout) => {
+      if (error) reject(error);
+      else resolve(stdout as string);
+    });
+  });
+}
+
+/**
+ * One async quota sample from `paseo usage --json` (kept as the source: the
+ * public providers.listUsage() is a lossy legacy projection on 0.17.4).
+ * Never blocks the event loop; concurrent callers share a single in-flight
+ * run; failures keep the last sample and log once. Consumers flag staleness
+ * from the read time (see isQuotaSampleStale).
+ */
+export function sampleQuotaAsync(
+  run: QuotaRun = defaultRun,
   log: (message: string) => void = console.log,
-): Record<string, any> | null {
-  try {
-    const snapshot = parseUsageJson(run(paseoBinary(), ["usage", "--json"]));
-    quotaSnapshot = snapshot;
-    lastSampleAt = Date.now();
-    return snapshot;
-  } catch (error) {
-    log(`[factory] quota sample failed (${error instanceof Error ? error.message : String(error)})`);
-    return quotaSnapshot;
-  }
+): Promise<Record<string, any> | null> {
+  if (inFlight) return inFlight;
+  inFlight = (async () => {
+    try {
+      const snapshot = parseUsageJson(await run(paseoBinary(), ["usage", "--json"]));
+      quotaSnapshot = snapshot;
+      lastSampleAt = Date.now();
+      return snapshot;
+    } catch (error) {
+      log(`[factory] quota sample failed (${error instanceof Error ? error.message : String(error)})`);
+      return quotaSnapshot;
+    } finally {
+      inFlight = null;
+    }
+  })();
+  return inFlight;
 }
 
 export function startQuotaTimer({
@@ -64,7 +91,7 @@ export function startQuotaTimer({
 }: {
   getSettings: () => Promise<any>;
   intervalMs?: number;
-  run?: (binary: string, args: string[]) => string;
+  run?: QuotaRun;
   log?: (message: string) => void;
 }): () => void {
   let stopped = false;
@@ -74,9 +101,11 @@ export function startQuotaTimer({
       try {
         const settings = await getSettings();
         const configured = Number(settings?.quotaSampleMinutes);
-        const minutes = Number.isFinite(configured) ? Math.max(10, configured) : 10;
+        const minutes = Number.isFinite(configured)
+          ? Math.max(QUOTA_SAMPLE_MINUTES, configured)
+          : QUOTA_SAMPLE_MINUTES;
         if (Date.now() - lastSampleAt < minutes * 60_000) return;
-        sampleQuota(run, log);
+        await sampleQuotaAsync(run, log);
       } catch (error) {
         log(`[factory] quota timer failed (${error instanceof Error ? error.message : String(error)})`);
       }

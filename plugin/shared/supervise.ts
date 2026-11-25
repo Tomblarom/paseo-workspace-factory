@@ -1,4 +1,5 @@
-// Worker supervision (S-B) plugin-side decisions. Pure module: no imports, so
+// Worker supervision (S-B) plugin-side decisions. Pure module: its only
+// import is the generated defaults (single source: src/defaults.mjs), so
 // both the plugin bundles and plain node:test use it. The core register rules
 // (transitions, wake planning, failover chain, escalation) live in
 // src/supervision.mjs; server/supervise.ts uses them through the synced factory
@@ -6,13 +7,18 @@
 // ADVISOR-REQUEST scan, the first-turn excerpt, the drain-marker quiet check,
 // wake text extras (archive hint, takeover requests), the
 // answered/busy/unanswered classification, and the settings mirror.
+import {
+  DRAIN_GRACE_MS as CORE_DRAIN_GRACE_MS,
+  QUOTA_DEFAULTS,
+  isDrainMarkerActive as coreIsDrainMarkerActive,
+} from "./defaults.js";
 
 /** Agent metadata key carrying the immutable worker facts (plugin-owned). */
 export const WORKER_METADATA_KEY = "wsf.worker";
 /** Workspace metadata key carrying the live drain marker; mirrors DRAIN_KEY in core drain.mjs. */
 export const DRAIN_METADATA_KEY = "wsf.drain";
-/** Stale-marker grace; mirrors DRAIN_GRACE_MS in core drain.mjs. */
-export const DRAIN_GRACE_MS = 60_000;
+/** Stale-marker grace; single source is DRAIN_GRACE_MS in src/defaults.mjs. */
+export const DRAIN_GRACE_MS = CORE_DRAIN_GRACE_MS;
 /** Task excerpt bound; mirrors TASK_MAX in core supervision.mjs. */
 export const TASK_EXCERPT_MAX = 300;
 /** Wake text lists at most this many worker ids, then "+N more". */
@@ -42,7 +48,7 @@ export const SUPERVISION_SETTINGS_DEFAULTS: SupervisionSettings = {
   staleMinutes: 60,
   answerMinutes: 10,
   maxAutoResumes: 2,
-  quota: { exhaustedPct: 95, warnPct: 75 },
+  quota: { exhaustedPct: QUOTA_DEFAULTS.exhaustedPct, warnPct: QUOTA_DEFAULTS.warnPct },
   quotaSampleMinutes: 10,
 };
 
@@ -276,16 +282,10 @@ export function scopeLastWakeAt(
 /**
  * True while a drain marker claims a live drain (now <= timeoutAt + 1 min).
  * Malformed or expired markers are ignored (no quiet), so a crashed drain
- * self-expires. Mirrors isDrainMarkerActive in core drain.mjs.
+ * self-expires. Single source is isDrainMarkerActive in src/defaults.mjs
+ * (re-exported here so server and test imports keep working).
  */
-export function isDrainMarkerActive(marker: unknown, nowMs: number): boolean {
-  if (!marker || typeof marker !== "object" || Array.isArray(marker)) return false;
-  const timeoutAt = (marker as Record<string, unknown>).timeoutAt;
-  const timeoutMs = typeof timeoutAt === "string" ? Date.parse(timeoutAt) : NaN;
-  if (!Number.isFinite(timeoutMs)) return false;
-  if (!Number.isFinite(nowMs)) return false;
-  return nowMs <= timeoutMs + DRAIN_GRACE_MS;
-}
+export const isDrainMarkerActive: (marker: unknown, nowMs: number) => boolean = coreIsDrainMarkerActive;
 
 /** Latest of several ISO stamps, or null when none parses. */
 export function maxStampMs(...values: readonly unknown[]): number | null {

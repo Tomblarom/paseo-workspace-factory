@@ -11,7 +11,7 @@
 import { LABEL } from './paseo.js';
 import { isAdvisorProfile, slotOrder, validateConfig } from './config.js';
 import { buildCandidate, nextFreeSlot, parseProviderModel, resolveProfile, resolveSteerAdd } from './models.js';
-import { bestFamilyAccount, earliestFamilyReset, familyAccounts, profileFamily } from './quota.js';
+import { QUOTA_DEFAULTS, bestFamilyAccount, earliestFamilyReset, familyAccounts, profileFamily } from './quota.js';
 import { idempotencyKey, requestDigest } from './planner.js';
 import { suggestAccountPin } from './zerosub.js';
 
@@ -183,8 +183,8 @@ function findProfileByModelKey(profiles, key, exclude = null) {
 export function planSteerAdd(config, providerEntries, liveSteers, {
   slot = null, spec = null, thinking = undefined, mode = undefined, profile: profileOption = undefined,
   scopeId = null, workspaceId = null, repo = null,
-  usedProfiles = [], quotaSnapshot = null, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 95,
-  quotaWarnPct = config?.quota?.warnPct ?? 75, profileHealth = null, now = Date.now(), zerosub = null,
+  usedProfiles = [], quotaSnapshot = null, quotaExhaustedPct = config?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct,
+  quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, profileHealth = null, now = Date.now(), zerosub = null,
 } = {}) {
   const { target, classification } = checkedTargetSlot(config, liveSteers, scopeId, slot);
   const notes = [];
@@ -433,7 +433,7 @@ export async function applySteerAdd(config, providerEntries, liveSteers, {
   slot = null, spec = null, thinking = undefined, mode = undefined, profile: profileOption = undefined,
   scopeId = null, workspaceId = null, repo = null, fingerprint = null,
   fingerprintOf = null, usedProfiles = [], quotaSnapshot = null,
-  quotaExhaustedPct = config?.quota?.exhaustedPct ?? 95, quotaWarnPct = config?.quota?.warnPct ?? 75,
+  quotaExhaustedPct = config?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct,
   profileHealth = null, now = Date.now(), zerosub = null, lookupReceipt = null, execute = null,
 } = {}) {
   if (typeof fingerprint !== 'string' || !fingerprint) throw new SteerAddStale('Steer add needs the fingerprint of a confirmed preview.');

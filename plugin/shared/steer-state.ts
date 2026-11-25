@@ -7,9 +7,10 @@
 // Reuse map: cache groups and the profile floor come from cache-profiles.ts;
 // the needsResume reason union mirrors idle-cleanup.ts (validated by the feed
 // with isNeedsResumeReason); freshHint arrives already validated for the
-// current idle period (the feed uses currentFreshHint); quota thresholds
-// mirror QUOTA_DEFAULTS in src/quota.mjs (the feed passes the effective
-// config values). All UI text is English.
+// current idle period (the feed uses currentFreshHint); quota thresholds,
+// cadence and staleness come from the generated defaults (single source:
+// src/defaults.mjs; the feed passes the effective config values). All UI
+// text is English.
 import {
   effectiveMinContextTokens,
   contextSizeThreshold,
@@ -24,6 +25,7 @@ import {
   type CleanupProfile,
 } from "./cache-profiles.js";
 import type { NeedsResumeReason } from "./idle-cleanup.js";
+import { QUOTA_DEFAULTS, QUOTA_SAMPLE_MINUTES, isQuotaSampleStale } from "./defaults.js";
 
 /** Face states in priority order (highest first); Unknown is the fallback. */
 export const STEER_STATES = [
@@ -71,12 +73,12 @@ export type SteerPrimaryAction =
   | "focus"
   | "reload-or-open";
 
-/** Quota defaults; mirrors QUOTA_DEFAULTS in src/quota.mjs. */
-export const STEER_QUOTA_WARN_PCT = 75;
-export const STEER_QUOTA_EXHAUSTED_PCT = 90;
+/** Quota defaults; single source is QUOTA_DEFAULTS in src/defaults.mjs. */
+export const STEER_QUOTA_WARN_PCT = QUOTA_DEFAULTS.warnPct;
+export const STEER_QUOTA_EXHAUSTED_PCT = QUOTA_DEFAULTS.exhaustedPct;
 
 /** Default quota sampling cadence in minutes (supervision settings floor). */
-export const STEER_QUOTA_SAMPLE_MINUTES = 10;
+export const STEER_QUOTA_SAMPLE_MINUTES = QUOTA_SAMPLE_MINUTES;
 
 /** Fallback context floor; mirrors CLEANUP_DEFAULTS in idle-cleanup.ts. */
 export const STEER_MIN_CONTEXT_TOKENS = 60_000;
@@ -296,7 +298,6 @@ export function resolveQuota(input: QuotaInput): QuotaResult {
     Number.isFinite(input.quotaSampleMinutes) && (input.quotaSampleMinutes as number) > 0
       ? (input.quotaSampleMinutes as number)
       : STEER_QUOTA_SAMPLE_MINUTES;
-  const staleAfterMs = 2 * minutes * 60_000;
   const exhaustedPct =
     Number.isFinite(input.exhaustedPct) ? (input.exhaustedPct as number) : STEER_QUOTA_EXHAUSTED_PCT;
   const empty: QuotaResult = {
@@ -315,10 +316,12 @@ export function resolveQuota(input: QuotaInput): QuotaResult {
     limitRetired: false,
     rows: [],
   };
-  const isStale = (sampledAtMs: number | null | undefined): boolean => {
-    if (sampledAtMs === null || sampledAtMs === undefined || !Number.isFinite(sampledAtMs)) return true;
-    return nowMs - (sampledAtMs as number) > staleAfterMs;
-  };
+  const isStale = (sampledAtMs: number | null | undefined): boolean =>
+    isQuotaSampleStale(
+      sampledAtMs === undefined ? null : (sampledAtMs as number | null),
+      nowMs,
+      minutes,
+    );
   /** A reported window whose reset passed without a fresh reading is expired. */
   const windowExpired = (resetsAt: unknown, sampledAtMs: number | null | undefined): boolean => {
     const reset = stampMs(resetsAt);

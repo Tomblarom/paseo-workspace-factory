@@ -2,8 +2,14 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
 import ts from "typescript";
+import { register } from "node:module";
 import { applySettingsEdit, percentage, wholeNumber } from "../client/settings-edit.ts";
-import { factoryDisplaySettings } from "../shared/settings.ts";
+
+register("./ts-resolve-hooks.mjs", import.meta.url);
+
+// Shared modules import the generated defaults through `.js` specifiers, so
+// they must load dynamically after the resolve hook is registered.
+const { factoryDisplaySettings } = await import("../shared/settings.ts");
 
 test("old display settings enable the findings passage by default", () => {
   assert.deepEqual(factoryDisplaySettings.schema.parse({ checkpointInChat: false }), {

@@ -48,24 +48,30 @@ function writePluginFixture(pluginDir, extra = {}) {
   return files;
 }
 
-function writeSrcFactoryMirror(root, { stale = null, orphan = false } = {}) {
+function writeSrcFactoryMirror(root, { stale = null, orphan = false, shared = false } = {}) {
   const srcDir = join(root, 'src');
-  const factoryDir = join(root, 'plugin', 'server', 'factory');
+  const pluginDir = join(root, 'plugin');
+  const factoryDir = join(pluginDir, 'server', 'factory');
   mkdirSync(srcDir, { recursive: true });
   mkdirSync(factoryDir, { recursive: true });
   writeFileSync(join(srcDir, 'alpha.mjs'), `import { x } from './beta.mjs';\nexport const a = x;\n`);
   writeFileSync(join(srcDir, 'beta.mjs'), 'export const x = 1;\n');
   writeFileSync(join(srcDir, 'cli.mjs'), 'cli entry is skipped\n');
-  for (const file of ['alpha.mjs', 'beta.mjs']) {
+  writeFileSync(join(srcDir, 'defaults.mjs'), 'export const v = 1;\n');
+  for (const file of ['alpha.mjs', 'beta.mjs', 'defaults.mjs']) {
     const base = file.slice(0, -'.mjs'.length);
     writeFileSync(join(factoryDir, `${base}.ts`), generatedContent(file, readFileSync(join(srcDir, file), 'utf8')));
+  }
+  if (shared) {
+    mkdirSync(join(pluginDir, 'shared'), { recursive: true });
+    writeFileSync(join(pluginDir, 'shared', 'defaults.ts'), generatedContent('defaults.mjs', readFileSync(join(srcDir, 'defaults.mjs'), 'utf8')));
   }
   if (stale === 'modified') writeFileSync(join(factoryDir, 'alpha.ts'), '// hand edit\n');
   if (stale === 'missing-file') rmSync(join(factoryDir, 'alpha.ts'));
   if (orphan) {
     writeFileSync(join(factoryDir, 'gone.ts'), generatedContent('gone.mjs', 'export const g = 1;\n'));
   }
-  return { srcDir, factoryDir };
+  return { srcDir, factoryDir, pluginDir };
 }
 
 // process-runner fake: handlers keyed by "cmd args…", records every call.
@@ -174,6 +180,26 @@ test('checkMirrorStale mirrors plugin-sync exactly, including orphans', () => {
   // Hand-written extras without the GENERATED banner are left alone.
   writeFileSync(join(orph.factoryDir, 'hand.ts'), 'export const h = 1;\n');
   assert.deepEqual(checkMirrorStale(orph), ['orphan: plugin/server/factory/gone.ts (src/gone.mjs gone)']);
+});
+
+test('checkMirrorStale covers the shared client mirror when a plugin dir is passed', () => {
+  const root = makeTempRoot();
+  const { srcDir, factoryDir, pluginDir } = writeSrcFactoryMirror(root);
+  const sharedTarget = join(pluginDir, 'shared', 'defaults.ts');
+  // Without a plugin dir the shared mirror is not checked.
+  assert.deepEqual(checkMirrorStale({ srcDir, factoryDir }), []);
+  assert.deepEqual(
+    checkMirrorStale({ srcDir, factoryDir, sharedDir: pluginDir }),
+    ['missing: plugin/shared/defaults.ts'],
+  );
+  mkdirSync(join(pluginDir, 'shared'), { recursive: true });
+  writeFileSync(sharedTarget, generatedContent('defaults.mjs', readFileSync(join(srcDir, 'defaults.mjs'), 'utf8')));
+  assert.deepEqual(checkMirrorStale({ srcDir, factoryDir, sharedDir: pluginDir }), []);
+  writeFileSync(sharedTarget, '// hand edit\n');
+  assert.deepEqual(
+    checkMirrorStale({ srcDir, factoryDir, sharedDir: pluginDir }),
+    ['modified: plugin/shared/defaults.ts'],
+  );
 });
 
 test('runChecks runs typecheck and plugin tests in the plugin dir', () => {
@@ -344,7 +370,7 @@ test('main build prints commands and never installs by default', () => {
   const root = makeTempRoot();
   const pluginDir = join(root, 'plugin');
   writePluginFixture(pluginDir);
-  writeSrcFactoryMirror(root);
+  writeSrcFactoryMirror(root, { shared: true });
   const releasesDir = join(root, 'releases');
   const run = fakeRun({
     'npm run typecheck': { status: 0, stdout: '', stderr: '' },

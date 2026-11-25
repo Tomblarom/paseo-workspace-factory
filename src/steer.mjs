@@ -591,7 +591,7 @@ function ageAgo(when, now) {
  * the last turn had no CHECKPOINT) enable the heuristic restart guess; without
  * them only plugin-marked interruptions are shown.
  */
-export function buildResumeBrief(status, { agentId = null, agentState = null, workerLastAnswer = null, git = null, scope = null, now = () => Date.now(), daemonStartedAt = null, lastTurnCheckpoints = null, config = null, workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, zerosub = null, promptOptions, budget = BRIEF_BUDGET } = {}) {
+export function buildResumeBrief(status, { agentId = null, agentState = null, workerLastAnswer = null, git = null, scope = null, now = () => Date.now(), daemonStartedAt = null, lastTurnCheckpoints = null, config = null, workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, zerosub = null, promptOptions, budget = BRIEF_BUDGET } = {}) {
   const id = scope?.id ?? status.repo;
   const kind = scope?.kind ?? 'unknown';
   const epoch = status.state?.epoch ?? '?';
@@ -712,7 +712,7 @@ export function buildResumeBrief(status, { agentId = null, agentState = null, wo
  * receiving agent and the verify-git line. Without interruption this is
  * exactly buildHandoff.
  */
-function handoffWithBrief(status, args, { discovery, git, language, workerModel = null, quotaSnapshot = null, quotaWarnPct = 75, zerosub = null, promptOptions }) {
+function handoffWithBrief(status, args, { discovery, git, language, workerModel = null, quotaSnapshot = null, quotaWarnPct = QUOTA_DEFAULTS.warnPct, zerosub = null, promptOptions }) {
   const at = status.checkpoint?.interrupted?.at ?? null;
   if (at === null && !status.checkpoint?.interrupted) return buildHandoff(status, { ...args, workerModel, promptOptions });
   const packet = buildHandoff(status, { ...args, workerModel, promptOptions, budget: 3500 });
@@ -887,7 +887,7 @@ async function waitForSwitchDelivery(workspace, agentId, deliveryId, epoch, dead
  * re-read, check the expected epoch and active steer, write, read back, release;
  * the handoff is delivered after the lock is released.
  */
-export async function switchSteer({ client, discovery, toSlot, apply = false, send = true, wait = false, waitTimeoutMs = 600_000, notifyPrevious = false, language = runtime().handoffLanguage, git, lock = withLock, now = () => new Date(), config = null, workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, zerosub = null, callerId = process.env.PASEO_AGENT_ID, paseoCli = null, promptOptions, deliverSteer = null }) {
+export async function switchSteer({ client, discovery, toSlot, apply = false, send = true, wait = false, waitTimeoutMs = 600_000, notifyPrevious = false, language = runtime().handoffLanguage, git, lock = withLock, now = () => new Date(), config = null, workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, zerosub = null, callerId = process.env.PASEO_AGENT_ID, paseoCli = null, promptOptions, deliverSteer = null }) {
   const status = steerStatus(discovery);
   if (!status.workspace || !status.state) throw new SwitchRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
@@ -1139,7 +1139,7 @@ async function tryActiveRewind({ client, discovery, status, expected, slot, from
  * or stages it, e.g. into the composer); `notifyPrevious: false` skips the
  * notice to the retired agent (the efficient path shows a UI notice instead).
  */
-export async function freshSteer({ client, discovery, config, apply = false, send = true, notifyPrevious = true, slot: slotArg = null, workerId = null, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, now = () => new Date(), workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 95, zerosub = null, paseoCli = null, rewindClient = null, requireRefreshMode = null, promptOptions }) {
+export async function freshSteer({ client, discovery, config, apply = false, send = true, notifyPrevious = true, slot: slotArg = null, workerId = null, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, now = () => new Date(), workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, quotaExhaustedPct = config?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct, zerosub = null, paseoCli = null, rewindClient = null, requireRefreshMode = null, promptOptions }) {
   const status = steerStatus(discovery);
   if (!status.workspace || !status.state) throw new SwitchRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
