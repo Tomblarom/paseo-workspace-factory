@@ -130,6 +130,25 @@ test('brief handles missing checkpoint, git and notes gracefully', () => {
   assert.match(brief, /Open hub items: none\./);
 });
 
+test('brief shows only the caller’s current fresh recommendation', () => {
+  const world = makeWorld();
+  const { steers } = provisioned(world);
+  const status = steerStatus(discoveryOf(world));
+  const agentState = {
+    [steers.A.id]: {
+      lastTurnEndedAt: hoursAgo(2),
+      freshHint: { at: hoursAgo(1), reason: 'Fresh recommended at the package boundary' },
+    },
+    [steers.B.id]: {
+      lastTurnEndedAt: hoursAgo(1),
+      freshHint: { at: hoursAgo(2), reason: 'Stale recommendation' },
+    },
+  };
+  assert.match(buildResumeBrief(status, { agentId: steers.A.id, agentState }), /Context recommendation: Fresh recommended at the package boundary/);
+  assert.doesNotMatch(buildResumeBrief(status, { agentId: steers.B.id, agentState }), /Context recommendation:/);
+  assert.doesNotMatch(buildResumeBrief(status, { agentState }), /Context recommendation:/);
+});
+
 test('brief shows git state and worker note first lines', () => {
   const world = makeWorld();
   const { ws } = provisioned(world);

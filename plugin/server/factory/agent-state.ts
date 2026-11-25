@@ -25,10 +25,21 @@ export const CHECKPOINT_AGENTS_KEY = `${METADATA_KEY}.checkpoint`;
 export const NOTE_MAX = 1500;
 export const EXCERPT_MAX = 1500;
 export const ERROR_MAX = 300;
+const FRESH_HINT_REASON_MAX = 300;
 
 export function clipText(value, max) {
   if (typeof value !== 'string') return value;
   return value.length > max ? value.slice(0, max) : value;
+}
+
+/** The hint belongs to the current idle period and carries a bounded reason. */
+export function currentFreshHint(entry) {
+  const hint = entry?.freshHint;
+  const reason = typeof hint?.reason === 'string' ? hint.reason.replace(/\s+/g, ' ').trim() : '';
+  const hintedAt = typeof hint?.at === 'string' ? Date.parse(hint.at) : NaN;
+  const lastEnd = typeof entry?.lastTurnEndedAt === 'string' ? Date.parse(entry.lastTurnEndedAt) : NaN;
+  if (!reason || !Number.isFinite(hintedAt) || (Number.isFinite(lastEnd) && hintedAt < lastEnd)) return null;
+  return clipText(reason, FRESH_HINT_REASON_MAX);
 }
 
 function clipEntry(entry) {

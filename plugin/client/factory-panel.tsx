@@ -253,10 +253,10 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
     onError: fail,
   });
   const freshMutation = useMutation({
-    mutationFn: async (vars: { repo?: string; workspaceId: string; fingerprint: string }) =>
+    mutationFn: async (vars: { repo?: string; workspaceId: string; slot?: string; fingerprint: string }) =>
       vars.repo
-        ? callFresh({ repo: vars.repo, fingerprint: vars.fingerprint })
-        : callFresh({ workspaceId: vars.workspaceId, fingerprint: vars.fingerprint }),
+        ? callFresh({ repo: vars.repo, slot: vars.slot, fingerprint: vars.fingerprint })
+        : callFresh({ workspaceId: vars.workspaceId, slot: vars.slot, fingerprint: vars.fingerprint }),
     onSuccess: (fresh) =>
       setFactoryResult({
         kind: "info",
@@ -413,6 +413,7 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
   const confirmFresh = () => {
     if (result?.kind !== "freshPreview") return;
     freshMutation.mutate({
+      slot: result.preview.slot,
       repo: result.repo,
       workspaceId: result.workspaceId,
       fingerprint: result.preview.fingerprint,

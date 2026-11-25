@@ -393,7 +393,7 @@ export async function previewFresh(
     input.repo,
     input.workspaceId,
   );
-  const freshOptions: any = { client: paseo, discovery, config, apply: false, git: createGit(), rewindClient: defaultCreateRewindClient };
+  const freshOptions: any = { client: paseo, discovery, config, apply: false, slot: input.slot ?? null, git: createGit(), rewindClient: defaultCreateRewindClient };
   const dry: any = await freshSteer(freshOptions);
   return {
     repo: dry.repo,
@@ -420,7 +420,7 @@ export async function applyFresh(
 ): Promise<any> {
   const { config, discovery } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
   const git = createGit();
-  const dryOptions: any = { client: paseo, discovery, config, apply: false, git, rewindClient: defaultCreateRewindClient };
+  const dryOptions: any = { client: paseo, discovery, config, apply: false, slot: input.slot ?? null, git, rewindClient: defaultCreateRewindClient };
   const dry: any = await freshSteer(dryOptions);
   const fresh = freshFingerprint({ repo: dry.repo, slot: dry.slot, epoch: dry.epoch });
   if (fresh !== input.fingerprint) {
@@ -439,6 +439,7 @@ export async function applyFresh(
     discovery,
     config,
     apply: true,
+    slot: input.slot ?? null,
     git,
     lookupReceipt: lookupCreationReceipt,
     execute: createExecutors(executeOptions),

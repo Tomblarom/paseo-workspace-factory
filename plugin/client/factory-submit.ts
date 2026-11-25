@@ -170,7 +170,7 @@ export async function submitFactoryCommand(
   }
   if (parsed.command === "fresh") {
     const address = parsed.repo ? { repo: parsed.repo } : { workspaceId: ctx.workspaceId };
-    const preview = await ctx.rpc(factoryFreshPreview, address);
+    const preview = await ctx.rpc(factoryFreshPreview, { ...address, ...(parsed.slot ? { slot: parsed.slot } : {}) });
     setFactoryResult({
       kind: "freshPreview",
       repo: parsed.repo,

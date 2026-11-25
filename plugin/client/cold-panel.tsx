@@ -7,7 +7,7 @@ import { useSubscription } from "@getpaseo/plugin/client";
 import { useCallback, useMemo, useState } from "react";
 import { ScrollView, Text, View } from "react-native";
 import { factoryCold } from "../shared/factory.js";
-import { coldHintText, resumeReminderText } from "../shared/idle-cleanup.js";
+import { coldHintText, freshHintText, resumeReminderText } from "../shared/idle-cleanup.js";
 import { ColdActions } from "./cold-actions.js";
 
 const NO_INPUT = {};
@@ -26,6 +26,8 @@ interface ColdRow {
   hasHistory: boolean;
   canFresh: boolean;
   reason?: AttentionReason;
+  /** Valid stored fresh recommendation; shown instead of the cold hint (never above resume). */
+  freshHint: string | null;
   slot: string | null;
   activeSteer: string | null;
   advisor: boolean;
@@ -61,6 +63,8 @@ export function attentionRowsOf(event: unknown): AttentionRow[] {
       hasHistory: row.hasHistory === true,
       canFresh: row.canFresh === true,
       ...(isAttentionReason(row.reason) ? { reason: row.reason } : {}),
+      freshHint:
+        typeof row.freshHint === "string" && row.freshHint.trim() !== "" ? row.freshHint : null,
       slot: typeof row.slot === "string" ? row.slot : null,
       activeSteer: typeof row.activeSteer === "string" ? row.activeSteer : null,
       advisor: row.advisor === true,
@@ -154,6 +158,7 @@ function ColdBody({
     );
   }
   const needsResume = self ? resumeReasonOf(self) : null;
+  const fresh = self && !needsResume ? self.freshHint : null;
   const reminder =
     self && needsResume
       ? resumeReminderText({
@@ -168,19 +173,26 @@ function ColdBody({
       {self ? (
         <View style={styles.screen}>
           <Text style={styles.title}>
-            {reminder ? reminder.title : coldHintText(self.contextTokens, self.idleMinutes * 60_000)}
+            {reminder
+              ? reminder.title
+              : fresh
+                ? freshHintText(self.contextTokens, self.idleMinutes * 60_000)
+                : coldHintText(self.contextTokens, self.idleMinutes * 60_000)}
           </Text>
           <Text style={styles.muted}>
             {needsResume && reminder
               ? reminder.body
                 ? `${reminder.body} ${resumeReasonSentence(needsResume)}`
                 : resumeReasonSentence(needsResume)
-              : `Idle ${self.idleMinutes}m with a large context. Read the brief, hand over to a fresh agent, or reopen the saved history.`}
+              : fresh
+                ? `Fresh recommended (${fresh}). Read the brief, hand over to a fresh agent, or reopen the saved history.`
+                : `Idle ${self.idleMinutes}m with a large context. Read the brief, hand over to a fresh agent, or reopen the saved history.`}
           </Text>
           <ColdActions
             agentId={agentId}
             workspaceId={workspaceId}
             canFresh={self.canFresh}
+            slot={self.advisor ? null : self.slot}
             hasHistory={self.hasHistory}
             needsResume={needsResume}
             takeover={needsResume !== null && !self.canFresh && !self.advisor}

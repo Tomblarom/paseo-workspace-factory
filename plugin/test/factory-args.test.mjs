@@ -284,13 +284,15 @@ test("worker and steer reject bad input with usage", () => {
 test("fresh, workers, models and drain parse", () => {
   assert.deepEqual(parseFactoryArgs("fresh"), { command: "fresh" });
   assert.deepEqual(parseFactoryArgs("fresh a/b"), { command: "fresh", repo: "a/b" });
+  assert.deepEqual(parseFactoryArgs("fresh --slot e"), { command: "fresh", slot: "E" });
+  assert.throws(() => parseFactoryArgs("fresh --slot EE"), /one steer letter/);
   assert.deepEqual(parseFactoryArgs("workers"), { command: "workers" });
   assert.deepEqual(parseFactoryArgs("workers a/b"), { command: "workers", repo: "a/b" });
   assert.deepEqual(parseFactoryArgs("models"), { command: "models" });
   assert.deepEqual(parseFactoryArgs("drain"), { command: "drain" });
   assert.deepEqual(parseFactoryArgs("drain --timeout 5m"), { command: "drain", timeout: "5m" });
   assert.throws(() => parseFactoryArgs("fresh a b"), /at most one scope address/);
-  assert.throws(() => parseFactoryArgs("fresh --to B"), /takes no flags/);
+  assert.throws(() => parseFactoryArgs("fresh --to B"), /Unknown flag --to/);
   assert.throws(() => parseFactoryArgs("workers a b"), /at most one scope address/);
   assert.throws(() => parseFactoryArgs("models x"), /takes no arguments/);
   assert.throws(() => parseFactoryArgs("drain a/b"), /whole instance/);

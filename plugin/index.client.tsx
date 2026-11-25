@@ -23,7 +23,7 @@ import { dismissFactoryResultPill, showFactoryResultPill } from "./client/result
 import { FactorySettings } from "./client/settings-factory.js";
 import { assertSteerContext } from "./shared/agent-guard.js";
 import { factoryCold } from "./shared/factory.js";
-import { coldHintText, resumeReminderText } from "./shared/idle-cleanup.js";
+import { coldHintText, freshHintText, resumeReminderText } from "./shared/idle-cleanup.js";
 
 const SETTINGS_SCREEN_ID = "factory-settings";
 
@@ -78,7 +78,8 @@ export default function contribute(client: PluginClientContext) {
   });
   // Attention composer pills: one pill per flagged factory agent, driven by
   // the server's attention feed (factory.cold until R-A renames it). A steer
-  // that needs resume takes over the C6 cold pill instead of adding a second.
+  // that needs resume takes over the C6 cold pill instead of adding a second;
+  // a stored fresh recommendation relabels it (never above resume).
   const attentionPills = new Map<string, PluginButtonRegistration>();
   const attentionFeed = client.subscribe(
     factoryCold,
@@ -89,7 +90,8 @@ export default function contribute(client: PluginClientContext) {
       for (const row of rows) {
         seen.add(row.agentId);
         const reason = resumeReasonOf(row);
-        const title = reason ? "Resume nötig" : "Kontext kalt";
+        const fresh = !reason ? row.freshHint : null;
+        const title = reason ? "Resume nötig" : fresh ? "Fresh empfohlen" : "Kontext kalt";
         const label = reason
           ? resumeReminderText({
               reasonLabel: resumeReasonLabel(reason),
@@ -97,7 +99,9 @@ export default function contribute(client: PluginClientContext) {
               advisor: row.advisor,
               activeSteer: row.activeSteer,
             }).pill
-          : coldHintText(row.contextTokens ?? 0, (row.idleMinutes ?? 0) * 60_000);
+          : fresh
+            ? freshHintText(row.contextTokens ?? 0, (row.idleMinutes ?? 0) * 60_000)
+            : coldHintText(row.contextTokens ?? 0, (row.idleMinutes ?? 0) * 60_000);
         const icon = reason ? "RotateCcw" : "Snowflake";
         const known = attentionPills.get(row.agentId);
         if (known) {

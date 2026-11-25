@@ -1,13 +1,10 @@
 import type { PluginSidebarItemProps } from "@getpaseo/plugin/client";
-import { useRpc, useSubscription } from "@getpaseo/plugin/client";
+import { useRpc } from "@getpaseo/plugin/client";
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { Text } from "react-native";
-import { factoryCold, factoryQuota } from "../shared/factory.js";
-import { countActiveResumeRows } from "../shared/idle-cleanup.js";
-import { attentionRowsOf } from "./cold-panel.js";
+import { factoryQuota } from "../shared/factory.js";
 
-const NO_INPUT = {};
 const QUOTA_POLL_MS = 60_000;
 
 function quotaWarningText(quota: {
@@ -31,11 +28,6 @@ export function FactorySidebarItem({
   openSettings,
   theme,
 }: PluginSidebarItemProps & { openSettings: () => void }) {
-  const [resumeCount, setResumeCount] = useState(0);
-  const onEvent = useCallback((event: any) => {
-    setResumeCount(countActiveResumeRows(attentionRowsOf(event)));
-  }, []);
-  useSubscription(factoryCold, NO_INPUT, onEvent);
   const callQuota = useRpc(factoryQuota);
   const [quotaWarn, setQuotaWarn] = useState<string | null>(null);
   useEffect(() => {
@@ -55,12 +47,7 @@ export function FactorySidebarItem({
       clearInterval(timer);
     };
   }, [callQuota]);
-  const resumeText =
-    resumeCount === 1 ? "1 Steer braucht Resume" : `${resumeCount} Steers brauchen Resume`;
-  const trailing =
-    resumeCount > 0 || quotaWarn
-      ? [resumeCount > 0 ? resumeText : null, quotaWarn].filter(Boolean).join(" · ")
-      : null;
+  const trailing = quotaWarn;
   return (
     <SidebarRow
       icon="Factory"

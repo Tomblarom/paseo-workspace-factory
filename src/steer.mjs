@@ -19,7 +19,7 @@ import { idempotencyKey, requestDigest } from './planner.mjs';
 import { createExecutors } from './apply.mjs';
 import { resolveScope, scopeToEntry, sameScopeId, domainOfScope } from './scope.mjs';
 import { STEER_TITLE, activeMarker, markSteerTitle, stripActiveMarker } from './discovery.mjs';
-import { AGENTS_KEY, updateAgentEntry } from './agent-state.mjs';
+import { AGENTS_KEY, currentFreshHint, updateAgentEntry } from './agent-state.mjs';
 import { SUPERVISION_DEFAULTS, failoverChain, openWorkers as openRegisterWorkers, readWorkers, zerosubMoveDecision } from './supervision.mjs';
 import { QUOTA_DEFAULTS, accountExhausted, accountForAgent, formatQuotaLine, profilePool } from './quota.mjs';
 import { readRewindPoint, rewindAndBrief } from './rewind.mjs';
@@ -556,6 +556,8 @@ export function buildResumeBrief(status, { agentId = null, agentState = null, gi
 
   const cp = status.checkpoint;
   const agents = agentState && typeof agentState === 'object' ? agentState : {};
+  const freshHint = currentFreshHint((callerSteer || callerWorker) ? agents[agentId] : null);
+  if (freshHint) lines.push(`Context recommendation: ${freshHint}`);
   if (!cp?.task) {
     lines.push('Task checkpoint: NONE RECORDED. Do not infer the current task from history; confirm it with the user.');
   } else {
@@ -889,13 +891,13 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
 
 /**
  * Reads the rewind point for a fresh preview without side effects. Returns
- * the first user_message id, or null when rewind is disabled, the daemon is
+ * the previous resume brief or first user_message id, or null when the daemon is
  * unreachable, or the agent has no user message (send-only history).
  */
-async function previewRewindPoint(fromId, rewindClient) {
+async function previewRewindPoint(fromId, rewindClient, previousBriefId) {
   if (typeof rewindClient !== 'function' || !fromId) return null;
   try {
-    return await readRewindPoint(fromId, { createClient: rewindClient });
+    return await readRewindPoint(fromId, { createClient: rewindClient, previousBriefId });
   } catch {
     return null;
   }
@@ -914,8 +916,8 @@ function rewindFallbackWarning(fromId, outcomeStatus) {
  * path. A landed rewind is recorded even when the brief send failed (the
  * rewind stands; resend the packet manually).
  */
-async function runTabRewind({ client, workspaceId, agentId, packet, checkpoint, lock, now, rewindClient }) {
-  const outcome = await rewindAndBrief(agentId, packet, { createClient: rewindClient });
+async function runTabRewind({ client, workspaceId, agentId, packet, checkpoint, lock, now, rewindClient, previousBriefId }) {
+  const outcome = await rewindAndBrief(agentId, packet, { createClient: rewindClient, previousBriefId });
   if (outcome.status === 'failed') {
     throw new SwitchRefused(`Rewind of ${agentId} failed (${outcome.error ?? 'unknown error'}); nothing sent, nothing recorded, no new agent created`);
   }
@@ -937,10 +939,11 @@ async function runTabRewind({ client, workspaceId, agentId, packet, checkpoint, 
 async function tryActiveRewind({ client, discovery, status, expected, slot, from, apply, language, git, lock, now, workerModel, rewindClient }) {
   const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;
   const entry = agentState?.[from.id] ?? null;
+  const previousBriefId = entry?.refreshed?.briefMessageId;
   const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory) : null;
   const checkpoint = Boolean(status.checkpoint?.task);
   if (!apply) {
-    const point = await previewRewindPoint(from.id, rewindClient);
+    const point = await previewRewindPoint(from.id, rewindClient, previousBriefId);
     if (!point) return { fallback: 'unavailable' };
     const packet = buildRefreshPacket(status, {
       kind: 'steer', slot, from, to: { id: from.id }, epoch: expected.epoch, git: gitSnapshot,
@@ -969,7 +972,7 @@ async function tryActiveRewind({ client, discovery, status, expected, slot, from
     note: entry?.note ?? null, noteAt: entry?.noteAt ?? null,
     lastMessage: await hintOf(client, from.id), language, workerModel, rewound: true,
   });
-  const { outcome } = await runTabRewind({ client, workspaceId: status.workspace.id, agentId: from.id, packet, checkpoint: status.checkpoint, lock, now, rewindClient });
+  const { outcome } = await runTabRewind({ client, workspaceId: status.workspace.id, agentId: from.id, packet, checkpoint: status.checkpoint, lock, now, rewindClient, previousBriefId });
   if (outcome.status !== 'rewound') return { fallback: outcome.status };
   return {
     repo: status.repo, slot, kind: 'steer', from: from.id, to: from.id, epoch: expected.epoch, epochBumped: false, profile: null,
@@ -1165,6 +1168,7 @@ export async function freshSteer({ client, discovery, config, apply = false, slo
 async function tryTabRewind({ client, discovery, status, expected, from, kind, packetArgs, apply, language, git, lock, now, workerModel, rewindClient, resultBase }) {
   const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;
   const entry = agentState?.[from.id] ?? null;
+  const previousBriefId = entry?.refreshed?.briefMessageId;
   const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory) : null;
   const checkpoint = Boolean(status.checkpoint?.task);
   const packetOf = async () => buildRefreshPacket(status, {
@@ -1174,7 +1178,7 @@ async function tryTabRewind({ client, discovery, status, expected, from, kind, p
     ...packetArgs,
   });
   if (!apply) {
-    const point = await previewRewindPoint(from.id, rewindClient);
+    const point = await previewRewindPoint(from.id, rewindClient, previousBriefId);
     if (!point) return { fallback: 'unavailable' };
     const packet = await packetOf();
     return {
@@ -1195,7 +1199,7 @@ async function tryTabRewind({ client, discovery, status, expected, from, kind, p
     };
   }
   const packet = await packetOf();
-  const { outcome } = await runTabRewind({ client, workspaceId: status.workspace.id, agentId: from.id, packet, checkpoint: status.checkpoint, lock, now, rewindClient });
+  const { outcome } = await runTabRewind({ client, workspaceId: status.workspace.id, agentId: from.id, packet, checkpoint: status.checkpoint, lock, now, rewindClient, previousBriefId });
   if (outcome.status !== 'rewound') return { fallback: outcome.status };
   return {
     ...resultBase, from: from.id, to: from.id, epoch: expected.epoch, epochBumped: false, profile: null,

@@ -4,6 +4,8 @@ import { register } from "node:module";
 
 register("./ts-resolve-hooks.mjs", import.meta.url);
 
+const { currentFreshHint } = await import("../server/factory/agent-state.ts");
+
 const {
   CLEANUP_DEFAULTS,
   CLEAR_COMMAND,
@@ -13,6 +15,7 @@ const {
   cleanupInputOf,
   coldHintText,
   decideCleanupAction,
+  freshHintText,
   hasKeepContext,
   isCold,
   isSupervisionProtectedState,
@@ -34,7 +37,7 @@ function input(overrides = {}) {
     labels: { ...LABELS },
     provider: "claude",
     model: null,
-    quotaAvailable: null,
+    quotaAvailable: true,
     openWorkers: 1,
     status: "idle",
     archivedAt: null,
@@ -492,14 +495,14 @@ test("mode clear maps Codex to compact, never /clear", () => {
   assert.match(coldCodex.reason, /already passed the 30m/);
 });
 
-test("quota gates the compact; unknown quota fails open, clear stays free", () => {
+test("quota gates the compact; unknown quota fails closed, clear stays free", () => {
   assert.match(
     decideCleanupAction(input({ quotaAvailable: false })).reason,
     /quota is exhausted/,
   );
   assert.equal(decideCleanupAction(input({ quotaAvailable: true })).action, "compact-warm");
-  assert.equal(decideCleanupAction(input({ quotaAvailable: null })).action, "compact-warm");
-  assert.equal(decideCleanupAction(input({ quotaAvailable: undefined })).action, "compact-warm");
+  assert.match(decideCleanupAction(input({ quotaAvailable: null })).reason, /quota is unknown/);
+  assert.match(decideCleanupAction(input({ quotaAvailable: undefined })).reason, /quota is unknown/);
   assert.match(
     decideCleanupAction(
       input({ entry: { needsResume: { reason: "limit", at: at(NOW - MIN) } } }),
@@ -655,6 +658,37 @@ test("agents without a valid package state cool untouched", () => {
     ).reason,
     /no note/,
   );
+});
+
+test("currentFreshHint keeps only current hints, freshHintText labels the pill", () => {
+  assert.equal(currentFreshHint(null), null);
+  assert.equal(currentFreshHint(undefined), null);
+  assert.equal(currentFreshHint({}), null);
+  assert.equal(currentFreshHint({ freshHint: null, lastTurnEndedAt: at(NOW - HOUR) }), null);
+  assert.equal(currentFreshHint({ freshHint: { at: at(NOW - 10 * MIN), reason: "  " } }), null);
+  assert.equal(currentFreshHint({ freshHint: { at: "not-a-date", reason: "x" } }), null);
+  assert.equal(
+    currentFreshHint({
+      lastTurnEndedAt: at(NOW - HOUR),
+      freshHint: { at: at(NOW - 2 * HOUR), reason: "old" },
+    }),
+    null,
+    "recorded before the last turn: stale",
+  );
+  assert.equal(
+    currentFreshHint({
+      lastTurnEndedAt: at(NOW - HOUR),
+      freshHint: { at: at(NOW - 10 * MIN), reason: "package\n  boundary" },
+    }),
+    "package boundary",
+  );
+  assert.equal(
+    currentFreshHint({ freshHint: { at: at(NOW - 10 * MIN), reason: "boundary" } }),
+    "boundary",
+    "unknown last turn keeps the hint, mirroring the resume brief",
+  );
+  assert.equal(freshHintText(120_000, 55 * MIN), "Fresh empfohlen · 120k · 55m");
+  assert.equal(freshHintText(61_200, 2 * HOUR), "Fresh empfohlen · 61k · 2h");
 });
 
 test("shouldRewindFresh gates the rewind execution by setting and group", () => {

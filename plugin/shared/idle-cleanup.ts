@@ -502,6 +502,7 @@ export function decideCleanupAction(input: CleanupInput): CleanupDecision {
       };
     }
     if (input.quotaAvailable === false) return deny("provider quota is exhausted");
+    if (input.quotaAvailable !== true) return deny("provider quota is unknown");
     const flagged = (input.entry?.needsResume ?? null) as { reason?: unknown } | null;
     if (flagged?.reason === "limit") return deny("a provider limit is flagged for this agent");
   }
@@ -566,6 +567,11 @@ function formatIdle(idleMs: number): string {
 /** Short pill/panel line, e.g. "Kontext kalt · 350k · 2h". */
 export function coldHintText(contextTokens: number, idleMs: number): string {
   return `Kontext kalt · ${Math.round(contextTokens / 1000)}k · ${formatIdle(idleMs)}`;
+}
+
+/** Short pill/panel line for a fresh recommendation, e.g. "Fresh empfohlen · 120k · 55m". */
+export function freshHintText(contextTokens: number, idleMs: number): string {
+  return `Fresh empfohlen · ${Math.round(contextTokens / 1000)}k · ${formatIdle(idleMs)}`;
 }
 
 export interface CleanupEvidence {

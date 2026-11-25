@@ -353,6 +353,28 @@ test('fresh --slot preview shows rewind vs new agent', async () => {
   assert.equal(legacy.refreshMode, 'new-agent');
 });
 
+test('fresh preview and apply use the recorded resume brief when it is still a user message', async () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  ws.metadata[AGENTS_KEY] = { [steers.B.id]: { refreshed: { briefMessageId: 'brief-previous' } } };
+  const timeline = userTimeline('original');
+  timeline.entries.push({ item: { type: 'user_message', messageId: 'brief-previous' } });
+  const daemon = fakeDaemon({ timeline });
+  const run = (apply) => freshSteer({
+    client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG,
+    slot: 'B', language: 'en', lock: testLock, rewindClient: daemon, apply,
+  });
+  assert.equal((await run(false)).rewindPoint, 'brief-previous');
+  assert.equal((await run(true)).rewindPoint, 'brief-previous');
+  assert.deepEqual(daemon.calls.find(([method]) => method === 'rewindAgent'),
+    ['rewindAgent', steers.B.id, 'brief-previous', 'conversation']);
+  const withoutUserBrief = userTimeline('original');
+  withoutUserBrief.entries.push({ item: { type: 'tool_call', messageId: 'brief-previous' } });
+  assert.equal(await readRewindPoint(steers.B.id, {
+    createClient: fakeDaemon({ timeline: withoutUserBrief }), previousBriefId: 'brief-previous',
+  }), 'original');
+});
+
 // ------------------------------------------------------------- rewind apply
 
 test('fresh --slot apply rewinds the same tab and records cleared/refreshed', async () => {

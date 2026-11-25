@@ -16,6 +16,8 @@ interface ColdActionsProps {
   workspaceId: string;
   /** Fresh is manual-only and additive; offered only to the active steer. */
   canFresh: boolean;
+  /** Own steer slot; a non-active steer is refreshed per slot. */
+  slot?: string | null;
   hasHistory: boolean;
   /** Set when the attention feed flags this steer for resume; shows "Resume jetzt". */
   needsResume: NeedsResumeReason | null;
@@ -24,6 +26,12 @@ interface ColdActionsProps {
   theme: PluginHostProps["theme"];
   compact: boolean;
 }
+
+const FRESH_HINT =
+  "Renews the agent in the same tab with a rewind and the saved brief (about 8k uncached tokens instead of the whole old context). The old chat stays visible. If no rewind point exists, a new agent takes over.";
+const COLD_HINT =
+  "Keeps writing in the old chat. The whole context is processed again without cache, which is the most expensive option. Opens the saved history as a tab.";
+const RESUME_HINT = "Clears the context and posts the resume brief.";
 
 interface FreshPreview {
   slot: string;
@@ -43,12 +51,14 @@ export function ColdActions({
   agentId,
   workspaceId,
   canFresh,
+  slot = null,
   hasHistory,
   needsResume,
   takeover,
   theme,
   compact,
 }: ColdActionsProps) {
+  const [hover, setHover] = useState<string | null>(null);
   const callResume = useRpc(factoryResume);
   const callResumeApply = useRpc(factoryResumeApply);
   const callFreshPreview = useRpc(factoryFreshPreview);
@@ -71,6 +81,20 @@ export function ColdActions({
         backgroundColor: theme.colors.accent,
       },
       buttonText: { color: theme.colors.accentForeground, fontSize: 14 },
+      coldButton: {
+        paddingVertical: 10,
+        paddingHorizontal: 14,
+        borderRadius: 8,
+        backgroundColor: "#f87171",
+      },
+      coldText: { color: "#450a0a", fontSize: 14 },
+      freshButton: {
+        paddingVertical: 10,
+        paddingHorizontal: 14,
+        borderRadius: 8,
+        backgroundColor: theme.colors.statusSuccess,
+      },
+      freshText: { color: "#ffffff", fontSize: 14 },
       body: { color: theme.colors.foreground, fontSize: 14 },
       muted: { color: theme.colors.foregroundMuted, fontSize: 13 },
       error: { color: theme.colors.statusDanger, fontSize: 14 },
@@ -124,7 +148,7 @@ export function ColdActions({
     setError(null);
     setNotice(null);
     try {
-      const preview = await callFreshPreview({ workspaceId });
+      const preview = await callFreshPreview({ workspaceId, ...(slot && !canFresh ? { slot } : {}) });
       setFresh({
         slot: preview.slot,
         epoch: preview.epoch,
@@ -145,7 +169,7 @@ export function ColdActions({
     setBusy("fresh");
     setError(null);
     try {
-      const applied = await callFresh({ workspaceId, fingerprint: fresh.fingerprint });
+      const applied = await callFresh({ workspaceId, slot: fresh.slot, fingerprint: fresh.fingerprint });
       setFresh(null);
       setNotice(
         `Fresh Steer ${String(applied.slot)} is active (epoch ${String(applied.epoch)}). ` +
@@ -185,45 +209,45 @@ export function ColdActions({
             accessibilityLabel="Resume now"
             style={styles.button}
             disabled={busy !== null}
+            onHoverIn={() => setHover("resume")}
+            onHoverOut={() => setHover(null)}
             onPress={() => void onResumeApply()}
           >
             <Text style={styles.buttonText}>{busy === "resumeApply" ? "…" : "Resume jetzt"}</Text>
           </Pressable>
         ) : null}
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Show resume brief"
-          style={styles.button}
-          disabled={busy !== null}
-          onPress={() => void onResume()}
-        >
-          <Text style={styles.buttonText}>{busy === "resume" ? "…" : "Brief lesen"}</Text>
-        </Pressable>
-        {canFresh ? (
+        {canFresh || slot ? (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Hand over to a fresh steer"
-            style={styles.button}
+            accessibilityLabel="Continue fresh"
+            style={styles.freshButton}
             disabled={busy !== null}
+            onHoverIn={() => setHover("fresh")}
+            onHoverOut={() => setHover(null)}
             onPress={() => void onFreshPreview()}
           >
-            <Text style={styles.buttonText}>{busy === "fresh" ? "…" : "Fresh"}</Text>
+            <Text style={styles.freshText}>{busy === "fresh" ? "…" : "Continue Fresh"}</Text>
           </Pressable>
         ) : null}
         {hasHistory ? (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Open old history"
-            style={styles.button}
+            accessibilityLabel="Continue cold"
+            style={styles.coldButton}
             disabled={busy !== null}
+            onHoverIn={() => setHover("cold")}
+            onHoverOut={() => setHover(null)}
             onPress={() => void onHistory()}
           >
-            <Text style={styles.buttonText}>
-              {busy === "history" ? "…" : "Alten Verlauf öffnen"}
-            </Text>
+            <Text style={styles.coldText}>{busy === "history" ? "…" : "Continue Cold"}</Text>
           </Pressable>
         ) : null}
       </View>
+      {hover ? (
+        <Text style={styles.muted}>
+          {hover === "fresh" ? FRESH_HINT : hover === "cold" ? COLD_HINT : RESUME_HINT}
+        </Text>
+      ) : null}
       {error ? <Text style={styles.error}>{error}</Text> : null}
       {notice ? <Text style={styles.ok}>{notice}</Text> : null}
       {brief ? <Text style={styles.body}>{brief}</Text> : null}

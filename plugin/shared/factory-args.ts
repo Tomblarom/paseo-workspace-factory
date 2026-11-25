@@ -266,7 +266,7 @@ export type FactoryCommand =
     }
   | { command: "switch"; repo?: string; to: string; apply: boolean }
   | { command: "resume"; repo?: string; agentId?: string; brief: boolean }
-  | { command: "fresh"; repo?: string }
+  | { command: "fresh"; repo?: string; slot?: string }
   | { command: "relocate"; repo?: string; to: string }
   | { command: "assign"; repo?: string; task: string; tests: string[]; blockers: string[]; next?: string }
   | { command: "workers"; repo?: string }
@@ -352,7 +352,7 @@ interface ParsedFlags {
 }
 
 const REPEATABLE = new Set(["test", "blocker", "adopt", "adopt-worker", "local", "hub"]);
-const VALUE_FLAGS = new Set(["slots", "to", "task", "from-agent", "next", "test", "blocker", "agent", "thinking", "mode", "profile", "only", "timeout", "adopt", "adopt-worker", "local", "hub", "checkout", "name", "subject", "main", "domain", "rename-project"]);
+const VALUE_FLAGS = new Set(["slots", "slot", "to", "task", "from-agent", "next", "test", "blocker", "agent", "thinking", "mode", "profile", "only", "timeout", "adopt", "adopt-worker", "local", "hub", "checkout", "name", "subject", "main", "domain", "rename-project"]);
 const BOOL_FLAGS = new Set(["allow-fork", "apply", "candidates", "brief", "dry-run", "plan", "allow-destructive", "allow-ignored", "detach", "retitle"]);
 
 function parseFlags(tokens: string[]): ParsedFlags {
@@ -835,11 +835,15 @@ export function parseFactoryArgs(args: string): FactoryCommand {
     };
   }
   if (sub === "fresh") {
-    checkNoFlags(flags, "fresh");
+    checkAllowed(flags, "fresh", ["slot"]);
     if (flags.positionals.length > 1) fail("fresh takes at most one scope address (project); leave it out for this workspace.");
-    return flags.positionals.length === 1
-      ? { command: "fresh", repo: flags.positionals[0] }
-      : { command: "fresh" };
+    const slot = flags.singles.get("slot");
+    if (slot !== undefined && !/^[A-Za-z]$/.test(slot)) fail("fresh --slot needs one steer letter, e.g. --slot E.");
+    return {
+      command: "fresh",
+      ...(flags.positionals.length === 1 ? { repo: flags.positionals[0] } : {}),
+      ...(slot ? { slot: slot.toUpperCase() } : {}),
+    };
   }
   if (sub === "relocate") {
     checkAllowed(flags, "relocate", ["to"]);

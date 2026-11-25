@@ -171,6 +171,16 @@ test("factory.resume.apply contract and resume settings defaults", () => {
     reason: "limit",
   };
   assert.equal(factoryAttention.event.parse({ ...payload, attention: [row] }).attention[0].reason, "limit");
+  const freshRow = { ...row, reason: "cold", freshHint: "package boundary" };
+  assert.equal(
+    factoryAttention.event.parse({ ...payload, attention: [freshRow] }).attention[0].freshHint,
+    "package boundary",
+  );
+  assert.equal(
+    factoryAttention.event.parse({ ...payload, attention: [row] }).attention[0].freshHint,
+    undefined,
+    "pre-change rows without the hint still parse",
+  );
   assert.equal(factoryResumeSettings.id, "factory-resume");
   assert.equal(factoryResumeSettings.scope, "host");
   assert.deepEqual(factoryResumeSettings.schema.parse({}), RESUME_CLEAR_DEFAULTS);

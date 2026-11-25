@@ -455,6 +455,86 @@ test("collectColdAgents carries reason: cold rows and needsResume rows", async (
   assert.equal(advisedById.get(cold.id)?.advisor, false);
 });
 
+test("collectColdAgents surfaces a valid freshHint below the cold threshold", async () => {
+  const world = makeWorld();
+  const ws = addWorkspace(world, { metadata: scopeMeta({}) });
+  const hint = "package boundary: valid checkpoint, no open workers";
+  const hinted = addAgent(world, {
+    title: "Steer A",
+    workspaceId: ws.id,
+    lastUsage: { contextWindowUsedTokens: 120_000 },
+    labels: steerLabels("A"),
+  });
+  const stale = addAgent(world, {
+    title: "Steer B",
+    workspaceId: ws.id,
+    lastUsage: { contextWindowUsedTokens: 120_000 },
+    labels: steerLabels("B"),
+  });
+  const running = addAgent(world, {
+    title: "Steer C",
+    workspaceId: ws.id,
+    status: "running",
+    lastUsage: { contextWindowUsedTokens: 120_000 },
+    labels: steerLabels("C"),
+  });
+  const pending = addAgent(world, {
+    title: "Steer D",
+    workspaceId: ws.id,
+    lastUsage: { contextWindowUsedTokens: 120_000 },
+    labels: steerLabels("D"),
+  });
+  const flagged = addAgent(world, {
+    title: "Steer E",
+    workspaceId: ws.id,
+    labels: steerLabels("E"),
+  });
+  world.workspaces[0].metadata[AGENTS_KEY] = {
+    // Warm by the generic threshold (55m < 60m idleMinutes) but recommended.
+    [hinted.id]: {
+      lastTurnEndedAt: at(NOW - 55 * MIN),
+      freshHint: { at: at(NOW - 10 * MIN), reason: hint },
+    },
+    // Recorded before the last turn: stale, stays hidden.
+    [stale.id]: {
+      lastTurnEndedAt: at(NOW - 55 * MIN),
+      freshHint: { at: at(NOW - 2 * HOUR), reason: hint },
+    },
+    // Valid hint, but the agent is not idle.
+    [running.id]: {
+      lastTurnEndedAt: at(NOW - 55 * MIN),
+      freshHint: { at: at(NOW - 10 * MIN), reason: hint },
+    },
+    // A pending C5 action hides the hint like a plain cold row.
+    [pending.id]: {
+      lastTurnEndedAt: at(NOW - 55 * MIN),
+      freshHint: { at: at(NOW - 10 * MIN), reason: hint },
+      pendingAction: { kind: "compact", at: at(NOW - MIN), reason: "idle" },
+    },
+    // needsResume keeps its reason; the hint rides along for after the resume.
+    [flagged.id]: {
+      lastTurnEndedAt: at(NOW - 2 * MIN),
+      needsResume: { reason: "limit", at: at(NOW - MIN) },
+      freshHint: { at: at(NOW - MIN), reason: hint },
+    },
+  };
+  const rows = await sweep.collectColdAgents(
+    fakeClient(world),
+    { ...CLEANUP_DEFAULTS, mode: "compact-warm" },
+    NOW,
+  );
+  const byId = new Map(rows.map((r) => [r.agentId, r]));
+  assert.equal(byId.get(hinted.id)?.freshHint, hint);
+  assert.equal(byId.get(hinted.id)?.reason, "cold");
+  assert.equal(byId.get(hinted.id)?.workspaceId, ws.id);
+  assert.equal(byId.get(hinted.id)?.canFresh, true);
+  assert.equal(byId.has(stale.id), false);
+  assert.equal(byId.has(running.id), false);
+  assert.equal(byId.has(pending.id), false);
+  assert.equal(byId.get(flagged.id)?.reason, "limit");
+  assert.equal(byId.get(flagged.id)?.freshHint, hint);
+});
+
 // ---------------------------------------------------------------------------
 // F4: a woken steer with needsResume gets an automatic resume.
 // ---------------------------------------------------------------------------
@@ -615,10 +695,11 @@ test("client stub is replaced by the shared contracts", () => {
 // Sweep quota gate and Codex mapping (fake world, no live agents).
 // ---------------------------------------------------------------------------
 
-test("quotaAvailableForCleanup fails closed only on proven exhaustion", () => {
+test("quotaAvailableForCleanup is true only with a reading that shows headroom", () => {
   assert.equal(sweep.quotaAvailableForCleanup("claude", null), null);
   assert.equal(sweep.quotaAvailableForCleanup("claude", undefined), null);
-  assert.equal(sweep.quotaAvailableForCleanup("claude", {}), true);
+  assert.equal(sweep.quotaAvailableForCleanup("claude", {}), null);
+  assert.equal(sweep.quotaAvailableForCleanup("claude", { claude: {} }), null);
   assert.equal(sweep.quotaAvailableForCleanup("claude", { claude: { sessionPct: 40 } }), true);
   assert.equal(sweep.quotaAvailableForCleanup("claude", { claude: { sessionPct: 95 } }), false);
   assert.equal(
@@ -651,13 +732,27 @@ function sweepWorld({ provider = "claude", model = "m", idleMs = 55 * MIN, usage
   return { world, ws, agent, nowMs };
 }
 
-test("sweepOnce compacts an eligible agent when quota is unknown (fail open)", async () => {
+test("sweepOnce skips the compact when the provider quota is unknown (fail closed)", async () => {
   const { world, agent, nowMs } = sweepWorld({ workers: { "worker-1": { state: "running" } } });
   const results = await sweep.sweepOnce({
     paseo: fakeClient(world),
     settings: { ...CLEANUP_DEFAULTS, mode: "compact-warm" },
     nowMs,
     quotaSnapshot: null,
+    lock: noLock,
+    log: () => {},
+  });
+  assert.deepEqual(results, []);
+  assert.deepEqual(sendsTo(world, agent.id), []);
+});
+
+test("sweepOnce compacts an eligible agent when quota shows headroom", async () => {
+  const { world, agent, nowMs } = sweepWorld({ workers: { "worker-1": { state: "running" } } });
+  const results = await sweep.sweepOnce({
+    paseo: fakeClient(world),
+    settings: { ...CLEANUP_DEFAULTS, mode: "compact-warm" },
+    nowMs,
+    quotaSnapshot: { claude: { sessionPct: 40 } },
     lock: noLock,
     log: () => {},
   });
@@ -725,7 +820,7 @@ test("sweepOnce maps mode clear to /compact for Codex, never /clear", async () =
     paseo: fakeClient(world),
     settings: { ...CLEANUP_DEFAULTS, mode: "clear", providers: ["claude", "codex"] },
     nowMs,
-    quotaSnapshot: null,
+    quotaSnapshot: { codex: { sessionPct: 10 } },
     lock: noLock,
     log: () => {},
   });

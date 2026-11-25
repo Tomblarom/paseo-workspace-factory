@@ -31,16 +31,24 @@ import { runtime } from './runtime.mjs';
  * only via `send` have none.
  */
 export function firstRewindPoint(timelinePayload) {
+  return selectRewindPoint(timelinePayload, null);
+}
+
+function selectRewindPoint(timelinePayload, previousBriefId) {
   const rows = timelinePayload?.entries ?? timelinePayload?.rows ?? timelinePayload?.items ?? [];
   if (!Array.isArray(rows)) return null;
+  let first = null;
   for (const row of rows) {
     const item = row?.item ?? row;
     if (!item || typeof item !== 'object') continue;
     if (item.type !== 'user_message') continue;
     const id = item.messageId;
-    if (typeof id === 'string' && id) return id;
+    if (typeof id !== 'string' || !id) continue;
+    if (id === previousBriefId) return id;
+    first ??= id;
+    if (!previousBriefId) break;
   }
-  return null;
+  return first;
 }
 
 /**
@@ -76,7 +84,7 @@ export function isRewindUnsupportedError(error) {
  * null on any failure (no daemon, no timeline, no user message). Never throws
  * for daemon failures; production callers treat null as "new agent".
  */
-export async function readRewindPoint(agentId, { url = null, cliPath = null, createClient = defaultCreateRewindClient } = {}) {
+export async function readRewindPoint(agentId, { url = null, cliPath = null, createClient = defaultCreateRewindClient, previousBriefId = null } = {}) {
   if (typeof agentId !== 'string' || !agentId) return null;
   let client = null;
   try {
@@ -84,7 +92,7 @@ export async function readRewindPoint(agentId, { url = null, cliPath = null, cre
     const bin = cliPath ?? paseoBinary();
     client = await createClient({ url: target, cliPath: bin });
     const timeline = await client.fetchAgentTimeline(agentId, { limit: 0, projection: 'canonical' });
-    return firstRewindPoint(timeline);
+    return selectRewindPoint(timeline, previousBriefId);
   } catch {
     return null;
   } finally {
@@ -156,7 +164,7 @@ export async function rewindSameTab(agentId, { url = null, cliPath = null, creat
  *   failed; nothing was sent, and the caller must abort without side effects
  *   (no record, no new agent).
  */
-export async function rewindAndBrief(agentId, briefText, { url = null, cliPath = null, createClient = defaultCreateRewindClient, messageId: briefId = null } = {}) {
+export async function rewindAndBrief(agentId, briefText, { url = null, cliPath = null, createClient = defaultCreateRewindClient, messageId: briefId = null, previousBriefId = null } = {}) {
   if (typeof agentId !== 'string' || !agentId) return { status: 'failed', error: 'missing agent id' };
   if (typeof briefText !== 'string' || !briefText.trim()) return { status: 'failed', error: 'missing brief text' };
   let client = null;
@@ -174,7 +182,7 @@ export async function rewindAndBrief(agentId, briefText, { url = null, cliPath =
     } catch (error) {
       return { status: 'unavailable', error: error?.message ?? String(error) };
     }
-    const messageId = firstRewindPoint(timeline);
+    const messageId = selectRewindPoint(timeline, previousBriefId);
     if (!messageId) return { status: 'no-point' };
     if (typeof client.rewindAgent !== 'function') return { status: 'unsupported', error: 'daemon has no rewindAgent' };
     try {

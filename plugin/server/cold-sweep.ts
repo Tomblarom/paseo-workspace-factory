@@ -1,12 +1,12 @@
-import { AGENTS_KEY, updateAgentEntry } from "./factory/agent-state.js";
+import { AGENTS_KEY, currentFreshHint, updateAgentEntry } from "./factory/agent-state.js";
 import { isAdvisorSlot } from "./factory/config.js";
 import { LEGACY_PREFIX, METADATA_KEY, readPaseoState } from "./factory/paseo.js";
-import { quotaExhausted } from "./factory/quota.js";
+import { quotaEntry, quotaExhausted, quotaPct } from "./factory/quota.js";
 import { listScopes } from "./factory/scope.js";
 import { WORKERS_KEY } from "./factory/supervision.js";
 import { buildRewindRecord } from "./factory/steer.js";
 import { rewindSameTab } from "./factory/rewind.js";
-import { getQuotaSnapshot } from "./quota.js";
+import { getQuotaSampledAt, getQuotaSnapshot } from "./quota.js";
 import {
   CLEAR_COMMAND,
   COMPACT_COMMAND,
@@ -187,19 +187,17 @@ export interface SweepDeps {
 }
 
 /**
- * Provider quota for the compact gate. False only when the snapshot proves
- * exhaustion for the agent's pool (profile pools default to the provider id,
- * and quotaExhausted reuses the core quota reader). Unknown (no snapshot
- * yet) fails open: sampling is best-effort, and blocking on unknown would
- * silently disable the cleanup; a compact that hits a real limit is flagged
- * by the turn hook as needsResume=limit, which blocks later compacts.
+ * True only with a quota reading that shows headroom. Missing provider
+ * entries and unsupported telemetry are unknown.
  */
 export function quotaAvailableForCleanup(
   provider: string,
   snapshot: Record<string, any> | null | undefined,
 ): boolean | null {
-  if (!snapshot) return null;
-  return !quotaExhausted(snapshot, provider);
+  const entry = quotaEntry(snapshot, provider);
+  if (!entry) return null;
+  if (quotaExhausted(snapshot, provider)) return false;
+  return quotaPct(entry) !== null || entry.unlimited === true ? true : null;
 }
 
 /**
@@ -240,7 +238,9 @@ export async function sweepOnce({
   };
   for (const scope of lookup.scopes) lookup.byId.set(scope.id, scope);
   const liveIds = (state.agents ?? []).map((agent: any) => agent.id);
-  const quota = quotaSnapshot !== undefined ? quotaSnapshot : getQuotaSnapshot();
+  const sampledAt = getQuotaSampledAt();
+  const sampleIsFresh = sampledAt !== null && nowMs - sampledAt >= 0 && nowMs - sampledAt <= 30 * 60_000;
+  const quota = quotaSnapshot !== undefined ? quotaSnapshot : sampleIsFresh ? getQuotaSnapshot() : null;
   for (const agent of state.agents ?? []) {
     try {
       const result = await sweepAgent(paseo, agent, state, lookup, liveIds, settings, nowMs, log, quota, lock, rewindFn);
@@ -307,7 +307,10 @@ async function sweepAgent(
       openWorkers: openWorkerCount(reads.workers),
     }),
   );
-  if (!first.action) return null;
+  if (!first.action) {
+    if (first.reason === "provider quota is unknown") log(`[factory] idle cleanup: skipped compact for ${agent.id} (${first.reason})`);
+    return null;
+  }
   const modelOf = (snapshot: any): string | null =>
     typeof snapshot?.model === "string" ? snapshot.model : null;
   const wantRewind = shouldRewindFresh({
@@ -606,6 +609,8 @@ export interface ColdAgent {
   canFresh: boolean;
   /** Why the row needs attention; plain cold rows carry "cold". */
   reason: NeedsResumeReason;
+  /** Valid stored fresh recommendation; null when none (needsResume still wins the reason). */
+  freshHint: string | null;
   /** Own slot letter (steers), so the client can name a takeover. */
   slot: string | null;
   /** The scope's active steer slot, so a non-active reminder can name it. */
@@ -668,7 +673,9 @@ export function serveColdSubscription(
 
 /**
  * Factory agents that are cold right now (C6): idle past the threshold with
- * a context worth cleaning, and no C5 action already pending for them.
+ * a context worth cleaning, and no C5 action already pending for them. An
+ * idle agent with a valid stored fresh recommendation is listed as well,
+ * even below the cold threshold; needsResume keeps its reason precedence.
  */
 export async function collectColdAgents(
   paseo: any,
@@ -713,7 +720,11 @@ export async function collectColdAgents(
         minContextTokens: settings.minContextTokens,
         nowMs,
       });
-    if (!coldNow && !needsReason) continue;
+    // A valid stored recommendation surfaces its idle agent even when the
+    // generic cold threshold is not met. Non-idle agents keep the old shape:
+    // cold/needsResume rows without the hint.
+    const fresh = agent?.status === "idle" ? currentFreshHint(entry) : null;
+    if (!coldNow && !needsReason && !fresh) continue;
     const previous = entry?.previousSessions;
     const slot = identity.role === "steer" && typeof identity.slot === "string" ? identity.slot : null;
     const activeSteer = typeof reads.activeSteer === "string" ? reads.activeSteer : null;
@@ -729,6 +740,7 @@ export async function collectColdAgents(
       hasHistory: Array.isArray(previous) && previous.length > 0,
       canFresh: slot !== null && slot === activeSteer,
       reason: needsReason ?? "cold",
+      freshHint: fresh,
       slot,
       activeSteer,
       advisor: slot !== null && isAdvisorSlotOf(config, slot),

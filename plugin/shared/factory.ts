@@ -242,12 +242,16 @@ const coldAgent = z.looseObject({
   slot: z.string().nullable().optional(),
   activeSteer: z.string().nullable().optional(),
   advisor: z.boolean().optional(),
+  /** Valid stored fresh recommendation, also below the cold threshold; null when none. */
+  freshHint: z.string().nullable().optional(),
 });
 
 /**
- * One attention row: a cold agent (reason "cold" or absent) or a steer that
- * needs `/factory resume` (daemon-restart, limit, failed). The server pushes
- * the same rows under both `attention` and the legacy `cold` key.
+ * One attention row: a cold agent (reason "cold" or absent), a steer that
+ * needs `/factory resume` (daemon-restart, limit, failed), or an idle agent
+ * with a valid stored fresh recommendation (`freshHint`, also below the cold
+ * threshold). The server pushes the same rows under both `attention` and the
+ * legacy `cold` key.
  */
 const attentionAgent = coldAgent.extend({
   reason: z.enum(["daemon-restart", "limit", "failed", "cold"]).optional(),
@@ -295,6 +299,7 @@ export const factoryResumeApply = defineRpc({
 export const factoryFreshPreview = defineRpc({
   name: "factory.fresh.preview",
   input: z.object({
+    slot: z.string().regex(/^[A-Za-z]$/).optional(),
     repo: z.string().min(1).optional(),
     workspaceId: z.string().min(1).optional(),
   }),
@@ -318,6 +323,7 @@ export const factoryFreshPreview = defineRpc({
 export const factoryFresh = defineRpc({
   name: "factory.fresh",
   input: z.object({
+    slot: z.string().regex(/^[A-Za-z]$/).optional(),
     repo: z.string().min(1).optional(),
     workspaceId: z.string().min(1).optional(),
     fingerprint: z.string().min(1),

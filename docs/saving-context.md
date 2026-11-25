@@ -14,9 +14,9 @@ Every tool step reprocesses the whole chat history, so long steer chats burn thr
 
 ## Fresh steer
 
-`fresh <repo>` previews handing the active steer to a NEW agent of the same slot and profile (empty context); `fresh <repo> --apply` creates it, delivers the checkpoint handoff and bumps the epoch. The old steer keeps its chat and labels and gets only a short notice (one model turn); archive it in Paseo — until then `status` marks it superseded (newest by creation wins; `switch`/`plan` follow the newest instead of refusing). An interrupted apply is recovered through its creation receipt on the next `--apply`, never recreated.
+`fresh <repo>` previews a context refresh for the active steer. `fresh <repo> --apply` tries a same-tab rewind and delivers the checkpoint as a resume brief. It uses the previous brief when that brief is available as a user message, or the first user message otherwise. Same-tab refresh keeps the agent, slot and epoch.
 
-`fresh <repo> --slot <S>` refreshes a non-active steer and `fresh <repo> --worker <id>` a worker the same way but without any takeover: same slot/role, brief from the agent's own note or the checkpoint, no epoch change. Every fresh agent is created without a parent link (a fresh worker keeps its previous parent, never the calling agent); a manual `paseo run` from inside an agent needs `env -u PASEO_AGENT_ID` for the same guarantee.
+`fresh <repo> --slot <S>` refreshes a non-active steer and `fresh <repo> --worker <id>` refreshes a worker. Each uses the agent's own note or the scope checkpoint. The preview names the new-agent fallback when a rewind is unavailable. In that case an active-steer refresh bumps the epoch, and `status` marks the previous holder superseded. A newly created steer has no parent, and a newly created worker keeps its previous parent when it has one. Creation receipts let a retry recover an interrupted creation.
 
 ## Lessons from live use
 

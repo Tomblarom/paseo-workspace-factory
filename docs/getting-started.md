@@ -61,7 +61,7 @@ For first-time setup, open **Settings → Plugins → Factory** in Paseo. Under 
 | save the checkpoint from the last answer | `/factory checkpoint --from-agent <id>`, then confirm in the panel |
 | restart your steer after a break | `/factory resume` (clears the chat, then shows task and next step) |
 | only read the status report | `/factory resume --brief` |
-| replace the active steer with a new agent | `/factory fresh`, then confirm in the panel |
+| refresh the active steer's context | `/factory fresh`, then confirm in the panel |
 | move a project to another checkout | `/factory relocate --to <path>`, then confirm in the panel |
 | send a task to a project's steer (hub/domain) | `/factory assign --task "…"`, then confirm in the panel |
 | see the helper agents of a project | `/factory workers` |
@@ -105,7 +105,7 @@ Without a project name, commands use the workspace you are in. The Factory panel
 
 **Provider limit reached.** Save the checkpoint, run `/factory switch --to B`, and confirm the handoff. [Provider limit workflow](workflow-provider-limit.md)
 
-**Chat got too long.** Save the checkpoint, run `/factory fresh`, and confirm. A new agent in the same slot takes over and the old tab stays available. [Saving context](saving-context.md)
+**Chat got too long.** Save the checkpoint and run `/factory fresh`. Review whether the preview will rewind the current tab or create a new agent, then confirm. [Saving context](saving-context.md)
 
 **Back after a break.** In the steer's own tab, `/factory resume` is the way back after a restart, crash, or limit: it saves the checkpoint, clears the chat, and then shows the task and next step without reading the old chat. A "Resume nötig" pill on the steer asks you to do this when needed. `resume` on the CLI (or `/factory resume --brief`) only reads the same report and never clears anything. The plugin can also tidy up idle agents automatically; see [cold context](design/cold-context-resume.md).
 

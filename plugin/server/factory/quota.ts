@@ -144,8 +144,8 @@ export function quotaExhausted(snapshot, pool, threshold = QUOTA_DEFAULTS.exhaus
   const entry = quotaEntry(snapshot, pool);
   if (!entry) return false;
   const pct = quotaPct(entry);
-  if (pct !== null && pct >= threshold) return true;
-  const until = Date.parse(entry.limitUntil ?? entry.resetsAt ?? '');
+  if ((pct !== null && pct >= threshold) || (Number.isFinite(entry.weeklyPct) && entry.weeklyPct >= threshold)) return true;
+  const until = Date.parse(entry.limitUntil ?? '');
   return Number.isFinite(until) && until > now;
 }
 
@@ -210,12 +210,19 @@ export function parseUsageJson(input) {
       const text = `${window?.id ?? ''} ${window?.label ?? ''} ${window?.shortLabel ?? ''}`.toLowerCase();
       return text.includes('5h') || text.includes('5 h') || text.includes('session');
     }) ?? windows[0];
-    const pct = quotaPct(session) ?? (Number.isFinite(Number(session?.remainingPct)) ? 100 - Number(session.remainingPct) : null);
+    const windowPct = (window) => quotaPct(window) ?? (window?.remainingPct != null && Number.isFinite(Number(window.remainingPct)) ? 100 - Number(window.remainingPct) : null);
+    const pct = windowPct(session);
+    const weekly = windows.find((window) => /week|7\s*d/i.test(`${window?.id ?? ''} ${window?.label ?? ''} ${window?.shortLabel ?? ''}`));
+    const weeklyPct = windowPct(weekly);
     const pool = typeof record?.sourceId === 'string' && record.sourceId.trim()
       ? record.sourceId.trim()
       : (typeof record?.sourceLabel === 'string' ? record.sourceLabel.trim() : '');
     if (!pool || pct === null) continue;
-    snapshot[pool] = { sessionPct: pct, ...(session?.resetsAt ? { limitUntil: session.resetsAt } : {}) };
+    snapshot[pool] = {
+      sessionPct: pct,
+      ...(session?.resetsAt ? { resetsAt: session.resetsAt } : {}),
+      ...(weeklyPct !== null ? { weeklyPct } : {}),
+    };
   }
   return snapshot;
 }

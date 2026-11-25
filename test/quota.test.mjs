@@ -69,7 +69,7 @@ test('usage JSON parsing is fail-soft and extracts the 5h window', () => {
   const output = JSON.stringify([{ sourceLabel: 'claude', lastSuccessful: { report: { windows: [
     { id: 'five-hour', usedPct: 82, resetsAt: '2026-11-24T15:00:00Z' },
   ] } } }]);
-  assert.deepEqual(parseUsageJson(output), { claude: { sessionPct: 82, limitUntil: '2026-11-24T15:00:00Z' } });
+  assert.deepEqual(parseUsageJson(output), { claude: { sessionPct: 82, resetsAt: '2026-11-24T15:00:00Z' } });
   assert.deepEqual(parseUsageJson('{broken'), {});
   assert.deepEqual(parseUsageJson(null), {});
 });
