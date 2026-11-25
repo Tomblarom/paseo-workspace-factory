@@ -12,13 +12,13 @@
 import { isAbsolute, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { isDeepStrictEqual } from 'node:util';
-import { LABEL, METADATA_KEY, readPaseoState } from './paseo.js';
+import { METADATA_KEY, readPaseoState } from './paseo.js';
 import { withLock, workspaceLockName } from './lock.js';
 import { runtime } from './runtime.js';
 import { validScope, domainOfScope } from './scope.js';
 import { isAdvisorSlot } from './config.js';
 import { resolveProfile, steerFallbackList, usedProfilesByLiveSteers } from './models.js';
-import { idempotencyKey, requestDigest } from './planner.js';
+import { checkedCreationReceipt, confirmCreationReceipt, idempotencyKey, lookupCreation, profileAgentConfig, requestDigest, steerCreateKey, steerCreateLabels } from './steer-create.js';
 import { createExecutors } from './apply.js';
 import { CHECKPOINT_KEY, steerStatus, buildHandoff, hintOf, previousSteerNotice, readGitSnapshot } from './steer.js';
 import { defaultExistsDir } from './cleanup.js';
@@ -50,27 +50,12 @@ export function parseRelocateTarget(to, projects) {
   return { kind: 'path', dir };
 }
 
-function agentConfig(profile) {
-  return {
-    provider: `${profile.provider}/${profile.model}`,
-    ...(profile.mode ? { modeId: profile.mode } : {}),
-    ...(profile.thinking ? { thinkingOptionId: profile.thinking } : {}),
-  };
-}
-
-function checkedReceipt(lookupReceipt, kind, key, idOf) {
-  return lookupReceipt(kind, key).catch((error) => {
-    throw new RelocateRefused(`Relocate receipt lookup failed (${error.message}); refusing to create without a receipt`);
-  }).then((receipt) => {
-    if (!receipt) return null;
-    if (receipt.idempotencyKey && receipt.idempotencyKey !== key) throw new RelocateRefused('Relocate recovery stopped: the receipt belongs to a different key');
-    if (receipt.outcomeUnknown) throw new RelocateRefused(`Relocate recovery stopped: the receipt has an unknown outcome (${receipt.error ?? 'outcome unknown'})`);
-    if (receipt.phase !== 'completed') throw new RelocateRefused(`Relocate recovery stopped: the receipt is in phase ${receipt.phase}${receipt.error ? ` (${receipt.error})` : ''}`);
-    const id = idOf(receipt);
-    if (!id) throw new RelocateRefused('Relocate recovery stopped: the receipt names no object');
-    return { ...receipt, recoveredId: id };
-  });
-}
+const relocateLookupFail = (message) => new RelocateRefused(`Relocate ${message}`);
+const relocateRecoveryFail = (message) => new RelocateRefused(`Relocate recovery stopped: ${message}`);
+const relocateIdentity = {
+  workspace: { idOf: (receipt) => receipt.workspace?.id ?? receipt.workspaceId, missing: 'the receipt names no object' },
+  agent: { idOf: (receipt) => receipt.agentId, missing: 'the receipt names no object' },
+};
 
 /**
  * Hands a scope to a new main workspace: recreates every live steer of the
@@ -164,12 +149,13 @@ export async function relocateScope({ client, discovery, config, to, apply = fal
   const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory) : null;
   const previews = holders.map((holder) => {
     const profile = profiles.get(holder.slot);
+    const labels = steerCreateLabels(status.repo, status.repo, holder.slot);
+    const config = profileAgentConfig(profile);
     return {
       slot: holder.slot, from: holder.id, profile: profile.name, provider: profile.provider, model: profile.model,
-      idempotencyKey: idempotencyKey(status.repo, 'relocate', 'steer', holder.slot, requestDigest({
-        target: target.dir, title: `Steer ${holder.slot}`, config: agentConfig(profile),
-        labels: { [LABEL.repo]: status.repo, [LABEL.role]: 'steer', [LABEL.slot]: holder.slot, [LABEL.scope]: status.repo },
-      })),
+      idempotencyKey: steerCreateKey(status.repo, ['relocate', 'steer', holder.slot], {
+        target: target.dir, title: `Steer ${holder.slot}`, config, labels,
+      }),
     };
   });
   const packetFor = (holder, toId, lastMessage) => {
@@ -210,15 +196,15 @@ export async function relocateScope({ client, discovery, config, to, apply = fal
     let adopted = false;
     if (assessed.mode === 'create') {
       const createOp = { key: 'relocate.workspace', kind: 'paseo.workspace.create', summary: `Create relocated main workspace at ${target.dir}`, params: { path: target.dir, title: newTitle, metadata: newMetadata, idempotencyKey: workspaceKey } };
-      const receipt = await checkedReceipt(lookupReceipt, 'workspace', workspaceKey, (r) => r.workspace?.id ?? r.workspaceId);
+      const receipt = await lookupCreation(lookupReceipt, 'workspace', workspaceKey, relocateLookupFail);
       if (!receipt) {
         const out = await run(createOp, config);
         if (!out?.workspaceId) throw new Error('Relocated workspace creation returned no id');
         newWsId = out.workspaceId;
       } else {
-        const confirmed = await run(createOp, config);
-        if (confirmed?.workspaceId !== receipt.recoveredId) throw new RelocateRefused(`Relocate recovery stopped: identical request returned ${confirmed?.workspaceId}, receipt says ${receipt.recoveredId}`);
-        newWsId = receipt.recoveredId;
+        const recoveredId = checkedCreationReceipt(receipt, workspaceKey, relocateRecoveryFail, relocateIdentity.workspace);
+        const { id } = await confirmCreationReceipt(run, createOp, config, recoveredId, relocateRecoveryFail, { idOf: (out) => out?.workspaceId });
+        newWsId = id;
       }
     } else {
       const candidate = assessed.workspace;
@@ -238,19 +224,19 @@ export async function relocateScope({ client, discovery, config, to, apply = fal
       const op = {
         key: `relocate.steer.${preview.slot}`, kind: 'paseo.agent.create', summary: `Create relocated Steer ${preview.slot} without prompt`,
         params: {
-          workspaceId: newWsId, title: `Steer ${preview.slot}`, config: agentConfig(profile),
-          labels: { [LABEL.repo]: status.repo, [LABEL.role]: 'steer', [LABEL.slot]: preview.slot, [LABEL.scope]: status.repo }, idempotencyKey: preview.idempotencyKey,
+          workspaceId: newWsId, title: `Steer ${preview.slot}`, config: profileAgentConfig(profile),
+          labels: steerCreateLabels(status.repo, status.repo, preview.slot), idempotencyKey: preview.idempotencyKey,
         },
       };
-      const receipt = await checkedReceipt(lookupReceipt, 'agent', preview.idempotencyKey, (r) => r.agentId);
+      const receipt = await lookupCreation(lookupReceipt, 'agent', preview.idempotencyKey, relocateLookupFail);
       if (!receipt) {
         const out = await run(op, config);
         if (!out?.agentId) throw new Error(`Relocated Steer ${preview.slot} creation returned no agent id`);
         steers.push({ ...preview, to: out.agentId, reused: false });
       } else {
-        const confirmed = await run(op, config);
-        if (confirmed?.agentId !== receipt.recoveredId) throw new RelocateRefused(`Relocate recovery stopped: identical request returned ${confirmed?.agentId}, receipt says ${receipt.recoveredId}`);
-        steers.push({ ...preview, to: receipt.recoveredId, reused: true });
+        const recoveredId = checkedCreationReceipt(receipt, preview.idempotencyKey, relocateRecoveryFail, relocateIdentity.agent);
+        const { id } = await confirmCreationReceipt(run, op, config, recoveredId, relocateRecoveryFail);
+        steers.push({ ...preview, to: id, reused: true });
       }
     }
 

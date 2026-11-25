@@ -8,29 +8,10 @@ import { formatSlotProfileSuggestion, resolveProfile, steerFallbackList, usedPro
 import { LABEL, METADATA_KEY, describeParent, parentOf, pendingLegacyKeys, agentUsage } from './paseo.js';
 import { STEER_TITLE, STEER_DIGIT_TITLE } from './discovery.js';
 import { validScope } from './scope.js';
+import { buildSteerCreate, idempotencyKey, requestDigest, steerCreateLabels } from './steer-create.js';
 
 export const WORKSPACE_REF = { ref: 'main-workspace' };
-
-export function idempotencyKey(forkName, ...parts) {
-  return ['wsf', forkName.toLowerCase(), ...parts].join(':');
-}
-
-/** Short digest of a create request: the daemon rejects a reused key with a different request. */
-export function requestDigest(request) {
-  return createHash('sha256').update(JSON.stringify(request)).digest('hex').slice(0, 10);
-}
-
-function agentConfig(profile) {
-  return {
-    provider: `${profile.provider}/${profile.model}`,
-    ...(profile.mode ? { modeId: profile.mode } : {}),
-    ...(profile.thinking ? { thinkingOptionId: profile.thinking } : {}),
-  };
-}
-
-function steerLabels(scopeId, slot) {
-  return { [LABEL.repo]: scopeId, [LABEL.role]: 'steer', [LABEL.slot]: slot, [LABEL.scope]: scopeId };
-}
+export { idempotencyKey, requestDigest };
 
 /**
  * Repository identity of a scope id: the id without the @branch suffix of
@@ -431,7 +412,7 @@ export function planRepository(discovery, config, { allowFork = false, adopt = {
     if (currentParent) {
       add(`${key}.detach`, 'agent.detach', `Detach candidate ${candidate.id} from ${describeParent(candidate)} (native agent detach, verified after)`, { agentId: candidate.id, parent: currentParent });
     }
-    add(key, 'paseo.agent.adopt', `Label confirmed agent ${candidate.id} as Steer ${slot} (title and model unchanged)`, { agentId: candidate.id, labels: steerLabels(effScopeId, slot) });
+    add(key, 'paseo.agent.adopt', `Label confirmed agent ${candidate.id} as Steer ${slot} (title and model unchanged)`, { agentId: candidate.id, labels: steerCreateLabels(effScopeId, effScopeId, slot) });
     if (profile.advisor === true) {
       notes.push(`Steer ${slot} uses advisor profile "${profile.name}" (advisor, never active)`);
     }
@@ -549,9 +530,12 @@ export function planRepository(discovery, config, { allowFork = false, adopt = {
     }
     const effective = { name: resolved.name, provider: resolved.provider, model: resolved.model, thinking: resolved.thinking ?? null, mode: resolved.mode ?? null };
     const generation = labelled.length + 1; // archived steers of this slot get a fresh key
-    const request = { workspaceId, title: `Steer ${slot}`, config: agentConfig(effective), labels: steerLabels(effScopeId, slot) };
+    const { request, idempotencyKey: createKey } = buildSteerCreate({
+      keyScope: forkName, repo: effScopeId, scopeId: effScopeId, slot, workspaceId, profile: effective,
+      keyParts: ['steer', slot, `g${generation}`],
+    });
     add(key, 'paseo.agent.create', `Create top-level Steer ${slot} (${effective.provider}/${effective.model}) without prompt`, {
-      ...request, idempotencyKey: idempotencyKey(forkName, 'steer', slot, `g${generation}`, requestDigest(request)),
+      ...request, idempotencyKey: createKey,
     });
   }
 

@@ -9,6 +9,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { join, resolve } from 'node:path';
 import { withLock, workspaceLockName } from './lock.mjs';
 import { planHash, WORKSPACE_REF } from './planner.mjs';
+import { checkedCreationReceipt, confirmCreationReceipt, lookupCreation, verifySteerPlacement } from './steer-create.mjs';
 import { getRepo, GitHubNotFound, remoteToFullName } from './github.mjs';
 import { inspectCloneTarget, readRemotes } from './local.mjs';
 import { LABEL, METADATA_KEY, LEGACY_PREFIX, parentOf, newKeyForLegacyKey } from './paseo.mjs';
@@ -27,25 +28,18 @@ function refuse(key, why) {
 }
 
 async function readReceipt(op, lookupReceipt) {
-  if (typeof lookupReceipt !== 'function') refuse(op.key, 'no receipt lookup is available');
-  try {
-    return await lookupReceipt(CREATE_KINDS[op.kind], op.params.idempotencyKey);
-  } catch (error) {
-    return refuse(op.key, `the receipt lookup failed (${error.message})`);
-  }
+  return lookupCreation(lookupReceipt, CREATE_KINDS[op.kind], op.params.idempotencyKey, (message) => refuse(op.key, message));
 }
 
 function completedId(op, receipt) {
-  if (receipt.idempotencyKey && receipt.idempotencyKey !== op.params.idempotencyKey) refuse(op.key, 'the receipt belongs to a different key');
-  if (receipt.outcomeUnknown) refuse(op.key, `its receipt has an unknown outcome (${receipt.error ?? 'outcome unknown'})`);
-  if (receipt.phase !== 'completed') refuse(op.key, `its receipt is in phase ${receipt.phase}${receipt.error ? ` (${receipt.error})` : ''}`);
-  if (CREATE_KINDS[op.kind] === 'agent') {
-    if (!receipt.agentId) refuse(op.key, 'its receipt names no agent');
-    return receipt.agentId;
+  const fail = (message) => refuse(op.key, message);
+  if (CREATE_KINDS[op.kind] === 'agent') return checkedCreationReceipt(receipt, op.params.idempotencyKey, fail);
+  if (receipt.workspace?.id && receipt.workspaceId && receipt.workspace.id !== receipt.workspaceId) {
+    fail('the receipt names no unambiguous workspace');
   }
-  const id = receipt.workspace?.id ?? receipt.workspaceId;
-  if (!id || (receipt.workspace?.id && receipt.workspaceId && receipt.workspace.id !== receipt.workspaceId)) refuse(op.key, 'its receipt names no unambiguous workspace');
-  return id;
+  return checkedCreationReceipt(receipt, op.params.idempotencyKey, fail, {
+    idOf: (entry) => entry.workspace?.id ?? entry.workspaceId, missing: 'the receipt names no unambiguous workspace',
+  });
 }
 
 /**
@@ -82,14 +76,9 @@ export async function reconcileAttempt({ op, pending, observed = {}, authorizati
     const created = Date.parse(main.createdAt ?? '');
     if (!Number.isFinite(created) || created < Date.parse(authorization.createdAt)) refuse(op.key, `workspace ${id} was not created after the dry-run`);
   }
-  let confirmed;
-  try {
-    confirmed = await execute(op, config);
-  } catch (error) {
-    refuse(op.key, `the identical request was rejected (${error.message})`);
-  }
-  const confirmedId = isWorkspace ? confirmed?.workspaceId : confirmed?.agentId;
-  if (confirmedId !== id) refuse(op.key, `the identical request returned ${confirmedId}, receipt says ${id}`);
+  const { confirmed } = await confirmCreationReceipt(execute, op, config, id, (message) => refuse(op.key, message), {
+    idOf: (result) => (isWorkspace ? result?.workspaceId : result?.agentId),
+  });
   return { result: { ...confirmed, recovered: true, via: 'receipt' } };
 }
 
@@ -522,7 +511,7 @@ export function createExecutors({ client, gh, git, paseoCli, sleep = (ms) => new
       const handle = await client.workspaces.ref(workspaceId).agents.create({ config: agentConfig, title, labels, idempotencyKey, ...(metadata ? { metadata } : {}) });
       let agent = (await handle.refresh())?.agent;
       if (clearParent) agent = await detachInheritedParent(handle, agent);
-      verifySteer(agent, { workspaceId, labels });
+      verifySteerPlacement(agent, { workspaceId, labels, parent: null });
       return { agentId: agent.id, parent: null };
     },
 
@@ -541,17 +530,7 @@ export function createExecutors({ client, gh, git, paseoCli, sleep = (ms) => new
       });
       let agent = (await handle.refresh())?.agent;
       if (!parent && clearParent) agent = await detachInheritedParent(handle, agent);
-      if (!agent) throw new Error('Agent snapshot missing after write');
-      if (agent.archivedAt) throw new Error(`Agent ${agent.id} is archived (an old idempotency receipt?)`);
-      if (agent.workspaceId !== workspaceId) throw new Error(`Agent ${agent.id} landed in ${agent.workspaceId}, expected ${workspaceId}`);
-      if ((parentOf(agent) ?? null) !== parent) {
-        throw new Error(parent
-          ? `Agent ${agent.id} parent is ${parentOf(agent)}, expected ${parent}`
-          : `PARENT VIOLATION: agent ${agent.id} has parent ${parentOf(agent)}; not continuing`);
-      }
-      for (const [key, value] of Object.entries(labels)) {
-        if (agent.labels?.[key] !== value) throw new Error(`Agent ${agent.id} label ${key} is ${agent.labels?.[key]}, expected ${value}`);
-      }
+      verifySteerPlacement(agent, { workspaceId, labels, parent });
       return { agentId: agent.id, parent };
     },
 
@@ -564,7 +543,7 @@ export function createExecutors({ client, gh, git, paseoCli, sleep = (ms) => new
       const labelArg = Object.entries(op.params.labels).map(([k, v]) => `${k}=${v}`).join(',');
       paseoCli(['agent', 'update', before.id, '--label', labelArg]);
       const after = (await handle.refresh())?.agent;
-      verifySteer(after, { workspaceId: before.workspaceId, labels: op.params.labels });
+      verifySteerPlacement(after, { workspaceId: before.workspaceId, labels: op.params.labels, parent: null });
       return { agentId: after.id };
     },
 
@@ -815,20 +794,10 @@ async function listProjectWorkspaces(client, projectId) {
  * steer creates never pass `parent`, so any parent on the fresh snapshot is
  * unintended. Detaches once through the public SDK handle (the same native
  * call the CLI uses) and re-reads. Without a parent the agent is returned
- * unchanged and the caller verifies (verifySteer refuses a remaining parent).
+ * unchanged and the caller verifies (verifySteerPlacement refuses a remaining parent).
  */
 async function detachInheritedParent(handle, agent) {
   if (!agent || !parentOf(agent)) return agent;
   await handle.detach();
   return (await handle.refresh())?.agent ?? agent;
-}
-
-export function verifySteer(agent, { workspaceId, labels }) {
-  if (!agent) throw new Error('Agent snapshot missing after write');
-  if (parentOf(agent)) throw new Error(`PARENT VIOLATION: agent ${agent.id} has parent ${parentOf(agent)}; not continuing`);
-  if (agent.archivedAt) throw new Error(`Agent ${agent.id} is archived (an old idempotency receipt?)`);
-  if (agent.workspaceId !== workspaceId) throw new Error(`Agent ${agent.id} landed in ${agent.workspaceId}, expected ${workspaceId}`);
-  for (const [key, value] of Object.entries(labels)) {
-    if (agent.labels?.[key] !== value) throw new Error(`Agent ${agent.id} label ${key} is ${agent.labels?.[key]}, expected ${value}`);
-  }
 }

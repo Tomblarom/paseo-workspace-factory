@@ -17,7 +17,7 @@ import { discoveryScopeAliases, guardScope, scopeHolder, ScopeGuardError } from 
 import { runtime } from './runtime.mjs';
 import { isAdvisorSlot, isSensitiveSlot } from './config.mjs';
 import { formatSlotProfileSuggestion, resolveProfile, steerFallbackList, usedProfilesByLiveSteers } from './models.mjs';
-import { idempotencyKey, requestDigest } from './planner.mjs';
+import { buildSteerCreate, checkedCreationReceipt, confirmCreationReceipt, idempotencyKey, lookupCreation, profileAgentConfig, requestDigest, shortHolderId, steerCreateKey, verifyCreatedAgent } from './steer-create.mjs';
 import { createExecutors } from './apply.mjs';
 import { resolveScope, scopeToEntry, sameScopeId, domainOfScope } from './scope.mjs';
 import { STEER_TITLE, activeMarker, markSteerTitle, stripActiveMarker } from './discovery.mjs';
@@ -475,40 +475,9 @@ export function buildRefreshPacket(status, { kind, slot = null, owner = null, ti
   return boundBrief(lines, { worker: Boolean(worker), truncated });
 }
 
-/** Shared receipt lookup for every fresh path: missing lookup or failed exchange refuses, never recreates blindly. */
-async function lookupFreshReceipt(lookupReceipt, key) {
-  if (typeof lookupReceipt !== 'function') throw new SwitchRefused('Fresh needs a receipt lookup; refusing to create without a receipt');
-  try {
-    return await lookupReceipt('agent', key);
-  } catch (error) {
-    throw new SwitchRefused(`Fresh receipt lookup failed (${error.message}); refusing to create without a receipt`);
-  }
-}
-
-/**
- * Shared receipt validation for every fresh path: a completed receipt
- * re-sends the identical request (the daemon returns the existing agent and
- * creates nothing); anything else stops, as in apply.mjs.
- */
-function checkedFreshReceipt(receipt, key) {
-  if (receipt.idempotencyKey && receipt.idempotencyKey !== key) throw new SwitchRefused('Fresh recovery stopped: the receipt belongs to a different key');
-  if (receipt.outcomeUnknown) throw new SwitchRefused(`Fresh recovery stopped: the receipt has an unknown outcome (${receipt.error ?? 'outcome unknown'})`);
-  if (receipt.phase !== 'completed') throw new SwitchRefused(`Fresh recovery stopped: the receipt is in phase ${receipt.phase}${receipt.error ? ` (${receipt.error})` : ''}`);
-  if (!receipt.agentId) throw new SwitchRefused('Fresh recovery stopped: the receipt names no agent');
-  return receipt;
-}
-
-/** Re-sends the identical request for a completed receipt and returns its agent id; any deviation stops. */
-async function confirmFreshReceipt(run, op, config, receipt) {
-  let confirmed;
-  try {
-    confirmed = await run(op, config);
-  } catch (error) {
-    throw new SwitchRefused(`Fresh recovery stopped: the identical request was rejected (${error.message})`);
-  }
-  if (confirmed?.agentId !== receipt.agentId) throw new SwitchRefused(`Fresh recovery stopped: the identical request returned ${confirmed?.agentId}, receipt says ${receipt.agentId}`);
-  return confirmed.agentId;
-}
+const freshLookupFail = (message) => new SwitchRefused(`Fresh ${message}`);
+const freshRecoveryFail = (message) => new SwitchRefused(`Fresh recovery stopped: ${message}`);
+const freshVerifyFail = (freshId) => (message) => new SwitchRefused(`Fresh agent ${freshId} failed placement verification (${message})`);
 
 // A Fresh creation and its first prompt are separate durable operations. Pin
 // the exact prompt and native receipt key before the first send, and retain it
@@ -528,31 +497,6 @@ async function deliverFreshPacket({ client, workspaceId, agentId, packet, epoch,
   if (result.status === 'sent') await updateAgentEntry({ client, workspaceId, agentId, lock, patch: (entry) =>
     entry?.action?.wakeId === action.wakeId ? { action: { ...entry.action, phase: 'done' } } : null });
   return result;
-}
-
-/**
- * Fresh parent guarantee, independent of the executor: a fresh steer must
- * be parent-free, a fresh worker must carry exactly its previous parent
- * (the owning steer) — never the calling agent. The real executor already
- * verifies (and clears an inherited link); this refuses a parented agent
- * from any custom executor too. Fails open when the snapshot is
- * unreadable (the executor then owns verification).
- */
-async function verifyFreshAgentParent(client, agentId, expectedParent) {
-  let snapshot = null;
-  try {
-    snapshot = (await client.agents.ref(agentId).refresh())?.agent ?? null;
-  } catch {
-    snapshot = null;
-  }
-  if (!snapshot) return;
-  const actual = parentOf(snapshot) ?? null;
-  const expected = expectedParent ?? null;
-  if (actual !== expected) {
-    throw new SwitchRefused(actual
-      ? `Fresh agent ${agentId} has parent ${actual}; refusing a parented fresh agent`
-      : `Fresh agent ${agentId} has no parent, expected ${expected}`);
-  }
 }
 
 /**
@@ -1303,16 +1247,14 @@ export async function freshSteer({ client, discovery, config, apply = false, sen
     profileSuggestion ??= cmd;
   }
 
-  // Same create request the planner builds for a slot (mirrored here; planner
-  // internals are not exported), bound to the current epoch so a retry before the
-  // state write reuses the key while every applied fresh gets a new one.
+  // Same create request the planner builds for a slot, bound to the current
+  // epoch so a retry before the state write reuses the key while every
+  // applied fresh gets a new one.
   const scopeId = discovery.scope?.id ?? status.repo;
-  const labels = { [LABEL.repo]: status.repo, [LABEL.role]: 'steer', [LABEL.slot]: slot, [LABEL.scope]: scopeId };
-  const request = {
-    workspaceId: status.workspace.id, title: markSteerTitle(`Steer ${slot}`, activeMarker(config)), labels,
-    config: { provider: `${profile.provider}/${profile.model}`, ...(profile.mode ? { modeId: profile.mode } : {}), ...(profile.thinking ? { thinkingOptionId: profile.thinking } : {}) },
-  };
-  const key = idempotencyKey(status.repo, 'steer', slot, `fresh-e${expected.epoch}`, requestDigest(request));
+  const { request, idempotencyKey: key, expected: placement } = buildSteerCreate({
+    keyScope: status.repo, repo: status.repo, scopeId, slot, workspaceId: status.workspace.id, profile,
+    title: markSteerTitle(`Steer ${slot}`, activeMarker(config)), keyParts: ['steer', slot, `fresh-e${expected.epoch}`],
+  });
   const op = { key: `steer.${slot}.fresh`, kind: 'paseo.agent.create', summary: `Create fresh Steer ${slot} (${profile.provider}/${profile.model}) without prompt`, params: { ...request, clearInheritedParent: true, idempotencyKey: key } };
 
   const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory) : null;
@@ -1336,17 +1278,18 @@ export async function freshSteer({ client, discovery, config, apply = false, sen
   let from = single;
   let freshId;
   await lock(workspaceLockName(status.workspace.id), async (held) => {
-    const receipt = await lookupFreshReceipt(lookupReceipt, key);
+    const receipt = await lookupCreation(lookupReceipt, 'agent', key, freshLookupFail);
+    let receiptAgentId = null;
     if (receipt) {
-      checkedFreshReceipt(receipt, key);
+      receiptAgentId = checkedCreationReceipt(receipt, key, freshRecoveryFail);
       if (!from) {
-        const rest = holders.filter((h) => h.id !== receipt.agentId);
-        if (!holders.some((h) => h.id === receipt.agentId) || rest.length !== 1) throw new SwitchRefused(`Steer ${slot} has several live agents; archive the retired one in Paseo, then rerun`);
+        const rest = holders.filter((h) => h.id !== receiptAgentId);
+        if (!holders.some((h) => h.id === receiptAgentId) || rest.length !== 1) throw new SwitchRefused(`Steer ${slot} has several live agents; archive the retired one in Paseo, then rerun`);
         from = rest[0];
       }
     }
     if (!from) throw new SwitchRefused(`Steer ${slot} has several live agents (${holders.map((s) => s.id).join(', ')}); archive the retired one in Paseo, then rerun`);
-    const { state: current } = await guardSteerScope({ client, held, workspaceId: status.workspace.id, scopeId: expected.scope?.id ?? status.repo, epoch: expected.epoch, agentId: from?.id, excludeIds: receipt ? [receipt.agentId] : [], aliases: discoveryScopeAliases(discovery), config });
+    const { state: current } = await guardSteerScope({ client, held, workspaceId: status.workspace.id, scopeId: expected.scope?.id ?? status.repo, epoch: expected.epoch, agentId: from?.id, excludeIds: receiptAgentId ? [receiptAgentId] : [], aliases: discoveryScopeAliases(discovery), config });
     if (callerId) {
       if (callerId !== from.id) throw new SwitchRefused('Only the active steer may request active Fresh');
     }
@@ -1356,12 +1299,12 @@ export async function freshSteer({ client, discovery, config, apply = false, sen
       if (!freshId) throw new Error('Fresh agent creation returned no agent id');
     } else {
       if (BUSY.has(from.status)) throw new SwitchRefused(`Active Steer ${slot} is ${from.status}; stop it or wait for its turn to end first`);
-      const confirmedId = await confirmFreshReceipt(run, op, config, receipt);
+      const { id: confirmedId } = await confirmCreationReceipt(run, op, config, receiptAgentId, freshRecoveryFail);
       if (confirmedId === from.id) throw new SwitchRefused('Fresh recovery stopped: the receipt names the current Steer itself');
       freshId = confirmedId;
       result.reused = true;
     }
-    await verifyFreshAgentParent(client, freshId, null); // parent-free, whoever the executor was
+    await verifyCreatedAgent(client, freshId, placement, freshVerifyFail(freshId)); // whoever the executor was
     held.verify(); // the lock file must still be the locked inode right before the write
     await workspace.setMetadata({ [METADATA_KEY]: { ...current, activeSteer: slot, activeAgentId: freshId, epoch: current.epoch + 1, previousSteer: from.id, switchedAt: now().toISOString() } });
     const written = (await workspace.refresh())?.metadata?.[METADATA_KEY];
@@ -1466,7 +1409,10 @@ async function tryTabRewind({ client, discovery, status, expected, from, kind, p
  * no takeover. Nothing is written to the steer state (no epoch change, no
  * active-steer write); the daemon idempotency key carries the refreshed
  * agent id, so retries reuse the receipt while later refreshes get a new
- * key. The new agent is created without the active marker and parent-free.
+ * key. The key is stable per holder (the operation identity): a retry looks
+ * up one candidate key per live holder, so it still finds its receipt after
+ * the slot holds the old and the fresh agent. The new agent is created
+ * without the active marker and parent-free.
  */
 async function freshNonActiveSteer({ client, discovery, status, expected, slot, config, apply, send = true, notifyPrevious = true, language, git, lookupReceipt, execute, workerModel, quotaSnapshot, quotaExhaustedPct, zerosub, lock = withLock, now = () => new Date(), rewindClient = null, requireRefreshMode = null, promptOptions }) {
   const holders = status.steers.filter((s) => s.slot === slot);
@@ -1510,13 +1456,11 @@ async function freshNonActiveSteer({ client, discovery, status, expected, slot, 
   }
 
   const scopeId = discovery.scope?.id ?? status.repo;
-  const labels = { [LABEL.repo]: status.repo, [LABEL.role]: 'steer', [LABEL.slot]: slot, [LABEL.scope]: scopeId };
-  const request = {
-    workspaceId: status.workspace.id, title: `Steer ${slot}`, labels,
-    config: { provider: `${profile.provider}/${profile.model}`, ...(profile.mode ? { modeId: profile.mode } : {}), ...(profile.thinking ? { thinkingOptionId: profile.thinking } : {}) },
-  };
-  const short = String(single?.id ?? 'x').replace(/[^A-Za-z0-9]/g, '').slice(0, 8) || 'x';
-  const key = idempotencyKey(status.repo, 'steer', slot, `fresh-e${expected.epoch}-${short}`, requestDigest(request));
+  const partFor = (holder) => `fresh-e${expected.epoch}-${shortHolderId(holder?.id)}`;
+  const { request, idempotencyKey: key, expected: placement } = buildSteerCreate({
+    keyScope: status.repo, repo: status.repo, scopeId, slot, workspaceId: status.workspace.id, profile,
+    keyParts: ['steer', slot, partFor(single)],
+  });
   const op = { key: `steer.${slot}.fresh`, kind: 'paseo.agent.create', summary: `Create fresh Steer ${slot} (${profile.provider}/${profile.model}) without prompt`, params: { ...request, clearInheritedParent: true, idempotencyKey: key } };
 
   const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory) : null;
@@ -1539,30 +1483,43 @@ async function freshNonActiveSteer({ client, discovery, status, expected, slot, 
     result.packetChars = result.packet.length;
     return result;
   }
-  const receipt = await lookupFreshReceipt(lookupReceipt, key);
   const run = execute ?? createExecutors({ client });
+  const ambiguous = () => new SwitchRefused(`Steer ${slot} has several live agents (${holders.map((s) => s.id).join(', ')}); archive the retired one in Paseo, then rerun`);
+  let receipt = null;
+  let receiptKey = null;
+  const seen = new Set();
+  for (const holder of holders) {
+    const candidate = steerCreateKey(status.repo, ['steer', slot, partFor(holder)], request);
+    if (seen.has(candidate)) continue; // holders sharing one short id
+    seen.add(candidate);
+    const found = await lookupCreation(lookupReceipt, 'agent', candidate, freshLookupFail);
+    if (!found) continue;
+    if (receipt) throw ambiguous();
+    receipt = found;
+    receiptKey = candidate;
+  }
   let from = single;
   let freshId;
   if (!receipt) {
-    if (!from) throw new SwitchRefused(`Steer ${slot} has several live agents (${holders.map((s) => s.id).join(', ')}); archive the retired one in Paseo, then rerun`);
+    if (!from) throw ambiguous();
     freshId = (await run(op, config))?.agentId; // the executor verifies parent freedom, labels and workspace
     if (!freshId) throw new Error('Fresh agent creation returned no agent id');
   } else {
-    checkedFreshReceipt(receipt, key);
-    if (!from) {
-      const rest = holders.filter((h) => h.id !== receipt.agentId);
-      if (!holders.some((h) => h.id === receipt.agentId) || rest.length !== 1) {
-        throw new SwitchRefused(`Steer ${slot} has several live agents (${holders.map((s) => s.id).join(', ')}); archive the retired one in Paseo, then rerun`);
-      }
-      from = rest[0];
-      if (BUSY.has(from.status)) throw new SwitchRefused(`Steer ${slot} is ${from.status}; stop it or wait for its turn to end first`);
+    const receiptAgentId = checkedCreationReceipt(receipt, receiptKey, freshRecoveryFail);
+    if (holders.length === 1 && holders[0].id === receiptAgentId) {
+      throw new SwitchRefused('Fresh recovery stopped: the receipt names the current Steer itself');
     }
-    const confirmedId = await confirmFreshReceipt(run, op, config, receipt);
+    const rest = holders.filter((h) => h.id !== receiptAgentId);
+    if (!holders.some((h) => h.id === receiptAgentId) || rest.length !== 1) throw ambiguous();
+    from = rest[0];
+    if (BUSY.has(from.status)) throw new SwitchRefused(`Steer ${slot} is ${from.status}; stop it or wait for its turn to end first`);
+    const { id: confirmedId } = await confirmCreationReceipt(run, { ...op, params: { ...op.params, idempotencyKey: receiptKey } }, config, receiptAgentId, freshRecoveryFail);
     if (confirmedId === from.id) throw new SwitchRefused('Fresh recovery stopped: the receipt names the current Steer itself');
     freshId = confirmedId;
     result.reused = true;
+    result.idempotencyKey = receiptKey;
   }
-  await verifyFreshAgentParent(client, freshId, null); // parent-free, whoever the executor was
+  await verifyCreatedAgent(client, freshId, placement, freshVerifyFail(freshId)); // parent-free, whoever the executor was
   result.from = from.id;
   result.applied = true;
   result.to = freshId;
@@ -1625,11 +1582,10 @@ async function freshWorkerAgent({ client, discovery, status, expected, workerId,
   if (twins.length > 1) warnings.push(`Several profiles match ${from.provider}/${from.model} (${twins.map(([name]) => name).join(', ')}); the fresh worker uses provider defaults for thinking/mode`);
   const request = {
     workspaceId: from.workspaceId ?? status.workspace.id, title, labels,
-    config: { provider: `${from.provider}/${from.model}`, ...(twin?.mode ? { modeId: twin.mode } : {}), ...(twin?.thinking ? { thinkingOptionId: twin.thinking } : {}) },
+    config: profileAgentConfig({ provider: from.provider, model: from.model, mode: twin?.mode, thinking: twin?.thinking }),
     ...(parentId ? { parent: parentId } : {}),
   };
-  const short = String(from.id).replace(/[^A-Za-z0-9]/g, '').slice(0, 8) || 'x';
-  const key = idempotencyKey(status.repo, 'worker', owner, `fresh-e${expected.epoch}-${short}`, requestDigest(request));
+  const key = idempotencyKey(status.repo, 'worker', owner, `fresh-e${expected.epoch}-${shortHolderId(from.id)}`, requestDigest(request));
   const op = { key: `worker.${from.id}.fresh`, kind: 'paseo.agent.createWorker', summary: `Create fresh worker "${request.title}" (${from.provider}/${from.model}) without prompt`, params: { ...request, parent: parentId ?? null, clearInheritedParent: true, idempotencyKey: key } };
 
   const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory) : null;
@@ -1654,20 +1610,22 @@ async function freshWorkerAgent({ client, discovery, status, expected, workerId,
     result.packetChars = result.packet.length;
     return result;
   }
-  const receipt = await lookupFreshReceipt(lookupReceipt, key);
+  const receipt = await lookupCreation(lookupReceipt, 'agent', key, freshLookupFail);
   const run = execute ?? createExecutors({ client });
   let freshId;
   if (!receipt) {
     freshId = (await run(op, config))?.agentId; // the executor verifies the parent, labels and workspace
     if (!freshId) throw new Error('Fresh agent creation returned no agent id');
   } else {
-    checkedFreshReceipt(receipt, key);
-    const confirmedId = await confirmFreshReceipt(run, op, config, receipt);
+    const receiptAgentId = checkedCreationReceipt(receipt, key, freshRecoveryFail);
+    const { id: confirmedId } = await confirmCreationReceipt(run, op, config, receiptAgentId, freshRecoveryFail);
     if (confirmedId === from.id) throw new SwitchRefused('Fresh recovery stopped: the receipt names the current worker itself');
     freshId = confirmedId;
     result.reused = true;
   }
-  await verifyFreshAgentParent(client, freshId, parentId); // previous parent only, never the caller
+  await verifyCreatedAgent(client, freshId, {
+    workspaceId: request.workspaceId, labels, parent: parentId, provider: from.provider, model: from.model,
+  }, freshVerifyFail(freshId)); // previous parent only, never the caller
   result.applied = true;
   result.to = freshId;
   result.packet = buildRefreshPacket(status, {

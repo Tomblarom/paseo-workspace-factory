@@ -1,8 +1,8 @@
 // Scoped worker creation plus the git-state reader the archive guards use.
 // Accepted workers are archived natively in Paseo (`paseo archive`); there is
 // no factory retire command.
-import { LABEL, METADATA_KEY, parentOf } from './paseo.mjs';
-import { idempotencyKey, requestDigest } from './planner.mjs';
+import { LABEL, METADATA_KEY } from './paseo.mjs';
+import { idempotencyKey, profileAgentConfig, requestDigest, verifySteerPlacement } from './steer-create.mjs';
 import { ACCOUNT_METADATA_KEY } from './zerosub.mjs';
 import { findingsPassage } from './findings.mjs';
 import { withWorkspaceLock } from './lock.mjs';
@@ -25,11 +25,7 @@ export async function startScopedWorker({ client, status, callerId, aliases = []
     parent: parent.id,
     prompt: findings ? `${prompt}\n\n${findings}` : prompt,
     labels,
-    config: {
-      provider: `${profile.provider}/${profile.model}`,
-      ...(profile.mode ? { modeId: profile.mode } : {}),
-      ...(profile.thinking ? { thinkingOptionId: profile.thinking } : {}),
-    },
+    config: profileAgentConfig(profile),
     ...(accountId ? { metadata: { [ACCOUNT_METADATA_KEY]: accountId } } : {}),
   };
   const result = { scope: scopeId, workspaceId: workspace.id, parentId: parent.id, profile: profile.name, provider: request.config.provider, accountId: accountId ?? null };
@@ -44,8 +40,10 @@ export async function startScopedWorker({ client, status, callerId, aliases = []
     return workspaceHandle.agents.create({ ...request, idempotencyKey: key });
   });
   const agent = (await handle.refresh())?.agent;
-  if (!agent || agent.workspaceId !== workspace.id || parentOf(agent) !== parent.id || (accountId && agent.metadata?.[ACCOUNT_METADATA_KEY] !== accountId)) {
-    throw new Error('Worker creation could not be verified');
+  try {
+    verifySteerPlacement(agent, { workspaceId: workspace.id, labels, parent: parent.id, ...(accountId ? { accountId } : {}) });
+  } catch (error) {
+    throw new Error(`Worker creation could not be verified (${error.message})`);
   }
   return { ...result, agentId: agent.id };
 }

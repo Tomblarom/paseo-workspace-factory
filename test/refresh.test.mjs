@@ -205,6 +205,56 @@ test('fresh --slot delivery failure keeps the pinned brief for a manual resend',
   assert.equal(world.agents.length, 3, 'the fresh steer stands');
 });
 
+test('fresh --slot retry after a delivery failure reuses the receipt although the slot holds two agents', async () => {
+  const world = makeWorld();
+  const { steers } = provisioned(world);
+  world.hooks.sendFails = true;
+  const run = () => freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, notifyPrevious: false, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en' });
+  const first = await run();
+  assert.equal(first.delivered, false);
+  assert.equal(world.agents.length, 3, 'old + fresh agents share the slot, so no single holder resolves');
+  // A note written after the failure must not leak into the retried send:
+  // recovery replays the pinned brief, it does not rebuild it.
+  world.workspaces[0].metadata[AGENTS_KEY] = {
+    ...world.workspaces[0].metadata[AGENTS_KEY],
+    [steers.B.id]: { note: 'written after the failure', noteAt: '2026-11-24T12:00:00.000Z' },
+  };
+  world.hooks.sendFails = false;
+  const second = await run();
+  assert.equal(second.to, first.to, 'recovery reuses the created agent');
+  assert.equal(second.from, steers.B.id, 'the old holder is still the refresh source');
+  assert.equal(second.reused, true);
+  assert.equal(second.delivered, true);
+  assert.equal(second.idempotencyKey, first.idempotencyKey, 'the retry finds the receipt under the same stable key');
+  assert.equal(world.agents.length, 3, 'no second agent created');
+  const sends = world.calls.filter((c) => c[0] === 'agent.send' && c[1] === first.to);
+  assert.equal(sends.length, 1);
+  assert.equal(sends[0][2], first.packet, 'the pinned brief is sent, not a rebuilt one');
+  assert.ok(!sends[0][2].includes('written after the failure'));
+});
+
+test('fresh --slot retry recovers when superseded marks resolve the fresh agent as single', async () => {
+  const world = makeWorld();
+  const { steers } = provisioned(world);
+  steers.B.createdAt = '2026-11-24T09:00:00.000Z';
+  world.hooks.sendFails = true;
+  const run = () => {
+    const discovery = discoveryOf(world);
+    discovery.steers.labelled = markSupersededSlotHolders(discovery.steers.labelled);
+    return freshSteer({ client: fakeClient(world), discovery, config: CONFIG, slot: 'B', apply: true, notifyPrevious: false, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en' });
+  };
+  const first = await run();
+  assert.equal(first.delivered, false);
+  world.agents.find((a) => a.id === first.to).createdAt = '2026-11-24T10:00:00.000Z';
+  world.hooks.sendFails = false;
+  const second = await run();
+  assert.equal(second.to, first.to, 'recovery reuses the created agent, not the marked single holder');
+  assert.equal(second.from, steers.B.id);
+  assert.equal(second.reused, true);
+  assert.equal(second.delivered, true);
+  assert.equal(world.agents.length, 3, 'no second agent created');
+});
+
 test('fresh --slot refuses busy, missing and ambiguous targets, and slot+worker together', async () => {
   const world = makeWorld();
   const { steers } = provisioned(world);
@@ -346,7 +396,7 @@ test('fresh refuses a parented agent from a custom executor before any state wri
   };
   await assert.rejects(
     freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), execute, language: 'en' }),
-    /has parent .* refusing a parented fresh agent/,
+    /failed placement verification.*PARENT VIOLATION/,
   );
   assert.equal(world.workspaces[0].metadata[METADATA_KEY].epoch, 1, 'no state write after the refusal');
 });

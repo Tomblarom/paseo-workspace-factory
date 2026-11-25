@@ -12,7 +12,7 @@ import { LABEL } from './paseo.js';
 import { isAdvisorProfile, slotOrder, validateConfig } from './config.js';
 import { buildCandidate, nextFreeSlot, parseProviderModel, resolveProfile, resolveSteerAdd } from './models.js';
 import { QUOTA_DEFAULTS, bestFamilyAccount, earliestFamilyReset, familyAccounts, profileFamily } from './quota.js';
-import { idempotencyKey, requestDigest } from './planner.js';
+import { buildSteerCreate, checkedCreationReceipt, confirmCreationReceipt, lookupCreation, SteerPlacementError, verifySteerPlacement } from './steer-create.js';
 import { suggestAccountPin } from './zerosub.js';
 
 /**
@@ -323,13 +323,12 @@ export function planSteerAdd(config, providerEntries, liveSteers, {
   if (advisorSlot) notes.push(`Steer ${target} uses advisor profile "${profileName}" (advisor, never active)`);
 
   const effective = { name: picked.name, provider: picked.provider, model: picked.model, thinking: picked.thinking ?? null, mode: picked.mode ?? null };
-  const labels = { [LABEL.repo]: effectiveRepo ?? effectiveScope ?? '?', [LABEL.role]: 'steer', [LABEL.slot]: target, [LABEL.scope]: effectiveScope ?? effectiveRepo ?? '?' };
-  const request = {
-    workspaceId: workspaceId ?? '?', title: `Steer ${target}`, labels,
-    config: { provider: `${effective.provider}/${effective.model}`, ...(effective.mode ? { modeId: effective.mode } : {}), ...(effective.thinking ? { thinkingOptionId: effective.thinking } : {}) },
-    ...(zerosubPin ? { metadata: { ...zerosubPin.metadata } } : {}),
-  };
-  const key = idempotencyKey(String(effectiveRepo ?? effectiveScope ?? 'scope').toLowerCase(), 'steer', target, 'g1', requestDigest(request));
+  const { request, idempotencyKey: key } = buildSteerCreate({
+    keyScope: effectiveRepo ?? effectiveScope ?? 'scope', repo: effectiveRepo ?? effectiveScope ?? '?',
+    scopeId: effectiveScope ?? effectiveRepo ?? '?', slot: target, workspaceId: workspaceId ?? '?',
+    profile: effective, keyParts: ['steer', target, 'g1'],
+    metadata: zerosubPin ? zerosubPin.metadata : null, accountId: zerosubAccount,
+  });
   const op = {
     key: `steer.${target}`, kind: 'paseo.agent.create',
     summary: `Create top-level Steer ${target} (${effective.provider}/${effective.model}) without prompt`,
@@ -395,6 +394,11 @@ export class SteerAddStale extends Error {}
 export class SteerAddConflict extends Error {}
 /** Creation cannot be verified; check manually, then retry. */
 export class SteerAddRecovery extends Error {}
+
+const addRecoveryFail = (message) => new SteerAddRecovery(`Steer add recovery stopped: ${message}`);
+// A missing lookup is unreachable here: applySteerAdd refuses first unless
+// both a receipt lookup and an executor are passed.
+const addLookupFail = (message) => new SteerAddRecovery(`Steer add recovery stopped: the ${message}`);
 
 function occupiedError(slot, classification) {
   if (classification.state === 'live-unconfigured') {
@@ -476,58 +480,38 @@ async function recoverOccupiedSlot(config, providerEntries, liveSteers, planArgs
     throw occupiedError(classification.slot, classification);
   }
   const key = plan.op.params.idempotencyKey;
-  let receipt;
-  try {
-    receipt = await lookupReceipt('agent', key);
-  } catch (error) {
-    throw new SteerAddRecovery(`Steer add recovery stopped: the receipt lookup failed (${error.message})`);
-  }
+  const receipt = await lookupCreation(lookupReceipt, 'agent', key, addLookupFail);
   if (receipt) {
-    if (receipt.idempotencyKey && receipt.idempotencyKey !== key) throw new SteerAddRecovery('Steer add recovery stopped: the receipt belongs to a different key');
-    if (receipt.outcomeUnknown) throw new SteerAddRecovery(`Steer add recovery stopped: the receipt has an unknown outcome (${receipt.error ?? 'outcome unknown'})`);
-    if (receipt.phase !== 'completed') throw new SteerAddRecovery(`Steer add recovery stopped: the receipt is in phase ${receipt.phase}${receipt.error ? ` (${receipt.error})` : ''}`);
-    if (!receipt.agentId) throw new SteerAddRecovery('Steer add recovery stopped: the receipt names no agent');
-    if (receipt.agentId !== occupant.id) {
-      throw new SteerAddRecovery(`Steer add recovery stopped: the receipt names ${receipt.agentId} but ${occupant.id} is live; check manually and archive the spare steer in Paseo`);
+    const receiptAgentId = checkedCreationReceipt(receipt, key, addRecoveryFail);
+    if (receiptAgentId !== occupant.id) {
+      throw new SteerAddRecovery(`Steer add recovery stopped: the receipt names ${receiptAgentId} but ${occupant.id} is live; check manually and archive the spare steer in Paseo`);
     }
     return finishApplied(plan, occupant.id, { reused: true, scopeId: planArgs.scopeId ?? planArgs.repo, note: 'reused after receipt' });
   }
-  const expected = { provider: plan.profile.provider, model: plan.profile.model };
-  const labels = plan.op.params.labels;
-  const matches = occupant.provider === expected.provider && occupant.model === expected.model
-    && Object.entries(labels).every(([k, v]) => occupant.labels?.[k] === v);
-  if (!matches) throw occupiedError(classification.slot, classification);
+  // A live occupant from our own request converges without a receipt; a
+  // foreign one (other scope labels or model) stays a conflict. Workspace and
+  // parent are not adjudicated here, as before.
+  try {
+    verifySteerPlacement(occupant, { labels: plan.op.params.labels, provider: plan.profile.provider, model: plan.profile.model });
+  } catch (error) {
+    if (error instanceof SteerPlacementError) throw occupiedError(classification.slot, classification);
+    throw error;
+  }
   return finishApplied(plan, occupant.id, { reused: false, scopeId: planArgs.scopeId ?? planArgs.repo, note: 'already provisioned' });
 }
 
 async function createWithReceipt(plan, lookupReceipt, execute, scope) {
   const key = plan.op.params.idempotencyKey;
-  let receipt;
-  try {
-    receipt = await lookupReceipt('agent', key);
-  } catch (error) {
-    throw new SteerAddRecovery(`Steer add recovery stopped: the receipt lookup failed (${error.message})`);
-  }
+  const receipt = await lookupCreation(lookupReceipt, 'agent', key, addLookupFail);
   if (!receipt) {
     const created = await execute(plan.op, undefined);
     const agentId = created?.agentId;
     if (!agentId) throw new SteerAddRecovery('Steer add creation returned no agent id');
     return finishApplied(plan, agentId, { reused: false, scopeId: scope });
   }
-  if (receipt.idempotencyKey && receipt.idempotencyKey !== key) throw new SteerAddRecovery('Steer add recovery stopped: the receipt belongs to a different key');
-  if (receipt.outcomeUnknown) throw new SteerAddRecovery(`Steer add recovery stopped: the receipt has an unknown outcome (${receipt.error ?? 'outcome unknown'})`);
-  if (receipt.phase !== 'completed') throw new SteerAddRecovery(`Steer add recovery stopped: the receipt is in phase ${receipt.phase}${receipt.error ? ` (${receipt.error})` : ''}`);
-  if (!receipt.agentId) throw new SteerAddRecovery('Steer add recovery stopped: the receipt names no agent');
-  let confirmed;
-  try {
-    confirmed = await execute(plan.op, undefined);
-  } catch (error) {
-    throw new SteerAddRecovery(`Steer add recovery stopped: the identical request was rejected (${error.message})`);
-  }
-  if (confirmed?.agentId !== receipt.agentId) {
-    throw new SteerAddRecovery(`Steer add recovery stopped: the identical request returned ${confirmed?.agentId}, receipt says ${receipt.agentId}`);
-  }
-  return finishApplied(plan, receipt.agentId, { reused: true, scopeId: scope, note: 'reused after receipt' });
+  const receiptAgentId = checkedCreationReceipt(receipt, key, addRecoveryFail);
+  const { id } = await confirmCreationReceipt(execute, plan.op, undefined, receiptAgentId, addRecoveryFail);
+  return finishApplied(plan, id, { reused: true, scopeId: scope, note: 'reused after receipt' });
 }
 
 function finishApplied(plan, agentId, { reused, scopeId, note = null }) {
