@@ -72,7 +72,7 @@ export async function submitFactoryCommand(
   if (parsed.command === "help") {
     setFactoryResult({ kind: "info", at, text: factoryHelp(parsed.topic) });
     // Bare /factory keeps the panel as its home; a help topic is a quick read.
-    return args.trim() === "" ? PANEL : pill("Hilfe");
+    return args.trim() === "" ? PANEL : pill("Help");
   }
   if (parsed.command === "worker" || parsed.command === "steer" || parsed.command === "model") {
     return submitModels(parsed, ctx, at);
@@ -91,7 +91,7 @@ export async function submitFactoryCommand(
     });
     if (parsed.dryRun) {
       setFactoryResult({ kind: "info", at, text: preview.text });
-      return pill("Steer-Add");
+      return pill("Steer add");
     }
     // The preview stays on screen until the panel button confirms it; the
     // confirm saves the slot/profile settings first, then creates the steer.
@@ -116,11 +116,11 @@ export async function submitFactoryCommand(
     if (parsed.candidates) {
       const candidates = await ctx.rpc(factoryScopesCandidates, {});
       setFactoryResult({ kind: "scopeCandidates", at, candidates });
-      return pill("Kandidaten");
+      return pill("Candidates");
     }
     const scopes = await ctx.rpc(factoryScopes, {});
     setFactoryResult({ kind: "scopes", at, scopes });
-    return pill("Projekte");
+    return pill("Projects");
   }
   if (parsed.command === "cleanup") {
     if (parsed.plan) {
@@ -153,7 +153,7 @@ export async function submitFactoryCommand(
   if (parsed.command === "models") {
     const catalog = await ctx.rpc(factoryModelsCatalog, {});
     setFactoryResult({ kind: "info", at, text: catalog.text });
-    return pill("Modelle");
+    return pill("Models");
   }
   if (parsed.command === "drain") {
     const drain = await ctx.rpc(
@@ -219,7 +219,7 @@ export async function submitFactoryCommand(
         ...(parsed.agentId ?? ctx.agentId ? { agentId: (parsed.agentId ?? ctx.agentId) as string } : {}),
       });
       setFactoryResult({ kind: "resume", repo: parsed.repo ?? CURRENT_WORKSPACE, at, resume });
-      return pill("Resume-Brief");
+      return pill("Resume brief");
     }
     const target = parsed.agentId ?? ctx.agentId;
     if (!target) throw new Error("/factory resume needs an agent: run it in a steer chat.");
@@ -330,7 +330,7 @@ async function submitModels(
     const list = await ctx.rpc(factoryModelsList, {});
     const text = formatModelList(parsed.command, list as any);
     setFactoryResult({ kind: "info", at, text });
-    return pill(parsed.command === "worker" ? "Worker-Modelle" : "Steer-Slots");
+    return pill(parsed.command === "worker" ? "Worker models" : "Steer slots");
   }
   if (parsed.command === "worker" && parsed.action === "pick") {
     const pick = await ctx.rpc(
@@ -338,7 +338,7 @@ async function submitModels(
       parsed.repo ? { repo: parsed.repo } : { workspaceId: ctx.workspaceId },
     );
     setFactoryResult({ kind: "info", at, text: pick.text });
-    return pill("Worker-Pick");
+    return pill("Worker pick");
   }
   const input =
     parsed.command === "model"
@@ -367,5 +367,5 @@ async function submitModels(
   }
   const note = parsed.command !== "model" && parsed.note ? `${parsed.note}\n` : "";
   setFactoryResult({ kind: "info", at, text: `${note}${formatModelChange(change as any, !parsed.dryRun)}` });
-  return pill("Modelle");
+  return pill("Models");
 }

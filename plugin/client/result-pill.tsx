@@ -12,10 +12,11 @@ import {
   type FactoryResultStyles,
 } from "./factory-panel.js";
 import { getFactoryResult, subscribeFactoryResult } from "./factory-store.js";
+import { resultPillId } from "./steer-pill.js";
 
 const RESULT_PILL_TTL_MS = 60_000;
 
-const DISABLED_ACTIONS: FactoryResultActions = {
+export const READONLY_FACTORY_RESULT_ACTIONS: FactoryResultActions = {
   busy: true,
   apply: () => {},
   confirmCheckpoint: () => {},
@@ -72,7 +73,7 @@ export function FactoryResultPillContent({ theme, layout }: PluginButtonContentP
   return (
     <ScrollView>
       <View style={{ padding: 12 }}>
-        <ResultView result={result} styles={styles} actions={DISABLED_ACTIONS} />
+        <ResultView result={result} styles={styles} actions={READONLY_FACTORY_RESULT_ACTIONS} />
       </View>
     </ScrollView>
   );
@@ -113,7 +114,7 @@ export function showFactoryResultPill(
   clearCurrent();
   try {
     current = client.addComposerPill({
-      id: `factory-result-${input.agentId}`,
+      id: resultPillId(input.agentId),
       workspaceId: input.workspaceId,
       agentId: input.agentId,
       button: {

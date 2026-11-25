@@ -22,7 +22,7 @@
     "test": "node --test test/*.mjs"
   },
   "devDependencies": {
-    "@getpaseo/plugin": "0.16.2",
+    "@getpaseo/plugin": "0.17.4",
     "@tanstack/react-query": "^5.90.11",
     "@types/node": "^22.10.0",
     "@types/react": "~19.2.0",

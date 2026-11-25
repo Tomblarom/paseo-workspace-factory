@@ -19,9 +19,19 @@ import { FactorySidebarItem } from "./client/factory-sidebar-item.js";
 import { submitFactoryCommand } from "./client/factory-submit.js";
 import { dismissFactoryResultPill, showFactoryResultPill } from "./client/result-pill.js";
 import { FactorySettings } from "./client/settings-factory.js";
+import { FactorySteerPillContent } from "./client/steer-pill-content.js";
+import {
+  attentionPillId,
+  markSteerPillsDisconnected,
+  steerAgentIds,
+  steerRowsOf,
+  syncSteerPills,
+  teardownSteerPills,
+  type SteerPillMap,
+} from "./client/steer-pill.js";
 import { assertSteerContext } from "./shared/agent-guard.js";
 import { attentionStatus } from "./shared/context-continuation.js";
-import { factoryCold } from "./shared/factory.js";
+import { factoryCold, factorySteers } from "./shared/factory.js";
 
 const SETTINGS_SCREEN_ID = "factory-settings";
 
@@ -75,7 +85,11 @@ export default function contribute(client: PluginClientContext) {
     },
   });
   // One pill per agent, with the same reason shown inside the popover.
+  // Steer tabs carry the persistent steer pill instead; the attention feed
+  // stays for workers (rows without a slot and outside the steer feed).
   const attentionPills = new Map<string, PluginButtonRegistration>();
+  const steerPills: SteerPillMap = new Map();
+  let steerIds = new Set<string>();
   const attentionFeed = client.subscribe(
     factoryCold,
     {},
@@ -83,6 +97,7 @@ export default function contribute(client: PluginClientContext) {
       const rows = attentionRowsOf(event);
       const seen = new Set<string>();
       for (const row of rows) {
+        if (row.slot !== null || steerIds.has(row.agentId)) continue;
         seen.add(row.agentId);
         const title = attentionStatus(row);
         const icon = row.reason && row.reason !== "cold" ? "RotateCcw" : "Snowflake";
@@ -100,7 +115,7 @@ export default function contribute(client: PluginClientContext) {
           attentionPills.set(
             row.agentId,
             client.addComposerPill({
-              id: `factory-attention-${row.agentId}`,
+              id: attentionPillId(row.agentId),
               workspaceId: row.workspaceId,
               agentId: row.agentId,
               button: {
@@ -124,6 +139,29 @@ export default function contribute(client: PluginClientContext) {
         attentionPills.delete(id);
       }
     },
+  );
+  // One persistent pill per steer tab, kept in sync with the host-wide feed.
+  // Paseo re-subscribes after a reconnect; the close handler keeps the last
+  // verified pills as Unknown until the next event refreshes them.
+  const steerFeed = client.subscribe(
+    factorySteers,
+    {},
+    (event) => {
+      const rows = steerRowsOf(event);
+      steerIds = steerAgentIds(rows);
+      syncSteerPills(client, steerPills, rows, FactorySteerPillContent);
+      // A steer row that arrived here replaces its attention pill, if any.
+      for (const [id, pill] of attentionPills) {
+        if (!steerIds.has(id)) continue;
+        try {
+          pill.remove();
+        } catch {
+          // Already gone.
+        }
+        attentionPills.delete(id);
+      }
+    },
+    { onClosed: () => markSteerPillsDisconnected(steerPills) },
   );
   client.addCommandCenterItem({
     id: "factory-status",
@@ -211,6 +249,8 @@ export default function contribute(client: PluginClientContext) {
       }
     }
     attentionPills.clear();
+    void steerFeed.release().catch(() => {});
+    teardownSteerPills(steerPills);
     dismissFactoryResultPill();
   };
 }
