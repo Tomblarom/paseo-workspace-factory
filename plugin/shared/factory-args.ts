@@ -85,20 +85,19 @@ export const FACTORY_COMMANDS: Record<string, CommandHelp> = {
     examples: ["/factory quota"],
   },
   plan: {
-    usage: "/factory plan [scope…] [--allow-fork] [--slots A,B] [--adopt B=<agent-id>] [--local <path>] [--hub <path|workspace:id>] [--checkout <path>] [--name <id>] [--subject <text>] [--main workspace:<id>] [--domain <id>] [--adopt-worker <agent-id>[@A]] [--detach] [--retitle] [--rename-project <name>]",
-    summary: "Preview setting up or updating a project. Writes nothing.",
+    usage: "/factory plan [scope] [--slots A,B] [--adopt B=<agent-id>] [--local <path>] [--hub <path|workspace:id>] [--name <id>] [--main workspace:<id>] [--domain <id>] [--adopt-worker <agent-id>[@A]] [--detach]",
+    summary: "Preview enrolling one existing workspace, or repairing it. Writes nothing.",
     details: [
       "Ends with a 16-character plan hash; run it with /factory apply <hash>.",
-      "--allow-fork lets the plan create your GitHub fork. --slots limits the plan to some steers.",
-      "--adopt B=<agent-id> takes over an existing tab as Steer B (repeatable, comma-separated); with several scopes use --adopt <scope>:B=<agent-id> per scope.",
-      "--local plans an existing folder without GitHub (repeatable). --hub plans a hub-kind scope from a folder or worktree workspace (repeatable).",
-      "--checkout, --name, --subject, --main, --domain and --rename-project each need exactly one entry.",
-      "--name sets the scope id of a folder or workspace entry. --subject fills the {subject} title placeholder.",
+      "Plans exactly one workspace: open it natively first, then plan it by scope, workspace id or --local <path>.",
+      "--slots limits the plan to some steers.",
+      "--adopt B=<agent-id> takes over an existing tab as Steer B (repeatable, comma-separated).",
+      "--local plans an existing folder without GitHub. --hub plans a hub-kind scope from a folder or worktree workspace.",
+      "--name sets the scope id of a folder or workspace entry.",
       "--main adopts a worktree workspace as the main workspace of a github scope. --domain sets the domain pointer (--domain \"\" clears it).",
       "--adopt-worker <agent-id>[@A] labels an agent as scope worker (repeatable, comma-separated). --detach plans a native detach for parented steer candidates.",
-      "--retitle plans renaming the main workspace to the title template. --rename-project renames the Paseo project.",
     ],
-    examples: ["/factory plan", "/factory plan me/my-repo", "/factory plan me/my-repo --slots A,B", "/factory plan --adopt B=01234567-89ab-cdef-0123-456789abcdef", "/factory plan me/my-repo --domain my-domain --retitle", "/factory plan --hub /data/hub"],
+    examples: ["/factory plan", "/factory plan me/my-repo", "/factory plan me/my-repo --slots A,B", "/factory plan --adopt B=01234567-89ab-cdef-0123-456789abcdef", "/factory plan me/my-repo --domain my-domain", "/factory plan --hub /data/hub"],
   },
   apply: {
     usage: "/factory apply <plan-hash>",
@@ -168,7 +167,7 @@ export const FACTORY_COMMANDS: Record<string, CommandHelp> = {
     details: [
       "add creates a new steer in this workspace's project; without a slot it suggests the next free letter.",
       "set replaces the model of that slot; letters never shift. A new letter must be the next free one.",
-      "Running steers keep their model; /factory plan shows the difference.",
+      "Running steers keep their model.",
       "set and rm save at once in the plugin settings (--dry-run only shows it); add shows a preview and confirms in the Factory panel.",
     ],
     examples: ["/factory steer list", "/factory steer add", "/factory steer add C codex/gpt-6.2-sol --thinking high", "/factory steer set B codex/gpt-6.2-sol --thinking high", "/factory steer rm C"],
@@ -237,7 +236,7 @@ export type FactoryCommand =
   | { command: "status"; repo?: string }
   | { command: "scopes"; candidates: boolean }
   | { command: "cleanup" }
-  | { command: "plan"; repos: string[]; allowFork: boolean; slots?: string[]; adopt?: Record<string, string>; adoptScoped?: Record<string, Record<string, string>>; local?: string[]; hub?: string[]; checkout?: string; name?: string; subject?: string; main?: string; domain?: string; adoptWorker?: Record<string, string | null>; detach?: boolean; retitle?: boolean; renameProject?: string }
+  | { command: "plan"; repos: string[]; slots?: string[]; adopt?: Record<string, string>; local?: string[]; hub?: string[]; name?: string; main?: string; domain?: string; adoptWorker?: Record<string, string | null>; detach?: boolean }
   | { command: "apply"; hash: string }
   | {
       command: "checkpoint";
@@ -333,8 +332,8 @@ interface ParsedFlags {
 }
 
 const REPEATABLE = new Set(["test", "blocker", "adopt", "adopt-worker", "local", "hub"]);
-const VALUE_FLAGS = new Set(["slots", "slot", "to", "task", "from-agent", "from-steer", "next", "test", "blocker", "agent", "thinking", "mode", "profile", "timeout", "adopt", "adopt-worker", "local", "hub", "checkout", "name", "subject", "main", "domain", "rename-project"]);
-const BOOL_FLAGS = new Set(["allow-fork", "apply", "candidates", "brief", "dry-run", "detach", "retitle"]);
+const VALUE_FLAGS = new Set(["slots", "slot", "to", "task", "from-agent", "from-steer", "next", "test", "blocker", "agent", "thinking", "mode", "profile", "timeout", "adopt", "adopt-worker", "local", "hub", "name", "main", "domain"]);
+const BOOL_FLAGS = new Set(["apply", "candidates", "brief", "dry-run", "detach"]);
 
 function parseFlags(tokens: string[]): ParsedFlags {
   const positionals: string[] = [];
@@ -412,10 +411,9 @@ function checkTarget(value: string, sub: string): string {
   return fail(`${sub} expects ${sub === "steer" ? "a slot letter A-Z or a position 1, 2, …" : "a position 1, 2, …"}, got ${JSON.stringify(value)}.`);
 }
 
-/** Split --adopt input: legacy SLOT=<id> pairs and scoped <scope>:SLOT=<id> pairs. Slots are uppercase, scopes lowercase. */
+/** Split --adopt input: SLOT=<id> pairs (single entry). Slots are uppercase. */
 export interface PlanAdoptInput {
   adopt: Record<string, string>;
-  adoptScoped: Record<string, Record<string, string>>;
 }
 
 function parseAdoptPair(pair: string, into: PlanAdoptInput): void {
@@ -424,21 +422,19 @@ function parseAdoptPair(pair: string, into: PlanAdoptInput): void {
     into.adopt[legacy[1].toUpperCase()] = legacy[2];
     return;
   }
-  const scoped = pair.match(/^(.+):([A-Z])=([0-9a-f-]{8,})$/i);
-  if (!scoped || !scoped[1].trim()) {
-    throw new Error(`--adopt expects SLOT=<agent-id> or <scope-id>:SLOT=<agent-id>, got ${pair}`);
+  if (/:/.test(pair)) {
+    throw new Error(`--adopt <scope-id>:SLOT=<agent-id> was retired with multi-repo plans; plan one workspace with --adopt SLOT=<agent-id>, got ${pair}`);
   }
-  const scope = scoped[1].trim().toLowerCase();
-  (into.adoptScoped[scope] ??= {})[scoped[2].toUpperCase()] = scoped[3];
+  throw new Error(`--adopt expects SLOT=<agent-id>, got ${pair}`);
 }
 
 /**
- * Splits raw --adopt values (repeatable, each comma-separated) into legacy and
- * scoped adoption, exactly like the CLI. Throws plain Errors with the CLI
- * message; the parser re-raises them with usage via fail().
+ * Splits raw --adopt values (repeatable, each comma-separated) into the
+ * single-entry adoption map, exactly like the CLI. Throws plain Errors with
+ * the CLI message; the parser re-raises them with usage via fail().
  */
 export function splitAdoptPairs(values: string[]): PlanAdoptInput {
-  const into: PlanAdoptInput = { adopt: {}, adoptScoped: {} };
+  const into: PlanAdoptInput = { adopt: {} };
   for (const pair of values.flatMap((v) => v.split(",")).filter(Boolean)) {
     parseAdoptPair(pair, into);
   }
@@ -446,68 +442,33 @@ export function splitAdoptPairs(values: string[]): PlanAdoptInput {
 }
 
 /**
- * Merges legacy and scoped adoption into the runner form (`'*'` is the
- * single-entry fallback, one lowercase key per scope), exactly like the CLI.
- * Structured input is re-validated pair by pair, so direct RPC callers get the
- * same normalization as the slash command. Legacy adoption with anything but
- * one entry is rejected, like the CLI.
+ * Validates structured --adopt input pair by pair, so direct RPC callers get
+ * the same normalization as the slash command. Returns the runner form
+ * (`'*'` is the single-entry fallback), exactly like the CLI.
  */
 export function normalizePlanAdopt(
   adopt: Record<string, string>,
-  adoptScoped: Record<string, Record<string, string>>,
   entryCount: number,
 ): Record<string, Record<string, string>> {
-  const pairs = [
-    ...Object.entries(adopt ?? {}).map(([slot, id]) => `${slot}=${id}`),
-    ...Object.entries(adoptScoped ?? {}).flatMap(([scope, map]) =>
-      Object.entries(map ?? {}).map(([slot, id]) => `${scope}:${slot}=${id}`),
-    ),
-  ];
-  const split: PlanAdoptInput = { adopt: {}, adoptScoped: {} };
+  const pairs = Object.entries(adopt ?? {}).map(([slot, id]) => `${slot}=${id}`);
+  const split: PlanAdoptInput = { adopt: {} };
   for (const pair of pairs) {
     parseAdoptPair(pair, split);
   }
   if (Object.keys(split.adopt).length && entryCount !== 1) {
-    throw new Error("--adopt SLOT=<agent-id> needs exactly one repository; use --adopt <scope-id>:SLOT=<agent-id> with several entries");
+    throw new Error("--adopt SLOT=<agent-id> needs exactly one workspace entry");
   }
-  return { ...(Object.keys(split.adopt).length ? { "*": split.adopt } : {}), ...split.adoptScoped };
-}
-
-/**
- * Attaches --checkout to the single plan entry, like the CLI: a bare address
- * becomes { repo, checkout }, an object entry carries it alongside. Anything
- * but one entry is rejected, like the CLI (without the --repos-file clause,
- * which the plugin has no equivalent of).
- */
-export function applyPlanCheckout(entries: unknown[], checkout: string): unknown[] {
-  if (entries.length !== 1) {
-    throw new Error("--checkout needs exactly one repository entry");
-  }
-  if (!checkout?.trim()) {
-    throw new Error("--checkout needs a checkout path");
-  }
-  const only = entries[0] as Record<string, unknown> | string;
-  if (only && typeof only === "object" && !Array.isArray(only)) {
-    if (only.checkout !== undefined) {
-      throw new Error('--checkout conflicts with the entry "checkout"; use one of them');
-    }
-    if (only.main !== undefined) {
-      throw new Error('--checkout conflicts with the entry "main"; use one of them');
-    }
-    return [{ ...only, checkout }];
-  }
-  return [{ repo: only, checkout }];
+  return { ...(Object.keys(split.adopt).length ? { "*": split.adopt } : {}) };
 }
 
 /**
  * Attaches --name to the single plan entry, like the CLI: a bare address
  * becomes { repo, name }, an object entry carries it alongside. Anything but
- * one entry is rejected, like the CLI (without the --repos-file clause, which
- * the plugin has no equivalent of). Content validation stays with discovery.
+ * one entry is rejected, like the CLI. Content validation stays with discovery.
  */
 export function applyPlanName(entries: unknown[], name: string): unknown[] {
   if (entries.length !== 1) {
-    throw new Error("--name needs exactly one repository entry");
+    throw new Error("--name needs exactly one workspace entry");
   }
   const only = entries[0] as Record<string, unknown> | string;
   if (only && typeof only === "object" && !Array.isArray(only)) {
@@ -520,31 +481,12 @@ export function applyPlanName(entries: unknown[], name: string): unknown[] {
 }
 
 /**
- * Attaches --subject to the single plan entry, like the CLI. Content
- * validation stays with discovery.
- */
-export function applyPlanSubject(entries: unknown[], subject: string): unknown[] {
-  if (entries.length !== 1) {
-    throw new Error("--subject needs exactly one repository entry");
-  }
-  const only = entries[0] as Record<string, unknown> | string;
-  if (only && typeof only === "object" && !Array.isArray(only)) {
-    if (only.subject !== undefined) {
-      throw new Error('--subject conflicts with the entry "subject"; use one of them');
-    }
-    return [{ ...only, subject }];
-  }
-  return [{ repo: only, subject }];
-}
-
-/**
  * Attaches --main to the single plan entry, like the CLI. A blank workspace
- * id and anything but one entry are rejected; --main and --checkout exclude
- * each other, like the CLI.
+ * id and anything but one entry are rejected.
  */
 export function applyPlanMain(entries: unknown[], main: string): unknown[] {
   if (entries.length !== 1) {
-    throw new Error("--main needs exactly one repository entry");
+    throw new Error("--main needs exactly one workspace entry");
   }
   if (!main?.trim()) {
     throw new Error("--main needs a workspace id (workspace:<id>)");
@@ -553,9 +495,6 @@ export function applyPlanMain(entries: unknown[], main: string): unknown[] {
   if (only && typeof only === "object" && !Array.isArray(only)) {
     if (only.main !== undefined) {
       throw new Error('--main conflicts with the entry "main"; use one of them');
-    }
-    if (only.checkout !== undefined) {
-      throw new Error('--main conflicts with the entry "checkout"; use one of them');
     }
     return [{ ...only, main }];
   }
@@ -569,7 +508,7 @@ export function applyPlanMain(entries: unknown[], main: string): unknown[] {
  */
 export function applyPlanDomain(entries: unknown[], domain: string): unknown[] {
   if (entries.length !== 1) {
-    throw new Error("--domain needs exactly one repository entry");
+    throw new Error("--domain needs exactly one workspace entry");
   }
   const only = entries[0] as Record<string, unknown> | string;
   if (only && typeof only === "object" && !Array.isArray(only)) {
@@ -624,25 +563,9 @@ export function normalizePlanAdoptWorker(
     out[id] = slot;
   }
   if (Object.keys(out).length && entryCount !== 1) {
-    throw new Error("--adopt-worker needs exactly one repository entry; the worker is labelled for that scope");
+    throw new Error("--adopt-worker needs exactly one workspace entry; the worker is labelled for that scope");
   }
   return out;
-}
-
-/**
- * Validates --rename-project, like the CLI: only with exactly one entry, and
- * never blank. Returns the trimmed project name, or null when unset.
- */
-export function checkedRenameProject(value: string | undefined, entryCount: number): string | null {
-  if (value === undefined) return null;
-  if (entryCount !== 1) {
-    throw new Error("--rename-project needs exactly one repository entry");
-  }
-  const name = value.trim();
-  if (!name) {
-    throw new Error("--rename-project needs a project name");
-  }
-  return name;
 }
 
 export function parseFactoryArgs(args: string): FactoryCommand {
@@ -678,8 +601,11 @@ export function parseFactoryArgs(args: string): FactoryCommand {
     return { command: "cleanup" };
   }
   if (sub === "plan") {
-    checkAllowed(flags, "plan", ["allow-fork", "slots", "adopt", "adopt-worker", "local", "hub", "checkout", "name", "subject", "main", "domain", "detach", "retitle", "rename-project"]);
+    checkAllowed(flags, "plan", ["slots", "adopt", "adopt-worker", "local", "hub", "name", "main", "domain", "detach"]);
     // No address: the caller plans the scope of the current workspace.
+    // Exactly one entry: several addresses were retired with bulk provisioning.
+    const addressCount = flags.positionals.length + (flags.multis.get("local")?.length ?? 0) + (flags.multis.get("hub")?.length ?? 0);
+    if (addressCount > 1) fail("plan takes at most one workspace address; enroll one existing workspace at a time.");
     const slotsRaw = flags.singles.get("slots");
     let slots: string[] | undefined;
     if (slotsRaw !== undefined) {
@@ -692,17 +618,14 @@ export function parseFactoryArgs(args: string): FactoryCommand {
     }
     const local = flags.multis.get("local");
     const hub = flags.multis.get("hub");
-    const checkout = flags.singles.get("checkout");
     const name = flags.singles.get("name");
-    const subject = flags.singles.get("subject");
     const main = flags.singles.get("main");
     const domain = flags.singles.get("domain");
-    const renameRaw = flags.singles.get("rename-project");
-    const entryCount = flags.positionals.length + (local?.length ?? 0) + (hub?.length ?? 0) || 1;
-    let split: PlanAdoptInput = { adopt: {}, adoptScoped: {} };
+    const entryCount = addressCount || 1;
+    let split: PlanAdoptInput = { adopt: {} };
     try {
       split = splitAdoptPairs(flags.multis.get("adopt") ?? []);
-      normalizePlanAdopt(split.adopt, split.adoptScoped, entryCount);
+      normalizePlanAdopt(split.adopt, entryCount);
     } catch (error) {
       fail(error instanceof Error ? error.message : String(error));
     }
@@ -716,9 +639,7 @@ export function parseFactoryArgs(args: string): FactoryCommand {
     // Count and blank checks only, against dummy entries; the server attaches
     // each single-entry option to the resolved entry with the same helper.
     const singleEntryChecks: Array<[string | undefined, (entries: unknown[], value: string) => unknown[]]> = [
-      [checkout, applyPlanCheckout],
       [name, applyPlanName],
-      [subject, applyPlanSubject],
       [main, applyPlanMain],
       [domain, applyPlanDomain],
     ];
@@ -730,30 +651,18 @@ export function parseFactoryArgs(args: string): FactoryCommand {
         fail(error instanceof Error ? error.message : String(error));
       }
     }
-    let renameProject: string | null = null;
-    try {
-      renameProject = checkedRenameProject(renameRaw, entryCount);
-    } catch (error) {
-      fail(error instanceof Error ? error.message : String(error));
-    }
     return {
       command: "plan",
       repos: flags.positionals,
-      allowFork: flags.bools.has("allow-fork"),
       ...(slots ? { slots } : {}),
       ...(Object.keys(split.adopt).length ? { adopt: split.adopt } : {}),
-      ...(Object.keys(split.adoptScoped).length ? { adoptScoped: split.adoptScoped } : {}),
       ...(local?.length ? { local: [...local] } : {}),
       ...(hub?.length ? { hub: [...hub] } : {}),
-      ...(checkout !== undefined ? { checkout } : {}),
       ...(name !== undefined ? { name } : {}),
-      ...(subject !== undefined ? { subject } : {}),
       ...(main !== undefined ? { main } : {}),
       ...(domain !== undefined ? { domain } : {}),
       ...(Object.keys(adoptWorker).length ? { adoptWorker } : {}),
       ...(flags.bools.has("detach") ? { detach: true as const } : {}),
-      ...(flags.bools.has("retitle") ? { retitle: true as const } : {}),
-      ...(renameProject ? { renameProject } : {}),
     };
   }
   if (sub === "apply") {

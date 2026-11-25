@@ -10,11 +10,11 @@ You work on a project with AI coding agents in [Paseo](https://paseo.sh). One ag
 - its chat got so long that every message is slow and expensive,
 - another model would suit the next step better.
 
-Starting a new agent by hand means explaining the whole task again, or letting the new agent read the old chat, which costs as much as the long chat itself. Setting up each project the same way (fork, checkout, Paseo project, workspace, agents) is also repetitive manual work.
+Starting a new agent by hand means explaining the whole task again, or letting the new agent read the old chat, which costs as much as the long chat itself. Coordinating each project the same way (one home workspace, a few coordinating agents, one checkpoint) is also repetitive manual work.
 
 ## The idea in five sentences
 
-1. The factory sets up each project the same way: checkout, Paseo project, one home workspace and a few coordinating agents called **steers**.
+1. The factory enrolls each project the same way: one existing home workspace and a few coordinating agents called **steers**.
 2. Steers are named by letter (A, B, C …) and can use different providers and models, so when one runs out you still have another.
 3. Exactly one steer is **active** at a time; it leaves a short **checkpoint** (task, tests, blockers, next step) after each piece of work.
 4. **Switching** hands the work to another steer with a message built from the checkpoint and the git state, without replaying the chat and without a model call.
@@ -74,11 +74,11 @@ To update, note your values in **Settings → Plugins → Factory**. Run `paseo 
 
 For first-time setup, open **Settings → Plugins → Factory** in Paseo. Under **Host**, enter your GitHub owner and an absolute checkout root on the Paseo host. Choose a profile for the first steer and save. Advanced host configuration is available in the [configuration reference](configuration.md#fields).
 
-**2. Preview the setup.** Type `/factory plan <you>/<repo>` in the composer. The panel lists the planned checkout, Paseo project, workspace, and steers, along with a plan hash. Add `--allow-fork` if you want the plan to create your GitHub fork.
+**2. Preview the enrollment.** Open the project's workspace natively in Paseo (checkout, project and workspace already exist — the factory creates none of them). Type `/factory plan` in the composer, or `/factory plan <you>/<repo>` from anywhere. The panel lists the planned workspace adoption and steers, along with a plan hash.
 
 **3. Apply the plan.** Confirm it in the panel or use `/factory apply <hash>`. If a step fails, you can apply the same hash again. The factory skips steps it already completed.
 
-**4. Start work.** Open the new workspace and run `/factory status`. It shows the active steer and the current checkpoint. Give the active steer its task as a regular chat message.
+**4. Start work.** Open the enrolled workspace and run `/factory status`. It shows the active steer and the current checkpoint. Give the active steer its task as a regular chat message.
 
 **5. Hand over to another steer.** To create a second steer, run `/factory steer add B` in the project's workspace. Inspect the chosen profile and account, then select **Save slot and create steer**. Ask the active steer to leave a CHECKPOINT block. Run `/factory checkpoint --from-agent <steer-id>` and confirm it, then run `/factory switch --to B` and confirm the handoff. B becomes active and receives the checkpoint in its tab. [Steer instructions](steer-instructions.md)
 
@@ -88,10 +88,10 @@ For first-time setup, open **Settings → Plugins → Factory** in Paseo. Under 
 |---|---|
 | see who is active and what the task is | `/factory status` |
 | see all projects at a glance | `/factory scopes` |
-| preview setting up a project | `/factory plan <you>/<repo>` |
+| preview enrolling this workspace (or repair it) | `/factory plan`, or `/factory plan <you>/<repo>` |
 | adopt an existing steer tab | `/factory plan --adopt B=<agent-id>`, then confirm the plan |
 | create a steer in this scope | `/factory steer add [slot] [profile]`, then confirm the preview |
-| plan a local directory or a hub | `/factory plan --local <absolute-path>` or `/factory plan --hub <absolute-path>` |
+| enroll a local directory or a hub | `/factory plan --local <absolute-path>` or `/factory plan --hub <absolute-path>` |
 | assign a scope to a domain | `/factory plan --domain <domain-id>`, then confirm the plan |
 | register an existing worker | `/factory plan --adopt-worker <agent-id>`, then confirm the plan |
 | run a previewed plan | `/factory apply <hash>` |
@@ -100,7 +100,7 @@ For first-time setup, open **Settings → Plugins → Factory** in Paseo. Under 
 | restart your steer after a break | `/factory resume` (saves the checkpoint and shows the brief, clearing the context where supported) |
 | only read the status report | `/factory resume --brief` |
 | refresh the active steer's context | `/factory fresh`, then confirm in the panel |
-| move a project to another checkout | create a new scope at the target (`/factory plan`), then switch |
+| move a project to another checkout | enroll a scope at the target (`/factory plan`), then switch |
 | send a task to a project's steer (hub/domain) | `/factory assign --task "…"`, then confirm in the panel |
 | see the helper agents of a project | `/factory workers` |
 | list providers and models | `/factory models` |
@@ -138,7 +138,7 @@ Without a project name, commands use the workspace you are in. The Factory panel
 
 ## Typical workflows
 
-**Start a new project.** Run `/factory plan <repo>`, review the preview, then run `/factory apply <hash>` and give the active steer its task.
+**Start a new project.** Open its workspace natively in Paseo, run `/factory plan`, review the preview, then run `/factory apply <hash>` and give the active steer its task.
 
 **Provider limit reached.** Save the checkpoint, run `/factory switch --to B`, and confirm the handoff. [Provider limit workflow](workflow-provider-limit.md)
 

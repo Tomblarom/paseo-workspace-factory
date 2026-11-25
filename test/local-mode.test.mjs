@@ -196,8 +196,8 @@ function provisionedLocal(world, path = '/p/demo') {
 }
 
 test('normalizeEntry accepts {local: path} and local/<folder>', () => {
-  assert.deepEqual(normalizeEntry({ local: '/p/demo' }, CONFIG), { repo: 'local/demo', local: '/p/demo', parentDir: '/p', checkout: null });
-  assert.deepEqual(normalizeEntry('local/demo', CONFIG), { repo: 'local/demo', localName: 'demo', parentDir: '/p', checkout: null });
+  assert.deepEqual(normalizeEntry({ local: '/p/demo' }, CONFIG), { repo: 'local/demo', local: '/p/demo', parentDir: '/p' });
+  assert.deepEqual(normalizeEntry('local/demo', CONFIG), { repo: 'local/demo', localName: 'demo', parentDir: '/p' });
   assert.deepEqual(normalizeEntry({ repo: 'local/demo' }, CONFIG).localName, 'demo');
   assert.throws(() => normalizeEntry({ local: '  ' }, CONFIG), /non-empty "local"/);
   assert.throws(() => normalizeEntry('local/', CONFIG), /Not a local repository name/);
@@ -215,32 +215,41 @@ test('discovery with a local path makes no gh calls and names the repo after the
   assert.equal(d.local, true);
   assert.equal(d.checkout?.path, '/p/demo');
   assert.deepEqual(d.checkoutIssues, []);
-  assert.equal(d.cloneTarget, null);
-  assert.equal(d.upstreamRemote, null);
   assert.equal(d.github?.local, true);
 });
 
-test('fresh local directory plans only project, main workspace and steers', async () => {
+test('local enrollment adopts the existing workspace and plans steers (K13: no provisioning)', async () => {
   const world = makeWorld();
   world.checkouts['/p/demo'] = { remotes: {} };
+  addWorkspace(world, { path: '/p/demo', title: 'Main', metadata: {} });
   const [p] = await runnerFor(world).runPlans([{ local: '/p/demo' }]);
   assert.equal(ghCalls(world).length, 0);
   assert.equal(p.repo, 'demo');
   assert.equal(p.status, 'pending');
-  assert.deepEqual(keys(p), ['paseo.project', 'workspace.main', 'steer.A', 'steer.B']);
+  assert.deepEqual(keys(p), ['workspace.main.adopt', 'steer.A', 'steer.B']);
   assert.ok(!keys(p).some((k) => k.startsWith('github.') || k.startsWith('checkout.')));
   const steer = p.ops.find((op) => op.key === 'steer.A').params;
   assert.equal(steer.labels[LABEL.repo], 'demo');
   assert.equal(steer.labels[LABEL.scope], 'demo');
-  assert.deepEqual(p.ops.find((op) => op.key === 'workspace.main').params.metadata[METADATA_KEY].scope, { id: 'demo', kind: 'dir', locator: '/p/demo' });
+  assert.deepEqual(p.ops.find((op) => op.key === 'workspace.main.adopt').params.metadata[METADATA_KEY].scope, { id: 'demo', kind: 'dir', locator: '/p/demo' });
+});
+
+test('local directory without a workspace is a conflict (K13: enroll existing workspaces)', async () => {
+  const world = makeWorld();
+  world.checkouts['/p/demo'] = { remotes: {} };
+  const [p] = await runnerFor(world).runPlans([{ local: '/p/demo' }]);
+  assert.equal(p.status, 'conflict');
+  assert.match(p.conflicts.find((c) => c.key === 'workspace.main').reason, /No factory main workspace/);
+  assert.equal(ghCalls(world).length, 0);
 });
 
 test('plain folder without git remotes is usable in local mode', async () => {
   const world = makeWorld();
   world.localDirs.add('/p/plain');
+  addWorkspace(world, { path: '/p/plain', title: 'Main', metadata: {} });
   const [p] = await runnerFor(world).runPlans([{ local: '/p/plain' }]);
   assert.equal(p.repo, 'plain');
-  assert.ok(keys(p).includes('workspace.main'));
+  assert.ok(keys(p).includes('workspace.main.adopt'));
   assert.equal(ghCalls(world).length, 0);
 });
 
@@ -280,16 +289,17 @@ test('status, checkpoint and switch work with the local/<folder> name', async ()
 test('apply runs without gh and stores the local authorization', async () => {
   const world = makeWorld();
   world.checkouts['/p/demo'] = { remotes: {} };
+  addWorkspace(world, { path: '/p/demo', title: 'Main', metadata: {} });
   const entries = [{ local: '/p/demo' }];
   const runner = runnerFor(world);
   const plans = await runner.runPlans(entries);
-  const authorization = createAuthorization(plans, CONFIG, { entries, allowFork: false, adopt: {} });
+  const authorization = createAuthorization(plans, CONFIG, { entries, adopt: {} });
   assert.deepEqual(authorization.entries, entries);
   const result = await applyPlans({
     authorization, config: CONFIG, confirm: authorization.hash,
     lookupReceipt: fakeLookup(world),
     runPlans: (list, options) => runner.runPlans(list, options),
-    execute: createExecutors({ client: fakeClient(world), gh: strictGh(world), git: fakeGit(world), paseoCli: fakePaseoCli(world), sleep: async () => {} }),
+    execute: createExecutors({ client: fakeClient(world), paseoCli: fakePaseoCli(world) }),
   });
   assert.equal(result.report[0].status, 'complete', result.report[0].error);
   assert.equal(ghCalls(world).length, 0);

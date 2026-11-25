@@ -195,9 +195,14 @@ test('normalizeEntry keeps a valid per-entry name and rejects bad ones', () => {
 test('dir scope id is --name or the folder; metadata and steer labels carry it', async () => {
   const world = makeWorld();
   world.checkouts['/p/demo'] = { remotes: {} };
+  const project = addProject(world, '/p/demo');
+  world.workspaces.push({
+    id: 'wks_dirid0000000001', projectId: project.projectId, workspaceDirectory: '/p/demo',
+    workspaceKind: 'local_checkout', title: 'Main', name: 'Main', metadata: {}, createdAt: new Date().toISOString(),
+  });
   const [named] = await runnerFor(world).runPlans([{ local: '/p/demo', name: 'notes' }]);
   assert.equal(named.repo, 'notes');
-  assert.deepEqual(named.ops.find((o) => o.key === 'workspace.main').params.metadata[METADATA_KEY].scope, { id: 'notes', kind: 'dir', locator: '/p/demo' });
+  assert.deepEqual(named.ops.find((o) => o.key === 'workspace.main.adopt').params.metadata[METADATA_KEY].scope, { id: 'notes', kind: 'dir', locator: '/p/demo' });
   const steer = named.ops.find((o) => o.key === 'steer.A').params;
   assert.equal(steer.labels[LABEL.scope], 'notes');
   assert.equal(steer.labels[LABEL.repo], 'notes', 'wsf.repo keeps the scope id for compatibility');
@@ -287,18 +292,13 @@ test('id collision with a live scope is a conflict with a --name hint', async ()
   assert.ok(!self.conflicts.some((c) => c.key === 'scope.id'), 'own scope id is not a collision');
 });
 
-test('two entries planning one scope id in a run conflict; one entry twice is fine', async () => {
+test('K13: runPlans takes exactly one entry; same-scope collisions use --name', async () => {
   const world = makeWorld();
   world.checkouts['/p/a/demo'] = { remotes: {} };
   world.checkouts['/p/b/demo'] = { remotes: {} };
-  const [a, b] = await runnerFor(world).runPlans([{ local: '/p/a/demo' }, { local: '/p/b/demo' }]);
-  assert.equal(a.status, 'conflict');
-  assert.equal(b.status, 'conflict');
-  assert.match(a.conflicts.find((c) => c.key === 'scope.id').reason, /Several entries/);
-  const [x, y] = await runnerFor(world).runPlans([{ local: '/p/a/demo' }, { local: '/p/a/demo' }]);
-  assert.ok(!x.conflicts.some((c) => c.key === 'scope.id'));
-  assert.ok(!y.conflicts.some((c) => c.key === 'scope.id'));
-  const [named] = await runnerFor(world).runPlans([{ local: '/p/a/demo' }, { local: '/p/b/demo', name: 'demo-b' }]);
+  await assert.rejects(runnerFor(world).runPlans([{ local: '/p/a/demo' }, { local: '/p/b/demo' }]), /exactly one workspace entry/);
+  await assert.rejects(runnerFor(world).runPlans([]), /exactly one workspace entry/);
+  const [named] = await runnerFor(world).runPlans([{ local: '/p/b/demo', name: 'demo-b' }]);
   assert.ok(!named.conflicts.some((c) => c.key === 'scope.id'));
 });
 
@@ -371,47 +371,41 @@ test('legacy local/ steer labels still match (no duplicate steers planned)', asy
   assert.deepEqual(p.ops, []);
 });
 
-// ------------------------------------------------------- S4 multi-entry
+// ------------------------------------------------------- S4 single entry (K13)
 
-test('plan accepts several local entries with independent scopes', async () => {
+test('plan enrolls one local scope at a time without gh calls', async () => {
   const world = makeWorld();
   world.checkouts['/p/one'] = { remotes: {} };
   world.checkouts['/p/two'] = { remotes: {} };
-  const [a, b] = await runnerFor(world).runPlans([{ local: '/p/one' }, { local: '/p/two' }]);
+  const [a] = await runnerFor(world).runPlans([{ local: '/p/one' }]);
   assert.equal(a.repo, 'one');
+  const [b] = await runnerFor(world).runPlans([{ local: '/p/two' }]);
   assert.equal(b.repo, 'two');
-  assert.equal(a.status, 'pending');
-  assert.equal(b.status, 'pending');
   assert.equal(ghCalls(world).length, 0);
 });
 
-test('scoped adopt maps per scope id; legacy form still works for one entry', async () => {
+test('adopt maps by slot for the single entry ("*" fallback or exact scope id)', async () => {
   const world = makeWorld();
   world.checkouts['/p/one'] = { remotes: {} };
-  world.checkouts['/p/two'] = { remotes: {} };
-  for (const dir of ['/p/one', '/p/two']) {
-    const project = addProject(world, dir);
-    const ws = {
-      id: `wks_${dir.slice(3)}0000000001`, projectId: project.projectId, workspaceDirectory: dir, workspaceKind: 'local_checkout',
-      title: 'Main', name: 'Main', metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1 } }, createdAt: new Date().toISOString(),
-    };
-    world.workspaces.push(ws);
-    addAgent(world, { title: 'Steer A', provider: 'codex', model: 'gpt-6.2-sol', workspaceId: ws.id });
-  }
+  const project = addProject(world, '/p/one');
+  const ws = {
+    id: 'wks_one0000000001', projectId: project.projectId, workspaceDirectory: '/p/one', workspaceKind: 'local_checkout',
+    title: 'Main', name: 'Main', metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1 } }, createdAt: new Date().toISOString(),
+  };
+  world.workspaces.push(ws);
+  addAgent(world, { title: 'Steer A', provider: 'codex', model: 'gpt-6.2-sol', workspaceId: ws.id });
   const one = world.agents.find((a) => a.workspaceId === 'wks_one0000000001');
-  const two = world.agents.find((a) => a.workspaceId === 'wks_two0000000001');
-  const entries = [{ local: '/p/one' }, { local: '/p/two' }];
-  const [a, b] = await runnerFor(world).runPlans(entries, { adopt: { one: { A: one.id }, two: { A: two.id } } });
-  assert.equal(a.ops.find((o) => o.key === 'steer.A').params.agentId, one.id);
-  assert.equal(b.ops.find((o) => o.key === 'steer.A').params.agentId, two.id);
   const [single] = await runnerFor(world).runPlans([{ local: '/p/one' }], { adopt: { '*': { A: one.id } } });
   assert.equal(single.ops.find((o) => o.key === 'steer.A').params.agentId, one.id);
+  const [exact] = await runnerFor(world).runPlans([{ local: '/p/one' }], { adopt: { one: { A: one.id } } });
+  assert.equal(exact.ops.find((o) => o.key === 'steer.A').params.agentId, one.id);
 });
 
-test('CLI usage documents repeatable --local, --name and scoped --adopt', () => {
+test('CLI usage documents single-workspace plan, --local, --name and the retired flags', () => {
   const out = execFileSync('node', ['src/cli.mjs', '--help'], { encoding: 'utf8' });
-  assert.match(out, /\[--local <path>\]\.\.\./);
+  assert.match(out, /plan\s+<repo> \[--local <path>\]/);
   assert.match(out, /--name <id>/);
-  assert.match(out, /<scope-id>:A=<agent-id>|<scope-id>:SLOT=<agent-id>/);
+  assert.match(out, /exactly one existing Paseo workspace/);
+  assert.match(out, /Retired: --repos-file, --allow-fork, --checkout/);
   assert.match(out, /input alias only/);
 });

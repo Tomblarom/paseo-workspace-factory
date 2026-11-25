@@ -94,24 +94,21 @@ const planReport = z.looseObject({
 
 export const factoryPlan = defineRpc({
   name: "factory.plan",
+  // K13: single-workspace enrollment only (each address list holds at most
+  // one entry, and exactly one address overall). Retired: allowFork,
+  // adoptScoped, checkout, subject, retitle, renameProject.
   input: z.object({
-    repos: z.array(z.string().min(1)).max(20).optional(),
+    repos: z.array(z.string().min(1)).max(1).optional(),
     workspaceId: z.string().min(1).optional(),
-    allowFork: z.boolean().optional(),
     slots: z.array(z.string()).optional(),
     adopt: z.record(z.string(), z.string()).optional(),
-    adoptScoped: z.record(z.string(), z.record(z.string(), z.string())).optional(),
-    local: z.array(z.string().min(1)).max(20).optional(),
-    hub: z.array(z.string().min(1)).max(20).optional(),
-    checkout: z.string().min(1).optional(),
+    local: z.array(z.string().min(1)).max(1).optional(),
+    hub: z.array(z.string().min(1)).max(1).optional(),
     name: z.string().min(1).optional(),
-    subject: z.string().min(1).optional(),
     main: z.string().min(1).optional(),
     domain: z.string().max(200).optional(),
     adoptWorker: z.record(z.string(), z.string().nullable()).optional(),
     detach: z.boolean().optional(),
-    retitle: z.boolean().optional(),
-    renameProject: z.string().min(1).optional(),
   }),
   output: z.looseObject({
     hash: z.string(),

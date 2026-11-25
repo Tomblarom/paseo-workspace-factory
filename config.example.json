@@ -1,12 +1,9 @@
 {
   "version": 1,
   "github": {
-    "owner": "your-github-user",
-    "cloneProtocol": "https",
-    "upstreamRemote": "upstream"
+    "owner": "your-github-user"
   },
   "checkoutRoot": "/home/you/projects",
-  "workspaceTitle": "Main",
   "handoffLanguage": "en",
   "profiles": {
     "codex-high": {

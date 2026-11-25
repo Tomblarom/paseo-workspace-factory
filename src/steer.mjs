@@ -168,13 +168,7 @@ export function steerStatus(discovery, { warnContextTokens, daemonStartedAt = nu
   const domainChildren = (discovery.liveScopes ?? []).filter((s) => sameScopeId(s.domain, discovery.forkName)).map((s) => s.id);
   const warnings = [];
   if (config) {
-    for (const s of steers) {
-      const profileName = config.steers?.slots?.[s.slot];
-      const expected = profileName ? config.profiles?.[profileName] : null;
-      if (expected && (s.provider !== expected.provider || s.model !== expected.model)) {
-        warnings.push(`Steer ${s.slot} runs ${s.provider}/${s.model} but slot profile "${profileName}" names ${expected.provider}/${expected.model}`);
-      }
-    }
+    // K13: no expected-model drift warnings (the live model is authoritative).
     if (state?.activeSteer && isAdvisorSlot(config, state.activeSteer)) {
       warnings.push(`Active Steer ${state.activeSteer} is an advisor (profile "${config.steers.slots[state.activeSteer]}"); advisors never coordinate`);
     }

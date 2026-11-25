@@ -1,11 +1,12 @@
-// Display consistency (Worker B): parent wording (#8), candidate status (#7),
-// multi-repo titles (#6). Offline units; the plan-level title selection lives
-// in test/scope-titles.test.mjs, the candidates shape in test/scopes-view.test.mjs.
+// Display consistency (Worker B): parent wording (#8), candidate status (#7).
+// Offline units; the candidates shape lives in test/scopes-view.test.mjs.
+// (K13 retired the multi-repo title helpers: scopeRepoKey,
+// multipleReposActive, renderWorkspaceTitle, isFactoryHandleTitle.)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PARENT_LABEL, describeParent, parentOf } from '../src/paseo.mjs';
 import { formatScopeCandidates, scopeCandidates } from '../src/scopes-view.mjs';
-import { multipleReposActive, planHash, scopeRepoKey } from '../src/planner.mjs';
+import { planHash } from '../src/planner.mjs';
 import { validateConfig } from '../src/config.mjs';
 
 // ------------------------------------------------------------------ #8
@@ -42,50 +43,25 @@ test('candidates output shows status and the describeParent wording (no drift vs
   assert.ok(text.includes(describeParent(child)), 'parent wording pinned to describeParent()');
 });
 
-// ------------------------------------------------------------------ #6
-
-test('scopeRepoKey strips the @branch suffix of worktree scopes', () => {
-  assert.equal(scopeRepoKey('example/web'), 'example/web');
-  assert.equal(scopeRepoKey('example/web@feat'), 'example/web');
-  assert.equal(scopeRepoKey('notes@feat'), 'notes');
-  assert.equal(scopeRepoKey('demo'), 'demo');
-  assert.equal(scopeRepoKey('@scope'), '@scope');
-});
-
-test('multipleReposActive compares live repo keys within the entry project', () => {
-  const discovery = (projectWorkspaceIds, liveScopes) => ({ projectWorkspaceIds, liveScopes });
-  assert.equal(multipleReposActive(discovery(
-    ['w1', 'w2'],
-    [{ id: 'example/web', workspaceId: 'w1' }, { id: 'example/other', workspaceId: 'w2' }],
-  )), true);
-  assert.equal(multipleReposActive(discovery(
-    ['w1', 'w2'],
-    [{ id: 'example/web', workspaceId: 'w1' }, { id: 'example/web@feat', workspaceId: 'w2' }],
-  )), false, 'worktree counts as its parent repo');
-  assert.equal(multipleReposActive(discovery(
-    ['w1'],
-    [{ id: 'example/web', workspaceId: 'w1' }, { id: 'example/other', workspaceId: 'w2' }],
-  )), false, 'scopes outside the project are ignored');
-  assert.equal(multipleReposActive(discovery(
-    ['w1', 'w2'],
-    [{ id: 'alice/web', workspaceId: 'w1' }, { id: 'bob/web', workspaceId: 'w2' }],
-  )), true, 'same short name, different repos');
-  assert.equal(multipleReposActive({}), false, 'legacy discovery without scope data');
-  assert.equal(multipleReposActive(null), false);
-});
+// ------------------------------------------------------------------ #6 (K13)
 
 const BASE_CONFIG = {
   version: 1,
-  github: { owner: 'example', cloneProtocol: 'https', upstreamRemote: 'upstream' },
+  github: { owner: 'example' },
   checkoutRoot: '/p',
-  workspaceTitle: 'Main',
   profiles: { sol: { provider: 'codex', model: 'gpt-6.2-sol' } },
   steers: { slots: { A: 'sol' }, prepare: ['A'], initialActive: 'A' },
 };
 
-test('workspaceTitleMultiRepo is optional, null-tolerant and non-empty when set', () => {
+test('retired K13 knobs are optional: old configs load, new configs omit them', () => {
   assert.deepEqual(validateConfig(BASE_CONFIG), []);
-  assert.deepEqual(validateConfig({ ...BASE_CONFIG, workspaceTitleMultiRepo: '{repo} · {subject}' }), []);
+  const legacy = {
+    ...BASE_CONFIG,
+    github: { owner: 'example', cloneProtocol: 'https', upstreamRemote: 'upstream' },
+    workspaceTitle: 'Main',
+    workspaceTitleMultiRepo: '{repo} · {subject}',
+  };
+  assert.deepEqual(validateConfig(legacy), []);
   assert.deepEqual(validateConfig({ ...BASE_CONFIG, workspaceTitleMultiRepo: null }), []);
   for (const bad of ['', '   ', 42, {}]) {
     assert.match(
@@ -95,14 +71,14 @@ test('workspaceTitleMultiRepo is optional, null-tolerant and non-empty when set'
   }
 });
 
-test('planHash covers workspaceTitleMultiRepo but keeps old hashes when unset', () => {
+test('planHash ignores the retired title/clone knobs', () => {
   const plans = [{ repo: 'example/web', status: 'complete', ops: [], conflicts: [] }];
-  const unset = planHash(plans, BASE_CONFIG);
-  assert.equal(planHash(plans, { ...BASE_CONFIG, workspaceTitleMultiRepo: null }), unset, 'null keeps the hash');
-  assert.notEqual(planHash(plans, { ...BASE_CONFIG, workspaceTitleMultiRepo: '{repo} · {subject}' }), unset, 'setting it changes the hash');
-  assert.notEqual(
-    planHash(plans, { ...BASE_CONFIG, workspaceTitleMultiRepo: '{repo}!' }),
-    planHash(plans, { ...BASE_CONFIG, workspaceTitleMultiRepo: '{repo}?' }),
-    'changing it changes the hash',
-  );
+  const base = planHash(plans, BASE_CONFIG);
+  assert.equal(planHash(plans, {
+    ...BASE_CONFIG,
+    github: { owner: 'example', cloneProtocol: 'ssh', upstreamRemote: 'up' },
+    workspaceTitle: 'Main',
+    workspaceTitleMultiRepo: '{repo} · {subject}',
+  }), base, 'retired knobs do not change the hash');
+  assert.notEqual(planHash(plans, { ...BASE_CONFIG, github: { owner: 'other' } }), base, 'the owner still matters');
 });

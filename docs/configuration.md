@@ -9,18 +9,15 @@ The config is looked up in this order: `--config <path>`, `$PASEO_FACTORY_CONFIG
 | Field | Description |
 |---|---|
 | `version` | `1` |
-| `github.owner` | Account that owns the forks. |
-| `github.cloneProtocol` | `https` or `ssh`. |
-| `github.upstreamRemote` | Remote name for the parent repository (usually `upstream`). |
-| `checkoutRoot` | Absolute directory below which repositories are cloned. |
-| `workspaceTitle` | Template for the main workspace title (`{name}`, `{repo}`, `{subject}`; default `Main`). |
-| `workspaceTitleMultiRepo` | Optional multi-repo title template (same placeholders); used only when the scope's Paseo project hosts live scopes of several repos, else `workspaceTitle`. Unset disables it. |
+| `github.owner` | Account that owns the forks (scope identity and visibility checks). |
+| `github.cloneProtocol`, `github.upstreamRemote`, `workspaceTitle`, `workspaceTitleMultiRepo` | Retired (bulk provisioning): still accepted when present so old configs load, otherwise ignored. |
+| `checkoutRoot` | Absolute directory that scopes checkouts against; also a scan root for discovery. |
 | `handoffLanguage` | `en` (default) or `de`. |
 | `profiles.<name>` | `provider`, `model`, `thinking` (or `null` for the provider default), `mode`, `advisor` (boolean, default `false`), `sensitive` (boolean, default `false`; `muse` profiles migrate to `true` unless set). Validated against the live provider catalog before a steer is planned. Advisor-tagged profiles are second-opinion candidates; they are never picked for workers or non-advisor slots (see [Advisors](#advisors) and [Managing models](#managing-models-from-the-cli)). Sensitive profiles only get sanitized technical tasks (see [Privacy](#privacy-sensitive-profiles)). |
 | `knownLimits` | Optional extra catalog exceptions (same shape as the built-in list, see below). |
-| `steers.slots` | Slot letter (A–Z) → profile name, in priority order: A first, then B, C, … (priority = slot order, 1=A, 2=B). Changing a slot's profile does not change an existing steer; the plan only reports the difference. Default is a single steer `A`; add `B`, `C`, … with their profiles as needed. Steer slots never shift: `steer set` replaces the slot's profile, a number addresses an existing position (2 is B), and only a free letter within reach creates a slot — no new gaps (existing configs still load). |
-| `steers.prepare` | Slots created for every repository (default `["A"]`). Overridden per run with `plan --slots` (must be a subset of defined slots). Advisor slots are only planned when they are in `prepare`. |
-| `steers.initialActive` | Active steer after provisioning (must be in `prepare` and must not be an advisor slot; with `--slots` it falls back to the first slot when needed). At least one non-advisor slot is required. |
+| `steers.slots` | Slot letter (A–Z) → profile name, in priority order: A first, then B, C, … (priority = slot order, 1=A, 2=B). Changing a slot's profile does not change an existing steer; the live model is authoritative. Default is a single steer `A`; add `B`, `C`, … with their profiles as needed. Steer slots never shift: `steer set` replaces the slot's profile, a number addresses an existing position (2 is B), and only a free letter within reach creates a slot — no new gaps (existing configs still load). |
+| `steers.prepare` | Slots created on enrollment (default `["A"]`). Overridden per run with `plan --slots` (must be a subset of defined slots). Advisor slots are only planned when they are in `prepare`. |
+| `steers.initialActive` | Active steer after enrollment (must be in `prepare` and must not be an advisor slot; with `--slots` it falls back to the first slot when needed). At least one non-advisor slot is required. |
 | `steers.activeMarker` | Tab-title prefix on the active steer (`▷ Steer E`; default `"▷"`). `switch --apply`, `fresh` and resume-takeover move it to the new active steer and strip it from the old one (best-effort renames via `paseo agent update --name`); empty disables the marker. Title matching tolerates the prefix. |
 | `workers.priority` | Ordered profile-name list for workers, highest priority first. A missing `priority` reads as `[defaultProfile]`; writing sets `defaultProfile` to `priority[0]` for older readers. |
 | `workers.defaultProfile` | First entry of `workers.priority`, kept for backwards compatibility. Prefer `workers.priority`. |
@@ -39,7 +36,7 @@ Per-run slot selection: `plan <repo> --slots D` (comma-separated, e.g. `--slots 
 
 If live steers already run in slots outside `prepare` (for example D and E while the config prepares A), `plan` refuses to create further steers and suggests a `--slots` list that includes the running ones; with that `--slots` they are acknowledged and the plan continues; when nothing needs creating, the running steers are only noted. A running slot that is not defined in `steers.slots` must be defined there or archived first.
 
-Existing agents can become steers. Unlabelled agents in the main workspace whose title looks like a steer are candidates for that slot: `Steer A`, in any letter case, optionally with a suffix in brackets or after a separator (`Steer A [kn]`, `Steer A (fp)`, `Steer A · fp`). The plan reports such a candidate as a conflict until you confirm it with `--adopt A=<agent-id>`, so no existing agent is taken over silently. Adoption only adds the labels; title and model stay as they are. When the adopted model differs from the slot profile, the plan suggests the `steer set` command that points the slot at the live model (a preview-only option list when several profiles match). A title with a number (`Steer 3`) is never assigned to a slot automatically: `plan` lists it in the notes, and you adopt it explicitly with `--adopt C=<agent-id>`. Privacy rule: adopting an agent whose model differs from the slot profile is a conflict instead of an adoption when the agent's provider is sensitive (any same-provider profile with `"sensitive": true`; `muse` counts as sensitive unless set otherwise) and the repository is private or its visibility is unknown — a sensitive agent is only adopted for a repository that GitHub reports as public (see [Privacy](#privacy-sensitive-profiles)).
+Existing agents can become steers. Unlabelled agents in the main workspace whose title looks like a steer are candidates for that slot: `Steer A`, in any letter case, optionally with a suffix in brackets or after a separator (`Steer A [kn]`, `Steer A (fp)`, `Steer A · fp`). The plan reports such a candidate as a conflict until you confirm it with `--adopt A=<agent-id>`, so no existing agent is taken over silently. Adoption only adds the labels; title and model stay as they are (point the slot at the live model with `steer set` if you want them to match). A title with a number (`Steer 3`) is never assigned to a slot automatically: `plan` lists it in the notes, and you adopt it explicitly with `--adopt C=<agent-id>`. Privacy rule: adopting an agent whose model differs from the slot profile is a conflict instead of an adoption when the agent's provider is sensitive (any same-provider profile with `"sensitive": true`; `muse` counts as sensitive unless set otherwise) and the repository is private or its visibility is unknown — a sensitive agent is only adopted for a repository that GitHub reports as public (see [Privacy](#privacy-sensitive-profiles)).
 
 ## Findings in prompts
 
@@ -55,22 +52,24 @@ In the Paseo composer, run `/factory labels <scope-or-agent-id>` and review the 
 
 ## Scopes
 
+`plan` enrolls exactly one existing Paseo workspace as a factory scope (or repairs it). Open the workspace natively first, then plan it by scope id, `workspace:<id>` or `--local <path>`. Nothing is forked, cloned or created: the checkout, project and workspace must already exist. Re-running `plan` on an enrolled scope only repairs it (missing steer slots, labels, metadata).
+
 Every entry plans a scope of one kind:
 
-| Kind | Id | Locator | Provisioning |
+| Kind | Id | Locator | Enrollment needs |
 |---|---|---|---|
-| `github` | `owner/repo` | the fork | fork, clone, upstream remote, project, main workspace |
-| `dir` | `--name` else folder | directory | project (if missing), main workspace |
-| `workspace` | `--name` else `<parent>@<branch>` else folder | existing workspace id | metadata only; no new project or workspace |
+| `github` | `owner/repo` | the fork | existing checkout with the fork as origin + existing Main workspace |
+| `dir` | `--name` else folder | directory | existing directory + existing Main workspace |
+| `workspace` | `--name` else `<parent>@<branch>` else folder | existing workspace id | the existing worktree workspace |
 | `hub` | `--name` else `hub` | directory or workspace | like `dir`/`workspace`; at most one live hub per host |
 
-Commands address a scope by id first, then by `wks_…`/`workspace:<id>`, then by path, then by the legacy `local/<folder>` alias (input only; usage prints a deprecation note). An id already used by another live scope — or by two entries of one run — is a conflict resolved with `--name`.
+Commands address a scope by id first, then by `wks_…`/`workspace:<id>`, then by path, then by the legacy `local/<folder>` alias (input only; usage prints a deprecation note). An id already used by another live scope is a conflict resolved with `--name`.
 
 ### GitHub scopes: which checkout, which main workspace
 
-Several local checkouts may share the fork as origin (for example one per task). `plan` then picks one only on a clear signal: the checkout that already has a factory main workspace, else the checkout that is a Paseo project root, else `<checkoutRoot>/<repo>`. Otherwise the plan reports a conflict listing the paths; choose one with `--checkout <path>` (one entry) or per-entry `"checkout"` in a repos file.
+Several local checkouts may share the fork as origin (for example one per task). `plan` then picks one only on a clear signal: the checkout that already has a factory main workspace, else the checkout that is a Paseo project root, else `<checkoutRoot>/<repo>`. Otherwise the plan reports a conflict listing the paths; enroll one workspace directly (`workspace:<id>` or `--local <path>`).
 
-`--main workspace:<id>` (one github entry, or per-entry `"main"`) makes an existing Paseo worktree workspace the main workspace of the github scope, for example when the coordinating workspace is itself a worktree. The scope id stays `owner/repo` (not `<parent>@<branch>` as for a worktree scope), no project or workspace is created, and apply checks again that the workspace is still that worktree in the same directory (if it moved, apply stops and asks for a new dry-run). Later `plan` and `status` runs find the scope on that worktree without `--main`.
+`--main workspace:<id>` makes an existing Paseo worktree workspace the main workspace of the github scope, for example when the coordinating workspace is itself a worktree. The scope id stays `owner/repo` (not `<parent>@<branch>` as for a worktree scope), and apply checks again that the workspace is still that worktree in the same directory (if it moved, apply stops and asks for a new dry-run). Later `plan` and `status` runs find the scope on that worktree without `--main`.
 
 ## Local mode
 
@@ -82,11 +81,11 @@ A repository entry with a local directory needs no GitHub repository:
 ```
 
 ```text
-/factory plan --local /path/to/project --local /path/to/other
+/factory plan --local /path/to/project
 /factory plan --local /path/to/project --name notes
 ```
 
-The path must exist (a git checkout or a plain folder). The factory makes no `gh` calls and plans no fork, clone or upstream remote. Each entry becomes a scope of kind `dir` with the scope id `--name` (or per-entry `"name"`) else the folder name; `--name` needs exactly one entry while repos-file entries may each carry their own `"name"`. `local/<folder>` stays an input alias only. Planned are only the Paseo project registration (when missing), the main workspace (created or adopted, with the scope id in its metadata) and the steer slots (including `--adopt`, `--adopt <scope-id>:A=<agent-id>` with several entries, and `--slots`). The plan hash and the stored authorization cover the entries, so `apply --confirm <hash>` runs without GitHub as well. A scope id already used by another live scope (or by two entries of one run) is a conflict resolved with `--name`.
+The path must exist (a git checkout or a plain folder). The factory makes no `gh` calls. The entry becomes a scope of kind `dir` with the scope id `--name` else the folder name; `local/<folder>` stays an input alias only. Planned are only the adoption of the existing Main workspace (with the scope id in its metadata) and the steer slots (including `--adopt` and `--slots`). The plan hash and the stored authorization cover the entry, so `apply --confirm <hash>` runs without GitHub as well. A scope id already used by another live scope is a conflict resolved with `--name`.
 
 ## Worktree workspaces
 
@@ -102,26 +101,22 @@ An existing Paseo worktree workspace (`workspaceKind: worktree`, usually a Paseo
 /factory plan workspace:wks_0123456789abcdef
 ```
 
-The scope id is `--name` (or per-entry `"name"`), else `<parent>@<branch>` — the parent from the owning project checkout (a github scope when its origin parses to `owner/repo`, else a dir scope for the project folder, else no parent) plus the worktree branch — else the worktree folder (detached or unreadable branch). `status`, `checkpoint`, `switch`, `fresh` and `workers` accept the scope id as well as the `local/<folder>` alias and the workspace id (`workspace:<id>` or the bare `wks_...` id). The plan registers no new Paseo project and creates no duplicate workspace: it sets the factory metadata including the scope on the existing worktree workspace (`workspace.main.adopt`, or the non-destructive `workspace.main.scope` top-up when metadata without a scope exists) and plans the steer slots as usual (`Steer A` titles, `--adopt` for unlabelled candidates, `--slots` for a subset). New steers are labelled `wsf.scope=<id>` next to `wsf.repo`; steers labelled with the legacy `local/<folder>` name keep matching. Existing agents of the workspace are only listed in the plan notes for reuse by id; they are never renamed or archived. Discovery without a worktree match behaves exactly as before; when several directories or workspaces share a folder name, `local/<folder>` is a conflict and the full path, the scope id or the workspace id disambiguates.
+The scope id is `--name`, else `<parent>@<branch>` — the parent from the owning project checkout (a github scope when its origin parses to `owner/repo`, else a dir scope for the project folder, else no parent) plus the worktree branch — else the worktree folder (detached or unreadable branch). `status`, `checkpoint`, `switch`, `fresh` and `workers` accept the scope id as well as the `local/<folder>` alias and the workspace id (`workspace:<id>` or the bare `wks_...` id). The plan sets the factory metadata including the scope on the existing worktree workspace (`workspace.main.adopt`, or the non-destructive `workspace.main.scope` repair when metadata without a scope exists) and plans the steer slots as usual (`Steer A` titles, `--adopt` for unlabelled candidates, `--slots` for a subset). New steers are labelled `wsf.scope=<id>` next to `wsf.repo`; steers labelled with the legacy `local/<folder>` name keep matching. Existing agents of the workspace are only listed in the plan notes for reuse by id; they are never renamed or archived. Discovery without a worktree match behaves exactly as before; when several directories or workspaces share a folder name, `local/<folder>` is a conflict and the full path, the scope id or the workspace id disambiguates.
 
 ## Workspace titles
 
-`workspaceTitle` is a template for the main workspace title (default `"Main"`): `{name}` is the scope short form (the repo name for github, else the scope id), `{repo}` the short repository name (the scope id without the `@branch` suffix of worktree scopes and without the owner: `web` for `example/web` and `example/web@feat`), `{subject}` the entry subject (`--subject <text>` with one entry, or per-entry `"subject"` in repos-file). New workspaces are created with the rendered title. An existing main workspace with a deviating title is only reported; `plan --retitle` plans a `workspace.retitle` op (native workspace rename, verified after). A template needing `{subject}` without one, or with an unknown placeholder, is a plan conflict. `--rename-project <name>` (one entry) plans a `project.rename` op onto the scope project, but only when the project already exists and the name differs.
-
-Optional `workspaceTitleMultiRepo` (e.g. `"{repo} · {subject}"`, unset by default) overrides `workspaceTitle` only when the scope's Paseo project hosts live scopes of several repos — a worktree scope counts as its parent's repo, and the planned scope itself does not count until it exists. Otherwise `workspaceTitle` applies, so single-repo projects keep short titles while shared projects disambiguate (`web · USB pass`). Template errors name the active field (`workspace.title` conflict); converging already-created titles after the second repo arrives goes through the usual `--retitle` note.
-
-`Main` is the factory handle. An existing main workspace titled `Main`, `<repo> · Main` or `<name> · Main` (with its own scope's name) is always accepted: the title templates never propose to rename it, so a naming rule like `<Repo> · <Subject>` cannot collide with the handle.
+Retired: workspace titles stay as they are. The factory never renames workspaces or projects (`--retitle`, `--rename-project`, `--subject` and the `workspaceTitle`/`workspaceTitleMultiRepo` templates were removed with bulk provisioning). Rename natively in Paseo if you want a different title.
 
 ## Hub scope
 
-`plan --hub <path|workspace:<id>> [--name]` creates or adopts a scope of kind `hub` (default id `--name` else `hub`); at most one hub scope lives on a host, anything beyond is a conflict. An existing dir scope converts in place with `plan --hub <same path>`: the `scope.convert` op rewrites only the scope field to kind `hub` (keeping the id unless `--name` renames), while steers, epoch and checkpoint stay untouched. Only dir scopes convert; hub operations never write into member scopes.
+`plan --hub <path|workspace:<id>> [--name]` adopts a scope of kind `hub` (default id `--name` else `hub`); at most one hub scope lives on a host, anything beyond is a conflict. An existing dir scope converts in place with `plan --hub <same path>`: the `scope.convert` op rewrites only the scope field to kind `hub` (keeping the id unless `--name` renames), while steers, epoch and checkpoint stay untouched. Only dir scopes convert; hub operations never write into member scopes.
 
 ## Domains
 
 A domain groups several scopes under one coordinating scope, for example one product made of several repositories: Hub → Domain → Child. It is a role, not a scope kind: any live scope except a hub can be the domain of others.
 
-- `plan <child> --domain <domain-scope-id>` (one entry, or per-entry `"domain"`) stores the pointer in the child's scope field (`scope.domain` op, epoch-checked at apply). A new scope gets it with its main workspace. `--domain ""` clears it.
-- The domain must be a live scope or planned in the same run (one run creates the domain first, then its children) and cannot be the child itself; hubs carry no domain.
+- `plan <child> --domain <domain-scope-id>` stores the pointer in the child's scope field (`scope.domain` op, epoch-checked at apply). A newly enrolled scope gets it with its main workspace. `--domain ""` clears it.
+- The domain must be a live scope (enroll it first) and cannot be the child itself; hubs carry no domain.
 - The relation is logical only: no Paseo parent, steers stay top-level, and creating, archiving or deleting scopes stays with the hub.
 - Escalation: a child steer prefixes blockers with `domain:` for its domain steer and with `hub:` for the hub. The domain steer hands work down with `assign <child>`, the same epoch-checked preview and apply as from the hub.
 - `scopes` groups the rows (hub first, then each domain with its children, then the rest) and lists each domain's open `domain:` items. `status`, the `assign` preview and the resume brief name the domain and its children.
@@ -265,12 +260,12 @@ Not part of `npm test`; each needs an explicit approval variable and keeps every
 | Command | What it does |
 |---|---|
 | `WSF_LIVE_WRITE=approved node test/integration-live.mjs` | Scratch repo, one workspace, one agent without prompt: idempotency, key conflict, parent freedom, metadata read-back. |
-| `WSF_LIVE_CRASH=approved node test/integration-crash.mjs` | Real apply runner killed right after the workspace create; a new process recovers the id through the receipt. |
+| `WSF_LIVE_CRASH=approved node test/integration-crash.mjs` | Real apply runner killed right after a steer create; a new process recovers the id through the receipt. |
 | `WSF_LIVE_CLEANUP=approved node test/integration-live.mjs --cleanup <manifest>` | Fail-closed cleanup: archives only fully verified scratch resources; never deletes files. |
 
 ## CLI reference for scripts
 
-The CLI reads its configuration from the host file. Use `paseo-factory --help` for the complete command list, including scripting flags such as `--repos-file`, `--json`, and `--out`.
+The CLI reads its configuration from the host file. Use `paseo-factory --help` for the complete command list, including scripting flags such as `--json` and `--out`.
 
 ```text
 paseo-factory models [--json]

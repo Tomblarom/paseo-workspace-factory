@@ -686,12 +686,12 @@ test('plan keeps a superseded extra as a note but conflicts on several live hold
   assert.match(live.conflicts.find((c) => c.key === 'steer.B').reason, /Several agents are labelled as Steer B/);
 });
 
-test('plan suggests the slot profile matching an adopted steer', () => {
+test('plan adopts a mismatched steer silently (K13: no drift suggestion)', () => {
   const candidate = {
     id: 'cand-b', workspaceId: 'wks_main', archivedAt: null, title: 'Steer B', provider: 'codex', model: 'gpt-6.2-sol', status: 'idle',
     labels: {},
   };
   const plan = planRepository(planDiscovery([labelledSteer('a', 'A', 'codex', 'gpt-6.2-sol')], { legacy: [candidate] }), CONFIG, { adopt: { B: 'cand-b' } });
   assert.equal(plan.ops.find((o) => o.key === 'steer.B').kind, 'paseo.agent.adopt');
-  assert.match(plan.notes.join('\n'), /Adopted Steer B runs codex\/gpt-6\.2-sol; profile "cheap" names muse\/muse-spark-1\.3-contributor \(kept\) — to match the slot profile to the live steer: paseo-factory steer set B "standard"/);
+  assert.ok(!plan.notes.join('\n').includes('Adopted Steer B runs'), 'K13 keeps the live model without a drift note');
 });

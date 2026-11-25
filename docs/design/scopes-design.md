@@ -32,11 +32,11 @@ The factory is keyed by a GitHub repository (`owner/repo`). Everything that is n
 
 A **scope** is the unit of coordination: exactly one main workspace carrying factory metadata, its steers (slots A–Z), epoch, checkpoint and workers. Today's "repository" becomes the scope of kind `github`.
 
-| Kind | Locator | Provisioning |
+| Kind | Locator | Enrollment needs (K13: existing workspaces only) |
 |---|---|---|
-| `github` | `owner/repo` | fork, clone, upstream, project, main workspace (today) |
-| `dir` | directory (git without GitHub, or non-git) | project (if missing), main workspace |
-| `workspace` | existing workspace id (worktree or local) | metadata only; optional `parent` scope |
+| `github` | `owner/repo` | existing checkout with the fork as origin + existing Main workspace |
+| `dir` | directory (git without GitHub, or non-git) | existing directory + existing Main workspace |
+| `workspace` | existing workspace id (worktree or local) | the existing workspace; optional `parent` scope |
 | `hub` | directory or workspace of the coordinating level | like `dir`/`workspace`, at most one per host |
 
 Identity: metadata `wsf = { scope: { id, kind, locator, parent? }, main, activeSteer, epoch, … }`, steer label `wsf.scope=<id>`. `id` is `owner/repo` for `github`, otherwise a name: `--name`, else derived (`<folder>` for `dir`, `<parent>@<branch>` for a worktree of a known scope, `hub`). Ids are unique among live scopes; a collision is a plan conflict resolved with `--name`. Address resolution (CLI, plugin): scope id → `wks_…` id → path → legacy `local/<folder>` alias (kept, with a deprecation note).
@@ -53,7 +53,7 @@ The coordinating level (administrator) is a scope of kind `hub` with its own slo
 
 | Role | Responsible for | Not responsible for |
 |---|---|---|
-| Hub steer | provisioning and lifecycle plans for any scope, slot/model assignment, adoption, priorities across scopes, cleanup | content work inside a scope that has an active steer |
+| Hub steer | enrollment and lifecycle plans for any scope, slot/model assignment, adoption, priorities across scopes, cleanup | content work inside a scope that has an active steer |
 | Scope steer | tasks of its scope, its workers, its CHECKPOINT | other scopes, destructive lifecycle ops |
 | Worker | one bounded task | coordination |
 
@@ -61,14 +61,14 @@ Relations stay logical (metadata/labels), never `parent`: steers stay parent-fre
 
 ## Decision 3 — adoption is labelling, never moving
 
-- Workspaces: any number of `--local <path>` / `workspace:<id>` entries per plan; a worktree of a known scope gets `parent` and the id `<parent>@<branch>`.
+- Workspaces: exactly one `--local <path>` / `workspace:<id>` entry per plan (K13: single-workspace enrollment); a worktree of a known scope gets `parent` and the id `<parent>@<branch>`.
 - Steers: `--adopt X=<id>`; a candidate with a parent is a conflict unless `--detach` plans a native `agent detach` op.
 - Workers: `--adopt-worker <id>[@<slot>]` labels `wsf.scope`, `wsf.role=worker`, `wsf.owner=<slot>`. Agents in another workspace stay there (no native move); status shows their workspace.
 - `scopes --candidates` lists unadopted workspaces/agents read-only.
 
 ## Decision 4 — lifecycle without data loss
 
-- **Retitle**: title template (`workspaceTitle`, e.g. `{name} · Main` or `Main`); a mismatch is a planned `workspace.retitle` op with `--retitle`, otherwise a note.
+- **Retitle** was removed (K13): workspace titles stay as they are; rename natively in Paseo.
 - **Relocate** was removed (K14): to move a scope, create a new scope at the target and switch. Old installs may still carry scopes retired with `movedTo`; they stay readable (status, scopes, cleanup) and refuse coordination.
 - **Retire** scope was removed with relocate; archiving stays a separate native step.
 - **Cleanup** is a read-only report (scratch scopes labelled `wsf.scratch`, missing directories, empty or duplicate projects, retired scopes). Each candidate carries a loss inventory — agents (running?), owned worktree, uncommitted changes, unpushed commits — plus the native command that archives it (`paseo archive`, `paseo workspace archive`, `paseo project delete`).

@@ -211,21 +211,15 @@ export async function submitFactoryCommand(
     const plan = await ctx.rpc(factoryPlan, {
       ...(parsed.repos.length || parsed.local?.length || parsed.hub?.length ? {} : { workspaceId: ctx.workspaceId }),
       ...(parsed.repos.length ? { repos: parsed.repos } : {}),
-      ...(parsed.allowFork ? { allowFork: true as const } : {}),
       ...(parsed.slots ? { slots: parsed.slots } : {}),
       ...(parsed.adopt ? { adopt: parsed.adopt } : {}),
-      ...(parsed.adoptScoped ? { adoptScoped: parsed.adoptScoped } : {}),
       ...(parsed.local?.length ? { local: parsed.local } : {}),
       ...(parsed.hub?.length ? { hub: parsed.hub } : {}),
-      ...(parsed.checkout !== undefined ? { checkout: parsed.checkout } : {}),
       ...(parsed.name !== undefined ? { name: parsed.name } : {}),
-      ...(parsed.subject !== undefined ? { subject: parsed.subject } : {}),
       ...(parsed.main !== undefined ? { main: parsed.main } : {}),
       ...(parsed.domain !== undefined ? { domain: parsed.domain } : {}),
       ...(parsed.adoptWorker ? { adoptWorker: parsed.adoptWorker } : {}),
       ...(parsed.detach ? { detach: true as const } : {}),
-      ...(parsed.retitle ? { retitle: true as const } : {}),
-      ...(parsed.renameProject !== undefined ? { renameProject: parsed.renameProject } : {}),
     });
     setFactoryResult({ kind: "plan", repos: [...parsed.repos, ...(parsed.local ?? []), ...(parsed.hub ?? [])], at, plan });
     return PANEL;

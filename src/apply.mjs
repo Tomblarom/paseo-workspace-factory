@@ -4,14 +4,12 @@
 // (after resolving symbolic references from verified results of this plan), and the
 // authorized operation, not the rediscovered one, is what runs. Progress is stored
 // so an interrupted run resumes the same plan.
-import { lstatSync, realpathSync, mkdirSync, writeFileSync, linkSync, unlinkSync, readFileSync, renameSync } from 'node:fs';
+import { mkdirSync, writeFileSync, linkSync, unlinkSync, readFileSync, renameSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 import { join, resolve } from 'node:path';
 import { withLock, workspaceLockName } from './lock.mjs';
 import { planHash, WORKSPACE_REF } from './planner.mjs';
 import { checkedCreationReceipt, confirmCreationReceipt, lookupCreation, verifySteerPlacement } from './steer-create.mjs';
-import { getRepo, GitHubNotFound, remoteToFullName } from './github.mjs';
-import { inspectCloneTarget, readRemotes } from './local.mjs';
 import { LABEL, METADATA_KEY, LEGACY_PREFIX, parentOf, newKeyForLegacyKey } from './paseo.mjs';
 import { validScope } from './scope.mjs';
 import { isWorktreeWorkspace } from './discovery.mjs';
@@ -20,7 +18,16 @@ export class ApplyRefused extends Error {}
 export class NotAuthorized extends Error {}
 export class RecoveryRefused extends Error {}
 
-const CREATE_KINDS = { 'paseo.workspace.create': 'workspace', 'paseo.agent.create': 'agent' };
+// K13: only agent creates are reconciled (enrollment creates steers in an
+// existing workspace). Workspace provisioning kinds are retired below.
+const CREATE_KINDS = { 'paseo.agent.create': 'agent' };
+
+// Operation kinds retired by K13 (bulk provisioning). Old stored plans
+// containing them are refused with a clear message instead of crashing.
+export const RETIRED_KINDS = new Set([
+  'github.fork', 'paseo.clone', 'git.remote.add', 'paseo.project.add',
+  'paseo.workspace.create', 'paseo.workspace.retitle', 'paseo.project.rename',
+]);
 
 function refuse(key, why) {
   throw new RecoveryRefused(`Recovery stopped: ${key} was attempted without a stored result and ${why}. Check manually and run a new dry-run.`);
@@ -32,33 +39,25 @@ async function readReceipt(op, lookupReceipt) {
 
 function completedId(op, receipt) {
   const fail = (message) => refuse(op.key, message);
-  if (CREATE_KINDS[op.kind] === 'agent') return checkedCreationReceipt(receipt, op.params.idempotencyKey, fail);
-  if (receipt.workspace?.id && receipt.workspaceId && receipt.workspace.id !== receipt.workspaceId) {
-    fail('the receipt names no unambiguous workspace');
-  }
-  return checkedCreationReceipt(receipt, op.params.idempotencyKey, fail, {
-    idOf: (entry) => entry.workspace?.id ?? entry.workspaceId, missing: 'the receipt names no unambiguous workspace',
-  });
+  return checkedCreationReceipt(receipt, op.params.idempotencyKey, fail);
 }
 
 /**
- * Reconciles one authorized create operation that was attempted but has no stored
- * result (lost response, process death). Identity comes only from the daemon receipt
- * of the authorized idempotency key:
+ * Reconciles one authorized agent-create operation that was attempted but has
+ * no stored result (lost response, process death). Identity comes only from
+ * the daemon receipt of the authorized idempotency key:
  * - no receipt: the request never reached the daemon (it persists the receipt before
  *   creating anything). A fresh execution is allowed only while discovery still lists
  *   the operation as pending and nothing it would create is observed; otherwise stop.
  * - completed receipt: the identical authorized request is re-sent (same key and
  *   request: the daemon returns the existing object, creates nothing) and must return
- *   the receipt's id; observed objects must match it; for workspace.main, path, title,
- *   initial metadata and creation time are extra consistency checks.
+ *   the receipt's id; observed objects must match it.
  * - outcomeUnknown, failed, ambiguous or contradicting receipt: stop, nothing re-sent.
  * @returns { result } to record, or { retry: true } to allow one normal execution
  */
 export async function reconcileAttempt({ op, pending, observed = {}, authorization, lookupReceipt, execute, config }) {
   const receipt = await readReceipt(op, lookupReceipt);
-  const isWorkspace = CREATE_KINDS[op.kind] === 'workspace';
-  const seen = isWorkspace ? observed.mainWorkspace?.id : observed.steers?.[op.params.labels?.[LABEL.slot]];
+  const seen = observed.steers?.[op.params.labels?.[LABEL.slot]];
   if (!receipt) {
     if (!pending) refuse(op.key, 'the daemon has no receipt although discovery no longer lists it as pending, so whatever exists was not created by this plan');
     if (seen) refuse(op.key, `the daemon has no receipt but ${seen} is observed`);
@@ -66,17 +65,8 @@ export async function reconcileAttempt({ op, pending, observed = {}, authorizati
   }
   const id = completedId(op, receipt);
   if (seen && seen !== id) refuse(op.key, `its receipt names ${id} but ${seen} is observed`);
-  if (isWorkspace && observed.mainWorkspace) {
-    const main = observed.mainWorkspace;
-    const { path, title, metadata } = op.params;
-    if (resolve(main.directory ?? '') !== resolve(path)) refuse(op.key, `workspace ${id} uses ${main.directory}, not ${path}`);
-    if (main.title !== title) refuse(op.key, `workspace ${id} is titled "${main.title}", not "${title}"`);
-    if (!isDeepStrictEqual(main.metadata?.[METADATA_KEY], metadata[METADATA_KEY])) refuse(op.key, `workspace ${id} carries different factory metadata`);
-    const created = Date.parse(main.createdAt ?? '');
-    if (!Number.isFinite(created) || created < Date.parse(authorization.createdAt)) refuse(op.key, `workspace ${id} was not created after the dry-run`);
-  }
   const { confirmed } = await confirmCreationReceipt(execute, op, config, id, (message) => refuse(op.key, message), {
-    idOf: (result) => (isWorkspace ? result?.workspaceId : result?.agentId),
+    idOf: (result) => result?.agentId,
   });
   return { result: { ...confirmed, recovered: true, via: 'receipt' } };
 }
@@ -103,16 +93,15 @@ export function storeAuthorization(dir, authorization, config, fs = { mkdirSync,
     } catch (parseError) {
       throw new ApplyRefused(`Stored authorization ${target} is unreadable (${parseError.message}); not replacing it`);
     }
+    // Retired K13 options (allowFork, retitle, renameProject) are ignored:
+    // old authorizations may carry them, new ones never do.
     const same = existing?.hash === authorization.hash
       && planHash(existing.plans ?? [], config) === authorization.hash
       && isDeepStrictEqual(existing.entries, authorization.entries)
-      && existing.allowFork === authorization.allowFork
       && isDeepStrictEqual(existing.adopt, authorization.adopt)
       && isDeepStrictEqual(existing.slots ?? null, authorization.slots ?? null)
       && isDeepStrictEqual(existing.adoptWorker ?? {}, authorization.adoptWorker ?? {})
       && (existing.detach ?? false) === (authorization.detach ?? false)
-      && (existing.retitle ?? false) === (authorization.retitle ?? false)
-      && (existing.renameProject ?? null) === (authorization.renameProject ?? null)
       && Number.isFinite(Date.parse(existing.createdAt));
     if (!same) throw new ApplyRefused(`Stored authorization ${target} differs from this dry-run or is damaged; not replacing it`);
     return { status: 'kept', authorization: existing, file: target };
@@ -147,8 +136,8 @@ export function withApplyLock(fn, options) {
 }
 
 /** Everything apply may later do, frozen at dry-run time. */
-export function createAuthorization(plans, config, { entries, allowFork = false, adopt = {}, slots, adoptWorker = {}, detach = false, retitle = false, renameProject = null } = {}) {
-  return { version: 1, hash: planHash(plans, config), createdAt: new Date().toISOString(), entries, allowFork, adopt, adoptWorker, detach, retitle, renameProject, ...(slots !== undefined ? { slots } : {}), plans: structuredClone(plans) };
+export function createAuthorization(plans, config, { entries, adopt = {}, slots, adoptWorker = {}, detach = false } = {}) {
+  return { version: 1, hash: planHash(plans, config), createdAt: new Date().toISOString(), entries, adopt, adoptWorker, detach, ...(slots !== undefined ? { slots } : {}), plans: structuredClone(plans) };
 }
 
 function authorizedOps(plan) {
@@ -200,8 +189,18 @@ export function memoryProgress(initial = null) {
 export async function applyPlans({ authorization, config, confirm, runPlans, execute, lookupReceipt, progress = memoryProgress(), journal = () => {}, guard = () => {}, maxStepsPerRepo = 20 }) {
   if (!authorization) throw new ApplyRefused('No stored plan; run plan first and confirm its hash');
   if (!confirm || confirm !== authorization.hash) throw new ApplyRefused(`Apply needs --confirm ${authorization.hash} (hash of the stored dry-run)`);
+  if (!Array.isArray(authorization.plans) || !Array.isArray(authorization.entries)) throw new ApplyRefused('Stored plan is damaged (not a plan file); run a new dry-run');
+  // Old multi-entry authorizations predate K13 (single-workspace enrollment).
+  if (authorization.entries.length !== 1 || authorization.plans.length !== 1) {
+    throw new ApplyRefused(`Stored plan covers ${authorization.plans.length} entries; plans are single-workspace since K13 — run a new plan for one existing workspace`);
+  }
+  for (const op of authorization.plans.flatMap((p) => [...(p.ops ?? []), ...((p.ops ?? []).flatMap((o) => o.implies ?? []))])) {
+    if (RETIRED_KINDS.has(op?.kind)) {
+      throw new ApplyRefused(`Stored plan uses retired operation ${op.key} (${op.kind}); bulk provisioning was removed — run a new plan for one existing workspace`);
+    }
+  }
   if (planHash(authorization.plans, config) !== authorization.hash) throw new ApplyRefused('Stored plan does not match the current config or was altered; run a new dry-run');
-  const options = { allowFork: authorization.allowFork, adopt: authorization.adopt, adoptWorker: authorization.adoptWorker ?? {}, detach: authorization.detach ?? false, retitle: authorization.retitle ?? false, renameProject: authorization.renameProject ?? null, ...(authorization.slots !== undefined ? { slots: authorization.slots } : {}) };
+  const options = { adopt: authorization.adopt, adoptWorker: authorization.adoptWorker ?? {}, detach: authorization.detach ?? false, ...(authorization.slots !== undefined ? { slots: authorization.slots } : {}) };
   const state = progress.load() ?? { hash: authorization.hash, started: false, results: {} };
   if (state.hash !== authorization.hash) throw new ApplyRefused('Progress belongs to a different plan');
   if (!state.started) {
@@ -293,82 +292,9 @@ export async function applyPlans({ authorization, config, confirm, runPlans, exe
   return { hash: authorization.hash, report };
 }
 
-async function poll(check, { attempts = 10, delayMs = 3000, sleep }) {
-  for (let i = 0; i < attempts; i += 1) {
-    const value = await check();
-    if (value) return value;
-    await sleep(delayMs);
-  }
-  return null;
-}
-
 /** Real executors. Every write is guarded by a fresh precondition and verified afterwards. */
-export function createExecutors({ client, gh, git, paseoCli, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), fs = { lstatSync, realpathSync } }) {
+export function createExecutors({ client, paseoCli }) {
   const handlers = {
-    async 'github.fork'(op, config) {
-      const name = op.params.upstream.split('/')[1];
-      gh(['repo', 'fork', op.params.upstream, '--clone=false', '--remote=false']);
-      const fork = await poll(async () => {
-        try {
-          const repo = getRepo(gh, `${config.github.owner}/${name}`);
-          return repo.isFork ? repo : null;
-        } catch (error) {
-          if (error instanceof GitHubNotFound) return null;
-          throw error;
-        }
-      }, { sleep });
-      if (!fork) throw new Error(`Fork ${config.github.owner}/${name} did not appear`);
-      return { fork: fork.fullName };
-    },
-
-    async 'paseo.clone'(op, config) {
-      const { repo, parentDir, protocol, expectedPath, guard } = op.params;
-      // Recheck immediately before the write: same canonical root, no symlink component,
-      // target absent, deepest existing directory still the one inspected at plan time.
-      const now = inspectCloneTarget(config.checkoutRoot, parentDir, expectedPath, fs);
-      if (!now.ok) throw new Error(`Clone target unsafe: ${now.reason}`);
-      if (now.root !== guard?.root || now.anchor !== guard?.anchor || now.anchorId !== guard?.anchorId) {
-        throw new Error(`Clone target changed since the dry-run (${guard?.anchor} ${guard?.anchorId} -> ${now.anchor} ${now.anchorId})`);
-      }
-      const out = paseoCli(['clone', repo, '--dir', parentDir, '--protocol', protocol]);
-      if (resolve(out?.checkoutPath ?? '') !== resolve(expectedPath) || !out?.projectId) {
-        throw new Error(`Clone reported ${JSON.stringify(out)}; expected checkout ${expectedPath}`);
-      }
-      const st = fs.lstatSync(expectedPath);
-      if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`${expectedPath} is not a plain directory after cloning`);
-      if (fs.realpathSync(expectedPath) !== resolve(expectedPath)) throw new Error(`${expectedPath} resolves elsewhere after cloning`);
-      const origin = remoteToFullName(readRemotes(git, expectedPath).origin ?? '');
-      if (origin !== repo.toLowerCase()) throw new Error(`Cloned origin is ${origin}, expected ${repo}`);
-      return { checkoutPath: out.checkoutPath, projectId: out.projectId };
-    },
-
-    async 'git.remote.add'(op) {
-      const { path, origin, name, url } = op.params;
-      const st = fs.lstatSync(path);
-      if (st.isSymbolicLink() || !st.isDirectory() || fs.realpathSync(path) !== resolve(path)) throw new Error(`${path} is not the inspected checkout directory`);
-      const remotes = readRemotes(git, path);
-      if (remoteToFullName(remotes.origin ?? '') !== origin.toLowerCase()) throw new Error(`${path} origin is ${remotes.origin}, expected ${origin}`);
-      if (name in remotes) throw new Error(`Remote ${name} already exists in ${path}`);
-      git(path, ['remote', 'add', name, url]);
-      if (readRemotes(git, path)[name] !== url) throw new Error(`Remote ${name} not verifiable in ${path}`);
-      return { path, remote: name };
-    },
-
-    async 'paseo.project.add'(op) {
-      const out = paseoCli(['project', 'create', op.params.path]);
-      if (!out?.projectId) throw new Error(`Project registration returned ${JSON.stringify(out)}`);
-      return { projectId: out.projectId };
-    },
-
-    async 'paseo.workspace.create'(op) {
-      const { path, title, metadata, idempotencyKey } = op.params;
-      const handle = await client.workspaces.create({ source: { kind: 'directory', path }, title, metadata, idempotencyKey });
-      const workspace = await handle.refresh();
-      if (resolve(workspace?.workspaceDirectory ?? '') !== resolve(path)) throw new Error(`Workspace ${handle.id} points to ${workspace?.workspaceDirectory}`);
-      if (workspace.metadata?.[METADATA_KEY]?.main !== true) throw new Error(`Workspace ${handle.id} lacks factory metadata`);
-      return { workspaceId: handle.id };
-    },
-
     async 'paseo.workspace.metadata'(op) {
       const handle = client.workspaces.ref(op.params.workspaceId);
       const before = await handle.refresh();
@@ -403,28 +329,6 @@ export function createExecutors({ client, gh, git, paseoCli, sleep = (ms) => new
         }
         return { workspaceId, scope: scope.id };
       });
-    },
-
-    async 'paseo.workspace.retitle'(op) {
-      const { workspaceId, title } = op.params;
-      if (typeof title !== 'string' || !title.trim()) throw new Error('paseo.workspace.retitle needs a title');
-      const before = await client.workspaces.ref(workspaceId).refresh();
-      if (!before) throw new Error(`Workspace ${workspaceId} is missing`);
-      if ((before.title ?? before.name) === title) throw new Error(`Workspace ${workspaceId} is already titled ${JSON.stringify(title)}`);
-      await client.workspaces.ref(workspaceId).setTitle(title);
-      const after = await client.workspaces.ref(workspaceId).refresh();
-      if ((after?.title ?? after?.name) !== title) throw new Error(`Workspace ${workspaceId} title is ${JSON.stringify(after?.title ?? after?.name)}, expected ${JSON.stringify(title)}`);
-      return { workspaceId, title };
-    },
-
-    async 'paseo.project.rename'(op) {
-      const { projectId, name } = op.params;
-      if (typeof name !== 'string' || !name.trim()) throw new Error('paseo.project.rename needs a name');
-      paseoCli(['project', 'rename', projectId, name]);
-      const projects = await client.projects.list().then((result) => result.projects ?? []);
-      const project = projects.find((p) => p.projectId === projectId) ?? null;
-      if (project?.projectDisplayName !== name) throw new Error(`Project ${projectId} name is ${JSON.stringify(project?.projectDisplayName)}, expected ${JSON.stringify(name)}`);
-      return { projectId, name };
     },
 
     async 'agent.detach'(op) {
@@ -580,7 +484,12 @@ export function createExecutors({ client, gh, git, paseoCli, sleep = (ms) => new
   };
   return async function execute(op, config) {
     const handler = handlers[op.kind];
-    if (!handler) throw new Error(`No executor for ${op.kind}`);
+    if (!handler) {
+      if (RETIRED_KINDS.has(op.kind)) {
+        throw new Error(`Operation ${op.key} uses retired kind ${op.kind}; bulk provisioning was removed — run a new plan for one existing workspace`);
+      }
+      throw new Error(`No executor for ${op.kind}; run a new dry-run`);
+    }
     return handler(op, config);
   };
 }

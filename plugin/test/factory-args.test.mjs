@@ -1,12 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  applyPlanCheckout,
   applyPlanDomain,
   applyPlanMain,
   applyPlanName,
-  applyPlanSubject,
-  checkedRenameProject,
   normalizePlanAdopt,
   normalizePlanAdoptWorker,
   parseFactoryArgs,
@@ -40,33 +37,29 @@ test("scopes and cleanup take no address", () => {
   assert.throws(() => parseFactoryArgs("cleanup --plan"), /Unknown flag/);
 });
 
-test("plan takes repos, allow-fork and slots", () => {
-  assert.deepEqual(parseFactoryArgs("plan a/b c/d"), {
-    command: "plan",
-    repos: ["a/b", "c/d"],
-    allowFork: false,
-  });
-  assert.deepEqual(parseFactoryArgs("plan a/b --allow-fork --slots A,B"), {
+test("plan takes one repo and slots (K13: single-workspace enrollment)", () => {
+  assert.deepEqual(parseFactoryArgs("plan a/b --slots A,B"), {
     command: "plan",
     repos: ["a/b"],
-    allowFork: true,
     slots: ["A", "B"],
   });
   assert.deepEqual(parseFactoryArgs("plan a/b --slots=c,d"), {
     command: "plan",
     repos: ["a/b"],
-    allowFork: false,
     slots: ["C", "D"],
   });
-  assert.deepEqual(parseFactoryArgs("plan"), { command: "plan", repos: [], allowFork: false });
-  assert.deepEqual(parseFactoryArgs("plan --allow-fork"), {
-    command: "plan",
-    repos: [],
-    allowFork: true,
-  });
+  assert.deepEqual(parseFactoryArgs("plan"), { command: "plan", repos: [] });
+  assert.throws(() => parseFactoryArgs("plan a/b c/d"), /at most one workspace address/);
   assert.throws(() => parseFactoryArgs("plan a/b --slots A,A"), /duplicates/);
   assert.throws(() => parseFactoryArgs("plan a/b --slots AB"), /single slot letter/);
   assert.throws(() => parseFactoryArgs("plan a/b --to A"), /Unknown flag/);
+});
+
+test("retired bulk-provisioning flags fail as unknown flags (K13)", () => {
+  for (const flag of ["--allow-fork", "--checkout /tmp/x", "--subject s", "--retitle", "--rename-project P"]) {
+    assert.throws(() => parseFactoryArgs(`plan a/b ${flag}`), /Unknown flag/, flag);
+  }
+  assert.throws(() => parseFactoryArgs("plan a/b --adopt x:B=01234567"), /was retired with multi-repo plans/);
 });
 
 test("apply needs a 16-hex hash", () => {
@@ -367,7 +360,6 @@ test("plan --adopt takes legacy SLOT=<agent-id> pairs", () => {
   assert.deepEqual(parseFactoryArgs(`plan --adopt B=${id}`), {
     command: "plan",
     repos: [],
-    allowFork: false,
     adopt: { B: id },
   });
   // Lowercase slots normalize to uppercase; comma-separated and repeatable, like the CLI.
@@ -380,111 +372,66 @@ test("plan --adopt takes legacy SLOT=<agent-id> pairs", () => {
   // Bad syntax and short ids fail with the CLI message.
   assert.throws(
     () => parseFactoryArgs("plan a/b --adopt BB=01234567"),
-    /--adopt expects SLOT=<agent-id> or <scope-id>:SLOT=<agent-id>, got BB=01234567/,
+    /--adopt expects SLOT=<agent-id>, got BB=01234567/,
   );
   assert.throws(() => parseFactoryArgs("plan a/b --adopt B=xyz"), /got B=xyz/);
   assert.match(FACTORY_USAGE, /--adopt B=<agent-id>/);
 });
 
-test("plan --adopt supports scoped <scope>:SLOT=<id> pairs", () => {
+test("plan --adopt rejects scoped pairs and several entries (K13)", () => {
   const one = "01234567-89ab-cdef-0123-456789abcdef";
-  const two = "abcdef12";
-  assert.deepEqual(parseFactoryArgs(`plan one two --adopt One:B=${one} --adopt two:C=${two}`), {
-    command: "plan",
-    repos: ["one", "two"],
-    allowFork: false,
-    adoptScoped: { one: { B: one }, two: { C: two } },
-  });
-  // Mixed legacy and scoped pairs on one entry.
-  const mixed = parseFactoryArgs(`plan a/b --adopt B=${one},a/b:C=${two}`);
-  assert.deepEqual(mixed.adopt, { B: one });
-  assert.deepEqual(mixed.adoptScoped, { "a/b": { C: two } });
-  assert.throws(() => parseFactoryArgs(`plan a/b --adopt :B=${one}`), /got :B=/);
-});
-
-test("plan --adopt rejects legacy adoption with several entries", () => {
-  assert.throws(
-    () => parseFactoryArgs("plan a/b c/d --adopt B=01234567"),
-    /--adopt SLOT=<agent-id> needs exactly one repository; use --adopt <scope-id>:SLOT=<agent-id> with several entries/,
-  );
-  assert.throws(() => parseFactoryArgs("plan a/b --local /tmp --adopt B=01234567"), /needs exactly one repository/);
+  assert.throws(() => parseFactoryArgs(`plan a/b --adopt x:B=${one}`), /was retired with multi-repo plans/);
+  assert.throws(() => parseFactoryArgs(`plan a/b --adopt :B=${one}`), /was retired with multi-repo plans/);
+  assert.throws(() => parseFactoryArgs("plan a/b c/d --adopt B=01234567"), /at most one workspace address/);
+  assert.throws(() => parseFactoryArgs("plan a/b --local /tmp --adopt B=01234567"), /at most one workspace address/);
   // A bare plan (current workspace) and a single --local are one entry, so legacy fits.
   assert.deepEqual(parseFactoryArgs("plan --adopt B=01234567").adopt, { B: "01234567" });
   assert.deepEqual(parseFactoryArgs("plan --local /tmp --adopt B=01234567").adopt, { B: "01234567" });
 });
 
-test("plan --local and --checkout", () => {
-  assert.deepEqual(parseFactoryArgs("plan --local /tmp/a --local /tmp/b"), {
+test("plan --local takes one path (K13: single entry)", () => {
+  assert.deepEqual(parseFactoryArgs("plan --local /tmp/a"), {
     command: "plan",
     repos: [],
-    allowFork: false,
-    local: ["/tmp/a", "/tmp/b"],
+    local: ["/tmp/a"],
   });
-  assert.deepEqual(parseFactoryArgs("plan a/b --checkout /tmp/x"), {
-    command: "plan",
-    repos: ["a/b"],
-    allowFork: false,
-    checkout: "/tmp/x",
-  });
-  assert.throws(() => parseFactoryArgs("plan a/b c/d --checkout /tmp/x"), /--checkout needs exactly one repository entry/);
-  assert.throws(() => parseFactoryArgs('plan a/b --checkout "  "'), /--checkout needs a checkout path/);
-  assert.throws(() => parseFactoryArgs("plan --checkout"), /needs a value/);
-  assert.throws(() => parseFactoryArgs("plan a/b --checkout /tmp/x --checkout /tmp/y"), /given twice/);
+  assert.throws(() => parseFactoryArgs("plan --local /tmp/a --local /tmp/b"), /at most one workspace address/);
+  assert.throws(() => parseFactoryArgs("plan a/b --local /tmp"), /at most one workspace address/);
 });
 
-test("normalizePlanAdopt merges legacy and scoped adoption like the CLI", () => {
-  // Lowercase slots up, scopes down, '*' is the single-entry fallback.
-  assert.deepEqual(normalizePlanAdopt({ b: "01234567" }, { "Scope-X": { c: "abcdef12" } }, 1), {
-    "*": { B: "01234567" },
-    "scope-x": { C: "abcdef12" },
-  });
-  assert.deepEqual(normalizePlanAdopt({}, {}, 3), {});
-  assert.deepEqual(normalizePlanAdopt({}, { one: { A: "01234567" } }, 2), { one: { A: "01234567" } });
+test("normalizePlanAdopt validates SLOT=<agent-id> pairs like the CLI", () => {
+  assert.deepEqual(normalizePlanAdopt({ b: "01234567" }, 1), { "*": { B: "01234567" } });
+  assert.deepEqual(normalizePlanAdopt({}, 3), {});
   // Direct RPC input gets the same validation as the slash command.
-  assert.throws(() => normalizePlanAdopt({ BB: "01234567" }, {}, 1), /got BB=01234567/);
-  assert.throws(() => normalizePlanAdopt({ B: "xyz" }, {}, 1), /got B=xyz/);
-  assert.throws(() => normalizePlanAdopt({ B: "01234567" }, {}, 2), /needs exactly one repository/);
+  assert.throws(() => normalizePlanAdopt({ BB: "01234567" }, 1), /got BB=01234567/);
+  assert.throws(() => normalizePlanAdopt({ B: "xyz" }, 1), /got B=xyz/);
+  assert.throws(() => normalizePlanAdopt({ B: "01234567" }, 2), /needs exactly one workspace entry/);
 });
 
-test("applyPlanCheckout attaches like the CLI", () => {
-  assert.deepEqual(applyPlanCheckout(["a/b"], "/x"), [{ repo: "a/b", checkout: "/x" }]);
-  assert.deepEqual(applyPlanCheckout([{ local: "/p/demo" }], "/x"), [{ local: "/p/demo", checkout: "/x" }]);
-  assert.throws(() => applyPlanCheckout(["a", "b"], "/x"), /--checkout needs exactly one repository entry/);
-  assert.throws(() => applyPlanCheckout(["a/b"], "  "), /--checkout needs a checkout path/);
-  assert.throws(() => applyPlanCheckout([{ repo: "a/b", checkout: "/y" }], "/x"), /conflicts with the entry "checkout"/);
-  assert.throws(() => applyPlanCheckout([{ repo: "a/b", main: "workspace:wks_1" }], "/x"), /conflicts with the entry "main"/);
-});
-
-test("plan --name, --subject, --main and --domain attach to one entry", () => {
+test("plan --name, --main and --domain attach to one entry", () => {
   assert.deepEqual(parseFactoryArgs("plan --local /tmp/a --name demo"), {
     command: "plan",
     repos: [],
-    allowFork: false,
     local: ["/tmp/a"],
     name: "demo",
   });
-  assert.deepEqual(parseFactoryArgs('plan a/b --subject "Ship 2.0"').subject, "Ship 2.0");
   assert.deepEqual(parseFactoryArgs("plan a/b --main workspace:wks_123").main, "workspace:wks_123");
   assert.deepEqual(parseFactoryArgs("plan a/b --domain my-domain").domain, "my-domain");
   // A bare plan (current workspace) is one entry, so single-entry flags fit.
-  assert.deepEqual(parseFactoryArgs("plan --name demo --subject s --retitle"), {
+  assert.deepEqual(parseFactoryArgs("plan --name demo --detach"), {
     command: "plan",
     repos: [],
-    allowFork: false,
     name: "demo",
-    subject: "s",
-    retitle: true,
+    detach: true,
   });
-  assert.throws(() => parseFactoryArgs("plan a/b c/d --name x"), /--name needs exactly one repository entry/);
-  assert.throws(() => parseFactoryArgs("plan a/b c/d --subject x"), /--subject needs exactly one repository entry/);
-  assert.throws(() => parseFactoryArgs("plan a/b c/d --main workspace:wks_1"), /--main needs exactly one repository entry/);
-  assert.throws(() => parseFactoryArgs("plan a/b c/d --domain d"), /--domain needs exactly one repository entry/);
-  assert.throws(() => parseFactoryArgs("plan a/b --local /tmp --domain d"), /--domain needs exactly one repository entry/);
+  assert.throws(() => parseFactoryArgs("plan a/b c/d --name x"), /at most one workspace address/);
+  assert.throws(() => parseFactoryArgs("plan a/b c/d --main workspace:wks_1"), /at most one workspace address/);
+  assert.throws(() => parseFactoryArgs("plan a/b c/d --domain d"), /at most one workspace address/);
+  assert.throws(() => parseFactoryArgs("plan a/b --local /tmp --domain d"), /at most one workspace address/);
   assert.throws(() => parseFactoryArgs("plan a/b --main"), /needs a value/);
   assert.throws(() => parseFactoryArgs('plan a/b --main "  "'), /--main needs a workspace id/);
   assert.throws(() => parseFactoryArgs("plan a/b --name x --name y"), /given twice/);
   assert.match(FACTORY_USAGE, /--name <id>/);
-  assert.match(FACTORY_USAGE, /--subject <text>/);
   assert.match(FACTORY_USAGE, /--main workspace:<id>/);
   assert.match(FACTORY_USAGE, /--domain <id>/);
 });
@@ -497,24 +444,18 @@ test('plan --domain "" clears the pointer', () => {
   assert.throws(() => parseFactoryArgs("plan a/b --domain"), /needs a value/);
   // Other flags still reject an explicit empty string.
   assert.throws(() => parseFactoryArgs('plan a/b --name ""'), /needs a value/);
-  assert.throws(() => parseFactoryArgs('plan a/b --subject ""'), /needs a value/);
 });
 
-test("plan --hub plans hub-kind scopes and counts as entries", () => {
+test("plan --hub plans one hub-kind scope (K13: single entry)", () => {
   assert.deepEqual(parseFactoryArgs("plan --hub /data/hub"), {
     command: "plan",
     repos: [],
-    allowFork: false,
     hub: ["/data/hub"],
   });
-  assert.deepEqual(parseFactoryArgs("plan --hub /data/a --hub workspace:wks_123").hub, ["/data/a", "workspace:wks_123"]);
-  assert.deepEqual(parseFactoryArgs("plan a/b --hub /data/h").hub, ["/data/h"]);
-  // A single hub entry takes legacy --adopt and single-entry flags like any entry.
   assert.deepEqual(parseFactoryArgs("plan --hub /data/h --adopt B=01234567").adopt, { B: "01234567" });
-  // Hub flags join the entry count: two entries reject legacy --adopt and single-entry flags.
-  assert.throws(() => parseFactoryArgs("plan a/b --hub /data/h --adopt B=01234567"), /needs exactly one repository/);
-  assert.throws(() => parseFactoryArgs("plan --hub /data/a --hub /data/b --adopt B=01234567"), /needs exactly one repository/);
-  assert.throws(() => parseFactoryArgs("plan a/b --hub /data/h --domain d"), /--domain needs exactly one repository entry/);
+  assert.throws(() => parseFactoryArgs("plan --hub /data/a --hub /data/b"), /at most one workspace address/);
+  assert.throws(() => parseFactoryArgs("plan a/b --hub /data/h"), /at most one workspace address/);
+  assert.throws(() => parseFactoryArgs("plan a/b --hub /data/h --adopt B=01234567"), /at most one workspace address/);
   assert.throws(() => parseFactoryArgs("plan --hub"), /needs a value/);
   assert.match(FACTORY_USAGE, /--hub <path\|workspace:id>/);
 });
@@ -529,51 +470,37 @@ test("plan --adopt-worker takes agent ids with optional slots", () => {
     { [one]: "A", abcdef12: null, "00112233": "C" },
   );
   assert.deepEqual(parseFactoryArgs(`plan --adopt-worker ${one}`).adoptWorker, { [one]: null });
-  assert.throws(() => parseFactoryArgs("plan a/b c/d --adopt-worker 01234567"), /--adopt-worker needs exactly one repository entry/);
-  assert.throws(() => parseFactoryArgs("plan a/b --local /tmp --adopt-worker 01234567"), /needs exactly one repository entry/);
+  assert.throws(() => parseFactoryArgs("plan a/b c/d --adopt-worker 01234567"), /at most one workspace address/);
+  assert.throws(() => parseFactoryArgs("plan a/b --local /tmp --adopt-worker 01234567"), /at most one workspace address/);
   assert.throws(() => parseFactoryArgs("plan a/b --adopt-worker xyz"), /--adopt-worker expects <agent-id>\[@<slot>\], got xyz/);
   assert.throws(() => parseFactoryArgs("plan a/b --adopt-worker 01234567@BB"), /got 01234567@BB/);
   assert.throws(() => parseFactoryArgs("plan a/b --adopt-worker"), /needs a value/);
   assert.match(FACTORY_USAGE, /--adopt-worker <agent-id>\[@A\]/);
 });
 
-test("plan --detach, --retitle and --rename-project", () => {
-  assert.deepEqual(parseFactoryArgs("plan a/b --detach --retitle"), {
+test("plan --detach", () => {
+  assert.deepEqual(parseFactoryArgs("plan a/b --detach"), {
     command: "plan",
     repos: ["a/b"],
-    allowFork: false,
     detach: true,
-    retitle: true,
   });
-  assert.deepEqual(parseFactoryArgs('plan a/b --rename-project "My Project"').renameProject, "My Project");
-  assert.deepEqual(parseFactoryArgs('plan a/b --rename-project "  Padded  "').renameProject, "Padded");
-  assert.deepEqual(parseFactoryArgs("plan --retitle").retitle, true);
-  assert.throws(() => parseFactoryArgs("plan a/b c/d --rename-project P"), /--rename-project needs exactly one repository entry/);
-  assert.throws(() => parseFactoryArgs('plan a/b --rename-project "  "'), /--rename-project needs a project name/);
-  assert.throws(() => parseFactoryArgs("plan a/b --rename-project"), /needs a value/);
+  assert.deepEqual(parseFactoryArgs("plan --detach").detach, true);
   assert.throws(() => parseFactoryArgs("plan a/b --detach=x"), /takes no value/);
-  assert.throws(() => parseFactoryArgs("plan a/b --retitle=x"), /takes no value/);
   assert.match(FACTORY_USAGE, /--detach/);
-  assert.match(FACTORY_USAGE, /--retitle/);
-  assert.match(FACTORY_USAGE, /--rename-project <name>/);
 });
 
-test("applyPlanName, applyPlanSubject, applyPlanMain and applyPlanDomain attach like the CLI", () => {
+test("applyPlanName, applyPlanMain and applyPlanDomain attach like the CLI", () => {
   assert.deepEqual(applyPlanName([{ local: "/p/demo" }], "demo"), [{ local: "/p/demo", name: "demo" }]);
   assert.deepEqual(applyPlanName(["a/b"], "demo"), [{ repo: "a/b", name: "demo" }]);
-  assert.deepEqual(applyPlanSubject(["a/b"], "s"), [{ repo: "a/b", subject: "s" }]);
   assert.deepEqual(applyPlanMain(["a/b"], "workspace:wks_1"), [{ repo: "a/b", main: "workspace:wks_1" }]);
   assert.deepEqual(applyPlanDomain(["a/b"], "dom"), [{ repo: "a/b", domain: "dom" }]);
   assert.deepEqual(applyPlanDomain(["a/b"], ""), [{ repo: "a/b", domain: "" }]);
-  assert.throws(() => applyPlanName(["a", "b"], "x"), /--name needs exactly one repository entry/);
-  assert.throws(() => applyPlanSubject(["a", "b"], "x"), /--subject needs exactly one repository entry/);
-  assert.throws(() => applyPlanMain(["a", "b"], "workspace:wks_1"), /--main needs exactly one repository entry/);
-  assert.throws(() => applyPlanDomain(["a", "b"], "x"), /--domain needs exactly one repository entry/);
+  assert.throws(() => applyPlanName(["a", "b"], "x"), /--name needs exactly one workspace entry/);
+  assert.throws(() => applyPlanMain(["a", "b"], "workspace:wks_1"), /--main needs exactly one workspace entry/);
+  assert.throws(() => applyPlanDomain(["a", "b"], "x"), /--domain needs exactly one workspace entry/);
   assert.throws(() => applyPlanMain(["a/b"], "  "), /--main needs a workspace id/);
   assert.throws(() => applyPlanName([{ repo: "a/b", name: "x" }], "y"), /conflicts with the entry "name"/);
-  assert.throws(() => applyPlanSubject([{ repo: "a/b", subject: "x" }], "y"), /conflicts with the entry "subject"/);
   assert.throws(() => applyPlanMain([{ repo: "a/b", main: "workspace:wks_1" }], "workspace:wks_2"), /conflicts with the entry "main"/);
-  assert.throws(() => applyPlanMain([{ repo: "a/b", checkout: "/x" }], "workspace:wks_1"), /conflicts with the entry "checkout"/);
   assert.throws(() => applyPlanDomain([{ repo: "a/b", domain: "x" }], "y"), /conflicts with the entry "domain"/);
 });
 
@@ -587,12 +514,5 @@ test("splitAdoptWorkerPairs and normalizePlanAdoptWorker validate like the CLI",
   assert.throws(() => splitAdoptWorkerPairs([`${one}@BB`]), /got .*@BB/);
   assert.throws(() => normalizePlanAdoptWorker({ B: "01234567" }, 1), /got B@01234567/);
   assert.throws(() => normalizePlanAdoptWorker({ "01234567": "BB" }, 1), /got 01234567@BB/);
-  assert.throws(() => normalizePlanAdoptWorker({ "01234567": null }, 2), /needs exactly one repository entry/);
-});
-
-test("checkedRenameProject validates like the CLI", () => {
-  assert.equal(checkedRenameProject(undefined, 1), null);
-  assert.equal(checkedRenameProject("  P  ", 1), "P");
-  assert.throws(() => checkedRenameProject("P", 2), /needs exactly one repository entry/);
-  assert.throws(() => checkedRenameProject("  ", 1), /needs a project name/);
+  assert.throws(() => normalizePlanAdoptWorker({ "01234567": null }, 2), /needs exactly one workspace entry/);
 });

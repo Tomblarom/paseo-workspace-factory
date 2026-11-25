@@ -3,13 +3,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { parseRepoInput, resolveGitHub, GitHubNotFound } from '../src/github.mjs';
-import { scanCheckouts, classifyCheckouts, isWithin, inspectCloneTarget } from '../src/local.mjs';
+import { scanCheckouts, classifyCheckouts } from '../src/local.mjs';
 import { validateConfig, validateProfilesAgainstCatalog } from '../src/config.mjs';
 import { planHash } from '../src/planner.mjs';
 import { createRunner } from '../src/factory.mjs';
 import { applyPlans, createExecutors, createAuthorization, memoryProgress, storeAuthorization, fileProgress, withApplyLock, ApplyRefused } from '../src/apply.mjs';
 import { verifyCleanup, performCleanup } from './integration-cleanup.mjs';
-import { WORKSPACE_REF } from '../src/planner.mjs';
 import { switchSteer, steerStatus, SwitchRefused, writeCheckpoint, CHECKPOINT_KEY, parseCheckpointBlock, buildHandoff } from '../src/steer.mjs';
 import { configureRuntime, daemonHost } from '../src/runtime.mjs';
 import { defaultConfigPath } from '../src/config.mjs';
@@ -66,9 +65,6 @@ function makeWorld() {
     },
     forks: {},
     checkouts: {}, // path -> { remotes, linkedWorktree }
-    occupied: new Set(),
-    inodes: {},
-    symlinks: new Set(),
     projects: [],
     workspaces: [],
     agents: [],
@@ -171,7 +167,7 @@ function addAgent(world, fields) {
 }
 
 function fakeClient(world) {
-  const findWs = (id) => world.workspaces.find((w) => w.id === id) ?? world.hiddenWorkspaces?.find((w) => w.id === id) ?? null;
+  const findWs = (id) => world.workspaces.find((w) => w.id === id) ?? null;
   const findAgent = (id) => world.agents.find((a) => a.id === id) ?? null;
   const createAgent = (opts) => {
     world.calls.push(['agent.create', opts]);
@@ -226,18 +222,8 @@ function fakeClient(world) {
   return {
     workspaces: {
       ref: workspaceHandle,
-      create: async ({ source, title, metadata, idempotencyKey }) => {
-        world.calls.push(['workspace.create', { source, title, metadata, idempotencyKey }]);
-        const fingerprint = JSON.stringify({ source, title, metadata });
-        if (world.receipts.has(idempotencyKey)) {
-          if (world.fingerprints.get(idempotencyKey) !== fingerprint) throw new Error('workspace_request_key_conflict');
-          return workspaceHandle(world.receipts.get(idempotencyKey));
-        }
-        const workspace = addWorkspace(world, { path: source.path, title, metadata });
-        world.receipts.set(idempotencyKey, workspace.id);
-        world.fingerprints.set(idempotencyKey, fingerprint);
-        return workspaceHandle(workspace.id);
-      },
+      // K13: workspace creation is retired (enrollment adopts existing ones).
+      create: async () => { throw new Error('workspaces.create retired (K13)'); },
       archive: async (id) => {
         world.calls.push(['workspace.archive', id]);
         return { workspaceId: id };
@@ -250,14 +236,7 @@ function fakeClient(world) {
 function fakePaseoCli(world) {
   return (args) => {
     world.calls.push(['paseo', ...args]);
-    if (args[0] === 'clone') {
-      const [, repo, , parentDir] = args;
-      const path = `${parentDir}/${repo.split('/')[1]}`;
-      world.checkouts[path] = { remotes: { origin: `https://github.com/${repo}.git` } };
-      if (world.hooks.cloneWithoutProject) return { checkoutPath: path, projectId: 'prj_lost' };
-      return { checkoutPath: path, projectId: addProject(world, path).projectId };
-    }
-    if (args[0] === 'project') return { projectId: addProject(world, args[2]).projectId, path: args[2] };
+    // K13: clone/project provisioning is retired; only agent labelling remains.
     if (args[0] === 'agent' && args[1] === 'update') {
       const agent = world.agents.find((a) => a.id === args[2]);
       for (const pair of args[4].split(',')) {
@@ -267,20 +246,6 @@ function fakePaseoCli(world) {
       return { id: agent.id };
     }
     throw new Error(`unexpected paseo ${args.join(' ')}`);
-  };
-}
-
-/** Filesystem view of the simulated world (same answers at plan and apply time). */
-function worldFs(world) {
-  const enoent = () => Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
-  const exists = (p) => p === '/p' || world.occupied.has(p) || world.symlinks.has(p) || p in world.checkouts || Object.keys(world.checkouts).some((c) => c.startsWith(`${p}/`));
-  return {
-    lstatSync: (p, opts) => {
-      if (!exists(p)) throw enoent();
-      const ino = world.inodes[p] ?? 7;
-      return { isSymbolicLink: () => world.symlinks.has(p), isDirectory: () => !world.symlinks.has(p), dev: opts?.bigint ? 1n : 1, ino: opts?.bigint ? BigInt(ino) : ino };
-    },
-    realpathSync: (p) => p,
   };
 }
 
@@ -308,7 +273,6 @@ function runnerFor(world, config = CONFIG) {
     git: fakeGit(world),
     readState: async () => structuredClone({ projects: world.projects, workspaces: world.workspaces, agents: world.agents, providers: world.providers }),
     scan: worldScan(world),
-    inspectTarget: (root, parentDir, expectedPath) => inspectCloneTarget(root, parentDir, expectedPath, worldFs(world)),
     realpath: (p) => p,
   });
 }
@@ -318,17 +282,17 @@ async function plan(world, entries = [FIRMWARE], options = {}) {
 }
 
 function executorsFor(world) {
-  return createExecutors({ client: fakeClient(world), gh: fakeGh(world), git: fakeGit(world), paseoCli: fakePaseoCli(world), sleep: async () => {}, fs: worldFs(world) });
+  return createExecutors({ client: fakeClient(world), paseoCli: fakePaseoCli(world) });
 }
 
-async function authorize(world, entries = [FIRMWARE], { config = CONFIG, allowFork = false, adopt = {}, slots } = {}) {
-  const plans = await runnerFor(world, config).runPlans(entries, { allowFork, adopt, ...(slots ? { slots } : {}) });
-  return createAuthorization(plans, config, { entries, allowFork, adopt, ...(slots ? { slots } : {}) });
+async function authorize(world, entries = [FIRMWARE], { config = CONFIG, adopt = {}, slots } = {}) {
+  const plans = await runnerFor(world, config).runPlans(entries, { adopt, ...(slots ? { slots } : {}) });
+  return createAuthorization(plans, config, { entries, adopt, ...(slots ? { slots } : {}) });
 }
 
 /** Dry-run + confirm + apply; `tamper` rewrites what rediscovery observes. */
-async function apply(world, entries = [FIRMWARE], { config = CONFIG, allowFork = false, adopt = {}, slots, journal, authorization, progress, tamper, execute } = {}) {
-  const auth = authorization ?? (await authorize(world, entries, { config, allowFork, adopt, ...(slots ? { slots } : {}) }));
+async function apply(world, entries = [FIRMWARE], { config = CONFIG, adopt = {}, slots, journal, authorization, progress, tamper, execute } = {}) {
+  const auth = authorization ?? (await authorize(world, entries, { config, adopt, ...(slots ? { slots } : {}) }));
   const runner = runnerFor(world, config);
   return applyPlans({
     authorization: auth, config, confirm: auth.hash, progress, journal, lookupReceipt: fakeLookup(world),
@@ -349,6 +313,12 @@ function provisioned(world) {
     steers[slot] = addAgent(world, { provider, model, title: `Steer ${slot}`, workspaceId: ws.id, labels: { [LABEL.repo]: FIRMWARE, [LABEL.role]: 'steer', [LABEL.slot]: slot } });
   }
   return { ws, steers };
+}
+
+/** K13: a natively prepared firmware checkout + Main workspace, ready to enroll (no factory metadata yet). */
+function githubMain(world, { title = 'Main', metadata = {} } = {}) {
+  world.checkouts['/p/example-repo'] = { remotes: { origin: `https://github.com/${FIRMWARE}.git`, upstream: `https://github.com/${FW_PARENT}.git` } };
+  return addWorkspace(world, { path: '/p/example-repo', title, metadata });
 }
 
 const keys = (p) => p.ops.map((op) => op.key);
@@ -450,26 +420,20 @@ test('only origin == fork is reusable; fork under another remote or upstream clo
   assert.deepEqual(related.map((c) => c.path), ['/p/other-remote', '/p/source']);
 });
 
-test('path containment rejects traversal and sibling prefixes', () => {
-  assert.equal(isWithin('/p', '/p/a/b'), true);
-  assert.equal(isWithin('/p', '/p'), true);
-  assert.equal(isWithin('/p', '/p/../etc'), false);
-  assert.equal(isWithin('/p', '/px/a'), false);
-});
+// ---------------------------------------------------------------- planning (K13: enrollment + repair)
 
-// ---------------------------------------------------------------- planning
-
-test('fresh repository: clone, upstream remote, main workspace, three parent-free steers', async () => {
-  const [p] = await plan(makeWorld());
+test('enrollment adopts the Main workspace and plans three parent-free steers', async () => {
+  const world = makeWorld();
+  const ws = githubMain(world);
+  const [p] = await plan(world);
   assert.equal(p.status, 'pending');
-  assert.deepEqual(keys(p), ['checkout.clone', 'checkout.upstream-remote', 'workspace.main', 'steer.A', 'steer.B', 'steer.C']);
+  assert.deepEqual(keys(p), ['workspace.main.adopt', 'steer.A', 'steer.B', 'steer.C']);
   const steer = p.ops.find((op) => op.key === 'steer.A').params;
   assert.equal(steer.title, 'Steer A');
+  assert.equal(steer.workspaceId, ws.id);
   assert.equal('parent' in steer, false);
   assert.equal('prompt' in steer, false);
   assert.deepEqual(steer.config, { provider: 'codex/gpt-6.2-sol', modeId: 'full-access', thinkingOptionId: 'high' });
-  assert.equal(p.ops.find((op) => op.key === 'workspace.main').params.title, 'Main');
-  assert.equal(p.ops.find((op) => op.key === 'checkout.upstream-remote').params.url, `https://github.com/${FW_PARENT}.git`);
 });
 
 test('fully provisioned repository plans nothing', async () => {
@@ -480,50 +444,41 @@ test('fully provisioned repository plans nothing', async () => {
   assert.deepEqual(p.ops, []);
 });
 
-test('checkout without Paseo project (interrupted clone registration) registers the project', async () => {
+test('checkout without a workspace is a conflict (K13: nothing is created)', async () => {
   const world = makeWorld();
   world.checkouts['/p/example-repo'] = { remotes: { origin: `https://github.com/${FIRMWARE}`, upstream: `https://github.com/${FW_PARENT}` } };
   const [p] = await plan(world);
-  assert.deepEqual(keys(p), ['paseo.project', 'workspace.main', 'steer.A', 'steer.B', 'steer.C']);
+  assert.equal(p.status, 'conflict');
+  assert.match(p.conflicts.find((c) => c.key === 'workspace.main').reason, /No factory main workspace/);
 });
 
-test('occupied target directory is a conflict and nothing else is planned on it', async () => {
+test('missing checkout is a conflict naming the native clone', async () => {
   const world = makeWorld();
   world.checkouts['/p/example-repo'] = { remotes: { origin: `https://github.com/${FW_SOURCE}` } };
   const [p] = await plan(world);
   assert.equal(p.status, 'conflict');
-  assert.match(p.conflicts[0].reason, /already exists/);
-  world.checkouts = {};
-  world.occupied.add('/p/example-repo');
-  assert.equal((await plan(world))[0].status, 'conflict');
+  assert.match(p.conflicts.find((c) => c.key === 'checkout').reason, /No checkout with origin/);
+  const empty = makeWorld();
+  const [q] = await plan(empty);
+  assert.equal(q.status, 'conflict');
+  assert.match(q.conflicts.find((c) => c.key === 'checkout').reason, /No checkout with origin/);
 });
 
-test('several checkouts of the fork need an explicit choice', async () => {
+test('several checkouts of the fork name direct enrollment', async () => {
   const world = makeWorld();
   for (const path of ['/p/x/one', '/p/y/two']) world.checkouts[path] = { remotes: { origin: `https://github.com/${FIRMWARE}`, upstream: `https://github.com/${FW_PARENT}` } };
   const [p] = await plan(world);
   assert.equal(p.status, 'conflict');
   assert.deepEqual(p.ops, []);
-  const [chosen] = await plan(world, [{ repo: FIRMWARE, checkout: '/p/y/two' }]);
-  assert.equal(chosen.ops.find((op) => op.key === 'workspace.main').params.path, '/p/y/two');
+  assert.match(p.conflicts[0].reason, /workspace:<id> or --local <path>/);
 });
 
-test('upstream remote: missing is added, a different URL is a conflict', async () => {
-  const world = makeWorld();
-  world.checkouts['/p/example-repo'] = { remotes: { origin: `git@github.com:${FIRMWARE}.git` } };
-  addProject(world, '/p/example-repo');
-  assert.ok(keys((await plan(world))[0]).includes('checkout.upstream-remote'));
-  world.checkouts['/p/example-repo'].remotes.upstream = `https://github.com/${FW_SOURCE}`;
-  const [p] = await plan(world);
-  assert.equal(p.conflicts[0].key, 'checkout.upstream-remote');
-});
-
-test('two main workspaces on the checkout are a conflict; task workspaces are not adopted', async () => {
+test('two main workspaces on the checkout are a conflict; task workspaces are only noted', async () => {
   const world = makeWorld();
   world.checkouts['/p/example-repo'] = { remotes: { origin: `https://github.com/${FIRMWARE}`, upstream: `https://github.com/${FW_PARENT}` } };
   addWorkspace(world, { path: '/p/example-repo', title: 'Fix spindle PWM' });
   let [p] = await plan(world);
-  assert.equal(p.ops.find((op) => op.key === 'workspace.main').kind, 'paseo.workspace.create');
+  assert.equal(p.conflicts.find((c) => c.key === 'workspace.main').reason.includes('No factory main workspace'), true);
   assert.ok(p.notes.some((n) => n.includes('Fix spindle PWM')));
   addWorkspace(world, { path: '/p/example-repo', title: 'Main' });
   addWorkspace(world, { path: '/p/example-repo', title: 'example-repo · Main' });
@@ -571,13 +526,13 @@ test('unlabelled "Steer A" is only a candidate: no adoption without explicit con
   assert.equal(p.ops.some((op) => op.key === 'steer.A'), false);
 });
 
-test('confirmed adoption labels the candidate without renaming it and reports model drift', async () => {
+test('confirmed adoption labels the candidate without renaming it (K13: no drift note)', async () => {
   const { world, created: [legacy] } = legacyWorld([{ title: 'Steer A' }]);
   const adopt = { '*': { A: legacy.id } };
   const [p] = await plan(world, [FIRMWARE], { adopt });
   const op = p.ops.find((o) => o.key === 'steer.A');
   assert.equal(op.kind, 'paseo.agent.adopt');
-  assert.ok(p.notes.some((n) => n.includes('claude/claude-opus-5-5')));
+  assert.ok(!p.notes.some((n) => n.includes('claude/claude-opus-5-5')), 'K13 keeps the live model silently');
   const { report } = await apply(world, [FIRMWARE], { adopt });
   assert.equal(report[0].status, 'complete', report[0].error);
   const update = world.calls.find((c) => c[0] === 'paseo' && c[1] === 'agent');
@@ -611,13 +566,13 @@ test('invalid or ambiguous adoption is refused', async () => {
   assert.equal(p.ops.find((o) => o.key === 'steer.A').kind, 'paseo.agent.create');
 });
 
-test('labelled steer with a changed model configuration is reused, only reported', async () => {
+test('labelled steer with a changed model configuration is reused silently (K13)', async () => {
   const world = makeWorld();
   const { steers } = provisioned(world);
   steers.A.model = 'gpt-6.1-sol';
   const [p] = await plan(world);
   assert.equal(p.status, 'complete');
-  assert.ok(p.notes.some((n) => n.includes('codex/gpt-6.1-sol') && n.includes('kept, no recreation')));
+  assert.ok(!p.notes.some((n) => n.includes('codex/gpt-6.1-sol')), 'K13: no drift note');
 });
 
 test('steer outside the main workspace and duplicate slot labels are conflicts', async () => {
@@ -640,6 +595,7 @@ test('archived steer slot is recreated under a new idempotency generation', asyn
 
 test('profiles are validated against the live provider catalog per slot', async () => {
   const world = makeWorld();
+  githubMain(world);
   world.providers.find((e) => e.provider === 'muse').modes = [{ id: 'onRequest' }];
   const [p] = await plan(world);
   assert.deepEqual(p.conflicts.map((c) => c.key), [], 'slot B falls back to the next startable profile instead of conflicting');
@@ -650,6 +606,7 @@ test('profiles are validated against the live provider catalog per slot', async 
 
 test('steer slots conflict with the tried reasons only when no fallback is startable', async () => {
   const world = makeWorld();
+  githubMain(world);
   for (const e of world.providers) e.modes = [];
   const [p] = await plan(world);
   assert.equal(p.status, 'conflict');
@@ -660,18 +617,20 @@ test('steer slots conflict with the tried reasons only when no fallback is start
 test('role is independent of provider: a different slot assignment only changes the profile', async () => {
   const config = structuredClone(CONFIG);
   config.steers.slots = { A: 'agy', B: 'sol', C: 'muse' };
-  const [p] = await plan(makeWorld(), [FIRMWARE], { config });
+  const world = makeWorld();
+  githubMain(world);
+  const [p] = await plan(world, [FIRMWARE], { config });
   assert.equal(p.ops.find((op) => op.key === 'steer.A').params.config.provider, 'antigravity/gemini-3.8-flash-high');
   assert.equal(p.ops.find((op) => op.key === 'steer.A').params.title, 'Steer A');
 });
 
-test('missing fork needs --allow-fork', async () => {
+test('missing fork is a conflict naming the native fork (K13: no --allow-fork)', async () => {
   const world = makeWorld();
   delete world.repos[FIRMWARE];
-  let [p] = await plan(world, [FW_PARENT]);
+  const [p] = await plan(world, [FW_PARENT]);
   assert.equal(p.conflicts[0].key, 'github.fork');
-  [p] = await plan(world, [FW_PARENT], { allowFork: true });
-  assert.equal(p.ops[0].kind, 'github.fork');
+  assert.match(p.conflicts[0].reason, /create it natively/);
+  assert.ok(!p.ops.some((o) => o.kind === 'github.fork'));
 });
 
 test('workers of the steers are reported even in other worktree workspaces', async () => {
@@ -697,6 +656,7 @@ test('plan hash is stable for the same state and changes with config', async () 
 
 test('apply refuses without the stored hash, after config change or after state drift', async () => {
   const world = makeWorld();
+  githubMain(world);
   const auth = await authorize(world);
   const runner = runnerFor(world);
   const args = { authorization: auth, config: CONFIG, runPlans: (l, o) => runner.runPlans(l, o), execute: executorsFor(world) };
@@ -706,27 +666,27 @@ test('apply refuses without the stored hash, after config change or after state 
   changed.profiles.muse.model = 'muse-spark-1.2';
   await assert.rejects(applyPlans({ ...args, config: changed, confirm: auth.hash }), /does not match the current config/);
   const tampered = structuredClone(auth);
-  tampered.plans[0].ops[0].params.parentDir = '/p/elsewhere';
+  tampered.plans[0].ops.find((o) => o.key === 'steer.A').params.title = 'Steer Evil';
   await assert.rejects(applyPlans({ ...args, authorization: tampered, confirm: auth.hash }), /altered/);
-  world.checkouts['/p/example-repo'] = { remotes: { origin: `https://github.com/${FIRMWARE}` } }; // someone cloned meanwhile
+  addAgent(world, { title: 'Steer A', provider: 'codex', model: 'gpt-6.2-sol', workspaceId: world.workspaces[0].id }); // candidate meanwhile
   await assert.rejects(applyPlans({ ...args, confirm: auth.hash }), /State changed since the dry-run/);
-  assert.equal(world.calls.filter((c) => !['gh', 'git'].includes(c[0])).length, 0, 'no writes');
+  assert.equal(world.calls.filter((c) => c[0] === 'agent.create' || c[0] === 'workspace.setMetadata').length, 0, 'no writes');
 });
 
-test('apply provisions end to end, verifies parent freedom, and a rerun is a no-op', async () => {
+test('apply enrolls end to end, verifies parent freedom, and a rerun is a no-op', async () => {
   const world = makeWorld();
+  githubMain(world);
   const events = [];
   const { report } = await apply(world, [FIRMWARE], { journal: (e) => events.push(e) });
   assert.equal(report[0].status, 'complete', report[0].error);
-  assert.deepEqual(report[0].executed.map((e) => e.key), ['checkout.clone', 'checkout.upstream-remote', 'workspace.main', 'steer.A', 'steer.B', 'steer.C']);
+  assert.deepEqual(report[0].executed.map((e) => e.key), ['workspace.main.adopt', 'steer.A', 'steer.B', 'steer.C']);
   const steers = world.agents.filter((a) => a.labels[LABEL.role] === 'steer');
   assert.equal(steers.length, 3);
   assert.ok(steers.every((a) => !(PARENT_LABEL in a.labels)));
   const creates = world.calls.filter((c) => c[0] === 'agent.create').map((c) => c[1]);
   assert.ok(creates.every((o) => o.parent === undefined && o.prompt === undefined && o.idempotencyKey));
-  assert.deepEqual(world.checkouts['/p/example-repo'].remotes.upstream, `https://github.com/${FW_PARENT}.git`);
   assert.equal(world.workspaces[0].metadata[METADATA_KEY].activeSteer, 'A');
-  assert.equal(events.filter((e) => e.event === 'done').length, 6);
+  assert.equal(events.filter((e) => e.event === 'done').length, 4);
 
   const before = world.calls.length;
   const rerun = await apply(world);
@@ -739,11 +699,12 @@ test('apply provisions end to end, verifies parent freedom, and a rerun is a no-
 
 test('failure mid-way stops the repo; the next run continues with only the missing steps', async () => {
   const world = makeWorld();
+  githubMain(world);
   world.hooks.failCreate = (opts) => opts.title === 'Steer B';
   const first = await apply(world);
   assert.equal(first.report[0].status, 'failed');
   assert.match(first.report[0].error, /Steer B/);
-  assert.deepEqual(first.report[0].executed.map((e) => e.key), ['checkout.clone', 'checkout.upstream-remote', 'workspace.main', 'steer.A']);
+  assert.deepEqual(first.report[0].executed.map((e) => e.key), ['workspace.main.adopt', 'steer.A']);
   delete world.hooks.failCreate;
   const second = await apply(world);
   assert.deepEqual(second.report[0].executed.map((e) => e.key), ['steer.B', 'steer.C']);
@@ -752,6 +713,7 @@ test('failure mid-way stops the repo; the next run continues with only the missi
 
 test('recovery resumes the same confirmed plan with its stored progress', async () => {
   const world = makeWorld();
+  githubMain(world);
   const authorization = await authorize(world);
   const progress = memoryProgress();
   world.hooks.failCreate = (opts) => opts.title === 'Steer B';
@@ -762,7 +724,7 @@ test('recovery resumes the same confirmed plan with its stored progress', async 
   assert.equal(resumed.report[0].status, 'complete', resumed.report[0].error);
   assert.deepEqual(resumed.report[0].executed.map((e) => e.key), ['steer.B', 'steer.C']);
   const wsId = world.workspaces[0].id;
-  assert.ok(world.agents.every((a) => a.workspaceId === wsId), 'reference resolved from the verified workspace result');
+  assert.ok(world.agents.every((a) => a.workspaceId === wsId), 'steers land in the adopted workspace');
   const keys = world.calls.filter((c) => c[0] === 'agent.create').map((c) => c[1].idempotencyKey);
   const authorizedKeys = authorization.plans[0].ops.filter((o) => o.kind === 'paseo.agent.create').map((o) => o.params.idempotencyKey);
   assert.ok(keys.every((k) => authorizedKeys.includes(k)), 'executed with the authorized idempotency keys');
@@ -770,17 +732,9 @@ test('recovery resumes the same confirmed plan with its stored progress', async 
   await assert.rejects(apply(world, [FIRMWARE], { authorization: structuredClone(authorization), progress: memoryProgress() }), /State changed since the dry-run/);
 });
 
-test('clone without project registration recovers through project registration', async () => {
-  const world = makeWorld();
-  world.hooks.cloneWithoutProject = true;
-  const first = await apply(world);
-  assert.equal(first.report[0].status, 'complete');
-  assert.ok(first.report[0].executed.some((e) => e.key === 'paseo.project'));
-  assert.equal(world.projects.length, 1);
-});
-
 test('a parent appearing on a created steer is detected and stops apply', async () => {
   const world = makeWorld();
+  githubMain(world);
   world.hooks.injectParent = 'coordinator-agent';
   const { report } = await apply(world);
   assert.equal(report[0].status, 'failed');
@@ -790,10 +744,11 @@ test('a parent appearing on a created steer is detected and stops apply', async 
 
 test('an operation that was not confirmed aborts apply', async () => {
   const world = makeWorld();
+  githubMain(world);
   let step = 0;
   const { report } = await apply(world, [FIRMWARE], {
     tamper: (plans) => {
-      if (step++ > 0) plans[0].ops.unshift({ key: 'surprise', kind: 'paseo.clone', params: {} });
+      if (step++ > 0) plans[0].ops.unshift({ key: 'surprise', kind: 'labels.set', params: {} });
       return plans;
     },
   });
@@ -804,6 +759,7 @@ test('an operation that was not confirmed aborts apply', async () => {
 /** Applies with one observed field altered after the start check; nothing must be written. */
 async function applyWithObservedChange(mutate, { prepare } = {}) {
   const world = makeWorld();
+  githubMain(world);
   if (prepare) prepare(world);
   let step = 0;
   const result = await apply(world, [FIRMWARE], {
@@ -815,32 +771,22 @@ async function applyWithObservedChange(mutate, { prepare } = {}) {
   return { world, report: result.report[0] };
 }
 
-test('rediscovered parameters never extend the authorization (clone path, remotes, repo, kind)', async () => {
+test('rediscovered parameters never extend the authorization (metadata, config, repo, kind)', async () => {
   const cases = [
-    ['clone path', (p) => (p.ops[0].params.expectedPath = '/p/other/example-repo'), /expectedPath differs/],
-    ['clone parent', (p) => (p.ops[0].params.parentDir = '/p/other'), /parentDir differs/],
-    ['clone repo', (p) => (p.ops[0].params.repo = 'example-owner/evil'), /repo differs/],
-    ['repository identity', (p) => (p.repo = 'example-owner/other'), /identity changed/],
-    ['operation kind', (p) => (p.ops[0].kind = 'git.remote.add'), /kind git.remote.add instead of paseo.clone/],
+    ['adopt metadata', (p) => (p.ops[0].params.metadata[METADATA_KEY].activeSteer = 'C'), /metadata differs/, 0],
+    ['steer scope', (p) => (p.ops.find((o) => o.key === 'steer.A').params.labels['wsf.scope'] = 'evil'), /labels differs/, 1],
+    ['repository identity', (p) => (p.repo = 'example-owner/other'), /identity changed/, 0],
+    ['operation kind', (p) => (p.ops[0].kind = 'labels.set'), /kind labels.set instead of paseo.workspace.metadata/, 0],
   ];
-  for (const [name, mutate, expected] of cases) {
+  for (const [name, mutate, expected, adopted] of cases) {
     const { world, report } = await applyWithObservedChange(mutate);
     assert.equal(report.status, 'failed', name);
     assert.match(report.error, expected, name);
-    assert.equal(world.calls.filter((c) => c[0] === 'paseo').length, 0, `${name}: nothing cloned`);
+    // The adoption may have run before the tampered steer was observed, but
+    // no agent is ever created from rediscovered parameters.
+    assert.equal(world.calls.filter((c) => c[0] === 'workspace.setMetadata').length, adopted, `${name}: adoption writes`);
+    assert.equal(world.calls.filter((c) => c[0] === 'agent.create').length, 0, `${name}: no agent created`);
   }
-  // upstream remote URL drift after the clone step
-  let step = 0;
-  const world = makeWorld();
-  const { report } = await apply(world, [FIRMWARE], {
-    tamper: (plans) => {
-      const op = plans[0].ops.find((o) => o.key === 'checkout.upstream-remote');
-      if (step++ > 0 && op) op.params.url = 'https://github.com/attacker/fw.git';
-      return plans;
-    },
-  });
-  assert.match(report[0].error, /url differs/);
-  assert.equal(world.checkouts['/p/example-repo'].remotes.upstream, undefined, 'remote not added');
 });
 
 test('changed provider/model or workspace placement of a steer is refused', async () => {
@@ -852,10 +798,14 @@ test('changed provider/model or workspace placement of a steer is refused', asyn
   ];
   for (const [name, change, expected] of cases) {
     const world = makeWorld();
+    githubMain(world);
+    let step = 0;
     const { report } = await apply(world, [FIRMWARE], {
       tamper: (plans) => {
+        // Skip the start check: mutate only what the loop rediscovers.
+        if (step++ === 0) return plans;
         const op = plans[0].ops.find((o) => o.key === 'steer.A');
-        if (op && typeof op.params.workspaceId === 'string') change(op);
+        if (op) change(op);
         return plans;
       },
     });
@@ -865,46 +815,13 @@ test('changed provider/model or workspace placement of a steer is refused', asyn
   }
 });
 
-test('symbolic workspace reference resolves only from this plan\'s verified result', async () => {
-  // Someone else's Main workspace appears after the dry-run: the steer would target it.
-  const world = makeWorld();
-  const authorization = await authorize(world);
-  assert.deepEqual(authorization.plans[0].ops.find((o) => o.key === 'steer.A').params.workspaceId, WORKSPACE_REF);
-  let step = 0;
-  const { report } = await apply(world, [FIRMWARE], {
-    authorization,
-    tamper: (plans) => {
-      if (step++ === 3) {
-        // after clone + remote: a foreign Main workspace was created, so the plan skips workspace.main
-        const foreign = addWorkspace(world, { path: '/p/example-repo', title: 'Main', metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1, scope: { id: FIRMWARE, kind: 'github', locator: FIRMWARE } } } });
-        world.hooks.foreign = foreign.id;
-        return runnerFor(world).runPlans([FIRMWARE]);
-      }
-      return plans;
-    },
-  });
-  assert.equal(report[0].status, 'failed');
-  assert.match(report[0].error, /main workspace reference is unresolved/);
-  assert.equal(world.calls.filter((c) => c[0] === 'receipt.lookup').length, 0, 'a never-attempted create is not reconciled');
-  assert.equal(world.agents.length, 0);
-});
-
-test('executor guards: unsafe or changed clone targets and foreign remotes are refused', async () => {
+test('retired bulk-provisioning kinds are refused with a clear message (K13)', async () => {
   const world = makeWorld();
   const execute = executorsFor(world);
-  const guard = inspectCloneTarget('/p', '/p', '/p/example-repo', worldFs(world));
-  const clone = (params) => execute({ kind: 'paseo.clone', params: { repo: FIRMWARE, protocol: 'https', parentDir: '/p', expectedPath: '/p/example-repo', guard, ...params } }, CONFIG);
-  await assert.rejects(clone({ parentDir: '/etc', expectedPath: '/etc/example-repo' }), /unsafe/);
-  world.occupied.add('/p/example-repo');
-  await assert.rejects(clone({}), /already exists/);
-  world.occupied.clear();
-  world.inodes['/p'] = 99; // parent replaced since the dry-run
-  await assert.rejects(clone({}), /changed since the dry-run/);
-  world.checkouts['/p/r'] = { remotes: { origin: `https://github.com/${FIRMWARE}`, upstream: 'x' } };
-  await assert.rejects(execute({ kind: 'git.remote.add', params: { path: '/p/r', origin: FIRMWARE, name: 'upstream', url: 'y' } }, CONFIG), /already exists/);
-  world.checkouts['/p/s'] = { remotes: { origin: 'https://github.com/someone/else' } };
-  await assert.rejects(execute({ kind: 'git.remote.add', params: { path: '/p/s', origin: FIRMWARE, name: 'upstream', url: 'y' } }, CONFIG), /origin is/);
-  assert.equal(world.calls.filter((c) => c[0] === 'paseo' || (c[0] === 'git' && c[3] === 'remote')).length, 0);
+  for (const kind of ['github.fork', 'paseo.clone', 'git.remote.add', 'paseo.project.add', 'paseo.workspace.create', 'paseo.workspace.retitle', 'paseo.project.rename']) {
+    await assert.rejects(execute({ key: 'retired.x', kind, params: {} }, CONFIG), /retired kind .* bulk provisioning was removed/);
+  }
+  await assert.rejects(execute({ key: 'bogus.x', kind: 'bogus.kind', params: {} }, CONFIG), /No executor for bogus.kind/);
 });
 
 test('adopting a legacy steer re-checks the agent before labelling', async () => {
@@ -917,6 +834,7 @@ test('adopting a legacy steer re-checks the agent before labelling', async () =>
 
 test('apply aborted after the daemon already created a steer resumes without a duplicate', async () => {
   const world = makeWorld();
+  githubMain(world);
   world.hooks.dropResponseAfterCreate = (opts) => opts.title === 'Steer B';
   const first = await apply(world);
   assert.equal(first.report[0].status, 'failed');
@@ -930,6 +848,7 @@ test('apply aborted after the daemon already created a steer resumes without a d
 
 test('changed config after an aborted create uses a new key instead of a key conflict', async () => {
   const world = makeWorld();
+  githubMain(world);
   world.hooks.failCreate = (opts) => opts.title === 'Steer B';
   await apply(world);
   delete world.hooks.failCreate;
@@ -937,7 +856,8 @@ test('changed config after an aborted create uses a new key instead of a key con
   config.profiles.muse.mode = 'onRequest';
   const [before] = await plan(world);
   const [after] = await plan(world, [FIRMWARE], { config });
-  assert.notEqual(before.ops[0].params.idempotencyKey, after.ops[0].params.idempotencyKey);
+  const keyOf = (p) => p.ops.find((o) => o.key === 'steer.B').params.idempotencyKey;
+  assert.notEqual(keyOf(before), keyOf(after));
   const { report } = await apply(world, [FIRMWARE], { config });
   assert.equal(report[0].status, 'complete', report[0].error);
 });
@@ -1206,73 +1126,7 @@ test('guard failure prevents even the first progress write', async () => {
 });
 
 // Clone-target checks on a real temporary filesystem.
-test('clone target: canonical root, symlink components, existing targets and swapped parents', () => {
-  const base = realpathSync(mkdtempSync(join(tmpdir(), 'wsf-fs-')));
-  const root = join(base, 'projects');
-  const outside = join(base, 'outside');
-  mkdirSync(join(root, 'group'), { recursive: true });
-  mkdirSync(outside);
-  let r = inspectCloneTarget(root, join(root, 'group', 'new'), join(root, 'group', 'new', 'Repo'));
-  assert.equal(r.ok, true);
-  assert.equal(r.anchor, join(root, 'group'), 'deepest existing directory');
-  symlinkSync(outside, join(root, 'escape'));
-  r = inspectCloneTarget(root, join(root, 'escape'), join(root, 'escape', 'Repo'));
-  assert.match(r.reason, /is a symlink/);
-  r = inspectCloneTarget(root, join(root, 'escape', 'deep'), join(root, 'escape', 'deep', 'Repo'));
-  assert.match(r.reason, /is a symlink/);
-  symlinkSync(join(base, 'missing'), join(root, 'group', 'Dangling'));
-  assert.match(inspectCloneTarget(root, join(root, 'group'), join(root, 'group', 'Dangling')).reason, /already exists/);
-  assert.match(inspectCloneTarget(root, outside, join(outside, 'Repo')).reason, /not a direct child/);
-  assert.match(inspectCloneTarget(root, join(root, 'group'), join(root, 'Repo')).reason, /not a direct child/);
-  // a root that is itself reached through a symlink is canonicalized
-  symlinkSync(root, join(base, 'rootlink'));
-  r = inspectCloneTarget(join(base, 'rootlink'), join(base, 'rootlink', 'group'), join(base, 'rootlink', 'group', 'Repo'));
-  assert.equal(r.root, root);
-  // parent swapped between plan and apply: identity changes
-  const before = inspectCloneTarget(root, join(root, 'group'), join(root, 'group', 'Repo'));
-  renameSync(join(root, 'group'), join(root, 'group-old'));
-  mkdirSync(join(root, 'group'));
-  const after = inspectCloneTarget(root, join(root, 'group'), join(root, 'group', 'Repo'));
-  assert.notEqual(after.anchorId, before.anchorId);
-  rmSync(join(root, 'group'), { recursive: true });
-  symlinkSync(outside, join(root, 'group'));
-  assert.match(inspectCloneTarget(root, join(root, 'group'), join(root, 'group', 'Repo')).reason, /is a symlink/);
-  rmSync(base, { recursive: true, force: true });
-});
-
-test('clone executor on a real filesystem: swapped parent refused, symlinked result refused, good clone verified', async () => {
-  const base = realpathSync(mkdtempSync(join(tmpdir(), 'wsf-exec-')));
-  const root = join(base, 'projects');
-  mkdirSync(join(root, 'group'), { recursive: true });
-  const config = { ...CONFIG, checkoutRoot: root };
-  const expectedPath = join(root, 'group', 'example-repo');
-  const world = makeWorld();
-  let cloneMode = 'good';
-  const paseoCli = (args) => {
-    world.calls.push(['paseo', ...args]);
-    if (cloneMode === 'symlink') symlinkSync(base, expectedPath);
-    else mkdirSync(expectedPath);
-    world.checkouts[expectedPath] = { remotes: { origin: `https://github.com/${FIRMWARE}.git` } };
-    return { checkoutPath: expectedPath, projectId: 'prj_1' };
-  };
-  const execute = createExecutors({ client: fakeClient(world), gh: fakeGh(world), git: fakeGit(world), paseoCli, sleep: async () => {} });
-  const op = () => {
-    const t = inspectCloneTarget(root, join(root, 'group'), expectedPath);
-    return { kind: 'paseo.clone', params: { repo: FIRMWARE, parentDir: join(root, 'group'), protocol: 'https', expectedPath, guard: { root: t.root, anchor: t.anchor, anchorId: t.anchorId } } };
-  };
-  const planned = op();
-  renameSync(join(root, 'group'), join(root, 'group-old'));
-  mkdirSync(join(root, 'group'));
-  await assert.rejects(execute(planned, config), /changed since the dry-run/);
-  assert.equal(world.calls.length, 0, 'no clone after a parent swap');
-  cloneMode = 'symlink';
-  await assert.rejects(execute(op(), config), /not a plain directory/);
-  rmSync(expectedPath);
-  cloneMode = 'good';
-  const result = await execute(op(), config);
-  assert.equal(result.checkoutPath, expectedPath);
-  rmSync(base, { recursive: true, force: true });
-});
+// K13: clone-target inspection retired with bulk provisioning (no clone executor left).
 
 test('switch refuses changed state, busy steers, parented targets and no-ops', async () => {
   const world = makeWorld();
@@ -1363,7 +1217,9 @@ test('knownLimits extends the built-in exceptions: exact model and pattern, only
 test('knownLimits mismatch falls back with the reason instead of failing at apply', async () => {
   const config = structuredClone(CONFIG);
   config.knownLimits = [{ provider: 'codex', modelPattern: '^gpt-', field: 'thinking', reason: 'Test limit: codex rejects thinking here' }];
-  const [p] = await plan(makeWorld(), [FIRMWARE], { config });
+  const world = makeWorld();
+  githubMain(world);
+  const [p] = await plan(world, [FIRMWARE], { config });
   assert.equal(p.status, 'pending');
   assert.deepEqual(p.conflicts.map((c) => c.key), [], 'slot A falls back while another profile is startable');
   assert.ok(p.notes.some((n) => /Steer A: profile "sol" is not startable.*Test limit: codex rejects thinking here.*using fallback "muse"/.test(n)), `fallback note names the reason and the fallback: ${JSON.stringify(p.notes)}`);
@@ -1417,7 +1273,7 @@ test('runtime settings: environment beats config beats defaults; config path loo
   }
 });
 
-// ---------------------------------------------------------------- recovery of an unrecorded workspace.main
+// ---------------------------------------------------------------- recovery of an unrecorded steer create (K13: agent replay)
 
 /** Executor that dies right after (or right before) the daemon performs `key`. */
 function dyingAt(world, key, { before = false } = {}) {
@@ -1437,102 +1293,69 @@ function dyingAt(world, key, { before = false } = {}) {
   };
 }
 
-async function crashAfterWorkspaceCreate({ firstOp = false } = {}) {
+async function crashAfterSteerCreate() {
   const world = makeWorld();
-  if (firstOp) {
-    world.checkouts['/p/example-repo'] = { remotes: { origin: `https://github.com/${FIRMWARE}`, upstream: `https://github.com/${FW_PARENT}` } };
-    addProject(world, '/p/example-repo');
-  }
+  githubMain(world);
   const authorization = await authorize(world);
   const progress = memoryProgress();
-  const first = await apply(world, [FIRMWARE], { authorization, progress, execute: dyingAt(world, 'workspace.main') });
+  const first = await apply(world, [FIRMWARE], { authorization, progress, execute: dyingAt(world, 'steer.B') });
   assert.equal(first.report[0].status, 'failed');
-  assert.equal(progress.load().results[FIRMWARE]?.['workspace.main'], undefined, 'result was not stored');
-  assert.ok(progress.load().attempted.includes(`${FIRMWARE}#workspace.main`), 'the attempt was recorded');
-  assert.equal(world.workspaces.length, 1, 'the daemon did create it');
-  const key = authorization.plans[0].ops.find((o) => o.key === 'workspace.main').params.idempotencyKey;
+  assert.equal(progress.load().results[FIRMWARE]?.['steer.B'], undefined, 'result was not stored');
+  assert.ok(progress.load().attempted.includes(`${FIRMWARE}#steer.B`), 'the attempt was recorded');
+  assert.equal(world.agents.filter((a) => a.labels[LABEL.slot] === 'B').length, 1, 'the daemon did create it');
+  const key = authorization.plans[0].ops.find((o) => o.key === 'steer.B').params.idempotencyKey;
   return { world, authorization, progress, key };
 }
 
-test('crash after workspace create: resume recovers the id from the daemon receipt, no second workspace', async () => {
-  for (const firstOp of [false, true]) {
-    const { world, authorization, progress, key } = await crashAfterWorkspaceCreate({ firstOp });
-    const events = [];
-    const resumed = await apply(world, [FIRMWARE], { authorization, progress, journal: (e) => events.push(e) });
-    assert.equal(resumed.report[0].status, 'complete', resumed.report[0].error);
-    assert.equal(world.workspaces.length, 1, 'no second workspace');
-    assert.ok(world.agents.every((a) => a.workspaceId === world.workspaces[0].id));
-    assert.deepEqual(events.filter((e) => e.event === 'recovered').map((e) => e.output), [{ workspaceId: world.workspaces[0].id, recovered: true, via: 'receipt' }]);
-    assert.deepEqual(world.calls.filter((c) => c[0] === 'receipt.lookup').map((c) => c.slice(1)), [['workspace', key]]);
-    const creates = world.calls.filter((c) => c[0] === 'workspace.create').map((c) => c[1]);
-    assert.equal(creates.length, 2, 'original plus one identical confirmation');
-    assert.deepEqual(creates[1], creates[0], 'same request, same key');
-  }
+test('crash after steer create: resume recovers the id from the daemon receipt, no duplicate steer', async () => {
+  const { world, authorization, progress, key } = await crashAfterSteerCreate();
+  const events = [];
+  const resumed = await apply(world, [FIRMWARE], { authorization, progress, journal: (e) => events.push(e) });
+  assert.equal(resumed.report[0].status, 'complete', resumed.report[0].error);
+  assert.equal(world.agents.filter((a) => a.labels[LABEL.slot] === 'B').length, 1, 'no duplicate steer');
+  const recovered = events.filter((e) => e.event === 'recovered');
+  assert.equal(recovered.length, 1);
+  assert.equal(recovered[0].key, 'steer.B');
+  assert.equal(recovered[0].output.via, 'receipt');
+  assert.deepEqual(world.calls.filter((c) => c[0] === 'receipt.lookup').map((c) => c.slice(1)), [['agent', key]]);
+  const creates = world.calls.filter((c) => c[0] === 'agent.create' && c[1].title === 'Steer B').map((c) => c[1]);
+  assert.equal(creates.length, 2, 'original plus one identical confirmation');
+  assert.deepEqual(creates[1], creates[0], 'same request, same key');
 });
 
 test('crash recovery stops safely when the receipt is missing, unknown, failed, foreign or contradicted', async () => {
   const scenarios = [
-    ['receipt outcome unknown', ({ world, key }) => (world.hooks.receiptOverride = { [key]: { phase: 'failed', outcomeUnknown: true, error: 'workspace_request_outcome_unknown', workspaceId: world.workspaces[0].id } }), /unknown outcome/],
-    ['receipt failed', ({ world, key }) => (world.hooks.receiptOverride = { [key]: { phase: 'failed', error: 'provision failed', workspaceId: world.workspaces[0].id } }), /phase failed/],
-    ['receipt names another workspace', ({ world, key }) => (world.hooks.receiptOverride = { [key]: { phase: 'completed', workspaceId: 'wks_0000000000000999', workspace: { id: 'wks_0000000000000999' } } }), /receipt names wks_0000000000000999/],
-    ['receipt ambiguous', ({ world, key }) => (world.hooks.receiptOverride = { [key]: { phase: 'completed', workspaceId: world.workspaces[0].id, workspace: { id: 'wks_0000000000000998' } } }), /no unambiguous workspace/],
+    ['receipt outcome unknown', ({ world, key }) => (world.hooks.receiptOverride = { [key]: { phase: 'failed', outcomeUnknown: true, error: 'agent_request_outcome_unknown', agentId: world.agents[0].id } }), /unknown outcome/],
+    ['receipt failed', ({ world, key }) => (world.hooks.receiptOverride = { [key]: { phase: 'failed', error: 'provision failed', agentId: world.agents[0].id } }), /phase failed/],
+    ['receipt names another agent', ({ world, key }) => (world.hooks.receiptOverride = { [key]: { phase: 'completed', agentId: 'agent-999' } }), /receipt names agent-999/],
     ['receipt lookup unavailable', ({ world }) => (world.hooks.lookupFails = true), /receipt lookup failed/],
     ['identical request rejected', ({ world, key }) => world.fingerprints.set(key, 'other'), /identical request was rejected/],
-    ['identical request returns a different workspace', ({ world, key }) => {
-      const ghost = { ...structuredClone(world.workspaces[0]), id: 'wks_0000000000000777' };
-      world.hiddenWorkspaces = [ghost]; // not listed by discovery, but returned for the key
-      world.receipts.set(key, ghost.id);
-      world.hooks.receiptOverride = { [key]: { phase: 'completed', workspaceId: world.workspaces[0].id, workspace: { id: world.workspaces[0].id } } };
-    }, /identical request returned wks_0000000000000777/],
-    ['metadata changed after creation', ({ world }) => (world.workspaces[0].metadata[METADATA_KEY].activeSteer = 'C'), /different factory metadata/],
-    ['created before the dry-run', ({ world }) => (world.workspaces[0].createdAt = '2020-01-01T00:00:00.000Z'), /not created after the dry-run/],
+    ['receipt names no agent', ({ world, key }) => (world.hooks.receiptOverride = { [key]: { phase: 'completed', agentId: null } }), /names no agent/],
   ];
   for (const [name, inject, expected] of scenarios) {
-    const crash = await crashAfterWorkspaceCreate();
+    const crash = await crashAfterSteerCreate();
     inject(crash);
     const resumed = await apply(crash.world, [FIRMWARE], { authorization: crash.authorization, progress: crash.progress });
     assert.equal(resumed.report[0].status, 'failed', name);
     assert.match(resumed.report[0].error, expected, name);
-    assert.equal(crash.world.agents.length, 0, `${name}: no steer`);
-    assert.equal(crash.world.workspaces.length, 1, `${name}: no second workspace`);
   }
 });
 
-test('request that never reached the daemon: an identical-looking foreign workspace is not adopted', async () => {
+test('request that never reached the daemon: an identical-looking foreign steer is not adopted', async () => {
   const world = makeWorld();
+  githubMain(world);
   const authorization = await authorize(world);
   const progress = memoryProgress();
-  const first = await apply(world, [FIRMWARE], { authorization, progress, execute: dyingAt(world, 'workspace.main', { before: true }) });
+  const first = await apply(world, [FIRMWARE], { authorization, progress, execute: dyingAt(world, 'steer.B', { before: true }) });
   assert.equal(first.report[0].status, 'failed');
-  const wsOp = authorization.plans[0].ops.find((o) => o.key === 'workspace.main');
-  addWorkspace(world, { path: wsOp.params.path, title: wsOp.params.title, metadata: wsOp.params.metadata }); // created by someone else
+  addAgent(world, { title: 'Steer B', provider: 'muse', model: 'muse-spark-1.3-contributor', workspaceId: world.workspaces[0].id, labels: { [LABEL.repo]: FIRMWARE, [LABEL.role]: 'steer', [LABEL.slot]: 'B' } }); // created by someone else
   const resumed = await apply(world, [FIRMWARE], { authorization, progress });
   assert.match(resumed.report[0].error, /no receipt although discovery no longer lists it as pending/);
-  assert.equal(world.workspaces.length, 1);
-  assert.equal(world.calls.filter((c) => c[0] === 'workspace.create').length, 0, 'nothing re-sent without a receipt');
-  assert.equal(world.agents.length, 0);
-});
-
-test('a never-attempted workspace.main is never reconstructed', async () => {
-  const world = makeWorld();
-  const authorization = await authorize(world);
-  let step = 0;
-  const { report } = await apply(world, [FIRMWARE], {
-    authorization,
-    tamper: (plans) => {
-      if (step++ === 3) {
-        addWorkspace(world, { path: '/p/example-repo', title: 'Main', metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1, scope: { id: FIRMWARE, kind: 'github', locator: FIRMWARE } } } });
-        return runnerFor(world).runPlans([FIRMWARE]);
-      }
-      return plans;
-    },
-  });
-  assert.match(report[0].error, /main workspace reference is unresolved/);
-  assert.equal(world.calls.filter((c) => c[0] === 'receipt.lookup').length, 0);
+  assert.equal(world.calls.filter((c) => c[0] === 'agent.create' && c[1].title === 'Steer B').length, 0, 'nothing re-sent without a receipt');
 });
 
 test('resume after a crash with a changed configuration is refused before any call', async () => {
-  const { world, authorization, progress } = await crashAfterWorkspaceCreate();
+  const { world, authorization, progress } = await crashAfterSteerCreate();
   const changed = structuredClone(CONFIG);
   changed.profiles.sol.thinking = 'low';
   const before = world.calls.length;
@@ -1545,6 +1368,7 @@ test('resume after a crash with a changed configuration is refused before any ca
 /** First run: the executor marks the attempt but the request never reaches the daemon. */
 async function attemptedWithoutArrival(key) {
   const world = makeWorld();
+  githubMain(world);
   const authorization = await authorize(world);
   const progress = memoryProgress();
   await apply(world, [FIRMWARE], { authorization, progress, execute: dyingAt(world, key, { before: true }) });
@@ -1552,71 +1376,75 @@ async function attemptedWithoutArrival(key) {
   return { world, authorization, progress };
 }
 
-test('P0.1 workspace.main still pending, no receipt: one first execution, never a blind repeat', async () => {
-  const { world, authorization, progress } = await attemptedWithoutArrival('workspace.main');
-  const creates = () => world.calls.filter((c) => c[0] === 'workspace.create').length;
+test('P0.1 steer.B still pending, no receipt: one first execution, never a blind repeat', async () => {
+  const { world, authorization, progress } = await attemptedWithoutArrival('steer.B');
+  const creates = () => world.calls.filter((c) => c[0] === 'agent.create' && c[1].title === 'Steer B').length;
   assert.equal(creates(), 0, 'the request never arrived');
   const events = [];
   const resumed = await apply(world, [FIRMWARE], { authorization, progress, journal: (e) => events.push(e) });
   assert.equal(resumed.report[0].status, 'complete', resumed.report[0].error);
-  assert.ok(events.some((e) => e.event === 'retry-allowed' && e.key === 'workspace.main'));
+  assert.ok(events.some((e) => e.event === 'retry-allowed' && e.key === 'steer.B'));
   assert.equal(creates(), 1, 'exactly one create after the receipt showed nothing arrived');
-  assert.equal(world.workspaces.length, 1);
+  assert.equal(world.agents.filter((a) => a.labels[LABEL.slot] === 'B').length, 1);
 });
 
-test('P0.1 workspace.main still pending with a completed receipt: recovered, no second create', async () => {
-  const { world, authorization, progress, key } = await crashAfterWorkspaceCreate();
-  const ws = world.workspaces[0];
-  world.workspaces = []; // discovery does not list it, the daemon still has it
-  world.hiddenWorkspaces = [ws];
-  const resumed = await apply(world, [FIRMWARE], { authorization, progress });
+test('P0.1 steer.B hidden after recovery: recovered, then still-pending refuses', async () => {
+  const { world, authorization, progress, key } = await crashAfterSteerCreate();
+  const resumed = await apply(world, [FIRMWARE], {
+    authorization, progress,
+    journal: (e) => {
+      // Right after the reconcile records B, the daemon hides the agent from
+      // discovery (its receipt stays): the next observation then disagrees.
+      if (e.event === 'recovered' && e.key === 'steer.B') {
+        world.agents = world.agents.filter((a) => a.labels[LABEL.slot] !== 'B');
+      }
+    },
+  });
   assert.equal(resumed.report[0].status, 'failed');
   assert.match(resumed.report[0].error, /still pending after it ran/);
-  assert.equal(progress.load().results[FIRMWARE]['workspace.main'].workspaceId, ws.id, 'result recovered from the receipt');
-  assert.equal(world.calls.filter((c) => c[0] === 'workspace.create').length, 2, 'original + identical confirmation, no new object');
-  assert.equal(world.hiddenWorkspaces.length + world.workspaces.length, 1);
+  assert.equal(progress.load().results[FIRMWARE]['steer.B'].via, 'receipt', 'result recovered from the receipt first');
+  assert.equal(world.calls.filter((c) => c[0] === 'agent.create' && c[1].title === 'Steer B').length, 2, 'original + identical confirmation, no new object');
   assert.deepEqual(world.calls.filter((c) => c[0] === 'receipt.lookup').map((c) => c[2]), [key]);
 });
 
-test('P0.1 already skipped workspace: recovered before the next step, even with no ops left', async () => {
-  const { world, authorization, progress } = await crashAfterWorkspaceCreate();
-  // steers were created by a previous resume that died before recording workspace.main
+test('P0.1 already recorded steer: recovered before the next step, even with no ops left', async () => {
+  const { world, authorization, progress } = await crashAfterSteerCreate();
   const resumed = await apply(world, [FIRMWARE], { authorization, progress });
   assert.equal(resumed.report[0].status, 'complete', resumed.report[0].error);
   const stored = progress.load().results[FIRMWARE];
-  delete stored['workspace.main']; // lose it again after everything ran
+  delete stored['steer.B']; // lose it again after everything ran
   const lost = memoryProgress({ ...progress.load(), results: { [FIRMWARE]: stored } });
   const again = await apply(world, [FIRMWARE], { authorization, progress: lost });
   assert.equal(again.report[0].status, 'complete', again.report[0].error);
-  assert.equal(lost.load().results[FIRMWARE]['workspace.main'].via, 'receipt');
-  assert.equal(world.workspaces.length, 1);
+  assert.equal(lost.load().results[FIRMWARE]['steer.B'].via, 'receipt');
+  assert.equal(world.agents.filter((a) => a.labels[LABEL.slot] === 'B').length, 1);
 });
 
-test('P0.1 outcomeUnknown or failed receipt for a pending workspace.main: no replay', async () => {
-  for (const receipt of [{ phase: 'failed', outcomeUnknown: true, error: 'workspace_request_outcome_unknown' }, { phase: 'failed', error: 'provision failed' }, { phase: 'accepted' }]) {
-    const { world, authorization, progress } = await attemptedWithoutArrival('workspace.main');
-    const key = authorization.plans[0].ops.find((o) => o.key === 'workspace.main').params.idempotencyKey;
+test('P0.1 outcomeUnknown or failed receipt for a pending steer.B: no replay', async () => {
+  for (const receipt of [{ phase: 'failed', outcomeUnknown: true, error: 'agent_request_outcome_unknown' }, { phase: 'failed', error: 'provision failed' }, { phase: 'accepted' }]) {
+    const { world, authorization, progress } = await attemptedWithoutArrival('steer.B');
+    const key = authorization.plans[0].ops.find((o) => o.key === 'steer.B').params.idempotencyKey;
     world.hooks.receiptOverride = { [key]: receipt };
     const resumed = await apply(world, [FIRMWARE], { authorization, progress });
     assert.equal(resumed.report[0].status, 'failed', JSON.stringify(receipt));
     assert.match(resumed.report[0].error, /Recovery stopped/);
-    assert.equal(world.calls.filter((c) => c[0] === 'workspace.create').length, 0, 'no create at all');
+    assert.equal(world.calls.filter((c) => c[0] === 'agent.create' && c[1].title === 'Steer B').length, 0, 'no create at all');
   }
 });
 
 test('P0.1 progress without a prior attempt never adopts; agents are reconciled the same way', async () => {
-  // no attempt recorded: an observed workspace is not adopted
+  // no attempt recorded: the run executes normally and never touches receipts
   const world = makeWorld();
+  githubMain(world);
   const authorization = await authorize(world);
   const progress = memoryProgress({ hash: authorization.hash, started: true, results: {}, attempted: [] });
-  addWorkspace(world, { path: '/p/example-repo', title: 'Main', metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1 } } });
-  world.checkouts['/p/example-repo'] = { remotes: { origin: `https://github.com/${FIRMWARE}.git`, upstream: `https://github.com/${FW_PARENT}.git` } };
   const resumed = await apply(world, [FIRMWARE], { authorization, progress });
-  assert.equal(resumed.report[0].status, 'failed');
-  assert.equal(world.calls.filter((c) => c[0] === 'receipt.lookup').length, 0);
-  assert.equal(world.agents.length, 0);
+  assert.equal(resumed.report[0].status, 'complete', resumed.report[0].error);
+  assert.equal(world.calls.filter((c) => c[0] === 'receipt.lookup').length, 0, 'no reconcile without an attempt');
+  assert.equal(world.agents.length, 3);
   // steer created, result lost, discovery already sees it: receipt confirms, no duplicate
   const crash = makeWorld();
+  githubMain(crash);
   const auth = await authorize(crash);
   const prog = memoryProgress();
   await apply(crash, [FIRMWARE], { authorization: auth, progress: prog, execute: dyingAt(crash, 'steer.B') });
@@ -1626,6 +1454,7 @@ test('P0.1 progress without a prior attempt never adopts; agents are reconciled 
   assert.equal(prog.load().results[FIRMWARE]['steer.B'].via, 'receipt');
   // steer attempted, no receipt, but a steer for the slot is observed: refuse
   const odd = makeWorld();
+  githubMain(odd);
   const auth2 = await authorize(odd);
   const prog2 = memoryProgress();
   await apply(odd, [FIRMWARE], { authorization: auth2, progress: prog2, execute: dyingAt(odd, 'steer.B', { before: true }) });
@@ -1634,9 +1463,10 @@ test('P0.1 progress without a prior attempt never adopts; agents are reconciled 
   assert.match(refused.report[0].error, /no receipt although discovery no longer lists it as pending/);
 });
 
-test('P0.1 defensive paths: contradicting observation and unreconciled attempts are refused', async () => {
+test('P0.1 defensive paths: contradicting observation and failed receipt lookup are refused', async () => {
   // no receipt, discovery lists the steer as pending yet reports a steer for the slot
   const odd = makeWorld();
+  githubMain(odd);
   const auth = await authorize(odd);
   const prog = memoryProgress();
   await apply(odd, [FIRMWARE], { authorization: auth, progress: prog, execute: dyingAt(odd, 'steer.B', { before: true }) });
@@ -1649,14 +1479,15 @@ test('P0.1 defensive paths: contradicting observation and unreconciled attempts 
   });
   assert.match(res.report[0].error, /no receipt but agent-ghost is observed/);
   assert.equal(odd.agents.filter((a) => a.labels[LABEL.slot] === 'B').length, 0);
-  // a steer attempt recorded while its workspace was never attempted by this plan
+  // receipt lookup down during reconcile: nothing is repeated blindly
   const world = makeWorld();
+  githubMain(world);
   const authorization = await authorize(world);
-  const progress = memoryProgress({ hash: authorization.hash, started: true, results: {}, attempted: [`${FIRMWARE}#steer.A`] });
-  world.checkouts['/p/example-repo'] = { remotes: { origin: `https://github.com/${FIRMWARE}.git`, upstream: `https://github.com/${FW_PARENT}.git` } };
-  addWorkspace(world, { path: '/p/example-repo', title: 'Main', metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1, scope: { id: FIRMWARE, kind: 'github', locator: FIRMWARE } } } });
+  const progress = memoryProgress();
+  await apply(world, [FIRMWARE], { authorization, progress, execute: dyingAt(world, 'steer.A', { before: true }) });
+  world.hooks.lookupFails = true;
   const report = await apply(world, [FIRMWARE], { authorization, progress });
-  assert.match(report.report[0].error, /attempted before without a stored result; refusing to repeat it unverified/);
+  assert.match(report.report[0].error, /receipt lookup failed/);
   assert.equal(world.agents.length, 0);
 });
 
@@ -1665,6 +1496,7 @@ test('P0.1 defensive paths: contradicting observation and unreconciled attempts 
 test('P0.2 two concurrent applies on one plan: exactly one enters, the other fails before any mutation', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'wsf-apply-'));
   const world = makeWorld();
+  githubMain(world);
   const authorization = await authorize(world);
   const progress = memoryProgress();
   const run = () => withApplyLock((held) => apply(world, [FIRMWARE], { authorization, progress }).then((r) => (held.verify(), r)), { dir });
@@ -1673,7 +1505,7 @@ test('P0.2 two concurrent applies on one plan: exactly one enters, the other fai
   assert.match(results.find((r) => r.status === 'rejected').reason.message, /held by another process/);
   assert.equal(world.workspaces.length, 1);
   assert.equal(world.agents.length, 3);
-  assert.equal(world.calls.filter((c) => c[0] === 'paseo' && c[1] === 'clone').length, 1, 'one clone');
+  assert.equal(world.calls.filter((c) => c[0] === 'workspace.setMetadata').length, 1, 'one adoption');
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -1692,6 +1524,7 @@ test('P0.2 apply lock across real processes; a replaced lock file stops apply be
   assert.deepEqual((await Promise.all([contender(), contender(), contender()])).sort(), ['busy', 'busy', 'entered']);
 
   const world = makeWorld();
+  githubMain(world);
   const authorization = await authorize(world);
   const real = executorsFor(world);
   const lockFile = join(dir, 'factory-apply.lock');
@@ -1702,7 +1535,7 @@ test('P0.2 apply lock across real processes; a replaced lock file stops apply be
       runPlans: (l, o) => runner.runPlans(l, o),
       execute: async (op, cfg) => {
         const out = await real(op, cfg);
-        if (op.key === 'checkout.clone') {
+        if (op.key === 'workspace.main.adopt') {
           writeFile(`${lockFile}.new`, '');
           renameSync(`${lockFile}.new`, lockFile); // someone replaced the lock file
         }
@@ -1712,10 +1545,12 @@ test('P0.2 apply lock across real processes; a replaced lock file stops apply be
   }, { dir });
   assert.equal(outcome.report[0].status, 'failed');
   assert.match(outcome.report[0].error, /was replaced/);
-  assert.deepEqual(world.calls.filter((c) => c[0] === 'paseo' || c[0] === 'workspace.create' || c[0] === 'agent.create').map((c) => c[0] + ':' + (c[1] ?? '')), ['paseo:clone'], 'nothing after the replacement');
+  assert.equal(world.calls.filter((c) => c[0] === 'workspace.setMetadata').length, 1, 'only the adoption ran');
+  assert.equal(world.calls.filter((c) => c[0] === 'agent.create').length, 0, 'nothing after the replacement');
 
-  // replaced before the very first operation: not even the clone runs
+  // replaced before the very first operation: not even the adoption runs
   const fresh = makeWorld();
+  githubMain(fresh);
   const auth2 = await authorize(fresh);
   let observations = 0;
   const early = await withApplyLock(async (held) => {
@@ -1733,7 +1568,7 @@ test('P0.2 apply lock across real processes; a replaced lock file stops apply be
     });
   }, { dir });
   assert.match(early.report[0].error, /was replaced/);
-  assert.equal(fresh.calls.filter((c) => c[0] === 'paseo').length, 0, 'no clone after an early replacement');
+  assert.equal(fresh.calls.filter((c) => c[0] === 'workspace.setMetadata' || c[0] === 'agent.create').length, 0, 'no writes after an early replacement');
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -1742,6 +1577,7 @@ test('P0.2 apply lock across real processes; a replaced lock file stops apply be
 test('P1.1 repeated dry-run keeps the stored authorization and its createdAt; damage aborts', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'wsf-auth-'));
   const world = makeWorld();
+  githubMain(world);
   const first = await authorize(world);
   const stored = storeAuthorization(dir, first, CONFIG);
   assert.equal(stored.status, 'created');
@@ -1763,7 +1599,7 @@ test('P1.1 repeated dry-run keeps the stored authorization and its createdAt; da
   assert.equal(resumed.report[0].status, 'complete', resumed.report[0].error);
   // tampered and corrupt files are never replaced
   const tampered = JSON.parse(readFileSync(stored.file, 'utf8'));
-  tampered.plans[0].ops[0].params.parentDir = '/p/elsewhere';
+  tampered.plans[0].ops.find((o) => o.key === 'steer.A').params.title = 'Steer Evil';
   writeFile(stored.file, JSON.stringify(tampered));
   assert.throws(() => storeAuthorization(dir, first, CONFIG), /differs from this dry-run or is damaged/);
   writeFile(stored.file, '{broken');
@@ -1904,28 +1740,40 @@ test('default factory starts with exactly one steer', async () => {
   assert.deepEqual(validateConfig({ ...example, checkoutRoot: '/p' }), []);
   const config = structuredClone(CONFIG);
   config.steers = { slots: { A: 'sol' }, prepare: ['A'], initialActive: 'A' };
-  const [p] = await plan(makeWorld(), [FIRMWARE], { config });
-  assert.deepEqual(keys(p), ['checkout.clone', 'checkout.upstream-remote', 'workspace.main', 'steer.A']);
+  const world = makeWorld();
+  githubMain(world);
+  const [p] = await plan(world, [FIRMWARE], { config });
+  assert.deepEqual(keys(p), ['workspace.main.adopt', 'steer.A']);
 });
 
 test('plan --slots overrides prepare for this run and adjusts initialActive', async () => {
   const config = structuredClone(CONFIG);
   config.steers.slots.D = 'sol';
-  let [p] = await plan(makeWorld(), [FIRMWARE], { config, slots: ['D'] });
-  assert.deepEqual(keys(p), ['checkout.clone', 'checkout.upstream-remote', 'workspace.main', 'steer.D']);
-  assert.equal(p.ops.find((o) => o.key === 'workspace.main').params.metadata[METADATA_KEY].activeSteer, 'D');
-  [p] = await plan(makeWorld(), [FIRMWARE], { config, slots: ['B', 'C'] });
+  const one = makeWorld();
+  githubMain(one);
+  let [p] = await plan(one, [FIRMWARE], { config, slots: ['D'] });
+  assert.deepEqual(keys(p), ['workspace.main.adopt', 'steer.D']);
+  assert.equal(p.ops.find((o) => o.key === 'workspace.main.adopt').params.metadata[METADATA_KEY].activeSteer, 'D');
+  const two = makeWorld();
+  githubMain(two);
+  [p] = await plan(two, [FIRMWARE], { config, slots: ['B', 'C'] });
   assert.deepEqual(keys(p).filter((k) => k.startsWith('steer.')), ['steer.B', 'steer.C']);
-  assert.equal(p.ops.find((o) => o.key === 'workspace.main').params.metadata[METADATA_KEY].activeSteer, 'B');
-  [p] = await plan(makeWorld(), [FIRMWARE], { config, slots: ['A', 'C'] });
-  assert.equal(p.ops.find((o) => o.key === 'workspace.main').params.metadata[METADATA_KEY].activeSteer, 'A', 'initialActive kept when included');
-  const { report } = await apply(makeWorld(), [FIRMWARE], { config, slots: ['C'] });
+  assert.equal(p.ops.find((o) => o.key === 'workspace.main.adopt').params.metadata[METADATA_KEY].activeSteer, 'B');
+  const three = makeWorld();
+  githubMain(three);
+  [p] = await plan(three, [FIRMWARE], { config, slots: ['A', 'C'] });
+  assert.equal(p.ops.find((o) => o.key === 'workspace.main.adopt').params.metadata[METADATA_KEY].activeSteer, 'A', 'initialActive kept when included');
+  const four = makeWorld();
+  githubMain(four);
+  const { report } = await apply(four, [FIRMWARE], { config, slots: ['C'] });
   assert.equal(report[0].status, 'complete', report[0].error);
-  assert.deepEqual(report[0].executed.map((e) => e.key), ['checkout.clone', 'checkout.upstream-remote', 'workspace.main', 'steer.C']);
+  assert.deepEqual(report[0].executed.map((e) => e.key), ['workspace.main.adopt', 'steer.C']);
 });
 
 test('plan --slots must be a subset of defined slots', async () => {
-  const [p] = await plan(makeWorld(), [FIRMWARE], { slots: ['Z'] });
+  const world = makeWorld();
+  githubMain(world);
+  const [p] = await plan(world, [FIRMWARE], { slots: ['Z'] });
   assert.match(p.conflicts.find((c) => c.key === 'steer.Z').reason, /not defined in steers.slots/);
   assert.equal(p.ops.some((o) => o.key === 'steer.Z'), false);
 });

@@ -197,7 +197,7 @@ test('failoverChain skips advisors on steer, domain and hub level', () => {
   assert.deepEqual(kept.map((c) => [c.kind, c.steerId]), [['steer', 'c'], ['domain', 'dom'], ['hub', 'hub']]);
 });
 
-test('status tags advisor/sensitive steers and warns on mismatch', () => {
+test('status tags advisor/sensitive steers; model drift is silent (K13)', () => {
   const discovery = steerDiscovery(CONFIG);
   const status = steerStatus(discovery, { config: CONFIG });
   const bySlot = Object.fromEntries(status.steers.map((s) => [s.slot, s]));
@@ -209,7 +209,7 @@ test('status tags advisor/sensitive steers and warns on mismatch', () => {
   assert.match(text, /Steer B \[sensitive\]  agent-b  muse\/muse-spark-1\.3-contributor/);
   discovery.steers.labelled[0].model = 'other-model';
   const drifted = steerStatus(discovery, { config: CONFIG });
-  assert.ok(drifted.warnings.some((w) => /Steer A runs codex\/other-model but slot profile "sol"/.test(w)));
+  assert.deepEqual(drifted.warnings, [], 'K13: the live model is authoritative, no drift warning');
   const advised = steerStatus(steerDiscovery(CONFIG, { activeSteer: 'E' }), { config: CONFIG });
   assert.ok(advised.warnings.some((w) => /Active Steer E is an advisor.*advisors never coordinate/.test(w)));
 });

@@ -128,13 +128,15 @@ export function validateConfig(config) {
   if (!config || typeof config !== 'object') return ['config must be an object'];
   if (config.version !== 1) errors.push('version must be 1');
   if (!OWNER_PATTERN.test(config.github?.owner ?? '')) errors.push('github.owner must be a GitHub account name');
-  if (!['https', 'ssh'].includes(config.github?.cloneProtocol)) errors.push('github.cloneProtocol must be https or ssh');
-  if (!/^[A-Za-z0-9._-]+$/.test(config.github?.upstreamRemote ?? '')) errors.push('github.upstreamRemote must be a plain remote name');
+  // Retired K13 knobs (cloneProtocol, upstreamRemote, workspaceTitle{,MultiRepo}):
+  // validated only when present so old configs keep loading; the planner ignores them.
+  if (config.github?.cloneProtocol !== undefined && !['https', 'ssh'].includes(config.github.cloneProtocol)) errors.push('github.cloneProtocol must be https or ssh');
+  if (config.github?.upstreamRemote !== undefined && !/^[A-Za-z0-9._-]+$/.test(config.github.upstreamRemote)) errors.push('github.upstreamRemote must be a plain remote name');
   if (typeof config.checkoutRoot !== 'string' || !isAbsolute(config.checkoutRoot)) errors.push('checkoutRoot must be an absolute path');
-  if (typeof config.workspaceTitle !== 'string' || !config.workspaceTitle.trim()) errors.push('workspaceTitle must be a non-empty string');
+  if (config.workspaceTitle !== undefined && (typeof config.workspaceTitle !== 'string' || !config.workspaceTitle.trim())) errors.push('workspaceTitle must be a non-empty string when set (retired; ignored)');
   if (config.workspaceTitleMultiRepo !== undefined && config.workspaceTitleMultiRepo !== null
     && (typeof config.workspaceTitleMultiRepo !== 'string' || !config.workspaceTitleMultiRepo.trim())) {
-    errors.push('workspaceTitleMultiRepo must be a non-empty string when set (unset disables it)');
+    errors.push('workspaceTitleMultiRepo must be a non-empty string when set (retired; ignored)');
   }
 
   const profiles = config.profiles ?? {};

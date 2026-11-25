@@ -172,14 +172,14 @@ test('(b) restricted-provider mismatch on a private repo is a conflict', async (
   assert.ok(!p.ops.some((o) => o.key === 'steer.C'));
 });
 
-test('(b) restricted-provider mismatch on a public repo is a note, adoption proceeds', async () => {
+test('(b) restricted-provider mismatch on a public repo is adopted silently (K13: no drift notes)', async () => {
   const { world, agents } = githubWorld({ repoPrivate: false });
   const [p] = await runnerFor(world).runPlans([WEB], { adopt: { '*': { C: agents.candC.id } } });
   assert.equal(p.ops.find((o) => o.key === 'steer.C').kind, 'paseo.agent.adopt');
-  assert.match(p.notes.join('\n'), /Adopted Steer C runs muse\/muse-spark-1\.3-contributor; profile "sonnet" names copilot\/claude-sonnet-4\.5 \(kept\)/);
+  assert.ok(!p.notes.join('\n').includes('Adopted Steer C runs'), 'K13 keeps the live model without a drift note');
 });
 
-test('(b) unknown publicity (local scope) is a conflict; other mismatches stay notes', async () => {
+test('(b) unknown publicity (local scope) is a conflict; other mismatches adopt silently', async () => {
   const world = makeWorld();
   world.checkouts['/p/notes'] = { remotes: {} };
   const project = addProject(world, '/p/notes');
@@ -195,8 +195,8 @@ test('(b) unknown publicity (local scope) is a conflict; other mismatches stay n
 
   const pub = githubWorld({ repoPrivate: true });
   const [q] = await runnerFor(pub.world).runPlans([WEB], { adopt: { '*': { B: pub.agents.candB.id } } });
-  assert.equal(q.ops.find((o) => o.key === 'steer.B').kind, 'paseo.agent.adopt', 'codex mismatch on private repo stays a note');
-  assert.match(q.notes.join('\n'), /Adopted Steer B runs codex\/gpt-6\.2-sol; profile "muse" names muse\/muse-spark-1\.3-contributor \(kept\)/);
+  assert.equal(q.ops.find((o) => o.key === 'steer.B').kind, 'paseo.agent.adopt', 'codex mismatch on private repo still adopts');
+  assert.ok(!q.notes.join('\n').includes('Adopted Steer B runs'), 'K13 keeps the live model without a drift note');
 });
 
 test('(b) matching restricted adoption on a private repo is allowed', async () => {

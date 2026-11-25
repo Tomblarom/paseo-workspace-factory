@@ -44,12 +44,9 @@ import {
   switchFingerprint,
 } from "../shared/preview.js";
 import {
-  applyPlanCheckout,
   applyPlanDomain,
   applyPlanMain,
   applyPlanName,
-  applyPlanSubject,
-  checkedRenameProject,
   normalizePlanAdopt,
   normalizePlanAdoptWorker,
 } from "../shared/factory-args.js";
@@ -93,7 +90,7 @@ import {
 import { daemonHost, runtime } from "./factory/runtime.js";
 import { applyResume } from "./resume-apply.js";
 import { deliverSteer, type SteerDeliveryDeps } from "./steer-delivery.js";
-import { domainFirstPlanOrder, listScopes } from "./factory/scope.js";
+import { listScopes } from "./factory/scope.js";
 import { scopeCandidates, scopeRows } from "./factory/scopes-view.js";
 import { AGENTS_KEY } from "./factory/agent-state.js";
 import {
@@ -116,16 +113,6 @@ import { workerIdentityFromMetadata } from "../shared/supervise.js";
 import { filterStaleWorkerEvents } from "./worker-wakes.js";
 import { loadCatalog } from "./models-rpc.js";
 import { applySteerSettings, previewSteerSettings, revertSteerSettings } from "./steer-settings.js";
-
-/** Slot to configured provider/model, so the panel can show profile drift. */
-function expectedProfiles(config: any): Record<string, { profile: string; provider: string; model: string }> {
-  const out: Record<string, { profile: string; provider: string; model: string }> = {};
-  for (const [slot, name] of Object.entries<string>(config.steers?.slots ?? {})) {
-    const profile = config.profiles?.[name] ?? {};
-    out[slot] = { profile: name, provider: profile.provider ?? "?", model: profile.model ?? "?" };
-  }
-  return out;
-}
 
 function workspaceIdFromAddress(address: string): string | null {
   const prefixed = address.match(/^(?:workspace|worktree)\s*:\s*(.+)$/i);
@@ -190,10 +177,10 @@ export async function getStatus(
   { paseo }: PluginHandlerContext,
   loader: ConfigLoader,
 ): Promise<any> {
-  const { config, discovery, scope, deprecatedAlias, status } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
+  const { discovery, scope, deprecatedAlias, status } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
+  void discovery;
   return {
     ...status,
-    expectedProfiles: expectedProfiles(config),
     scope,
     deprecatedAlias,
   };
@@ -301,7 +288,7 @@ export async function applyResumeRpc(
           client: paseo, discovery, config, workerId, git,
           apply: true, notifyPrevious: false,
           lookupReceipt: lookupCreationReceipt,
-          execute: createExecutors({ client: paseo, gh: createGh(), git, paseoCli: createPaseoCli() }),
+          execute: createExecutors({ client: paseo, paseoCli: createPaseoCli() }),
           rewindClient: extra?.rewindClient ?? defaultCreateRewindClient,
           promptOptions: await loader.loadPromptOptions(paseo),
         } as any);
@@ -468,8 +455,6 @@ export async function applyFresh(
   }
   const executeOptions: any = {
     client: paseo,
-    gh: createGh(),
-    git,
     paseoCli: createPaseoCli(),
   };
   const applyOptions: any = {
@@ -693,7 +678,12 @@ export async function getPlan(
 ): Promise<any> {
   const config = await loader.loadEffectiveConfig();
   const slots = checkedSlots(input.slots, config);
+  const repos = input.repos ?? [];
   const localFlags = input.local ?? [];
+  const hubFlags = input.hub ?? [];
+  if (repos.length + localFlags.length + hubFlags.length > 1) {
+    throw new Error("plan takes at most one workspace address; enroll one existing workspace at a time");
+  }
   for (const flag of localFlags) {
     if (!flag?.trim()) throw new Error("--local needs a directory path");
     const abs = resolve(flag);
@@ -703,9 +693,9 @@ export async function getPlan(
       throw new Error(`--local path ${flag} does not exist or is not a directory`);
     }
   }
-  // --hub entries plan hub-kind scopes, like the CLI: a directory path or a
+  // --hub plans a hub-kind scope, like the CLI: a directory path or a
   // worktree workspace id (workspace:<id>, worktree:<id> or bare wks_…).
-  const hubEntries = (input.hub ?? []).map((flag) => {
+  const hubEntries = hubFlags.map((flag) => {
     if (!flag?.trim()) throw new Error("--hub needs a directory path or workspace:<id>");
     const trimmed = flag.trim();
     const prefixed = trimmed.match(/^(?:workspace|worktree)\s*:\s*(.+)$/i);
@@ -723,45 +713,30 @@ export async function getPlan(
     }
     return { local: abs, hub: true };
   });
-  const repos = input.repos ?? [];
   // No address: plan the scope of the current workspace (one shared snapshot).
   const snapshot: any = repos.length || localFlags.length || hubEntries.length ? null : await readPaseoState(paseo);
   let entries: any[] = snapshot
     ? [(await resolveEntryForAddress(paseo, undefined, input.workspaceId, snapshot)).target]
     : [...repos, ...localFlags.map((p) => ({ local: resolve(p) })), ...hubEntries];
-  // Single-entry options attach in CLI order (name, subject, checkout, main,
-  // domain); each helper re-validates count and conflicts for direct RPC
-  // callers, like the CLI does for scripted entries.
+  // Single-entry options attach in CLI order (name, main, domain); each helper
+  // re-validates count and conflicts for direct RPC callers, like the CLI.
   if (input.name !== undefined) entries = applyPlanName(entries, input.name) as any[];
-  if (input.subject !== undefined) entries = applyPlanSubject(entries, input.subject) as any[];
-  if (input.checkout !== undefined) entries = applyPlanCheckout(entries, input.checkout) as any[];
   if (input.main !== undefined) entries = applyPlanMain(entries, input.main) as any[];
   if (input.domain !== undefined) entries = applyPlanDomain(entries, input.domain) as any[];
-  const adopt = normalizePlanAdopt(input.adopt ?? {}, input.adoptScoped ?? {}, entries.length);
+  const adopt = normalizePlanAdopt(input.adopt ?? {}, entries.length);
   const adoptWorker = normalizePlanAdoptWorker(input.adoptWorker ?? {}, entries.length);
-  const renameProject = checkedRenameProject(input.renameProject, entries.length);
-  const allowFork = input.allowFork ?? false;
   const detach = input.detach ?? false;
-  const retitle = input.retitle ?? false;
   const runnerOptions: any = { config, client: paseo, gh: createGh(), git: createGit() };
   const runner = createRunner(runnerOptions);
-  const planOptions: any = { allowFork, adopt, adoptWorker, detach, retitle, renameProject, ...(slots ? { slots } : {}), ...(snapshot ? { state: snapshot } : {}) };
-  const unordered = await runner.runPlans(entries, planOptions);
-  // Domain scopes first, like the CLI: entries travel with their plans, apply
-  // pairs them by index, and the hash covers the ordered plans.
-  const order = (domainFirstPlanOrder as (plans: any[]) => number[])(unordered);
-  const plans = order.map((i) => unordered[i]);
-  const orderedEntries = order.map((i) => entries[i]);
+  const planOptions: any = { adopt, adoptWorker, detach, ...(slots ? { slots } : {}), ...(snapshot ? { state: snapshot } : {}) };
+  const plans = await runner.runPlans(entries, planOptions);
   const hash = planHash(plans, config);
   if (plans.some((p: any) => p.ops.length)) {
     const authOptions: any = {
-      entries: orderedEntries,
-      allowFork,
+      entries,
       adopt,
       adoptWorker,
       detach,
-      retitle,
-      renameProject,
       ...(slots ? { slots } : {}),
     };
     storeAuthorization(runtime().planDir, createAuthorization(plans, config, authOptions), config);
@@ -1056,8 +1031,6 @@ export async function applyPlan(
     const journalFile = join(journalDir, `${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`);
     const executeOptions: any = {
       client: paseo,
-      gh: createGh(),
-      git: createGit(),
       paseoCli: createPaseoCli(),
     };
     const applyOptions: any = {

@@ -3,7 +3,7 @@
 // Read-only discovery of local git checkouts and their remotes.
 import { execFileSync } from 'node:child_process';
 import { readdirSync, realpathSync, existsSync, lstatSync } from 'node:fs';
-import { join, resolve, relative, isAbsolute, sep } from 'node:path';
+import { join, resolve } from 'node:path';
 import { remoteToFullName } from './github.js';
 
 const SKIP = new Set(['node_modules', 'vendor', 'build', 'dist', 'target', '__pycache__']);
@@ -17,12 +17,6 @@ export function createGit(exec = execFileSync) {
       env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
     });
   };
-}
-
-/** True when `child` is `root` or lies below it (both absolute, already resolved). */
-export function isWithin(root, child) {
-  const rel = relative(resolve(root), resolve(child));
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel) && rel.split(sep)[0] !== '..');
 }
 
 export function readRemotes(git, path) {
@@ -103,50 +97,4 @@ export function classifyCheckouts(checkouts, { fork, upstream, source }) {
     else if (names.some((name) => name === forkKey || related.has(name))) other.push(checkout);
   }
   return { exact, related: other };
-}
-
-/**
- * Checks a clone target on the real filesystem: canonical root, no symlink in any
- * existing component between root and target, target absent, and the identity of
- * the deepest existing directory ("anchor") so a swapped parent is noticed later.
- * Remaining limit: between this check and the daemon's own mkdir/clone a concurrent
- * process could still swap a directory (realpath/recheck TOCTOU); no openat2 here.
- */
-export function inspectCloneTarget(checkoutRoot, parentDir, expectedPath, fs = { lstatSync, realpathSync }) {
-  const fail = (reason) => ({ ok: false, reason });
-  let root;
-  try {
-    root = fs.realpathSync(checkoutRoot);
-  } catch {
-    return fail(`checkoutRoot ${checkoutRoot} does not exist`);
-  }
-  const lexRoot = resolve(checkoutRoot);
-  const parent = resolve(parentDir);
-  const target = resolve(expectedPath);
-  if (!isWithin(lexRoot, parent) || resolve(parent, target.split(sep).at(-1)) !== target) return fail(`${expectedPath} is not a direct child of a directory inside ${checkoutRoot}`);
-  const rest = relative(lexRoot, parent).split(sep).filter(Boolean);
-  let anchor = lexRoot;
-  for (const part of rest) {
-    const next = join(anchor, part);
-    let st;
-    try {
-      st = fs.lstatSync(next);
-    } catch (error) {
-      if (error.code === 'ENOENT') break;
-      return fail(`cannot inspect ${next}: ${error.code}`);
-    }
-    if (st.isSymbolicLink()) return fail(`${next} is a symlink`);
-    if (!st.isDirectory()) return fail(`${next} is not a directory`);
-    anchor = next;
-  }
-  try {
-    fs.lstatSync(target);
-    return fail(`${expectedPath} already exists`);
-  } catch (error) {
-    if (error.code !== 'ENOENT') return fail(`cannot inspect ${expectedPath}: ${error.code}`);
-  }
-  const anchorStat = fs.lstatSync(anchor, { bigint: true });
-  const canonicalAnchor = anchor === lexRoot ? root : fs.realpathSync(anchor);
-  if (!isWithin(root, canonicalAnchor)) return fail(`${anchor} resolves outside ${root}`);
-  return { ok: true, root, anchor, anchorId: `${anchorStat.dev}:${anchorStat.ino}` };
 }

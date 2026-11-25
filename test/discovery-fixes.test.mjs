@@ -166,7 +166,7 @@ test('#2: the project checkout wins over the expected path', async () => {
   assert.equal(d.checkout?.path, '/p/y/two');
 });
 
-test('#2: two project checkouts stay ambiguous and the message names both ways', async () => {
+test('#2: two project checkouts stay ambiguous and the message names direct enrollment', async () => {
   const world = makeWorld();
   sameOrigin(world, '/p/x/one', '/p/y/two');
   addProject(world, '/p/x/one');
@@ -174,36 +174,26 @@ test('#2: two project checkouts stay ambiguous and the message names both ways',
   const d = await discover(world, FIRMWARE);
   assert.equal(d.checkout, null);
   assert.equal(d.checkoutIssues.length, 1);
-  assert.match(d.checkoutIssues[0], /--checkout <path>/);
-  assert.match(d.checkoutIssues[0], /\{"repo": \.\.\., "checkout": <path>\}/);
+  assert.match(d.checkoutIssues[0], /workspace:<id> or --local <path>/);
   const [p] = await plan(world, [FIRMWARE]);
   assert.equal(p.conflicts[0].key, 'checkout');
-  const [chosen] = await plan(world, [{ repo: FIRMWARE, checkout: '/p/y/two' }]);
-  assert.equal(chosen.ops.find((op) => op.key === 'workspace.main').params.path, '/p/y/two');
 });
 
-test('#2: an explicit checkout that is no origin match is refused', async () => {
+test('#2: a retired entry "checkout" is refused with a pointer to direct enrollment', async () => {
   const world = makeWorld();
   sameOrigin(world, '/p/x/one');
-  const d = await discover(world, { repo: FIRMWARE, checkout: '/p/elsewhere' });
-  assert.equal(d.checkout, null);
-  assert.match(d.checkoutIssues[0], new RegExp(`not a checkout with origin ${FIRMWARE}`));
+  await assert.rejects(discover(world, { repo: FIRMWARE, checkout: '/p/y/two' }), /was retired/);
 });
 
-// ---------------------------------------------------------------- #2 --checkout flag (CLI validation)
+// ---------------------------------------------------------------- #2 retired --checkout flag (CLI validation)
 
 const CLI = fileURLToPath(new URL('../src/cli.mjs', import.meta.url));
 
-function runCli(t, args, { reposFile = null } = {}) {
+function runCli(t, args) {
   const dir = mkdtempSync(join(tmpdir(), 'factory-checkout-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   writeFileSync(join(dir, 'config.json'), JSON.stringify(CONFIG));
   const argv = ['--config', join(dir, 'config.json'), ...args];
-  if (reposFile) {
-    const reposPath = join(dir, 'repos.json');
-    writeFileSync(reposPath, JSON.stringify(reposFile));
-    argv.push('--repos-file', reposPath);
-  }
   try {
     const stdout = execFileSync('node', [CLI, ...argv], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
     return { status: 0, stdout, stderr: '' };
@@ -212,25 +202,22 @@ function runCli(t, args, { reposFile = null } = {}) {
   }
 }
 
-test('#2: --help names the --checkout flag', (t) => {
+test('#2: --help names the retired bulk-provisioning flags', (t) => {
   const out = runCli(t, ['--help']);
   assert.equal(out.status, 0);
-  assert.match(out.stdout, /--checkout <path>/);
+  assert.match(out.stdout, /Retired: --repos-file, --allow-fork, --checkout/);
 });
 
-test('#2: --checkout needs plan and exactly one entry', (t) => {
-  let out = runCli(t, ['plan', 'Example-Owner/a', 'Example-Owner/b', '--checkout', '/p/x']);
+test('#2: retired --checkout is rejected as an unknown option', (t) => {
+  const out = runCli(t, ['plan', FIRMWARE, '--checkout', '/p/x']);
   assert.equal(out.status, 1);
-  assert.match(out.stderr, /--checkout needs exactly one repository entry/);
-  out = runCli(t, ['status', FIRMWARE, '--checkout', '/p/x']);
-  assert.equal(out.status, 1);
-  assert.match(out.stderr, /--checkout is only accepted with plan/);
+  assert.match(out.stderr, /checkout/i);
 });
 
-test('#2: --checkout conflicts with the entry checkout', (t) => {
-  const out = runCli(t, ['plan', '--checkout', '/p/y'], { reposFile: [{ repo: FIRMWARE, checkout: '/p/x' }] });
+test('#2: plan with two entries is rejected (single-workspace enrollment)', (t) => {
+  const out = runCli(t, ['plan', 'Example-Owner/a', 'Example-Owner/b']);
   assert.equal(out.status, 1);
-  assert.match(out.stderr, /--checkout conflicts with the entry "checkout"/);
+  assert.match(out.stderr, /exactly one workspace entry/);
 });
 
 // ---------------------------------------------------------------- #4 case-insensitive ids
@@ -414,7 +401,7 @@ test('digit candidate adopts into any slot via --adopt, parented needs --detach'
 
 // --------------------------------------- planner follow-up: case-insensitive scope.id
 
-test('scope.id clashes are case-insensitive (live scope and siblings)', async () => {
+test('scope.id clashes are case-insensitive against live scopes', async () => {
   const world = makeWorld();
   world.checkouts['/p/taken'] = { remotes: {} };
   world.checkouts['/p/other'] = { remotes: {} };
@@ -425,11 +412,4 @@ test('scope.id clashes are case-insensitive (live scope and siblings)', async ()
   const [p] = await runnerFor(world).runPlans([{ local: '/p/other', name: 'taken' }]);
   assert.equal(p.status, 'conflict');
   assert.match(p.conflicts.find((c) => c.key === 'scope.id').reason, /already used/);
-
-  const sib = makeWorld();
-  sib.checkouts['/p/a/demo'] = { remotes: {} };
-  sib.checkouts['/p/b/demo'] = { remotes: {} };
-  const [a, b] = await runnerFor(sib).runPlans([{ local: '/p/a/demo', name: 'Demo' }, { local: '/p/b/demo', name: 'demo' }]);
-  assert.match(a.conflicts.find((c) => c.key === 'scope.id').reason, /Several entries/);
-  assert.match(b.conflicts.find((c) => c.key === 'scope.id').reason, /Several entries/);
 });

@@ -18,7 +18,7 @@ A **scope** is one coordinated unit, usually one repository: its home workspace,
 
 The **active steer** coordinates your task. It can delegate bounded pieces to **workers** in parallel and records a **checkpoint** (`task`, `tests`, `blockers`, `next`) after each package. Workers stay where they are across handovers and are reused by ID.
 
-Typical flow: `/factory plan <repo>` once, confirm `/factory apply <hash>`, then talk to the active steer. `/factory status` shows who is active and what the checkpoint says.
+Typical flow: open the workspace natively, `/factory plan` once to enroll it, confirm `/factory apply <hash>`, then talk to the active steer. `/factory status` shows who is active and what the checkpoint says.
 
 ## Hand over without losing context
 
@@ -32,7 +32,7 @@ Every switch raises the **epoch** counter, which invalidates older previews. Det
 
 ## Coordinate many scopes
 
-A **hub** scope coordinates other scopes: provisioning and lifecycle plans, slot/model assignment, priorities, cleanup. It never does content work inside a scope that has an active steer. A **domain** is a role, not a kind: any non-hub scope coordinating a group of child scopes (one product of several repos).
+A **hub** scope coordinates other scopes: enrollment and lifecycle plans, slot/model assignment, priorities, cleanup. It never does content work inside a scope that has an active steer. A **domain** is a role, not a kind: any non-hub scope coordinating a group of child scopes (one product of several repos).
 
 The chain is Hub → Domain → Child. Work flows down with `assign <scope> --task … --next …` (epoch-checked preview, then apply); blockers flow up as `domain:` (to the domain steer) and `hub:` (to the hub). Relations stay logical (metadata/labels); steers stay parent-free. See [domains](configuration.md#domains).
 
@@ -56,15 +56,14 @@ Profiles share a quota pool (named by `profiles.<name>.pool`, else the provider)
 
 ZeroSub accounts are optional: when its daemon plugin is installed, families with ZeroSub accounts use per-account usage percents and `resetsAt` instead of the pool snapshot, judged against the same thresholds. Picks prefer the account with the most room; an exhausted family is skipped with its earliest reset time. Reads are best-effort with fallback to the usage snapshot, and account `email`/`organization`/`home` fields are never stored.
 
-## Provisioning safety
+## Enrollment safety
 
 - **Dry-run first.** `plan` never writes to GitHub, git or Paseo. It stores the complete plan as an authorization (`plans/<hash>.json`, never overwritten).
 - **Confirmed plan only.** `apply --confirm <hash>` runs only that stored plan. After each step it rediscovers the state; the next operation must match the authorized one in every effect-relevant parameter, otherwise it stops and asks for a new dry-run.
-- **Idempotent creation.** Workspaces and steers are created with daemon idempotency keys, with receipt recovery before anything else: recover the id, allow one first execution, or stop.
+- **Idempotent creation.** Steers are created with daemon idempotency keys, with receipt recovery before anything else: recover the id, allow one first execution, or stop.
 - **Parent-free steers.** Steers are created without `parent` and without a prompt; the parent label is verified after creation, and a link inherited from the calling agent is detached again right away. Fresh workers keep their previous parent, never the caller. CLI calls run without `PASEO_AGENT_ID`.
-- **Paths.** Clone targets must stay below `checkoutRoot` without symlink components; the target's parent identity is re-checked right before cloning.
 - **One apply at a time.** A kernel `flock` serializes `apply` runs on the host; switches and checkpoints use a per-workspace lock.
-- **Conflicts are reported, never resolved automatically**: ambiguous checkouts, occupied targets, a different `upstream`, steers with a parent, duplicate main workspaces, unstartable profiles, unconfirmed adoption of unlabelled agents.
+- **Conflicts are reported, never resolved automatically**: ambiguous checkouts, a missing checkout or main workspace, steers with a parent, duplicate main workspaces, unstartable profiles, unconfirmed adoption of unlabelled agents.
 
 ## Limits
 

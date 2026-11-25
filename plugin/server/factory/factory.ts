@@ -1,10 +1,11 @@
 // @ts-nocheck
 // GENERATED from src/factory.mjs by npm run plugin:sync. Do not edit.
 // Wiring: one fresh discovery pass over GitHub, the filesystem and Paseo.
+// K13: single-workspace enrollment only — runPlans takes exactly one entry.
 import { realpathSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { discoverRepository, normalizeEntry } from './discovery.js';
-import { scanCheckouts, inspectCloneTarget } from './local.js';
+import { scanCheckouts } from './local.js';
 import { readPaseoState } from './paseo.js';
 import { planRepository } from './planner.js';
 import { listScopes, resolveScope, scopeToEntry } from './scope.js';
@@ -24,6 +25,8 @@ function resolvePlanEntry(entry, paseoState) {
   const base = scopeToEntry(scope);
   if (typeof entry === 'string' || !entry || typeof entry !== 'object' || Array.isArray(entry)) return base;
   const keep = {};
+  // Retired keys (checkout, subject) pass through so normalizeEntry reports
+  // them as retired instead of silently dropping them.
   for (const key of ['name', 'subject', 'hub', 'domain', 'main', 'checkout', 'parentDir']) {
     if (entry[key] !== undefined) keep[key] = entry[key];
   }
@@ -31,7 +34,7 @@ function resolvePlanEntry(entry, paseoState) {
   return typeof base === 'string' ? { repo: base, ...keep } : { ...base, ...keep };
 }
 
-export function createRunner({ config, client, gh, git, readState = readPaseoState, scan = scanCheckouts, inspectTarget = inspectCloneTarget, realpath = realpathSync, existsDir } = {}) {
+export function createRunner({ config, client, gh, git, readState = readPaseoState, scan = scanCheckouts, realpath = realpathSync, existsDir } = {}) {
   async function discoverAll(entries, { state = null } = {}) {
     const paseo = state ?? await readState(client);
     const liveScopes = listScopes(paseo);
@@ -47,31 +50,20 @@ export function createRunner({ config, client, gh, git, readState = readPaseoSta
       ...paseo.workspaces.map((w) => w.workspaceDirectory),
     ];
     const checkouts = scan({ roots, knownDirs, git });
-    return resolved.map((entry) => discoverRepository(entry, { config, gh, git, checkouts, paseo, realpath, inspectTarget, liveScopes, ...(existsDir ? { existsDir } : {}) }));
+    return resolved.map((entry) => discoverRepository(entry, { config, gh, git, checkouts, paseo, realpath, liveScopes, ...(existsDir ? { existsDir } : {}) }));
   }
-  // Location identity for the cross-entry scope check: same workspace (or same
-  // expected path while creating) is the same scope addressed twice, not a dup.
-  const scopeSite = (d) => d.mainWorkspace?.id ?? d.expectedPath ?? d.input;
   return {
     discoverAll,
-    async runPlans(entries, { allowFork = false, adopt = {}, slots, adoptWorker = {}, detach = false, retitle = false, renameProject = null, state = null } = {}) {
-      const discoveries = await discoverAll(entries, { state });
-      for (const [index, d] of discoveries.entries()) {
-        d.siblingScopes = discoveries
-          .filter((other, j) => j !== index && other.scope?.id && scopeSite(other) !== scopeSite(d))
-          .map((other) => ({ id: other.scope.id, kind: other.scope.kind }));
+    async runPlans(entries, { adopt = {}, slots, adoptWorker = {}, detach = false, state = null } = {}) {
+      if (!Array.isArray(entries) || entries.length !== 1) {
+        throw new Error(`plan needs exactly one workspace entry, got ${Array.isArray(entries) ? entries.length : '?'}; enroll one existing workspace at a time`);
       }
-      return discoveries.map((d) => planRepository(d, config, {
-        allowFork,
-        // Scoped adoption (`--adopt <scope-id>:X=<agent>`) wins over the legacy
-        // repo/input keys; '*' stays the single-entry fallback.
-        adopt: adopt[d.scope?.id?.toLowerCase()] ?? adopt[d.forkName?.toLowerCase()] ?? adopt[String(d.input ?? '').toLowerCase()] ?? adopt['*'] ?? {},
-        slots,
-        adoptWorker,
-        detach,
-        retitle,
-        renameProject,
-      }));
+      const discoveries = await discoverAll(entries, { state });
+      const d = discoveries[0];
+      // Single-entry adoption: the legacy '*' fallback plus exact scope/repo
+      // keys (scoped per-entry keys are retired with multi-repo plans).
+      const adoptFor = adopt['*'] ?? adopt[d.scope?.id?.toLowerCase()] ?? adopt[d.forkName?.toLowerCase()] ?? adopt[String(d.input ?? '').toLowerCase()] ?? {};
+      return [planRepository(d, config, { adopt: adoptFor, slots, adoptWorker, detach })];
     },
   };
 }

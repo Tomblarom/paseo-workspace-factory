@@ -2,87 +2,22 @@
 // GENERATED from src/planner.mjs by npm run plugin:sync. Do not edit.
 // Pure planner: discovery + config -> ordered operations, conflicts and notes.
 // Operations carry stable keys; apply only executes keys confirmed in a dry-run.
+// K13: single-workspace enrollment + repair only. No fork/clone/project or
+// workspace provisioning, no retitle/rename, no title templates, no multi-repo.
 import { createHash } from 'node:crypto';
 import { isAdvisorSlot, providerIsSensitive, slotProfile, configWarnings } from './config.js';
-import { formatSlotProfileSuggestion, resolveProfile, steerFallbackList, usedProfilesByLiveSteers } from './models.js';
+import { resolveProfile, steerFallbackList, usedProfilesByLiveSteers } from './models.js';
 import { LABEL, METADATA_KEY, describeParent, parentOf, pendingLegacyKeys, agentUsage } from './paseo.js';
 import { STEER_TITLE, STEER_DIGIT_TITLE, liveSlotHolders } from './discovery.js';
 import { validScope } from './scope.js';
 import { buildSteerCreate, idempotencyKey, requestDigest, steerCreateLabels } from './steer-create.js';
 
+// Kept for old stored plans only: new plans never emit it (enrollment needs
+// an existing main workspace, so steer creates always carry a real id).
 export const WORKSPACE_REF = { ref: 'main-workspace' };
 export { idempotencyKey, requestDigest };
 
-/**
- * Repository identity of a scope id: the id without the @branch suffix of
- * worktree scopes, so "example/web@feat" and "example/web" are one repo.
- */
-export function scopeRepoKey(scopeId) {
-  const at = scopeId.indexOf('@');
-  const base = at === -1 ? scopeId : scopeId.slice(0, at);
-  return base || scopeId;
-}
-
-/**
- * Renders a workspace title template: {name} is the scope short form (the
- * repo name for github, else the scope id), {repo} the short repository name
- * (the repo key without the owner: "web" for "example/web" and
- * "example/web@feat"), {subject} the entry subject.
- * Returns { title } or { error } (missing subject, unknown placeholder).
- * No double prefix: a subject that already carries the "<repo> · " house
- * prefix keeps it once when the template prefixes it again.
- */
-export function renderWorkspaceTitle(template, scopeId, subject, field = 'workspaceTitle') {
-  const name = scopeId.includes('/') ? scopeId.slice(scopeId.lastIndexOf('/') + 1) : scopeId;
-  const key = scopeRepoKey(scopeId);
-  const repo = key.includes('/') ? key.slice(key.lastIndexOf('/') + 1) : key;
-  let title = template.replaceAll('{name}', name).replaceAll('{repo}', repo);
-  if (template.includes('{subject}')) {
-    if (!subject) return { error: `${field} template needs {subject}; pass --subject <text> (or per-entry "subject")` };
-    const head = template.slice(0, template.indexOf('{subject}')).replaceAll('{name}', name).replaceAll('{repo}', repo);
-    const dup = [repo, name].find((p) => head.endsWith(`${p} · `) && subject.startsWith(`${p} · `));
-    title = title.replaceAll('{subject}', dup ? subject.slice(`${dup} · `.length) : subject);
-  }
-  const unknown = title.match(/\{[^}]+\}/);
-  if (unknown) return { error: `${field} template has unknown placeholder ${unknown[0]} (supported: {name}, {repo}, {subject})` };
-  return { title };
-}
-
-/**
- * Factory handle titles: bare "Main", or the handle with this scope's own
- * repo/name prefix ("<repo> · Main"). Both are always acceptable on an
- * existing main workspace — the title template never proposes renaming them,
- * so the "<Repo> · <Betreff>" house rule cannot collide with the handle.
- */
-export function isFactoryHandleTitle(title, scopeId) {
-  const trimmed = typeof title === 'string' ? title.trim() : '';
-  if (trimmed === 'Main') return true;
-  const match = trimmed.match(/^(.*) · Main$/);
-  if (!match || typeof scopeId !== 'string') return false;
-  const name = scopeId.includes('/') ? scopeId.slice(scopeId.lastIndexOf('/') + 1) : scopeId;
-  const key = scopeRepoKey(scopeId);
-  const repo = key.includes('/') ? key.slice(key.lastIndexOf('/') + 1) : key;
-  return match[1] === name || match[1] === repo;
-}
-
-/**
- * True when the entry's Paseo project hosts live scopes of several repos:
- * live scopes on the project's workspaces with distinct repo keys (a worktree
- * scope counts as its parent's repo). Legacy discoveries without scope data
- * count as single-repo. Decides workspaceTitle vs workspaceTitleMultiRepo.
- */
-export function multipleReposActive(discovery) {
-  const inProject = new Set(discovery?.projectWorkspaceIds ?? []);
-  const repos = new Set();
-  for (const scope of discovery?.liveScopes ?? []) {
-    if (!inProject.has(scope.workspaceId)) continue;
-    repos.add(scopeRepoKey(scope.id));
-    if (repos.size > 1) return true;
-  }
-  return false;
-}
-
-export function planRepository(discovery, config, { allowFork = false, adopt = {}, slots, adoptWorker = {}, detach = false, retitle = false, renameProject = null } = {}) {
+export function planRepository(discovery, config, { adopt = {}, slots, adoptWorker = {}, detach = false } = {}) {
   const ops = [];
   const conflicts = [];
   const notes = [...(discovery.github?.notes ?? [])];
@@ -112,74 +47,34 @@ export function planRepository(discovery, config, { allowFork = false, adopt = {
   const slotsToPlan = adoptOutside ? definedAdopts : effectivePrepare;
   if (slotsToPlan.length && !slotsToPlan.includes(effectiveInitialActive)) effectiveInitialActive = slotsToPlan[0];
 
-  // 1. GitHub fork (skipped in local mode: no gh, fork, clone or upstream remote)
+  // 1. GitHub identity (read-only): a missing or conflicting fork is a
+  // conflict — create it natively in Paseo/GitHub, then enroll the workspace.
   if (!isLocal) {
     if (github.fork.status === 'conflict') conflict('github.fork', github.fork.reason);
     else if (github.fork.status === 'missing') {
-      if (allowFork) add('github.fork', 'github.fork', `Fork ${github.upstream.fullName} to ${github.fork.planned}`, { upstream: github.upstream.fullName, owner: config.github.owner });
-      else conflict('github.fork', `Fork ${github.fork.planned} does not exist; rerun with --allow-fork to plan its creation`);
+      conflict('github.fork', `Fork ${github.fork.planned} does not exist; create it natively, open the workspace in Paseo, then enroll that workspace`);
     } else if (github.fork.repo.archived) conflict('github.fork', `${forkName} is archived on GitHub`);
   }
   if (!forkName) return finish(discovery, config, ops, conflicts, notes);
 
-  // 2. Checkout and project registration
+  // 2. Checkout and project: enrollment needs both to exist already (created
+  // natively in Paseo). Nothing is cloned or registered here.
   for (const issue of discovery.checkoutIssues) conflict('checkout', issue);
   if (discovery.checkoutIssues.length) return finish(discovery, config, ops, conflicts, notes);
-  const willClone = !discovery.checkout && !discovery.checkoutIssues.length;
-  if (isLocal && willClone) {
+  if (isLocal && !discovery.checkout) {
     conflict('checkout', `Local path ${discovery.expectedPath} is not available; it must exist as a directory`);
     return finish(discovery, config, ops, conflicts, notes);
   }
-  if (willClone) {
-    const target = discovery.cloneTarget;
-    if (!target?.ok) {
-      conflict('checkout', `Cannot clone ${forkName} to ${discovery.expectedPath}: ${target?.reason ?? 'target not inspected'}`);
-      return finish(discovery, config, ops, conflicts, notes);
-    }
-    add('checkout.clone', 'paseo.clone', `Clone ${forkName} to ${discovery.expectedPath} and register the Paseo project`, {
-      repo: forkName, parentDir: discovery.parentDir, protocol: config.github.cloneProtocol, expectedPath: discovery.expectedPath,
-      guard: { root: target.root, anchor: target.anchor, anchorId: target.anchorId },
-    });
-    // The daemon registers the project during clone; if that half fails, registering it is the recovery.
-    ops.at(-1).implies = [{ key: 'paseo.project', kind: 'paseo.project.add', summary: `Register ${discovery.expectedPath} as Paseo project`, params: { path: discovery.expectedPath } }];
+  if (!isLocal && !discovery.checkout && !isWorktree) {
+    conflict('checkout', `No checkout with origin ${forkName}; clone it natively, open the workspace in Paseo, then enroll that workspace`);
+    return finish(discovery, config, ops, conflicts, notes);
   }
   for (const related of discovery.relatedCheckouts) {
     notes.push(`Related checkout left untouched: ${related.path} (${Object.entries(related.remotes).map(([n, u]) => `${n}=${u}`).join(', ')})`);
   }
   const checkoutPath = discovery.checkout?.path ?? discovery.expectedPath;
-
-  if (!isLocal && github?.upstream) {
-    const status = willClone ? 'missing' : discovery.upstreamRemote?.status;
-    if (status === 'missing') {
-      add('checkout.upstream-remote', 'git.remote.add', `Add remote ${config.github.upstreamRemote} -> ${github.upstream.fullName}`, {
-        path: checkoutPath, origin: forkName, name: config.github.upstreamRemote,
-        url: config.github.cloneProtocol === 'ssh' ? github.upstream.sshUrl : github.upstream.cloneUrl,
-      });
-    } else if (status === 'mismatch') {
-      conflict('checkout.upstream-remote', `Remote ${config.github.upstreamRemote} in ${checkoutPath} points to ${discovery.upstreamRemote.url}, expected ${github.upstream.fullName}`);
-    }
-  }
-  // A worktree workspace already belongs to its Paseo project; adopting it
-  // never registers a new project, even when the project list is empty.
-  if (!isWorktree) {
-    if (discovery.checkout && !discovery.projects.length) {
-      add('paseo.project', 'paseo.project.add', `Register ${checkoutPath} as Paseo project`, { path: checkoutPath });
-    } else if (discovery.projects.length > 1) {
-      conflict('paseo.project', `Checkout belongs to several Paseo projects: ${discovery.projects.map((p) => p.projectId).join(', ')}`);
-    }
-  }
-  // Optional project rename: only with --rename-project, only onto exactly one
-  // existing project (a missing registration runs first, in a run of its own).
-  if (renameProject) {
-    if (discovery.projects.length === 1 && discovery.projects[0].projectDisplayName !== renameProject) {
-      add('project.rename', 'paseo.project.rename', `Rename Paseo project ${discovery.projects[0].projectId} to ${JSON.stringify(renameProject)}`, {
-        projectId: discovery.projects[0].projectId, name: renameProject,
-      });
-    } else if (!discovery.projects.length) {
-      conflict('project.rename', `--rename-project ${JSON.stringify(renameProject)}: no Paseo project for ${checkoutPath} yet; register it first`);
-    } else if (discovery.projects.length > 1) {
-      conflict('project.rename', `--rename-project ${JSON.stringify(renameProject)}: several Paseo projects for ${checkoutPath}, ambiguous`);
-    }
+  if (!isWorktree && discovery.projects.length > 1) {
+    conflict('paseo.project', `Checkout belongs to several Paseo projects: ${discovery.projects.map((p) => p.projectId).join(', ')}`);
   }
 
   // 2b. Scope identity. The scope id (discovery.scope) names everything the
@@ -209,65 +104,41 @@ export function planRepository(discovery, config, { allowFork = false, adopt = {
   } else if (plannedScope) {
     const clash = (discovery.liveScopes ?? []).find((s) => sameScopeId(s.id, plannedScope.id));
     if (clash) {
-      conflict('scope.id', `Scope id ${JSON.stringify(plannedScope.id)} is already used by workspace ${clash.workspaceId} (${clash.kind}); rerun with --name <id> or a per-entry "name"`);
+      conflict('scope.id', `Scope id ${JSON.stringify(plannedScope.id)} is already used by workspace ${clash.workspaceId} (${clash.kind}); rerun with --name <id>`);
     }
   }
-  const siblings = discovery.siblingScopes ?? (discovery.siblingScopeIds ?? []).map((id) => ({ id, kind: null }));
-  if (plannedScope && siblings.some((s) => sameScopeId(s.id, plannedScope.id))) {
-    conflict('scope.id', `Several entries in this run plan scope id ${JSON.stringify(plannedScope.id)}; give each a distinct --name (or per-entry "name")`);
-  }
-  // At most one hub scope lives on a host: neither beside a live hub nor
-  // beside a second hub entry of this run.
+  // At most one hub scope lives on a host.
   if (plannedScope?.kind === 'hub') {
     const liveHub = (discovery.liveScopes ?? []).find((s) => s.kind === 'hub' && s.workspaceId !== main?.id);
     if (liveHub) {
       conflict('scope.hub', `Hub scope ${JSON.stringify(liveHub.id)} already lives on workspace ${liveHub.workspaceId}; at most one hub per host`);
-    } else if (siblings.some((s) => s.kind === 'hub')) {
-      conflict('scope.hub', 'Several entries in this run plan a hub scope; at most one hub per host');
     }
   }
   // Domain pointer resolution (used by initial.scope below and 3c-domain): an
   // explicit --domain wins ("" clears), otherwise the planned pointer (stored
-  // kept). The pointer may name a live scope or a scope planned by another
-  // entry of this run; the domain-creating plan is ordered first
-  // (domainFirstPlanOrder in scope.mjs), so apply finds it live. Canonical
-  // spelling is the live id, else the sibling's planned id.
+  // kept). The pointer must name a live scope; single-entry plans cannot
+  // create the domain in the same run. Canonical spelling is the live id.
   const domainWant = plannedScope && discovery.requestedDomain !== undefined
     ? (discovery.requestedDomain === '' ? null : discovery.requestedDomain)
     : undefined;
   const domainLive = typeof domainWant === 'string'
     ? (discovery.liveScopes ?? []).find((s) => sameScopeId(s.id, domainWant)) ?? null
     : null;
-  const domainPlanned = typeof domainWant === 'string' && !domainLive
-    ? siblings.find((s) => sameScopeId(s.id, domainWant)) ?? null
-    : null;
-  const domainCanonical = domainLive?.id ?? domainPlanned?.id ?? null;
+  const domainCanonical = domainLive?.id ?? null;
   const domainConflictReason = !plannedScope || domainWant === undefined ? null
     : (plannedScope.kind === 'hub' || stored?.kind === 'hub')
       ? '--domain is not supported for hub scopes (hubs carry no domain)'
       : (domainWant && sameScopeId(domainWant, plannedScope.id))
         ? `Domain scope ${JSON.stringify(domainWant)} is the scope itself`
-        : (domainWant && !domainLive && !domainPlanned)
-          ? `Domain scope ${JSON.stringify(domainWant)} is not a live scope (nor planned in this run); plan its entry in the same run or clear with --domain ""`
+        : (domainWant && !domainLive)
+          ? `Domain scope ${JSON.stringify(domainWant)} is not a live scope; enroll it first or clear with --domain ""`
           : null;
   // Labels and metadata use the stored id when one exists, else the planned one;
   // a hub conversion already labels new steers with the planned hub id.
   const effScopeId = convertingToHub ? plannedScope.id : (stored?.id ?? plannedScope?.id ?? forkName);
-  // Expected main title from the workspaceTitle template (S8), or from
-  // workspaceTitleMultiRepo when set and the scope's Paseo project hosts live
-  // scopes of several repos. Without a renderable title no title op or note
-  // is planned; the conflict blocks apply.
-  const multiTemplate = config.workspaceTitleMultiRepo && multipleReposActive(discovery) ? config.workspaceTitleMultiRepo : null;
-  const titleField = multiTemplate ? 'workspaceTitleMultiRepo' : 'workspaceTitle';
-  const rendered = renderWorkspaceTitle(multiTemplate ?? config.workspaceTitle, effScopeId, discovery.requestedSubject ?? null, titleField);
-  // The factory handle is exempt from the title template: an existing main
-  // already titled "Main" or "<repo> · Main" needs no rendering at all — no
-  // conflict, note or retitle op, under either template.
-  const titleExempt = main ? isFactoryHandleTitle(main.title ?? main.name, effScopeId) : false;
-  if (rendered.error && !titleExempt) conflict('workspace.title', rendered.error);
-  const expectedTitle = titleExempt ? (main.title ?? main.name) : (rendered.title ?? null);
 
-  // 3. Main workspace
+  // 3. Main workspace: enrollment adopts one existing workspace. Nothing is
+  // created here — open the workspace natively in Paseo first.
   const initialDomain = domainWant === undefined ? plannedScope?.domain : (domainCanonical ?? domainWant);
   const initial = plannedScope
     ? { main: true, activeSteer: effectiveInitialActive, epoch: 1, scope: { id: plannedScope.id, kind: plannedScope.kind, locator: plannedScope.locator, ...(plannedScope.parent !== undefined ? { parent: plannedScope.parent } : {}), ...(initialDomain ? { domain: initialDomain } : {}) } }
@@ -275,12 +146,7 @@ export function planRepository(discovery, config, { allowFork = false, adopt = {
   if (discovery.mainCandidates.length > 1 && !main) {
     conflict('workspace.main', `Several main workspaces use ${checkoutPath}: ${discovery.mainCandidates.map((w) => `${w.id} "${w.title ?? w.name}"`).join(', ')}`);
   } else if (!main) {
-    if (expectedTitle !== null) {
-      add('workspace.main', 'paseo.workspace.create', `Create local workspace "${expectedTitle}" for ${checkoutPath}`, {
-        path: checkoutPath, title: expectedTitle, metadata: { [METADATA_KEY]: initial },
-        idempotencyKey: idempotencyKey(forkName, 'workspace', 'main', requestDigest({ path: checkoutPath, title: expectedTitle, metadata: initial })),
-      });
-    }
+    conflict('workspace.main', `No factory main workspace for ${checkoutPath ?? forkName}; open or create the Paseo workspace natively, then enroll it (plan workspace:<id> or --local <path>)`);
   } else {
     const state = main.metadata?.[METADATA_KEY];
     if (!state) {
@@ -302,7 +168,7 @@ export function planRepository(discovery, config, { allowFork = false, adopt = {
   if (discovery.otherLocalWorkspaces?.length) {
     notes.push(`Other local workspaces on this checkout stay untouched: ${discovery.otherLocalWorkspaces.map((w) => `${w.id} "${w.title ?? w.name}"`).join(', ')}`);
   }
-  const workspaceId = main?.id ?? WORKSPACE_REF;
+  const workspaceId = main?.id ?? null;
 
   // 3b. Legacy prefix migration: `ari.wsf*` keys are still read, but new state
   // uses `wsf*`. One op rewrites the main workspace metadata (old keys are
@@ -351,9 +217,7 @@ export function planRepository(discovery, config, { allowFork = false, adopt = {
   // 3c-domain. --domain sets the domain pointer (Hub → Domain → Kind, logical
   // only, never a parent); --domain "" clears it. The op carries the planned
   // epoch and is epoch-checked at apply like assign. Fresh mains and scope
-  // supplements inherit a valid pointer through initial.scope above. The
-  // pointer may name a live scope or a scope planned in the same run (one
-  // run creates the domain first, then its children).
+  // supplements inherit a valid pointer through initial.scope above.
   if (discovery.requestedDomain !== undefined && plannedScope) {
     if (domainConflictReason) {
       conflict('scope.domain', domainConflictReason);
@@ -368,21 +232,6 @@ export function planRepository(discovery, config, { allowFork = false, adopt = {
         { workspaceId: main.id, domain: canonical, epoch: stateNow.epoch });
       }
     }
-    if (!domainConflictReason && domainPlanned) {
-      notes.push(`Domain scope ${JSON.stringify(domainCanonical)} is planned in this run; its entry is applied first`);
-    }
-  }
-
-  // 3d. Title: a main workspace deviating from the rendered template is renamed
-  // only with --retitle (native workspace rename), otherwise just reported.
-  if (main && expectedTitle !== null && (main.title ?? main.name) !== expectedTitle) {
-    if (retitle) {
-      add('workspace.retitle', 'paseo.workspace.retitle', `Rename workspace ${main.id} from "${main.title ?? main.name}" to "${expectedTitle}"`, {
-        workspaceId: main.id, from: main.title ?? main.name, title: expectedTitle,
-      });
-    } else {
-      notes.push(`Workspace ${main.id} is titled "${main.title ?? main.name}"; template expects "${expectedTitle}" (rerun with --retitle to plan a rename)`);
-    }
   }
 
   // 4. Steer slots
@@ -395,7 +244,7 @@ export function planRepository(discovery, config, { allowFork = false, adopt = {
   // Shared adoption tail for lettered and digit-titled candidates: the privacy
   // rule first (a sensitive provider with a profile mismatch only runs on
   // provably public code — unknown counts as private), then detach/adopt, then
-  // the mismatch and context notes.
+  // the context note. The live model is kept as-is (no drift reconciliation).
   const repoPublic = discovery.github?.fork?.repo?.private === false;
   const repoPublicity = discovery.github?.fork?.repo?.private === true ? 'is private' : 'is of unknown publicity (no GitHub repo info)';
   const planAdoption = (slot, key, candidate, profile) => {
@@ -415,9 +264,6 @@ export function planRepository(discovery, config, { allowFork = false, adopt = {
     add(key, 'paseo.agent.adopt', `Label confirmed agent ${candidate.id} as Steer ${slot} (title and model unchanged)`, { agentId: candidate.id, labels: steerCreateLabels(effScopeId, effScopeId, slot) });
     if (profile.advisor === true) {
       notes.push(`Steer ${slot} uses advisor profile "${profile.name}" (advisor, never active)`);
-    }
-    if (mismatch) {
-      notes.push(`Adopted Steer ${slot} runs ${candidate.provider}/${candidate.model}; profile "${profile.name}" names ${profile.provider}/${profile.model} (kept) — to match the slot profile to the live steer: ${formatSlotProfileSuggestion(config, slot, candidate.provider, candidate.model)}`);
     }
     const warn = config.usage?.warnContextTokens;
     const usage = agentUsage(candidate);
@@ -464,9 +310,8 @@ export function planRepository(discovery, config, { allowFork = false, adopt = {
       if (adopt[slot] && adopt[slot] !== existing.id) conflict(key, `--adopt ${slot}=${adopt[slot]} conflicts with the already labelled Steer ${slot} ${existing.id}`);
       else if (parent) conflict(key, `Steer ${slot} (${existing.id}) has ${describeParent(existing)}; detach it in Paseo or archive it before the factory can use the slot`);
       else if (main && existing.workspaceId !== main.id) conflict(key, `Steer ${slot} (${existing.id}) lives in workspace ${existing.workspaceId}, not in main workspace ${main.id}`);
-      else if (existing.provider !== profile.provider || existing.model !== profile.model) {
-        notes.push(`Steer ${slot} runs ${existing.provider}/${existing.model}; config profile "${profile.name}" names ${profile.provider}/${profile.model} (kept, no recreation) — to match the slot profile to the live steer: ${formatSlotProfileSuggestion(config, slot, existing.provider, existing.model)}`);
-      }
+      // A live model differing from the slot profile is kept silently (K13:
+      // no expected-model drift handling; point the slot at it with steer set).
       continue;
     }
 
@@ -510,6 +355,10 @@ export function planRepository(discovery, config, { allowFork = false, adopt = {
     if (liveOutsidePrepare.length) {
       outsideBlocked = true;
       conflict(key, `Steer ${slot} has no live agent, but live steers ${outsideDesc} run in slots outside prepare (${effectivePrepare.join(', ') || 'none'}); refusing to create another steer — re-run with --slots ${outsideSlotsFlag} or archive them in Paseo${outsideUndefined.length ? ` (slot ${outsideUndefined.join(', ')} is not defined in steers.slots; define it or archive the steer)` : ''}`);
+      continue;
+    }
+    if (!main || !workspaceId) {
+      conflict(key, `Steer ${slot} has no live agent and there is no main workspace to create it in; enroll the workspace first`);
       continue;
     }
     const { profile: resolved, skipped } = resolveProfile(config, discovery.providers, steerFallbackList(config, slot), {
@@ -637,7 +486,8 @@ function finish(discovery, config, ops, conflicts, notes) {
   notes = [...notes, ...configWarnings(config)];
   const status = conflicts.length ? 'conflict' : ops.length ? 'pending' : 'complete';
   const main = discovery.mainWorkspace;
-  // Observation only (not hashed): lets apply recover a workspace it created but could not record.
+  // Observation only (not hashed): lets apply reconcile an attempted agent
+  // create it could not record (old plans also observed workspaces).
   const steers = Object.fromEntries((discovery.steers?.labelled ?? []).filter((a) => !a.archivedAt).map((a) => [a.labels[LABEL.slot], a.id]));
   const observed = { mainWorkspace: main ? { id: main.id, directory: main.workspaceDirectory, title: main.title ?? main.name, metadata: main.metadata ?? {}, createdAt: main.createdAt ?? null } : null, steers };
   return { repo: discovery.forkName ?? discovery.input, input: discovery.input, status, ops, conflicts, notes, observed };
@@ -646,7 +496,9 @@ function finish(discovery, config, ops, conflicts, notes) {
 /** Hash over everything apply would do; the dry-run prints it, apply must quote it. */
 export function planHash(plans, config) {
   const material = {
-    config: { github: config.github, checkoutRoot: config.checkoutRoot, workspaceTitle: config.workspaceTitle, ...(config.workspaceTitleMultiRepo ? { workspaceTitleMultiRepo: config.workspaceTitleMultiRepo } : {}), profiles: config.profiles, steers: config.steers },
+    // K13: only the owner still matters (scope identity + visibility); the
+    // retired clone/title knobs are ignored so old configs keep hashing.
+    config: { github: { owner: config?.github?.owner }, checkoutRoot: config.checkoutRoot, profiles: config.profiles, steers: config.steers },
     plans: plans.map((p) => ({ repo: p.repo, status: p.status, ops: p.ops.map(({ key, kind, params, implies }) => ({ key, kind, params, implies: implies ?? [] })), conflicts: p.conflicts })),
   };
   return createHash('sha256').update(JSON.stringify(material)).digest('hex').slice(0, 16);

@@ -1,4 +1,4 @@
-Workspace Factory provisions and steers standardized Paseo workspaces from GitHub repositories. It creates one main workspace per repository with steer agents in slots A to Z, tracks the active steer with its task checkpoint, and hands coordination from one steer to another.
+Workspace Factory enrolls one existing Paseo workspace per scope and steers its coordinator agents. It adopts the home workspace, creates steer agents in slots A to Z, tracks the active steer with its task checkpoint, and hands coordination from one steer to another.
 
 ## How it works
 
@@ -24,7 +24,7 @@ Open **Settings → Plugins → Factory** to configure steer slots, worker profi
 
 ## Capabilities and limits
 
-Profile and slot changes never touch running steers. The panel marks a steer that drifts from its configured profile, and the next plan reports the difference.
+Profile and slot changes never touch running steers; the live model is authoritative.
 
 The plugin reads daemon state, local git checkouts, and GitHub through gh. It writes workspaces, agents, workspace metadata, and plan files on the daemon host. Plugin code is trusted code: server code runs unsandboxed with the daemon user's access, and client code runs inside the Paseo app.
 

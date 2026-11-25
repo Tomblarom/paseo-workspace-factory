@@ -139,16 +139,29 @@ test('normalizeEntry keeps a boolean hub flag and rejects junk', () => {
   assert.throws(() => normalizeEntry({ local: '/p/admin', hub: 'yes' }, CONFIG), /must be a boolean/);
 });
 
-test('fresh hub dir plans kind hub with id --name else hub', async () => {
+test('hub enrollment adopts the existing workspace with id --name else hub', async () => {
   const world = makeWorld();
   world.checkouts['/p/admin'] = { remotes: {} };
+  const project = addProject(world, '/p/admin');
+  world.workspaces.push({
+    id: 'wks_hubfresh00000001', projectId: project.projectId, workspaceDirectory: '/p/admin',
+    workspaceKind: 'local_checkout', title: 'Main', name: 'Main', metadata: {}, createdAt: new Date().toISOString(),
+  });
   const [plain] = await runnerFor(world).runPlans([{ local: '/p/admin', hub: true }]);
   assert.equal(plain.repo, 'hub');
-  assert.deepEqual(plain.ops.find((o) => o.key === 'workspace.main').params.metadata[METADATA_KEY].scope, { id: 'hub', kind: 'hub', locator: '/p/admin' });
+  assert.deepEqual(plain.ops.find((o) => o.key === 'workspace.main.adopt').params.metadata[METADATA_KEY].scope, { id: 'hub', kind: 'hub', locator: '/p/admin' });
   const [named] = await runnerFor(world).runPlans([{ local: '/p/admin', hub: true, name: 'ops' }]);
   assert.equal(named.repo, 'ops');
-  assert.equal(named.ops.find((o) => o.key === 'workspace.main').params.metadata[METADATA_KEY].scope.kind, 'hub');
+  assert.equal(named.ops.find((o) => o.key === 'workspace.main.adopt').params.metadata[METADATA_KEY].scope.kind, 'hub');
   assert.equal(ghCalls(world).length, 0);
+});
+
+test('hub dir without a workspace is a conflict (K13: enroll existing workspaces)', async () => {
+  const world = makeWorld();
+  world.checkouts['/p/admin'] = { remotes: {} };
+  const [p] = await runnerFor(world).runPlans([{ local: '/p/admin', hub: true }]);
+  assert.equal(p.status, 'conflict');
+  assert.match(p.conflicts.find((c) => c.key === 'workspace.main').reason, /No factory main workspace/);
 });
 
 test('hub on a worktree workspace adopts with hub kind', async () => {
@@ -168,7 +181,7 @@ test('hub on a worktree workspace adopts with hub kind', async () => {
   assert.ok(!keys(p).includes('paseo.project'), 'no new project for hub adoption');
 });
 
-test('a second live hub is a conflict; so are two hub entries in one run', async () => {
+test('a second live hub is a conflict; two hub entries are rejected (K13: one entry)', async () => {
   const world = makeWorld();
   world.checkouts['/p/admin'] = { remotes: {} };
   world.checkouts['/p/other'] = { remotes: {} };
@@ -179,9 +192,7 @@ test('a second live hub is a conflict; so are two hub entries in one run', async
   const fresh = makeWorld();
   fresh.checkouts['/p/a'] = { remotes: {} };
   fresh.checkouts['/p/b'] = { remotes: {} };
-  const [a, b] = await runnerFor(fresh).runPlans([{ local: '/p/a', hub: true }, { local: '/p/b', hub: true, name: 'hub2' }]);
-  assert.match(a.conflicts.find((c) => c.key === 'scope.hub').reason, /Several entries/);
-  assert.match(b.conflicts.find((c) => c.key === 'scope.hub').reason, /Several entries/);
+  await assert.rejects(runnerFor(fresh).runPlans([{ local: '/p/a', hub: true }, { local: '/p/b', hub: true, name: 'hub2' }]), /exactly one workspace entry/);
 });
 
 test('dir scope converts to hub in metadata only; steers, epoch and checkpoint stay', async () => {

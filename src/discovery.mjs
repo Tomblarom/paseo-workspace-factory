@@ -3,7 +3,7 @@
 import { basename, join, resolve } from 'node:path';
 import { realpathSync, statSync } from 'node:fs';
 import { resolveGitHub, parseRepoInput } from './github.mjs';
-import { classifyCheckouts, inspectCloneTarget } from './local.mjs';
+import { classifyCheckouts } from './local.mjs';
 import { LABEL, LEGACY_PREFIX, METADATA_KEY, PARENT_LABEL, parentOf } from './paseo.mjs';
 import { validScope } from './scope.mjs';
 import { continuedFromId, inheritContinuationLabels, resolveContinuations } from './zerosub.mjs';
@@ -118,7 +118,7 @@ export function defaultExistsDir(path) {
 }
 
 /**
- * Validates a per-entry scope name (`--name` / repos-file `"name"`). Scope ids
+ * Validates a per-entry scope name (`--name` / entry `"name"`). Scope ids
  * stay addressable: no "/" (github form), no ":" (`--adopt scope:X=...`), no
  * control characters. Returns the trimmed name or null when absent.
  */
@@ -136,22 +136,7 @@ function normalizeScopeName(raw, entry) {
 }
 
 /**
- * Validates a per-entry title subject (`--subject` / repos-file `"subject"`).
- * Titles are free text (spaces, slashes and dots allowed); only control
- * characters are rejected. Returns the trimmed subject or null when absent.
- */
-function normalizeSubject(raw, entry) {
-  if (raw === undefined || raw === null) return null;
-  if (typeof raw !== 'string') throw new Error(`Subject must be a string: ${JSON.stringify(entry)}`);
-  const subject = raw.trim();
-  if (!subject) throw new Error(`Subject must not be empty: ${JSON.stringify(entry)}`);
-  if (subject.length > 140) throw new Error(`Subject is too long (max 140 characters): ${JSON.stringify(entry)}`);
-  if (/[\0-\x1f\x7f]/.test(subject)) throw new Error(`Subject must not contain control characters: ${JSON.stringify(entry)}`);
-  return subject;
-}
-
-/**
- * Validates a per-entry main workspace override (`--main` / repos-file `"main"`).
+ * Validates a per-entry main workspace override (`--main`).
  * Only a workspace reference (`workspace:<id>`, `worktree:<id>`, bare `wks_...`).
  * Returns the workspace id or null when absent.
  */
@@ -164,7 +149,7 @@ function normalizeMainRef(raw, entry) {
 }
 
 /**
- * Validates a per-entry domain pointer (`--domain` / repos-file `"domain"`).
+ * Validates a per-entry domain pointer (`--domain` / entry `"domain"`).
  * Undefined/null means "not requested" (no change); "" clears the pointer;
  * otherwise a scope id (owner/repo forms keep their "/", only ":" and control
  * characters are rejected). Returns undefined, "" or the trimmed id.
@@ -181,54 +166,53 @@ function normalizeDomain(raw, entry) {
   return id;
 }
 
-/** Normalizes a repository list entry: "owner/repo", a URL, { repo, parentDir?, checkout?, main?, domain?, name?, subject?, hub? }, { local: <path>, domain?, name?, subject?, hub? } or "local/<folder>", { workspace: <id>, domain?, hub? } or "workspace:<id>" (bare "wks_..." ids too). A hub entry plans a hub-kind scope (S5b). `"main"` (github only) adopts that worktree workspace as the scope's main workspace. `"domain"` sets the domain pointer ("" clears it); hubs carry no domain. */
+/** Normalizes a single workspace entry: "owner/repo", a URL, { repo, parentDir?, main?, domain?, name?, hub? }, { local: <path>, domain?, name?, hub? } or "local/<folder>", { workspace: <id>, domain?, name?, hub? } or "workspace:<id>" (bare "wks_..." ids too). A hub entry plans a hub-kind scope (S5b). `"main"` (github only) adopts that worktree workspace as the scope's main workspace. `"domain"` sets the domain pointer ("" clears it); hubs carry no domain. `"checkout"` and `"subject"` were retired with bulk provisioning (K13). */
 export function normalizeEntry(entry, config) {
+  const raw = typeof entry === 'object' && entry !== null ? entry : null;
+  if (raw && raw.checkout !== undefined) throw new Error(`Entry "checkout" (--checkout) was retired; address the existing workspace directly (workspace:<id> or --local <path>): ${JSON.stringify(entry)}`);
+  if (raw && raw.subject !== undefined) throw new Error(`Entry "subject" (--subject) was retired with the title templates; workspace titles stay as they are: ${JSON.stringify(entry)}`);
   if (typeof entry === 'object' && entry !== null && typeof entry.local === 'string') {
     if (entry.main !== undefined) throw new Error(`Entry "main" (--main) is only supported for github entries: ${JSON.stringify(entry)}`);
-    const raw = entry.local.trim();
-    if (!raw) throw new Error(`Repository entry needs a non-empty "local" path: ${JSON.stringify(entry)}`);
-    const local = resolve(raw);
+    const rawPath = entry.local.trim();
+    if (!rawPath) throw new Error(`Repository entry needs a non-empty "local" path: ${JSON.stringify(entry)}`);
+    const local = resolve(rawPath);
     const base = basename(local);
     if (!base || base === '.' || base === '..') throw new Error(`Local path has no folder name: ${JSON.stringify(entry)}`);
     const name = normalizeScopeName(entry.name, entry);
-    const subject = normalizeSubject(entry.subject, entry);
     if (entry.hub !== undefined && typeof entry.hub !== 'boolean') throw new Error(`Entry "hub" must be a boolean: ${JSON.stringify(entry)}`);
     const domain = normalizeDomain(entry.domain, entry);
     if (domain !== undefined && entry.hub === true) throw new Error(`Entry must not combine "hub" with "domain" (hubs carry no domain): ${JSON.stringify(entry)}`);
-    return { repo: `local/${base}`, local, parentDir: resolve(entry.parentDir ?? config.checkoutRoot), checkout: entry.checkout ? resolve(entry.checkout) : null, ...(name !== null ? { name } : {}), ...(subject !== null ? { subject } : {}), ...(entry.hub === true ? { hub: true } : {}), ...(domain !== undefined ? { domain } : {}) };
+    return { repo: `local/${base}`, local, parentDir: resolve(entry.parentDir ?? config.checkoutRoot), ...(name !== null ? { name } : {}), ...(entry.hub === true ? { hub: true } : {}), ...(domain !== undefined ? { domain } : {}) };
   }
   if (typeof entry === 'object' && entry !== null && (typeof entry.workspace === 'string' || typeof entry.workspaceId === 'string')) {
     if (entry.main !== undefined) throw new Error(`Entry "main" (--main) is only supported for github entries: ${JSON.stringify(entry)}`);
-    const raw = (entry.workspace ?? entry.workspaceId).trim();
-    if (!raw) throw new Error(`Repository entry needs a non-empty "workspace" id: ${JSON.stringify(entry)}`);
+    const rawId = (entry.workspace ?? entry.workspaceId).trim();
+    if (!rawId) throw new Error(`Repository entry needs a non-empty "workspace" id: ${JSON.stringify(entry)}`);
     const name = normalizeScopeName(entry.name, entry);
-    const subject = normalizeSubject(entry.subject, entry);
     if (entry.hub !== undefined && typeof entry.hub !== 'boolean') throw new Error(`Entry "hub" must be a boolean: ${JSON.stringify(entry)}`);
     const domain = normalizeDomain(entry.domain, entry);
     if (domain !== undefined && entry.hub === true) throw new Error(`Entry must not combine "hub" with "domain" (hubs carry no domain): ${JSON.stringify(entry)}`);
-    return { repo: `workspace:${raw}`, workspaceId: raw, parentDir: resolve(entry.parentDir ?? config.checkoutRoot), checkout: entry.checkout ? resolve(entry.checkout) : null, ...(name !== null ? { name } : {}), ...(subject !== null ? { subject } : {}), ...(entry.hub === true ? { hub: true } : {}), ...(domain !== undefined ? { domain } : {}) };
+    return { repo: `workspace:${rawId}`, workspaceId: rawId, parentDir: resolve(entry.parentDir ?? config.checkoutRoot), ...(name !== null ? { name } : {}), ...(entry.hub === true ? { hub: true } : {}), ...(domain !== undefined ? { domain } : {}) };
   }
   const value = typeof entry === 'string' ? { repo: entry } : { ...entry };
   if (typeof value.repo !== 'string') throw new Error(`Repository entry needs "repo", "local" or "workspace": ${JSON.stringify(entry)}`);
   const name = normalizeScopeName(value.name, entry);
-  const subject = normalizeSubject(value.subject, entry);
   if (value.hub !== undefined && typeof value.hub !== 'boolean') throw new Error(`Entry "hub" must be a boolean: ${JSON.stringify(entry)}`);
-  const withName = { ...(name !== null ? { name } : {}), ...(subject !== null ? { subject } : {}), ...(value.hub === true ? { hub: true } : {}) };
+  const withName = { ...(name !== null ? { name } : {}), ...(value.hub === true ? { hub: true } : {}) };
   const mainWorkspaceId = normalizeMainRef(value.main, entry);
-  if (mainWorkspaceId && value.checkout) throw new Error(`Entry must not combine "main" with "checkout": ${JSON.stringify(entry)}`);
   const domain = normalizeDomain(value.domain, entry);
   if (domain !== undefined && value.hub === true) throw new Error(`Entry must not combine "hub" with "domain" (hubs carry no domain): ${JSON.stringify(entry)}`);
   const workspaceId = workspaceIdFromRepo(value.repo);
   if (workspaceId) {
     if (mainWorkspaceId) throw new Error(`Entry "main" (--main) is only supported for github entries: ${JSON.stringify(entry)}`);
-    return { repo: `workspace:${workspaceId}`, workspaceId, parentDir: resolve(value.parentDir ?? config.checkoutRoot), checkout: value.checkout ? resolve(value.checkout) : null, ...withName, ...(domain !== undefined ? { domain } : {}) };
+    return { repo: `workspace:${workspaceId}`, workspaceId, parentDir: resolve(value.parentDir ?? config.checkoutRoot), ...withName, ...(domain !== undefined ? { domain } : {}) };
   }
   const localName = localNameFromRepo(value.repo);
   if (localName) {
     if (mainWorkspaceId) throw new Error(`Entry "main" (--main) is only supported for github entries: ${JSON.stringify(entry)}`);
-    return { repo: `local/${localName}`, localName, parentDir: resolve(value.parentDir ?? config.checkoutRoot), checkout: value.checkout ? resolve(value.checkout) : null, ...withName, ...(domain !== undefined ? { domain } : {}) };
+    return { repo: `local/${localName}`, localName, parentDir: resolve(value.parentDir ?? config.checkoutRoot), ...withName, ...(domain !== undefined ? { domain } : {}) };
   }
-  return { repo: value.repo, parentDir: resolve(value.parentDir ?? config.checkoutRoot), checkout: value.checkout ? resolve(value.checkout) : null, ...withName, ...(mainWorkspaceId ? { mainWorkspaceId } : {}), ...(domain !== undefined ? { domain } : {}) };
+  return { repo: value.repo, parentDir: resolve(value.parentDir ?? config.checkoutRoot), ...withName, ...(mainWorkspaceId ? { mainWorkspaceId } : {}), ...(domain !== undefined ? { domain } : {}) };
 }
 
 function worktreesAt(paseo, wantedReal, realpath) {
@@ -545,7 +529,6 @@ function buildWorktreeDiscovery(matched, { normalized, parentDir, checkouts, pas
   const base = first ? basename(first.workspaceDirectory ?? '') : null;
   const folder = base && base !== '.' && base !== '..' && !base.includes('/') ? base : null;
   const requestedName = normalized.name ?? null;
-  const requestedSubject = normalized.subject ?? null;
   const mainWorkspace = matched.length === 1 ? matched[0] : null;
   const stored = mainWorkspace && validScope(mainWorkspace.metadata?.[METADATA_KEY]?.scope)
     ? mainWorkspace.metadata[METADATA_KEY].scope
@@ -610,15 +593,12 @@ function buildWorktreeDiscovery(matched, { normalized, parentDir, checkouts, pas
     forkName,
     scope,
     requestedName,
-    requestedSubject,
     requestedDomain,
     liveScopes: liveScopeRefs(liveScopes),
     expectedPath: dirReal,
-    cloneTarget: null,
     checkout,
     checkoutIssues: issues,
     relatedCheckouts: [],
-    upstreamRemote: null,
     projects,
     mainCandidates,
     otherLocalWorkspaces: [],
@@ -656,7 +636,6 @@ function discoverWorktreeById(normalized, { checkouts, paseo, realpath, git, liv
 function discoverLocal(normalized, { config, checkouts, paseo, realpath, existsDir, git, liveScopes, zerosubSwitches = [] }) {
   const live = liveScopeRefs(liveScopes);
   const requestedName = normalized.name ?? null;
-  const requestedSubject = normalized.subject ?? null;
   const requestedDomain = normalized.domain;
   // An explicit local path that is a worktree directory adopts that worktree
   // workspace instead of planning a duplicate project/workspace.
@@ -810,15 +789,12 @@ function discoverLocal(normalized, { config, checkouts, paseo, realpath, existsD
     forkName,
     scope,
     requestedName,
-    requestedSubject,
     requestedDomain,
     liveScopes: live,
     expectedPath,
-    cloneTarget: null,
     checkout,
     checkoutIssues,
     relatedCheckouts: [],
-    upstreamRemote: null,
     projects,
     mainCandidates: mainMatches,
     otherLocalWorkspaces: mainCandidates.filter((w) => !mainMatches.includes(w)),
@@ -831,7 +807,7 @@ function discoverLocal(normalized, { config, checkouts, paseo, realpath, existsD
   };
 }
 
-export function discoverRepository(entry, { config, gh, git, checkouts, paseo, realpath = realpathSync, inspectTarget = inspectCloneTarget, existsDir = defaultExistsDir, liveScopes = null, zerosubSwitches = [] }) {
+export function discoverRepository(entry, { config, gh, git, checkouts, paseo, realpath = realpathSync, existsDir = defaultExistsDir, liveScopes = null, zerosubSwitches = [] }) {
   const normalized = normalizeEntry(entry, config);
   if (normalized.workspaceId) {
     return discoverWorktreeById(normalized, { checkouts, paseo, realpath, git, liveScopes, zerosubSwitches });
@@ -839,7 +815,7 @@ export function discoverRepository(entry, { config, gh, git, checkouts, paseo, r
   if (normalized.local || normalized.localName) {
     return discoverLocal(normalized, { config, checkouts, paseo, realpath, existsDir, git, liveScopes, zerosubSwitches });
   }
-  const { repo: input, parentDir, checkout: explicitCheckout } = normalized;
+  const { repo: input, parentDir } = normalized;
   const github = resolveGitHub(gh, input, config.github.owner);
   const forkRepo = github.fork.repo ?? null;
   const forkName = forkRepo?.fullName ?? github.fork.planned ?? null;
@@ -866,7 +842,7 @@ export function discoverRepository(entry, { config, gh, git, checkouts, paseo, r
       mainOverride = found;
     }
   }
-  if (!mainOverride && !requestedMainId && !explicitCheckout && forkName) {
+  if (!mainOverride && !requestedMainId && forkName) {
     // Re-plan/status after a --main adoption: the github scope already lives on
     // a worktree workspace, which the checkout-path lookup below cannot see.
     // The live scope (same id, worktree main with factory metadata) wins over
@@ -906,33 +882,17 @@ export function discoverRepository(entry, { config, gh, git, checkouts, paseo, r
     }
   } else if (requestedMainId) {
     // The validation issue above is the conflict; no fallback to normal selection.
-  } else if (explicitCheckout) {
-    const wanted = real(explicitCheckout, realpath);
-    checkout = exact.find((c) => c.path === wanted) ?? null;
-    if (!checkout) checkoutIssues.push(`Requested checkout ${explicitCheckout} is not a checkout with origin ${forkName}`);
   } else if (exact.length === 1) checkout = exact[0];
   else if (exact.length > 1) {
     // Several clones of the fork: only unambiguous signals decide, otherwise
     // ask. A main workspace wins first, then the Paseo project checkout, then
-    // the expected path.
+    // the expected path. Otherwise enroll one workspace directly by id.
     const atExpected = exact.filter((c) => c.path === real(expectedPath, realpath));
     const withMain = exact.filter((c) => workspaceAt(c.path).some(isMain));
     const atProject = exact.filter((c) => paseo.projects.some((p) => real(p.projectRootPath, realpath) === c.path));
     const pick = withMain.length === 1 ? withMain : atProject.length === 1 ? atProject : atExpected;
     if (pick.length === 1) checkout = pick[0];
-    else checkoutIssues.push(`Several checkouts have origin ${forkName}: ${exact.map((c) => c.path).join(', ')}; name one with --checkout <path> or {"repo": ..., "checkout": <path>}`);
-  }
-  const cloneTarget = expectedPath && !checkout && !checkoutIssues.length ? inspectTarget(config.checkoutRoot, parentDir, expectedPath) : null;
-
-  let upstreamRemote = null;
-  if (checkout && github.upstream) {
-    const name = config.github.upstreamRemote;
-    const current = checkout.repos[name] ?? null;
-    upstreamRemote = !(name in checkout.remotes)
-      ? { status: 'missing' }
-      : current === github.upstream.fullName.toLowerCase()
-        ? { status: 'ok' }
-        : { status: 'mismatch', url: checkout.remotes[name] };
+    else checkoutIssues.push(`Several checkouts have origin ${forkName}: ${exact.map((c) => c.path).join(', ')}; enroll one workspace directly (workspace:<id> or --local <path>)`);
   }
 
   const path = checkout?.path ?? null;
@@ -983,17 +943,14 @@ export function discoverRepository(entry, { config, gh, git, checkouts, paseo, r
     forkName,
     scope,
     requestedName: normalized.name ?? null,
-    requestedSubject: normalized.subject ?? null,
     requestedHub: normalized.hub === true,
     requestedMain: requestedMainId,
     requestedDomain,
     liveScopes: liveScopeRefs(liveScopes),
     expectedPath,
-    cloneTarget,
     checkout,
     checkoutIssues,
     relatedCheckouts: [...related, ...untouchedExact].map((c) => ({ path: c.path, remotes: c.remotes })),
-    upstreamRemote,
     projects,
     mainCandidates: mainMatches,
     otherLocalWorkspaces: mainCandidates.filter((w) => !mainMatches.includes(w)),

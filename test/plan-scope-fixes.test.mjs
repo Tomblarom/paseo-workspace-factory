@@ -200,22 +200,19 @@ test('2: plan workspace:<id> on a non-worktree scope plans metadata, not a workt
   assert.ok(!domained.conflicts.some((c) => /not a worktree workspace/.test(c.reason)));
 });
 
-test('2: scope-id plans stay metadata-only (--retitle, --slots); unknown ids still fail', async () => {
+test('2: scope-id plans ignore titles and honor --slots; unknown ids still fail', async () => {
   const world = makeWorld();
   provisionDir(world, { path: '/p/team-a', id: 'team-a' });
   const { ws, steers } = provisionDir(world, { path: '/p/web', id: 'web', title: 'Old title' });
   const [noted] = await runnerFor(world).runPlans(['web']);
-  assert.ok(!keys(noted).includes('workspace.retitle'));
-  assert.ok(noted.notes.some((n) => n.includes('"Old title"') && n.includes('--retitle')));
-  const [retitled] = await runnerFor(world).runPlans(['web'], { retitle: true });
-  assert.deepEqual(keys(retitled), ['workspace.retitle']);
-  assert.equal(retitled.ops[0].params.title, 'Main');
+  assert.ok(!keys(noted).includes('workspace.retitle'), 'K13: titles stay as they are');
+  assert.ok(!noted.notes.some((n) => n.includes('"Old title"')), 'K13: no title notes');
 
   steers.B.archivedAt = '2026-01-01';
-  const [narrowed] = await runnerFor(world).runPlans(['web'], { retitle: true, slots: ['A'] });
-  assert.deepEqual(keys(narrowed), ['workspace.retitle'], 'unlisted slot B is not planned');
-  const [full] = await runnerFor(world).runPlans(['web'], { retitle: true });
-  assert.deepEqual(keys(full).sort(), ['steer.B', 'workspace.retitle'].sort());
+  const [narrowed] = await runnerFor(world).runPlans(['web'], { slots: ['A'] });
+  assert.deepEqual(keys(narrowed), [], 'unlisted slot B is not planned');
+  const [full] = await runnerFor(world).runPlans(['web']);
+  assert.deepEqual(keys(full), ['steer.B']);
 
   await assert.rejects(() => runnerFor(world).runPlans(['no-such-scope']), /Not a GitHub repository/);
   const [missing] = await runnerFor(world).runPlans([{ workspace: 'wks_doesnotexist0001' }]);

@@ -14,7 +14,7 @@ import { planHash } from './planner.mjs';
 import { applyPlans, createExecutors, createAuthorization, storeAuthorization, fileProgress, withApplyLock } from './apply.mjs';
 import { CHECKPOINT_KEY, restartInterruptions, steerStatus, switchSteer, freshSteer, writeCheckpoint, parseCheckpointBlock, lastAssistantText, resolveTargetEntry, buildResumeBrief, readGitBrief, workerResumeAnswer } from './steer.mjs';
 import { AGENTS_KEY } from './agent-state.mjs';
-import { listScopes, resolveScope, domainFirstPlanOrder } from './scope.mjs';
+import { listScopes, resolveScope } from './scope.mjs';
 import { planLabelFixes, formatLabelFixes } from './labels.mjs';
 import { DRAIN_DEFAULT_TIMEOUT_MS, drain, parseTimeout } from './drain.mjs';
 import { startScopedWorker } from './workers.mjs';
@@ -66,7 +66,7 @@ async function connectSteerDelivery() {
 }
 
 const USAGE = `Usage: paseo-factory <command> [options]
-  plan   <repo...> [--repos-file f.json] [--local <path>]... [--name <id>] [--subject <text>] [--checkout <path>] [--main workspace:<id>] [--domain <id>] [--hub <path|workspace:id>] [--allow-fork] [--adopt <scope-id>:A=<agent-id>] [--adopt-worker <agent-id>[@A]] [--detach] [--slots A,B] [--retitle] [--rename-project <name>] [--json] [--out f.json]
+  plan   <repo> [--local <path>] [--name <id>] [--main workspace:<id>] [--domain <id>] [--hub <path|workspace:id>] [--adopt A=<agent-id>] [--adopt-worker <agent-id>[@A]] [--detach] [--slots A,B] [--json] [--out f.json]
   apply  --confirm <hash>             run the stored dry-run plan; resumes after a failure
   status <repo> [--json]
   checkpoint <repo> --task <text> [--test <text>]... [--blocker <text>]... [--next <text>]
@@ -92,16 +92,15 @@ const USAGE = `Usage: paseo-factory <command> [options]
   scopes [--json] [--candidates]   one line per live scope; --candidates lists unadopted workspaces
   labels [scope|agent-id] [--apply] [--json]   list missing/wrong factory agent labels (dry-run); --apply sets them
   drain [--timeout 10m] [--json]   wait until no factory agent runs; marks leftovers planned-restart (exit 2), never restarts itself
---adopt SLOT=<agent-id> needs exactly one repository; with several entries use --adopt <scope-id>:SLOT=<agent-id> per entry.
---checkout <path> names the checkout of one entry (same as per-entry "checkout" in --repos-file); use it when several checkouts share one origin.
---local is repeatable and plans existing directories without GitHub (no fork, clone or upstream remote); dir/workspace entries may carry "name" for the scope id (or --name with one entry).
+plan enrolls exactly one existing Paseo workspace as a factory scope (or repairs it); open the workspace natively first, then plan it by scope id, workspace:<id> or --local <path>.
+--local plans an existing directory without GitHub; it may carry --name for the scope id.
 local/<folder> stays an input alias only; scopes are addressed by id (owner/repo, folder/--name, <parent>@<branch>).
-A --local worktree directory (or {"workspace": <id>}, "workspace:<id>") adopts that Paseo worktree workspace as the main workspace without a new project; status/checkpoint/switch/fresh/workers accept its scope id, local/<folder> alias or workspace id.
---main workspace:<id> adopts that worktree workspace as the main workspace of a github scope (one entry; the scope id stays owner/repo, no duplicate workspace or project).
+A --local worktree directory (or {"workspace": <id>}, "workspace:<id>") adopts that Paseo worktree workspace as the main workspace; status/checkpoint/switch/fresh/workers accept its scope id, local/<folder> alias or workspace id.
+--main workspace:<id> adopts that worktree workspace as the main workspace of a github scope (the scope id stays owner/repo).
 --domain <id> sets the scope's domain pointer (Hub → Domain → Kind, logical only; --domain "" clears it); blockers prefixed domain: go to the domain steer, hub: further to the hub.
-Main titles follow the workspaceTitle template ({name}, {subject}); a deviating title is only reported unless --retitle plans a rename. --rename-project renames the scope project (one entry).
 --hub plans a hub-kind scope (at most one live; an existing dir scope converts, steers/epoch/checkpoint untouched).
 --adopt-worker labels an agent as scope worker (stays in its workspace); --detach plans a native detach for parented steer candidates.
+Retired: --repos-file, --allow-fork, --checkout, --subject, --retitle, --rename-project and multi-repo plans (bulk provisioning).
 Model lists are ordered by priority, highest first. worker set <n> inserts at position n (later entries move down, an existing copy of the same model moves); worker rm <n> removes and closes the gap. Steer slots never shift: steer set <n|slot> replaces the slot's profile (2 is B). Unavailable models are stored with a warning and skipped by the fallback.
 Options: --config <path> (default: $PASEO_FACTORY_CONFIG or ~/.config/paseo-workspace-factory/config.json); --dry-run previews config writes`;
 
@@ -270,15 +269,15 @@ async function main() {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
     options: {
-      config: { type: 'string' }, 'repos-file': { type: 'string' }, 'allow-fork': { type: 'boolean' },
+      config: { type: 'string' },
       json: { type: 'boolean' }, confirm: { type: 'string' }, to: { type: 'string' }, apply: { type: 'boolean' },
       'no-send': { type: 'boolean' }, 'report-to': { type: 'string' }, help: { type: 'boolean' },
       adopt: { type: 'string', multiple: true }, slots: { type: 'string', multiple: true }, out: { type: 'string' }, task: { type: 'string' },
       test: { type: 'string', multiple: true }, blocker: { type: 'string', multiple: true },
       next: { type: 'string' }, 'from-agent': { type: 'string' }, wait: { type: 'boolean' }, 'expect-epoch': { type: 'string' },
       'notify-previous': { type: 'boolean' }, language: { type: 'string' }, local: { type: 'string', multiple: true }, name: { type: 'string' },
-      retitle: { type: 'boolean' }, 'rename-project': { type: 'string' }, subject: { type: 'string' }, hub: { type: 'string', multiple: true },
-      'adopt-worker': { type: 'string', multiple: true }, detach: { type: 'boolean' }, agent: { type: 'string' }, checkout: { type: 'string' },
+      hub: { type: 'string', multiple: true },
+      'adopt-worker': { type: 'string', multiple: true }, detach: { type: 'boolean' }, agent: { type: 'string' },
       main: { type: 'string' }, domain: { type: 'string' },
       thinking: { type: 'string' }, mode: { type: 'string' }, profile: { type: 'string' }, 'dry-run': { type: 'boolean' },
       candidates: { type: 'boolean' },
@@ -322,7 +321,7 @@ async function main() {
     }
     return { local: abs, hub: true };
   });
-  let entries = [...args, ...(values['repos-file'] ? JSON.parse(readFileSync(values['repos-file'], 'utf8')) : []), ...localFlags.map((p) => ({ local: resolve(p) })), ...hubEntries];
+  let entries = [...args, ...localFlags.map((p) => ({ local: resolve(p) })), ...hubEntries];
   if (localFlags.length && (command === 'models' || command === 'model' || command === 'steer' || command === 'worker')) {
     throw new Error(`--local is not accepted with ${command}`);
   }
@@ -331,7 +330,7 @@ async function main() {
   }
   if (values.name !== undefined) {
     if (command !== 'plan') throw new Error('--name is only accepted with plan');
-    if (entries.length !== 1) throw new Error('--name needs exactly one repository entry (or use per-entry "name" in --repos-file)');
+    if (entries.length !== 1) throw new Error('--name needs exactly one workspace entry');
     const only = entries[0];
     if (only && typeof only === 'object' && !Array.isArray(only)) {
       if (only.name !== undefined) throw new Error('--name conflicts with the entry "name"; use one of them');
@@ -340,38 +339,13 @@ async function main() {
       entries = [{ repo: only, name: values.name }];
     }
   }
-  if (values.subject !== undefined) {
-    if (command !== 'plan') throw new Error('--subject is only accepted with plan');
-    if (entries.length !== 1) throw new Error('--subject needs exactly one repository entry (or use per-entry "subject" in --repos-file)');
-    const only = entries[0];
-    if (only && typeof only === 'object' && !Array.isArray(only)) {
-      if (only.subject !== undefined) throw new Error('--subject conflicts with the entry "subject"; use one of them');
-      entries = [{ ...only, subject: values.subject }];
-    } else {
-      entries = [{ repo: only, subject: values.subject }];
-    }
-  }
-  if (values.checkout !== undefined) {
-    if (command !== 'plan') throw new Error('--checkout is only accepted with plan');
-    if (entries.length !== 1) throw new Error('--checkout needs exactly one repository entry (or use per-entry "checkout" in --repos-file)');
-    if (!values.checkout?.trim()) throw new Error('--checkout needs a checkout path');
-    const only = entries[0];
-    if (only && typeof only === 'object' && !Array.isArray(only)) {
-      if (only.checkout !== undefined) throw new Error('--checkout conflicts with the entry "checkout"; use one of them');
-      if (only.main !== undefined) throw new Error('--checkout conflicts with the entry "main"; use one of them');
-      entries = [{ ...only, checkout: values.checkout }];
-    } else {
-      entries = [{ repo: only, checkout: values.checkout }];
-    }
-  }
   if (values.main !== undefined) {
     if (command !== 'plan') throw new Error('--main is only accepted with plan');
-    if (entries.length !== 1) throw new Error('--main needs exactly one repository entry (or use per-entry "main" in --repos-file)');
+    if (entries.length !== 1) throw new Error('--main needs exactly one workspace entry');
     if (!values.main?.trim()) throw new Error('--main needs a workspace id (workspace:<id>)');
     const only = entries[0];
     if (only && typeof only === 'object' && !Array.isArray(only)) {
       if (only.main !== undefined) throw new Error('--main conflicts with the entry "main"; use one of them');
-      if (only.checkout !== undefined) throw new Error('--main conflicts with the entry "checkout"; use one of them');
       entries = [{ ...only, main: values.main }];
     } else {
       entries = [{ repo: only, main: values.main }];
@@ -379,7 +353,7 @@ async function main() {
   }
   if (values.domain !== undefined) {
     if (command !== 'plan') throw new Error('--domain is only accepted with plan');
-    if (entries.length !== 1) throw new Error('--domain needs exactly one repository entry (or use per-entry "domain" in --repos-file)');
+    if (entries.length !== 1) throw new Error('--domain needs exactly one workspace entry');
     const only = entries[0];
     if (only && typeof only === 'object' && !Array.isArray(only)) {
       if (only.domain !== undefined) throw new Error('--domain conflicts with the entry "domain"; use one of them');
@@ -388,9 +362,6 @@ async function main() {
       entries = [{ repo: only, domain: values.domain }];
     }
   }
-  if (values.retitle && command !== 'plan') throw new Error('--retitle is only accepted with plan');
-  if (values['rename-project'] !== undefined && command !== 'plan') throw new Error('--rename-project is only accepted with plan');
-  if (values['rename-project'] !== undefined && entries.length !== 1) throw new Error('--rename-project needs exactly one repository entry');
   const gh = createGh();
   const git = createGit();
   const client = await connect();
@@ -418,7 +389,7 @@ async function main() {
         return console.log(values.json ? JSON.stringify(rows, null, 2) : formatLabelFixes(rows));
       }
       const fixable = rows.filter((row) => Object.keys(row.labels).length);
-      const execute = createExecutors({ client, gh, git, paseoCli: createPaseoCli() });
+      const execute = createExecutors({ client, paseoCli: createPaseoCli() });
       const applied = [];
       for (const row of fixable) {
         try {
@@ -450,25 +421,20 @@ async function main() {
       if (!result.clean) process.exitCode = 2;
       return;
     }
-    const allowFork = Boolean(values['allow-fork']);
     const adoptPairs = (values.adopt ?? []).flatMap((v) => v.split(',')).filter(Boolean);
     const legacyAdopts = [];
-    const scopedAdopts = {};
     for (const pair of adoptPairs) {
       const legacy = pair.match(/^([A-Z])=([0-9a-f-]{8,})$/i);
-      if (legacy) {
-        legacyAdopts.push([legacy[1].toUpperCase(), legacy[2]]);
-        continue;
+      if (!legacy) {
+        if (/:/.test(pair)) throw new Error(`--adopt <scope-id>:SLOT=<agent-id> was retired with multi-repo plans; plan one workspace with --adopt SLOT=<agent-id>, got ${pair}`);
+        throw new Error(`--adopt expects SLOT=<agent-id>, got ${pair}`);
       }
-      const scoped = pair.match(/^(.+):([A-Z])=([0-9a-f-]{8,})$/i);
-      if (!scoped || !scoped[1].trim()) throw new Error(`--adopt expects SLOT=<agent-id> or <scope-id>:SLOT=<agent-id>, got ${pair}`);
-      (scopedAdopts[scoped[1].trim().toLowerCase()] ??= {})[scoped[2].toUpperCase()] = scoped[3];
+      legacyAdopts.push([legacy[1].toUpperCase(), legacy[2]]);
     }
-    if (legacyAdopts.length && entries.length !== 1) throw new Error('--adopt SLOT=<agent-id> needs exactly one repository; use --adopt <scope-id>:SLOT=<agent-id> with several entries');
-    const adopt = { ...(legacyAdopts.length ? { '*': Object.fromEntries(legacyAdopts) } : {}), ...scopedAdopts };
+    const adopt = legacyAdopts.length ? { '*': Object.fromEntries(legacyAdopts) } : {};
     const workerPairs = (values['adopt-worker'] ?? []).flatMap((v) => v.split(',')).map((s) => s.trim()).filter(Boolean);
     if (workerPairs.length && command !== 'plan') throw new Error('--adopt-worker is only accepted with plan');
-    if (workerPairs.length && entries.length !== 1) throw new Error('--adopt-worker needs exactly one repository entry; the worker is labelled for that scope');
+    if (workerPairs.length && entries.length !== 1) throw new Error('--adopt-worker needs exactly one workspace entry; the worker is labelled for that scope');
     const adoptWorker = Object.fromEntries(workerPairs.map((pair) => {
       const match = pair.match(/^([0-9a-f-]{8,})(?:@([A-Za-z]))?$/);
       if (!match) throw new Error(`--adopt-worker expects <agent-id>[@<slot>], got ${pair}`);
@@ -480,7 +446,7 @@ async function main() {
     if (values.prune && command !== 'workers') throw new Error('--prune is only accepted with workers');
 
     if (command === 'plan') {
-      if (!entries.length) throw new Error('plan needs at least one repository');
+      if (entries.length !== 1) throw new Error(`plan needs exactly one workspace entry, got ${entries.length}; enroll one existing workspace at a time`);
       const slots = (values.slots ?? []).flatMap((v) => v.split(',')).map((s) => s.trim()).filter(Boolean).map((s) => s.toUpperCase());
       for (const slot of slots) {
         if (!/^[A-Z]$/.test(slot)) throw new Error(`--slots expects comma-separated slot letters A-Z, got ${slot}`);
@@ -490,21 +456,11 @@ async function main() {
         if (!config.steers.slots[slot]) throw new Error(`--slots names slot ${slot}, which is not defined in steers.slots`);
       }
       const slotsOverride = slots.length ? slots : undefined;
-      const retitle = Boolean(values.retitle);
-      const renameProject = values['rename-project']?.trim() || null;
-      if (values['rename-project'] !== undefined && renameProject === null) throw new Error('--rename-project needs a project name');
-      const planOptions = { allowFork, adopt, adoptWorker, detach: Boolean(values.detach), retitle, renameProject, ...(slotsOverride ? { slots: slotsOverride } : {}) };
-      const unordered = await runner.runPlans(entries, planOptions);
-      // Domain scopes first: a child may point at a domain planned in the
-      // same run, and apply runs entries in order (replanning each alone),
-      // so the domain must be live before its children are applied. Entries
-      // travel with their plans — apply pairs them by index.
-      const order = domainFirstPlanOrder(unordered);
-      const plans = order.map((i) => unordered[i]);
-      const orderedEntries = order.map((i) => entries[i]);
+      const planOptions = { adopt, adoptWorker, detach: Boolean(values.detach), ...(slotsOverride ? { slots: slotsOverride } : {}) };
+      const plans = await runner.runPlans(entries, planOptions);
       const hash = planHash(plans, config);
       if (plans.some((p) => p.ops.length)) {
-        const stored = storeAuthorization(PLAN_DIR, createAuthorization(plans, config, { entries: orderedEntries, ...planOptions }), config);
+        const stored = storeAuthorization(PLAN_DIR, createAuthorization(plans, config, { entries, ...planOptions }), config);
         if (stored.status === 'kept' && !values.json) console.log(`Existing authorization kept (created ${stored.authorization.createdAt}).`);
       }
       if (values.out) writeFileSync(values.out, `${JSON.stringify({ generatedAt: new Date().toISOString(), hash, plans }, null, 2)}\n`);
@@ -528,7 +484,7 @@ async function main() {
           progress: fileProgress(join(PLAN_DIR, `${values.confirm}.progress.json`)),
           guard: () => held.verify(),
           runPlans: (list, options) => runner.runPlans(list, options),
-          execute: createExecutors({ client, gh, git, paseoCli: createPaseoCli() }),
+          execute: createExecutors({ client, paseoCli: createPaseoCli() }),
           journal: (event) => {
             held.verify();
             appendFileSync(journalFile, `${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`, { mode: 0o600 });

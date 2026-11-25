@@ -382,12 +382,13 @@ test('normal local discovery is unchanged when worktrees do not match', async ()
   world.checkouts['/p/demo'] = { remotes: {} };
   world.checkouts[WT_DIR] = { remotes: {}, linkedWorktree: true };
   addWorktree(world, {});
+  addPlainWorkspace(world, { path: '/p/demo' });
   const [p] = await runnerFor(world).runPlans([{ local: '/p/demo' }]);
   assert.equal(p.repo, 'demo');
-  assert.deepEqual(keys(p), ['paseo.project', 'workspace.main', 'steer.A', 'steer.B']);
+  assert.deepEqual(keys(p), ['workspace.main.adopt', 'steer.A', 'steer.B']);
   const [d] = await runnerFor(world).discoverAll(['local/demo']);
   assert.equal(d.worktree ?? null, null);
-  assert.equal(d.mainWorkspace, null);
+  assert.ok(d.mainWorkspace, 'the plain workspace is the main');
 });
 
 test('unknown or non-worktree workspace ids are conflicts', async () => {
@@ -514,7 +515,7 @@ test('--main: normalizeEntry accepts workspace refs and refuses non-github entri
   assert.equal(normalizeEntry({ repo: MOBILE, main: 'wks_abc123' }, CONFIG).mainWorkspaceId, 'wks_abc123');
   assert.equal(normalizeEntry({ repo: MOBILE, main: 'worktree:wks_abc123' }, CONFIG).mainWorkspaceId, 'wks_abc123');
   assert.throws(() => normalizeEntry({ repo: MOBILE, main: '/p/mobile' }, CONFIG), /Not a workspace reference in "main"/);
-  assert.throws(() => normalizeEntry({ repo: MOBILE, main: 'workspace:wks_1', checkout: '/p/mobile' }, CONFIG), /must not combine "main" with "checkout"/);
+  assert.throws(() => normalizeEntry({ repo: MOBILE, main: 'workspace:wks_1', checkout: '/p/mobile' }, CONFIG), /was retired/);
   assert.throws(() => normalizeEntry({ local: '/p/mobile', main: 'workspace:wks_1' }, CONFIG), /only supported for github/);
   assert.throws(() => normalizeEntry({ workspace: 'wks_1', main: 'workspace:wks_1' }, CONFIG), /only supported for github/);
   assert.throws(() => normalizeEntry({ repo: 'local/demo', main: 'workspace:wks_1' }, CONFIG), /only supported for github/);
@@ -630,11 +631,11 @@ test('--main: CLI flag validation', (t) => {
   assert.match(out.stdout, /--main workspace:<id>/);
   out = runCli(t, ['plan', 'example/a', 'example/b', '--main', 'workspace:wks_abc123']);
   assert.equal(out.status, 1);
-  assert.match(out.stderr, /--main needs exactly one repository entry/);
+  assert.match(out.stderr, /--main needs exactly one workspace entry/);
   out = runCli(t, ['status', MOBILE, '--main', 'workspace:wks_abc123']);
   assert.equal(out.status, 1);
   assert.match(out.stderr, /--main is only accepted with plan/);
   out = runCli(t, ['plan', MOBILE, '--checkout', '/p/x', '--main', 'workspace:wks_abc123']);
   assert.equal(out.status, 1);
-  assert.match(out.stderr, /conflicts with the entry "checkout"/);
+  assert.match(out.stderr, /checkout/i);
 });

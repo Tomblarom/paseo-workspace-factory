@@ -801,10 +801,6 @@ function StatusView({
   const checkpoint = (status.checkpoint ?? null) as Record<string, unknown> | null;
   const scope = asRecord(field(status, "scope"));
   const deprecatedAlias = field(status, "deprecatedAlias") === true;
-  const expected = (field(status, "expectedProfiles") ?? {}) as Record<
-    string,
-    { profile?: unknown; provider?: unknown; model?: unknown }
-  >;
   const steers = [...status.steers].sort((a, b) => a.slot.localeCompare(b.slot));
   const workers = [...status.workers].sort((a, b) =>
     text(field(a, "title") ?? a.id).localeCompare(text(field(b, "title") ?? b.id)),
@@ -833,18 +829,12 @@ function StatusView({
           /factory checkpoint --from-steer &lt;slot&gt;.
         </Text>
       )}
-      {steers.map((s) => {
-        const want = expected[s.slot];
-        const drifts =
-          want && (text(s.provider) !== text(want.provider) || text(s.model) !== text(want.model));
-        return (
-          <Text key={String(s.id)} style={drifts ? styles.conflict : styles.body}>
-            Steer {text(s.slot)} {text(s.id)} {text(s.provider)}/{text(s.model)} {text(s.status)}
-            {s.parent ? ` (parent ${text(s.parent)}; steers should be top-level)` : ""}
-            {drifts ? ` (profile ${text(want?.profile)} says ${text(want?.provider)}/${text(want?.model)})` : ""}
-          </Text>
-        );
-      })}
+      {steers.map((s) => (
+        <Text key={String(s.id)} style={styles.body}>
+          Steer {text(s.slot)} {text(s.id)} {text(s.provider)}/{text(s.model)} {text(s.status)}
+          {s.parent ? ` (parent ${text(s.parent)}; steers should be top-level)` : ""}
+        </Text>
+      ))}
       {workers.map((w) => (
         <Text key={String(w.id)} style={styles.body}>
           worker {text(field(w, "title") ?? w.id)} {text(field(w, "provider"))}/
