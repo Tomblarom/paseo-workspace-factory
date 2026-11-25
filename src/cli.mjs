@@ -112,10 +112,10 @@ Options: --config <path> (default: $PASEO_FACTORY_CONFIG or ~/.config/paseo-work
  * Default scope for bare `resume`: the calling agent's own scope label first
  * (it also covers workers in foreign workspaces), else the calling workspace.
  */
-async function defaultResumeEntry(client, command = 'resume', agentId = process.env.PASEO_AGENT_ID) {
+async function defaultResumeEntry(client, command = 'resume', agentId = process.env.PASEO_AGENT_ID, paseoState = null) {
   const workspaceId = process.env.PASEO_WORKSPACE_ID;
   if (agentId || workspaceId) {
-    const paseo = await readPaseoState(client);
+    const paseo = paseoState ?? await readPaseoState(client);
     const scopeId = agentId ? paseo.agents.find((a) => a.id === agentId)?.labels?.[LABEL.scope] : null;
     if (typeof scopeId === 'string' && scopeId) return scopeId;
     const workerWorkspace = agentId ? paseo.workspaces.find((workspace) => readWorkers(workspace.metadata)[agentId]) : null;
@@ -555,15 +555,20 @@ async function main() {
     }
 
     if (['status', 'switch', 'fresh', 'workers', 'checkpoint', 'assign', 'resume'].includes(command)) {
-      if ((command === 'resume' || command === 'workers') && !entries.length) entries.push(await defaultResumeEntry(client, command, values.agent));
+      let shared = null;
+      if ((command === 'resume' || command === 'workers') && !entries.length) {
+        shared = await readPaseoState(client);
+        entries.push(await defaultResumeEntry(client, command, values.agent, shared));
+      }
       if (entries.length !== 1) throw new Error(`${command} needs exactly one repository`);
+      shared ??= await readPaseoState(client);
       const raw = entries[0];
-      const { entry: target, scope, deprecatedAlias } = resolveTargetEntry(raw, await readPaseoState(client));
+      const { entry: target, scope, deprecatedAlias } = resolveTargetEntry(raw, shared);
       if (scope && deprecatedAlias) {
         const typed = typeof raw === 'string' ? raw : JSON.stringify(raw);
         console.error(`Note: ${JSON.stringify(typed)} is a legacy alias for scope ${JSON.stringify(scope.id)} (${scope.kind}); prefer the scope id.`);
       }
-      const [discovery] = await runner.discoverAll([target]);
+      const [discovery] = await runner.discoverAll([target], { state: shared });
       if (command === 'status') {
         const warnContextTokens = config.usage?.warnContextTokens;
         const heuristic = await heuristicInputsForDiscovery(client, discovery).catch(() => null);
@@ -649,9 +654,8 @@ async function main() {
         }
         let requester = null;
         if (process.env.PASEO_AGENT_ID && values.apply) {
-          const observed = await readPaseoState(client);
-          const caller = observed.agents.find((agent) => agent.id === process.env.PASEO_AGENT_ID);
-          const source = listScopes(observed).find((item) => item.workspaceId === caller?.workspaceId);
+          const caller = shared.agents.find((agent) => agent.id === process.env.PASEO_AGENT_ID);
+          const source = listScopes(shared).find((item) => item.workspaceId === caller?.workspaceId);
           const sourceState = source?.workspace?.metadata?.[METADATA_KEY];
           if (!caller || !source || !Number.isInteger(sourceState?.epoch)) throw new Error('The requesting agent has no current factory scope authority');
           requester = { workspaceId: source.workspaceId, scopeId: source.id, epoch: sourceState.epoch, agentId: caller.id,
@@ -739,12 +743,13 @@ async function main() {
       if (entries.length !== 1) throw new Error('relocate needs exactly one scope');
       if (!values.to) throw new Error('relocate needs --to <path|project>');
       const raw = entries[0];
-      const { entry: target, scope, deprecatedAlias } = resolveTargetEntry(raw, await readPaseoState(client));
+      const shared = await readPaseoState(client);
+      const { entry: target, scope, deprecatedAlias } = resolveTargetEntry(raw, shared);
       if (scope && deprecatedAlias) {
         const typed = typeof raw === 'string' ? raw : JSON.stringify(raw);
         console.error(`Note: ${JSON.stringify(typed)} is a legacy alias for scope ${JSON.stringify(scope.id)} (${scope.kind}); prefer the scope id.`);
       }
-      const [discovery] = await runner.discoverAll([target]);
+      const [discovery] = await runner.discoverAll([target], { state: shared });
       const result = await relocateScope({
         client, discovery, config, to: values.to, apply: Boolean(values.apply), git,
         lookupReceipt: lookupCreationReceipt, language: runtime().handoffLanguage,
@@ -854,7 +859,7 @@ async function runModelCommand({ command, args, values, config, configPath, clie
       if (scopeAddress) {
         paseoState ??= await readPaseoState(client);
         const { entry: target, scope } = resolveTargetEntry(scopeAddress, paseoState);
-        [discovery] = await runner.discoverAll([target]);
+        [discovery] = await runner.discoverAll([target], { state: paseoState });
         entries = discovery.providers ?? [];
         const priv = discovery.github?.fork?.repo?.private;
         repoPublic = priv === false ? true : priv === true ? false : null;
@@ -864,7 +869,7 @@ async function runModelCommand({ command, args, values, config, configPath, clie
         if (repoPublic === null && parentAddress && parentAddress !== scopeAddress) {
           try {
             const { entry: parentEntry } = resolveTargetEntry(parentAddress, paseoState);
-            const [parent] = await runner.discoverAll([parentEntry]);
+            const [parent] = await runner.discoverAll([parentEntry], { state: paseoState });
             const parentPriv = parent?.github?.fork?.repo?.private;
             repoPublic = parentPriv === false ? true : parentPriv === true ? false : null;
           } catch { /* unknown stays unknown (fail-closed) */ }

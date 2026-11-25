@@ -4,7 +4,7 @@ import { basename, join, resolve } from 'node:path';
 import { realpathSync, statSync } from 'node:fs';
 import { resolveGitHub, parseRepoInput } from './github.mjs';
 import { classifyCheckouts, inspectCloneTarget } from './local.mjs';
-import { LABEL, METADATA_KEY, PARENT_LABEL, parentOf } from './paseo.mjs';
+import { LABEL, LEGACY_PREFIX, METADATA_KEY, PARENT_LABEL, parentOf } from './paseo.mjs';
 import { validScope } from './scope.mjs';
 import { continuedFromId, inheritContinuationLabels, resolveContinuations } from './zerosub.mjs';
 
@@ -353,16 +353,17 @@ export function resolveSteerHolders(labelled, agents, switches = []) {
 }
 
 /**
- * Steer ids that match parent-linked workers: mapped steer ids plus the
- * superseded origins they stand in for (workers still point at the origin).
+ * Live holders of one slot from a resolved list: matching slot (legacy slot
+ * labels count, new prefix wins), not archived, not superseded, not retired
+ * unless `includeRetired`. Agents and status rows share this one selector.
  */
-function continuationMatchIds(mapped, agents, switches = []) {
-  const ids = new Set((mapped ?? []).map((agent) => agent?.id).filter((id) => typeof id === 'string' && id));
-  const resolution = resolveContinuations(agents ?? [], switches);
-  for (const [origin, live] of Object.entries(resolution.liveFor)) {
-    if (ids.has(live)) ids.add(origin);
-  }
-  return ids;
+export function liveSlotHolders(list, slot, { includeRetired = false } = {}) {
+  if (typeof slot !== 'string' || !slot) return [];
+  return (list ?? []).filter((entry) => {
+    if (!entry || entry.archivedAt || entry.superseded === true) return false;
+    if (!includeRetired && entry.retired === true) return false;
+    return (entry.labels?.[LABEL.slot] ?? entry.labels?.[`${LEGACY_PREFIX}.slot`] ?? entry.slot ?? null) === slot;
+  });
 }
 
 /**
@@ -455,6 +456,34 @@ function halfLabelledSteers(paseo, mainWorkspace, matchKeys) {
     if (a.status === 'closed' && !(typeof scope === 'string' && scope)) return false;
     return true;
   });
+}
+
+/**
+ * Steer membership of one discovery pass, shared by the worktree, local and
+ * github builders: resolved holders, candidates, workers and parent ids.
+ * `labelledFound` stays per builder; `scopeName` attributes workers.
+ */
+export function resolveScopeMembers(paseo, { mainWorkspace, matchKeys, labelledFound, scopeName, projectIds, zerosubSwitches = [] }) {
+  const agentsById = new Map((paseo.agents ?? []).map((a) => [a.id, a]));
+  const legacyAll = mainWorkspace
+    ? paseo.agents.filter((a) => a.workspaceId === mainWorkspace.id && !a.archivedAt && !a.labels?.[LABEL.role] && STEER_TITLE.test((a.title ?? '').trim()))
+    : [];
+  const splitLegacy = splitCandidates(legacyAll, matchKeys, agentsById);
+  const splitDigit = splitCandidates(digitSteerCandidates(paseo.agents, mainWorkspace?.id), matchKeys, agentsById);
+  const legacy = splitLegacy.kept;
+  const digitCandidates = splitDigit.kept;
+  const foreignWorkers = [...splitLegacy.foreignWorkers, ...splitDigit.foreignWorkers];
+  const halfLabelled = halfLabelledSteers(paseo, mainWorkspace, matchKeys);
+  const labelled = resolveSteerHolders(labelledFound, paseo.agents, zerosubSwitches);
+  // Worker parent ids: mapped steers plus the superseded origins they stand
+  // in for (workers still point at the origin).
+  const steerIds = new Set([...labelled, ...legacy].map((a) => a?.id).filter((id) => typeof id === 'string' && id));
+  for (const [origin, live] of Object.entries(resolveContinuations(paseo.agents, zerosubSwitches).liveFor)) {
+    if (steerIds.has(live)) steerIds.add(origin);
+  }
+  const projectWorkspaceIds = [...new Set(paseo.workspaces.filter((w) => projectIds.has(w.projectId)).map((w) => w.id))];
+  const workers = remapWorkerParents(applyContinuations(allWorkers(paseo, steerIds, scopeName), paseo.agents, zerosubSwitches), paseo.agents, zerosubSwitches);
+  return { labelled, legacy, digitCandidates, foreignWorkers, halfLabelled, steerIds, workers, projectWorkspaceIds };
 }
 
 /** Current branch of a worktree directory; null when unreadable or detached (HEAD). Never throws. */
@@ -567,20 +596,7 @@ function buildWorktreeDiscovery(matched, { normalized, parentDir, checkouts, pas
   const mainCandidates = matched;
 
   const labelledFound = paseo.agents.filter((a) => a.labels?.[LABEL.role] === 'steer' && matchKeys.has(a.labels?.[LABEL.repo]?.toLowerCase()));
-  const agentsById = new Map((paseo.agents ?? []).map((a) => [a.id, a]));
-  const legacyAll = mainWorkspace
-    ? paseo.agents.filter((a) => a.workspaceId === mainWorkspace.id && !a.archivedAt && !a.labels?.[LABEL.role] && STEER_TITLE.test((a.title ?? '').trim()))
-    : [];
-  const splitLegacy = splitCandidates(legacyAll, matchKeys, agentsById);
-  const splitDigit = splitCandidates(digitSteerCandidates(paseo.agents, mainWorkspace?.id), matchKeys, agentsById);
-  const legacy = splitLegacy.kept;
-  const digitCandidates = splitDigit.kept;
-  const foreignWorkers = [...splitLegacy.foreignWorkers, ...splitDigit.foreignWorkers];
-  const halfLabelled = halfLabelledSteers(paseo, mainWorkspace, matchKeys);
-  const labelled = resolveSteerHolders(labelledFound, paseo.agents, zerosubSwitches);
-  const steerIds = continuationMatchIds([...labelled, ...legacy], paseo.agents, zerosubSwitches);
-  const projectWorkspaceIds = new Set(paseo.workspaces.filter((w) => projectIds.has(w.projectId)).map((w) => w.id));
-  const workers = remapWorkerParents(applyContinuations(allWorkers(paseo, steerIds, forkName), paseo.agents, zerosubSwitches), paseo.agents, zerosubSwitches);
+  const { labelled, legacy, digitCandidates, foreignWorkers, halfLabelled, steerIds, workers, projectWorkspaceIds } = resolveScopeMembers(paseo, { mainWorkspace, matchKeys, labelledFound, scopeName: forkName, projectIds, zerosubSwitches });
   const worktreeAgents = mainWorkspace
     ? paseo.agents.filter((a) => a.workspaceId === mainWorkspace.id && !a.archivedAt && !steerIds.has(a.id) && a.labels?.[LABEL.role] !== 'steer')
     : [];
@@ -612,7 +628,7 @@ function buildWorktreeDiscovery(matched, { normalized, parentDir, checkouts, pas
     agents: paseo.agents,
     worktreeAgents,
     worktree: first ? { workspaceId: mainWorkspace?.id ?? null, workspaceIds: matched.map((w) => w.id), projectId: first.projectId ?? null, directory: first.workspaceDirectory } : null,
-    projectWorkspaceIds: [...projectWorkspaceIds],
+    projectWorkspaceIds,
     providers: paseo.providers,
   };
 }
@@ -783,20 +799,7 @@ function discoverLocal(normalized, { config, checkouts, paseo, realpath, existsD
   const matchKeys = new Set([repoKey, legacyKey]);
   if (stored && stored.id.toLowerCase() !== repoKey) matchKeys.add(stored.id.toLowerCase());
   const labelledFound = paseo.agents.filter((a) => a.labels?.[LABEL.role] === 'steer' && matchKeys.has(a.labels?.[LABEL.repo]?.toLowerCase()));
-  const agentsById = new Map((paseo.agents ?? []).map((a) => [a.id, a]));
-  const legacyAll = mainWorkspace
-    ? paseo.agents.filter((a) => a.workspaceId === mainWorkspace.id && !a.archivedAt && !a.labels?.[LABEL.role] && STEER_TITLE.test((a.title ?? '').trim()))
-    : [];
-  const splitLegacy = splitCandidates(legacyAll, matchKeys, agentsById);
-  const splitDigit = splitCandidates(digitSteerCandidates(paseo.agents, mainWorkspace?.id), matchKeys, agentsById);
-  const legacy = splitLegacy.kept;
-  const digitCandidates = splitDigit.kept;
-  const foreignWorkers = [...splitLegacy.foreignWorkers, ...splitDigit.foreignWorkers];
-  const halfLabelled = halfLabelledSteers(paseo, mainWorkspace, matchKeys);
-  const labelled = resolveSteerHolders(labelledFound, paseo.agents, zerosubSwitches);
-  const steerIds = continuationMatchIds([...labelled, ...legacy], paseo.agents, zerosubSwitches);
-  const projectWorkspaceIds = new Set(paseo.workspaces.filter((w) => projectIds.has(w.projectId)).map((w) => w.id));
-  const workers = remapWorkerParents(applyContinuations(allWorkers(paseo, steerIds, forkName), paseo.agents, zerosubSwitches), paseo.agents, zerosubSwitches);
+  const { labelled, legacy, digitCandidates, foreignWorkers, halfLabelled, steerIds, workers, projectWorkspaceIds } = resolveScopeMembers(paseo, { mainWorkspace, matchKeys, labelledFound, scopeName: forkName, projectIds, zerosubSwitches });
 
   return {
     input,
@@ -823,7 +826,7 @@ function discoverLocal(normalized, { config, checkouts, paseo, realpath, existsD
     steers: { labelled, legacy, digitCandidates, foreignWorkers, halfLabelled },
     workers,
     agents: paseo.agents,
-    projectWorkspaceIds: [...projectWorkspaceIds],
+    projectWorkspaceIds,
     providers: paseo.providers,
   };
 }
@@ -956,20 +959,7 @@ export function discoverRepository(entry, { config, gh, git, checkouts, paseo, r
   const repoKey = forkName?.toLowerCase();
   const labelledFound = paseo.agents.filter((a) => a.labels?.[LABEL.role] === 'steer' && a.labels?.[LABEL.repo]?.toLowerCase() === repoKey);
   const matchKeys = new Set(repoKey ? [repoKey] : []);
-  const agentsById = new Map((paseo.agents ?? []).map((a) => [a.id, a]));
-  const legacyAll = mainWorkspace
-    ? paseo.agents.filter((a) => a.workspaceId === mainWorkspace.id && !a.archivedAt && !a.labels?.[LABEL.role] && STEER_TITLE.test((a.title ?? '').trim()))
-    : [];
-  const splitLegacy = splitCandidates(legacyAll, matchKeys, agentsById);
-  const splitDigit = splitCandidates(digitSteerCandidates(paseo.agents, mainWorkspace?.id), matchKeys, agentsById);
-  const legacy = splitLegacy.kept;
-  const digitCandidates = splitDigit.kept;
-  const foreignWorkers = [...splitLegacy.foreignWorkers, ...splitDigit.foreignWorkers];
-  const halfLabelled = halfLabelledSteers(paseo, mainWorkspace, matchKeys);
-  const labelled = resolveSteerHolders(labelledFound, paseo.agents, zerosubSwitches);
-  const steerIds = continuationMatchIds([...labelled, ...legacy], paseo.agents, zerosubSwitches);
-  const projectWorkspaceIds = new Set(paseo.workspaces.filter((w) => projectIds.has(w.projectId)).map((w) => w.id));
-  const workers = remapWorkerParents(applyContinuations(allWorkers(paseo, steerIds, forkName), paseo.agents, zerosubSwitches), paseo.agents, zerosubSwitches);
+  const { labelled, legacy, digitCandidates, foreignWorkers, halfLabelled, steerIds, workers, projectWorkspaceIds } = resolveScopeMembers(paseo, { mainWorkspace, matchKeys, labelledFound, scopeName: forkName, projectIds, zerosubSwitches });
   // The github scope id is the resolved fork; the network-verified identity
   // always wins over a stored field (a mismatch is a planner conflict).
   // --main keeps that identity: the worktree is only the main workspace, never
@@ -1012,7 +1002,7 @@ export function discoverRepository(entry, { config, gh, git, checkouts, paseo, r
     workers,
     agents: paseo.agents,
     ...(mainOverride ? { worktree: { workspaceId: mainOverride.id, workspaceIds: [mainOverride.id], projectId: mainOverride.projectId ?? null, directory: mainOverride.workspaceDirectory } } : {}),
-    projectWorkspaceIds: [...projectWorkspaceIds],
+    projectWorkspaceIds,
     providers: paseo.providers,
   };
 }

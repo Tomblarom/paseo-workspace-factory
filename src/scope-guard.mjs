@@ -1,6 +1,6 @@
 // Scope authority is checked against a fresh observation while the workspace
 // lock is held. This is a cooperative generation fence, not authentication.
-import { resolveSteerHolders } from './discovery.mjs';
+import { liveSlotHolders, resolveSteerHolders } from './discovery.mjs';
 import { LABEL, LEGACY_PREFIX, METADATA_KEY, parentOf, readPaseoAgents } from './paseo.mjs';
 import { sameScopeId } from './scope.mjs';
 import { isAdvisorSlot } from './config.mjs';
@@ -16,10 +16,10 @@ export function scopeHolder({ agents, workspaceId, scopeId, slot, switches = [],
     const role = labels[LABEL.role] ?? labels[`${LEGACY_PREFIX}.role`];
     return !excluded.has(a?.id) && role === 'steer' && [scopeId, ...aliases].some((id) => sameScopeId(scope, id));
   });
-  const resolved = resolveSteerHolders(labelled, agents, switches).filter((a) => !a.archivedAt && a.labels?.[LABEL.slot] === slot);
+  const resolved = resolveSteerHolders(labelled, agents, switches).filter((a) => !a.archivedAt && (a.labels?.[LABEL.slot] ?? a.labels?.[`${LEGACY_PREFIX}.slot`]) === slot);
   const holders = ownerId
     ? resolved.filter((a) => a.id === ownerId || a.continuedFrom === ownerId)
-    : resolved.filter((a) => !a.superseded);
+    : liveSlotHolders(resolved, slot);
   if (holders.length !== 1) throw new ScopeGuardError(`Expected one active Steer ${slot}, found ${holders.length}`);
   const holder = holders[0];
   if (!ownerId && strictLegacy && resolved.some((a) => a.id !== holder.id && a.id !== previousSteer)) {

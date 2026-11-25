@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { isAdvisorSlot, providerIsSensitive, slotProfile, configWarnings } from './config.mjs';
 import { formatSlotProfileSuggestion, resolveProfile, steerFallbackList, usedProfilesByLiveSteers } from './models.mjs';
 import { LABEL, METADATA_KEY, describeParent, parentOf, pendingLegacyKeys, agentUsage } from './paseo.mjs';
-import { STEER_TITLE, STEER_DIGIT_TITLE } from './discovery.mjs';
+import { STEER_TITLE, STEER_DIGIT_TITLE, liveSlotHolders } from './discovery.mjs';
 import { validScope } from './scope.mjs';
 import { buildSteerCreate, idempotencyKey, requestDigest, steerCreateLabels } from './steer-create.mjs';
 
@@ -449,7 +449,7 @@ export function planRepository(discovery, config, { allowFork = false, adopt = {
 
     // Same-slot newer-wins: superseded older holders stay visible but never
     // block the plan; only several live holders conflict.
-    const holders = live.filter((a) => a.superseded !== true);
+    const holders = liveSlotHolders(labelled, slot);
     const extra = live.filter((a) => a.superseded === true);
     if (holders.length > 1) {
       conflict(key, `Several agents are labelled as Steer ${slot}: ${holders.map((a) => a.id).join(', ')}`);

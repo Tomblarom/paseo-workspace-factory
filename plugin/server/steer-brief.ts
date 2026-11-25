@@ -10,8 +10,7 @@ const takeLock = withLock as any;
 export type SteerBriefDeps = SteerDeliveryDeps;
 export interface StagedBrief { packet: string; at: string; kind: string }
 
-async function steerOrThrow(paseo: any, agentId: string): Promise<void> {
-  const state: any = await readPaseoState(paseo);
+function steerOrThrow(state: any, agentId: string): void {
   const agent = (state.agents ?? []).find((a: any) => a?.id === agentId);
   if (!agent) throw new Error(`Unknown agent ${JSON.stringify(agentId)}`);
   if (cleanupIdentity(agent.labels ?? null)?.role !== "steer") throw new Error(`Staged briefs are only for steers; ${agentId} is not a steer.`);
@@ -19,7 +18,7 @@ async function steerOrThrow(paseo: any, agentId: string): Promise<void> {
 
 export async function stageSteerBrief(paseo: any, input: { workspaceId: string; agentId: string; packet: string; kind: string }, deps: SteerBriefDeps = {}): Promise<void> {
   if (!input.packet?.trim()) throw new Error("Nothing to stage: the packet is empty.");
-  await steerOrThrow(paseo, input.agentId);
+  steerOrThrow(await readPaseoState(paseo), input.agentId);
   const workspace = paseo.workspaces.ref(input.workspaceId);
   await (deps.lock ?? takeLock)(workspaceLockName(input.workspaceId), async (held: any) => {
     const meta = (await workspace.refresh())?.metadata ?? {};
@@ -36,7 +35,8 @@ export async function stageSteerBrief(paseo: any, input: { workspaceId: string; 
 
 export async function deliverSteerBrief(paseo: any, input: { workspaceId: string; agentId: string; action: "send" | "dismiss" }, deps: SteerBriefDeps = {}): Promise<{ agentId: string; delivered: boolean; dismissed: boolean; detail: string }> {
   const agentId = input.agentId.trim();
-  await steerOrThrow(paseo, agentId);
+  const state: any = await readPaseoState(paseo);
+  steerOrThrow(state, agentId);
   const workspace = paseo.workspaces.ref(input.workspaceId);
   const action = await (deps.lock ?? takeLock)(workspaceLockName(input.workspaceId), async (held: any) => {
     const meta = (await workspace.refresh())?.metadata ?? {};
@@ -51,7 +51,7 @@ export async function deliverSteerBrief(paseo: any, input: { workspaceId: string
   });
   if (!action) return { agentId, delivered: false, dismissed: false, detail: "No staged brief for this steer. It was already sent or dismissed." };
   if (input.action === "dismiss") return { agentId, delivered: false, dismissed: true, detail: "Staged brief dismissed." };
-  const result = await deliverSteer(paseo, { workspaceId: input.workspaceId, agentId, actionId: action.wakeId, text: action.packet,
+  const result = await deliverSteer(paseo, { workspaceId: input.workspaceId, agentId, actionId: action.wakeId, text: action.packet, state,
     ...(action.stageKind === "switch" ? { renewalNote: "" } : {}) }, deps);
   return { agentId, delivered: result.status === "sent", dismissed: false, detail: result.status === "sent" && result.detail === "Message sent." ? "Staged brief sent." : result.detail };
 }

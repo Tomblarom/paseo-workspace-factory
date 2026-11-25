@@ -20,7 +20,7 @@ import { formatSlotProfileSuggestion, resolveProfile, steerFallbackList, usedPro
 import { buildSteerCreate, checkedCreationReceipt, confirmCreationReceipt, idempotencyKey, lookupCreation, profileAgentConfig, requestDigest, shortHolderId, steerCreateKey, verifyCreatedAgent } from './steer-create.mjs';
 import { createExecutors } from './apply.mjs';
 import { resolveScope, scopeToEntry, sameScopeId, domainOfScope } from './scope.mjs';
-import { STEER_TITLE, activeMarker, markSteerTitle, stripActiveMarker } from './discovery.mjs';
+import { STEER_TITLE, activeMarker, liveSlotHolders, markSteerTitle, stripActiveMarker } from './discovery.mjs';
 import { AGENTS_KEY, currentFreshHint, updateAgentEntry } from './agent-state.mjs';
 import { SUPERVISION_DEFAULTS, WORKERS_KEY, failoverChain, openWorkers as openRegisterWorkers, readWorkers, zerosubMoveDecision } from './supervision.mjs';
 import { QUOTA_DEFAULTS, accountExhausted, accountForAgent, formatQuotaLine, freshMaxUsedPct, profilePool } from './quota.mjs';
@@ -876,7 +876,7 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
   // Same-slot newer-wins: superseded holders (older, not yet archived)
   // are ignored for selection; only several live holders refuse as
   // ambiguous (missing or tied creation timestamps).
-  const liveHolders = (slot) => status.steers.filter((s) => s.slot === slot && !s.superseded);
+  const liveHolders = (slot) => liveSlotHolders(status.steers, slot, { includeRetired: true });
   const from = liveHolders(expected.activeSteer)[0] ?? null;
   const to = liveHolders(toSlot)[0] ?? null;
   if (!to) throw new SwitchRefused(`Steer ${toSlot} does not exist for ${status.repo}`);
@@ -1204,7 +1204,7 @@ export async function freshSteer({ client, discovery, config, apply = false, sen
   // completed fresh (previousSteer) proceeds; unexplained extras keep the
   // recovery-or-archive refusal below. Without creation timestamps every
   // holder counts as live, exactly as before.
-  const live = holders.filter((h) => !h.superseded);
+  const live = liveSlotHolders(holders, slot, { includeRetired: true });
   const unexplained = holders.filter((h) => h.superseded && h.id !== expected.previousSteer);
   const single = holders.length === 1 ? holders[0] : (live.length === 1 && !unexplained.length ? live[0] : null);
   if (single && BUSY.has(single.status)) throw new SwitchRefused(`Active Steer ${slot} is ${single.status}; stop it or wait for its turn to end first`);
@@ -1417,7 +1417,7 @@ async function tryTabRewind({ client, discovery, status, expected, from, kind, p
 async function freshNonActiveSteer({ client, discovery, status, expected, slot, config, apply, send = true, notifyPrevious = true, language, git, lookupReceipt, execute, workerModel, quotaSnapshot, quotaExhaustedPct, zerosub, lock = withLock, now = () => new Date(), rewindClient = null, requireRefreshMode = null, promptOptions }) {
   const holders = status.steers.filter((s) => s.slot === slot);
   if (!holders.length) throw new SwitchRefused(`No live Steer ${slot} to refresh for ${status.repo}; plan and apply one first`);
-  const live = holders.filter((h) => !h.superseded);
+  const live = liveSlotHolders(holders, slot, { includeRetired: true });
   const single = holders.length === 1 ? holders[0] : (live.length === 1 ? live[0] : null);
   if (single && BUSY.has(single.status)) throw new SwitchRefused(`Steer ${slot} is ${single.status}; stop it or wait for its turn to end first`);
   let rewindFallback = null;
@@ -1702,7 +1702,7 @@ export async function writeCheckpoint({ client, discovery, task, tests = [], blo
   if (!status.workspace || !status.state) throw new SwitchRefused('No factory main workspace with steer state');
   if (typeof task !== 'string' || !task.trim()) throw new SwitchRefused('A checkpoint needs a task');
   const workspace = client.workspaces.ref(status.workspace.id);
-  const holders = status.steers.filter((s) => s.slot === status.state.activeSteer && !s.retired && !s.superseded);
+  const holders = liveSlotHolders(status.steers, status.state.activeSteer);
   const expectedHolder = holders.length === 1 ? holders[0] : null;
   if (agentId && expectedHolder?.id !== agentId) throw new SwitchRefused('A checkpoint from an agent must come from the unique active steer');
   return lock(workspaceLockName(status.workspace.id), async (held) => {

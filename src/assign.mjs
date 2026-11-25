@@ -4,6 +4,7 @@
 // switch, an assignment changes neither the active steer nor the epoch, and
 // sending only queues a message. Retired scopes refuse.
 import { CHECKPOINT_KEY, checkpointRules, formatCheckpointBlock, steerStatus } from './steer.mjs';
+import { liveSlotHolders } from './discovery.mjs';
 import { METADATA_KEY } from './paseo.mjs';
 import { withLock, workspaceLockName } from './lock.mjs';
 import { discoveryScopeAliases, guardScope } from './scope-guard.mjs';
@@ -60,7 +61,7 @@ export async function assignScope({ client, discovery, task, tests = [], blocker
     throw new AssignRefused(`Scope ${status.repo} is retired${expected.movedTo ? ` (moved to ${expected.movedTo})` : ''}; assign to its successor instead`);
   }
   if (typeof task !== 'string' || !task.trim()) throw new AssignRefused('An assignment needs a task');
-  const holders = status.steers.filter((s) => s.slot === expected.activeSteer && !s.superseded && !s.retired);
+  const holders = liveSlotHolders(status.steers, expected.activeSteer);
   if (!holders.length) throw new AssignRefused(`No live Steer ${expected.activeSteer} to assign to for ${status.repo}; plan and apply one first`);
   if (holders.length > 1) throw new AssignRefused(`Steer ${expected.activeSteer} has several live agents (${holders.map((s) => s.id).join(', ')}); archive the retired one in Paseo, then rerun`);
   const target = holders[0];

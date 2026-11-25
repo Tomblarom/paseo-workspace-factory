@@ -7,6 +7,7 @@
 // to `steer set`/`fresh`. Live checks use exact label IDs and roles, never
 // titles.
 import { LABEL } from './paseo.mjs';
+import { liveSlotHolders } from './discovery.mjs';
 import { isAdvisorProfile, slotOrder, validateConfig } from './config.mjs';
 import { buildCandidate, nextFreeSlot, parseProviderModel, resolveProfile, resolveSteerAdd } from './models.mjs';
 import { QUOTA_DEFAULTS, bestFamilyAccount, earliestFamilyReset, familyAccounts, profileFamily } from './quota.mjs';
@@ -21,28 +22,20 @@ import { suggestAccountPin } from './zerosub.mjs';
  */
 export function liveSteerForSlot(liveSteers, slot, scopeId) {
   const want = typeof scopeId === 'string' ? scopeId.toLowerCase() : null;
-  let fallback = null;
-  for (const agent of liveSteers ?? []) {
-    if (!agent || agent.archivedAt) continue;
-    if (agent.labels?.[LABEL.role] !== 'steer') continue;
-    if (agent.labels?.[LABEL.slot] !== slot) continue;
-    if (want) {
-      const scope = agent.labels?.[LABEL.scope];
-      const repo = agent.labels?.[LABEL.repo];
-      const scopeMatch = typeof scope === 'string' && scope.toLowerCase() === want;
-      const repoMatch = typeof repo === 'string' && repo.toLowerCase() === want;
-      if (!scopeMatch && !repoMatch) continue;
-    }
-    if (typeof agent.id !== 'string' || !agent.id) continue;
-    // Same-slot newer-wins: a superseded older holder never shadows the
-    // live one; it only counts when nothing else matches.
-    if (agent.superseded === true) {
-      fallback ??= agent;
-      continue;
-    }
-    return agent;
-  }
-  return fallback;
+  const inScope = (liveSteers ?? []).filter((agent) => {
+    if (!agent || agent.archivedAt || agent.labels?.[LABEL.role] !== 'steer') return false;
+    if (typeof agent.id !== 'string' || !agent.id) return false;
+    if (!want) return true;
+    const scope = agent.labels?.[LABEL.scope];
+    const repo = agent.labels?.[LABEL.repo];
+    return (typeof scope === 'string' && scope.toLowerCase() === want)
+      || (typeof repo === 'string' && repo.toLowerCase() === want);
+  });
+  // Same-slot newer-wins: a superseded older holder never shadows the
+  // live one; it only counts when nothing else matches.
+  return liveSlotHolders(inScope, slot)[0]
+    ?? inScope.find((agent) => agent.superseded === true && agent.labels?.[LABEL.slot] === slot)
+    ?? null;
 }
 
 /**

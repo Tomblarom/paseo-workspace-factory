@@ -2,6 +2,7 @@
 // Accepted workers are archived natively in Paseo (`paseo archive`); there is
 // no factory retire command.
 import { LABEL, METADATA_KEY } from './paseo.mjs';
+import { liveSlotHolders } from './discovery.mjs';
 import { idempotencyKey, profileAgentConfig, requestDigest, verifySteerPlacement } from './steer-create.mjs';
 import { ACCOUNT_METADATA_KEY } from './zerosub.mjs';
 import { findingsPassage } from './findings.mjs';
@@ -11,7 +12,7 @@ import { guardScope } from './scope-guard.mjs';
 export async function startScopedWorker({ client, status, callerId, aliases = [], profile, accountId, prompt, title, apply = false, promptOptions }) {
   const { state, workspace, repo, steers } = status;
   const slot = state?.activeSteer;
-  const holders = steers.filter((steer) => steer.slot === slot && !steer.retired && !steer.superseded);
+  const holders = liveSlotHolders(steers, slot);
   const parent = holders.length === 1 ? holders[0] : null;
   if (!workspace?.id || state?.retired || !parent || parent.id !== callerId || parent.advisor || parent.parent || parent.workspaceId !== workspace.id) {
     throw new Error('Only the active steer can start a worker in this scope');

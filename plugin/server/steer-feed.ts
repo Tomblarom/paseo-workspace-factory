@@ -6,7 +6,7 @@ import { readSteerAction } from "./factory/steer-action.js";
 // per-agent polling for the face.
 import { AGENTS_KEY, currentFreshHint } from "./factory/agent-state.js";
 import { isAdvisorSlot } from "./factory/config.js";
-import { applyContinuations, markSupersededSlotHolders } from "./factory/discovery.js";
+import { liveSlotHolders, resolveSteerHolders } from "./factory/discovery.js";
 import { LEGACY_PREFIX, METADATA_KEY, readPaseoState } from "./factory/paseo.js";
 import { QUOTA_DEFAULTS } from "./factory/quota.js";
 import { listScopes } from "./factory/scope.js";
@@ -157,7 +157,6 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
   const scopes = listScopes(paseoState);
   const byId = new Map<string, any>();
   for (const scope of scopes) byId.set(scope.id, scope);
-  const continued = applyContinuations(agents, agents, []);
   const resolution = resolveContinuations(agents, []) as unknown as {
     liveFor: Record<string, string>;
   };
@@ -167,35 +166,32 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
   const exhaustedPct = finiteNumber(quota.exhaustedPct) ?? QUOTA_DEFAULTS.exhaustedPct;
   const queuedWakeFor = deps.queuedWakeFor ?? (() => false);
 
-  // Candidate tabs per scope: labelled steers, live continuations with
-  // inherited labels, and superseded origins (retired rows).
-  const candidates = new Map<string, any>();
-  for (const agent of [...continued, ...agents]) {
-    if (!agent || typeof agent.id !== "string" || !agent.id || candidates.has(agent.id)) continue;
+  // Candidate tabs per scope: resolved holders plus superseded origins as retired rows.
+  const rawByScope = new Map<string, any[]>();
+  for (const agent of agents) {
+    if (!agent || typeof agent.id !== "string" || !agent.id) continue;
     const identity = cleanupIdentity(agent.labels ?? null);
-    if (!identity || identity.role !== "steer") continue;
-    if (!byId.has(identity.scopeId)) continue;
-    candidates.set(agent.id, agent);
+    if (!identity || identity.role !== "steer" || !byId.has(identity.scopeId)) continue;
+    if (!rawByScope.has(identity.scopeId)) rawByScope.set(identity.scopeId, []);
+    rawByScope.get(identity.scopeId)?.push(agent);
   }
-
-  // Same-slot newer-wins marking per scope (creation order, like discovery).
-  const marked = new Set<string>();
+  const candidates = new Map<string, any>();
   const byScope = new Map<string, any[]>();
-  for (const agent of candidates.values()) {
-    const scopeId = cleanupIdentity(agent.labels ?? null)?.scopeId;
-    if (!scopeId) continue;
-    if (!byScope.has(scopeId)) byScope.set(scopeId, []);
-    byScope.get(scopeId)?.push(agent);
-  }
-  const markedByScope = new Map<string, Set<string>>();
-  for (const [scopeId, list] of byScope) {
-    const ids = new Set(
-      markSupersededSlotHolders(list)
-        .filter((agent: any) => agent?.superseded === true)
-        .map((agent: any) => agent.id),
-    );
-    markedByScope.set(scopeId, ids);
-    for (const id of ids) marked.add(id);
+  for (const [scopeId, list] of rawByScope) {
+    const group: any[] = [];
+    byScope.set(scopeId, group);
+    for (const agent of resolveSteerHolders(list, agents, [])) {
+      if (!agent || typeof agent.id !== "string" || !agent.id || candidates.has(agent.id)) continue;
+      candidates.set(agent.id, agent);
+      group.push(agent);
+    }
+    for (const agent of list) {
+      if (liveFor[agent.id] && !candidates.has(agent.id)) {
+        const origin = { ...agent, superseded: true };
+        candidates.set(agent.id, origin);
+        group.push(origin);
+      }
+    }
   }
 
   const rows: SteerFeedRow[] = [];
@@ -205,19 +201,12 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
     const reads = scopeReads(byId.get(identity.scopeId));
     if (!reads) continue;
     const slot = typeof identity.slot === "string" && identity.slot ? identity.slot : null;
-    const siblings = (byScope.get(identity.scopeId) ?? []).filter((other: any) => {
-      if (other.archivedAt) return false;
-      return cleanupIdentity(other.labels ?? null)?.slot === slot;
-    });
-    const contenders = siblings.filter(
-      (other: any) => !marked.has(other.id) && !liveFor[other.id],
-    );
+    const contenders = liveSlotHolders(byScope.get(identity.scopeId) ?? [], slot);
     const ambiguous = contenders.length > 1;
     const uniqueHolder =
       contenders.length === 1 && typeof contenders[0].id === "string" ? contenders[0].id : null;
-    const contLive = liveFor[agent.id] ?? null;
     const superseded =
-      (contLive !== null || marked.has(agent.id)) && uniqueHolder !== null && uniqueHolder !== agent.id;
+      agent.superseded === true && uniqueHolder !== null && uniqueHolder !== agent.id;
     const membership: SteerMembership = ambiguous ? "ambiguous" : "resolved";
     const entry = asRecord(reads.entries[agent.id]);
     const status = typeof agent.status === "string" ? agent.status : null;
@@ -291,7 +280,7 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
       permissionNeeded,
       stagedBrief:
         readSteerAction(entry, reads.mainId)?.phase === "staged",
-      successor: contLive ?? (superseded ? uniqueHolder : null),
+      successor: liveFor[agent.id] ?? (superseded ? uniqueHolder : null),
       state: projection.state,
       warmth: projection.warmth,
       tokens: projection.tokens,

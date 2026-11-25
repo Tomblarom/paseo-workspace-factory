@@ -140,8 +140,9 @@ async function steerScope(
   paseo: any,
   workspaceId: string,
   agentId: string,
+  snapshot?: any,
 ): Promise<{ agent: any; scope: any; mainId: string; slot: string | null; epoch: number | null; entry: Record<string, unknown> | null }> {
-  const state: any = await readPaseoState(paseo);
+  const state: any = snapshot ?? (await readPaseoState(paseo));
   const agent: any = (state.agents ?? []).find((a: any) => a?.id === agentId) ?? null;
   if (!agent) throw new Error(`Unknown agent ${JSON.stringify(agentId)}`);
   const identity = cleanupIdentity(agent.labels ?? null);
@@ -206,7 +207,8 @@ export async function previewSteerSettings(
   fingerprint: string;
 }> {
   const agentId = input.agentId.trim();
-  const { agent, mainId, slot, epoch } = await steerScope(paseo, input.workspaceId, agentId);
+  const paseoState: any = await readPaseoState(paseo);
+  const { agent, mainId, slot, epoch } = await steerScope(paseo, input.workspaceId, agentId, paseoState);
   const { tuple: current, sessionId } = liveTupleOf(agent);
   const requested = requestedTupleOf(current, {
     ...(input.model !== undefined ? { model: input.model } : {}),
@@ -225,7 +227,6 @@ export async function previewSteerSettings(
 
   // Warmth, size and the efficiency lock come from the shared feed so the
   // preview and the pill agree.
-  const paseoState: any = await readPaseoState(paseo);
   const cleanup = deps.getCleanupSettings ? await deps.getCleanupSettings().catch(() => null) : null;
   const config = deps.getConfig ? await deps.getConfig().catch(() => null) : null;
   const zerosub = deps.getZerosub ? await deps.getZerosub().catch(() => null) : null;

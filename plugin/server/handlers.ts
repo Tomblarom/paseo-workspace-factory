@@ -66,6 +66,7 @@ import {
   withApplyLock,
 } from "./factory/apply.js";
 import { assignScope } from "./factory/assign.js";
+import { liveSlotHolders } from "./factory/discovery.js";
 import {
   attachProjectArchivedAgents,
   collectCleanupCandidates,
@@ -141,16 +142,25 @@ function workspaceIdFromAddress(address: string): string | null {
   return null;
 }
 
+/** Scope id of one agent snapshot: scope/repo labels (legacy included), else worker metadata. */
+function agentScopeId(agent: any): string | null {
+  const id = agent?.labels?.[LABEL.scope] ?? agent?.labels?.[`${LEGACY_PREFIX}.scope`] ??
+    agent?.labels?.[LABEL.repo] ?? agent?.labels?.[`${LEGACY_PREFIX}.repo`] ?? workerIdentityFromMetadata(agent)?.scopeId;
+  return typeof id === "string" && id ? id : null;
+}
+
 /**
  * Resolves a scope address like the CLI (scope id, wks_ id, path, legacy
  * local/ alias), or the scope of the current workspace when no address is
  * given. A workspace without a scope gets a clear message plus the plan
  * call that would adopt it; anything else passes through to legacy discovery.
+ * Callers pass their snapshot so each RPC reads the daemon state once.
  */
 async function resolveEntryForAddress(
   paseo: any,
   repo: string | undefined,
   workspaceId: string | undefined,
+  state?: any,
 ): Promise<{ target: any; scope: any; deprecatedAlias: boolean }> {
   const address = repo?.trim() || (workspaceId ? `workspace:${workspaceId}` : "");
   if (!address) {
@@ -158,7 +168,7 @@ async function resolveEntryForAddress(
       "Which project? Pass a scope address (owner/repo, scope id, wks_… or folder path), or run the command inside a workspace.",
     );
   }
-  const paseoState: any = await readPaseoState(paseo);
+  const paseoState: any = state ?? (await readPaseoState(paseo));
   const resolved: any = resolveTargetEntry(address, paseoState);
   if (!resolved.scope) {
     const wid = workspaceIdFromAddress(address);
@@ -188,18 +198,9 @@ export async function getStatus(
   { paseo }: PluginHandlerContext,
   loader: ConfigLoader,
 ): Promise<any> {
-  const config = await loader.loadEffectiveConfig();
-  const { target, scope, deprecatedAlias } = await resolveEntryForAddress(
-    paseo,
-    input.repo,
-    input.workspaceId,
-  );
-  // The synced core is unchecked; pass its options as any.
-  const runnerOptions: any = { config, client: paseo, gh: createGh(), git: createGit() };
-  const runner = createRunner(runnerOptions);
-  const [discovery] = await runner.discoverAll([target]);
+  const { config, discovery, scope, deprecatedAlias, status } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
   return {
-    ...steerStatus(discovery),
+    ...status,
     expectedProfiles: expectedProfiles(config),
     scope,
     deprecatedAlias,
@@ -233,26 +234,8 @@ export async function getResume(
   { paseo }: PluginHandlerContext,
   loader: ConfigLoader,
 ): Promise<any> {
-  // Scope resolution: explicit scope > agent label wsf.scope > caller workspace.
   const agentId = input.agentId?.trim() || null;
-  let address = input.repo?.trim() || "";
-  if (!address && agentId) {
-    const found: any = (await readPaseoState(paseo)).agents.find((a: any) => a.id === agentId);
-    const scopeId =
-    found?.labels?.[LABEL.scope] ?? found?.labels?.[`${LEGACY_PREFIX}.scope`] ??
-    found?.labels?.[LABEL.repo] ?? found?.labels?.[`${LEGACY_PREFIX}.repo`] ?? workerIdentityFromMetadata(found)?.scopeId;
-    if (typeof scopeId === "string" && scopeId) address = scopeId;
-  }
-  const config = await loader.loadEffectiveConfig();
-  const { target, scope } = await resolveEntryForAddress(
-    paseo,
-    address || undefined,
-    input.workspaceId,
-  );
-  const runnerOptions: any = { config, client: paseo, gh: createGh(), git: createGit() };
-  const runner = createRunner(runnerOptions);
-  const [discovery] = await runner.discoverAll([target]);
-  const status: any = steerStatus(discovery);
+  const { config, discovery, scope, status } = await discoverOne(paseo, loader, input.repo?.trim() || undefined, input.workspaceId, agentId);
   const git = createGit();
   const briefOptions: any = {
     agentId,
@@ -283,18 +266,7 @@ export async function getResume(
  */
 export function createResumeBriefBuilder(loader: ConfigLoader) {
   return async (paseo: any, workspaceId: string, agentId: string): Promise<string> => {
-    const found: any = (await readPaseoState(paseo)).agents.find((a: any) => a.id === agentId);
-    const scopeId =
-    found?.labels?.[LABEL.scope] ?? found?.labels?.[`${LEGACY_PREFIX}.scope`] ??
-    found?.labels?.[LABEL.repo] ?? found?.labels?.[`${LEGACY_PREFIX}.repo`] ?? workerIdentityFromMetadata(found)?.scopeId;
-    const address =
-      typeof scopeId === "string" && scopeId ? scopeId : `workspace:${workspaceId}`;
-    const config = await loader.loadEffectiveConfig();
-    const { target, scope } = await resolveEntryForAddress(paseo, address, workspaceId);
-    const runnerOptions: any = { config, client: paseo, gh: createGh(), git: createGit() };
-    const runner = createRunner(runnerOptions);
-    const [discovery] = await runner.discoverAll([target]);
-    const status: any = steerStatus(discovery);
+    const { discovery, scope, status } = await discoverOne(paseo, loader, undefined, workspaceId, agentId);
     const metadata = discovery.mainWorkspace?.metadata;
     status.openWorkers = await filterStaleWorkerEvents(paseo, metadata,
       (status.openWorkers ?? []).map((entry: any) => ({ ...entry, workerId: entry.id })));
@@ -373,20 +345,19 @@ async function takeoverIfNonActive(
   loader: ConfigLoader,
   agentId: string,
 ): Promise<{ from: string; to: string; epoch: number } | null> {
-  const found: any = (await readPaseoState(paseo)).agents.find((a: any) => a.id === agentId);
-  const scopeId =
-    found?.labels?.[LABEL.scope] ?? found?.labels?.[`${LEGACY_PREFIX}.scope`] ??
-    found?.labels?.[LABEL.repo] ?? found?.labels?.[`${LEGACY_PREFIX}.repo`];
+  const snapshot: any = await readPaseoState(paseo);
+  const found: any = snapshot.agents.find((a: any) => a.id === agentId);
+  const scopeId = agentScopeId(found);
   const slot = found?.labels?.[LABEL.slot] ?? found?.labels?.[`${LEGACY_PREFIX}.slot`];
-  if (typeof scopeId !== "string" || !scopeId) throw new Error("agent has no factory scope label");
+  if (!scopeId) throw new Error("agent has no factory scope label");
   if (typeof slot !== "string" || !/^[A-Z]$/.test(slot)) throw new Error("agent has no steer slot label");
   const config = await loader.loadEffectiveConfig();
   if ((isAdvisorSlot as unknown as (c: unknown, s: string) => boolean)(config, slot)) {
     throw new Error("advisor steers never coordinate");
   }
-  const { target } = await resolveEntryForAddress(paseo, scopeId, undefined);
+  const { target } = await resolveEntryForAddress(paseo, scopeId, undefined, snapshot);
   const runnerOptions: any = { config, client: paseo, gh: createGh(), git: createGit() };
-  const [discovery] = await createRunner(runnerOptions).discoverAll([target]);
+  const [discovery] = await createRunner(runnerOptions).discoverAll([target], { state: snapshot });
   const status: any = steerStatus(discovery);
   if (status.state?.activeSteer === slot) return null;
   const switchOptions: any = {
@@ -761,10 +732,11 @@ export async function getPlan(
     return { local: abs, hub: true };
   });
   const repos = input.repos ?? [];
-  // No address: plan the scope of the current workspace.
-  let entries: any[] = repos.length || localFlags.length || hubEntries.length
-    ? [...repos, ...localFlags.map((p) => ({ local: resolve(p) })), ...hubEntries]
-    : [(await resolveEntryForAddress(paseo, undefined, input.workspaceId)).target];
+  // No address: plan the scope of the current workspace (one shared snapshot).
+  const snapshot: any = repos.length || localFlags.length || hubEntries.length ? null : await readPaseoState(paseo);
+  let entries: any[] = snapshot
+    ? [(await resolveEntryForAddress(paseo, undefined, input.workspaceId, snapshot)).target]
+    : [...repos, ...localFlags.map((p) => ({ local: resolve(p) })), ...hubEntries];
   // Single-entry options attach in CLI order (name, subject, checkout, main,
   // domain); each helper re-validates count and conflicts for direct RPC
   // callers, like the CLI does for scripted entries.
@@ -781,7 +753,7 @@ export async function getPlan(
   const retitle = input.retitle ?? false;
   const runnerOptions: any = { config, client: paseo, gh: createGh(), git: createGit() };
   const runner = createRunner(runnerOptions);
-  const planOptions: any = { allowFork, adopt, adoptWorker, detach, retitle, renameProject, ...(slots ? { slots } : {}) };
+  const planOptions: any = { allowFork, adopt, adoptWorker, detach, retitle, renameProject, ...(slots ? { slots } : {}), ...(snapshot ? { state: snapshot } : {}) };
   const unordered = await runner.runPlans(entries, planOptions);
   // Domain scopes first, like the CLI: entries travel with their plans, apply
   // pairs them by index, and the hash covers the ordered plans.
@@ -811,18 +783,22 @@ function checkedSlot(raw: string, what: string): string {
   return slot;
 }
 
+/** One snapshot per RPC: config, state, scope resolution, discovery, status. Explicit address wins, else the agent's scope label, else the caller workspace. */
 async function discoverOne(
   paseo: any,
   loader: ConfigLoader,
   repo: string | undefined,
   workspaceId?: string,
+  agentId?: string | null,
 ): Promise<any> {
   const config = await loader.loadEffectiveConfig();
-  const { target, scope, deprecatedAlias } = await resolveEntryForAddress(paseo, repo, workspaceId);
-  const runnerOptions: any = { config, client: paseo, gh: createGh(), git: createGit() };
-  const runner = createRunner(runnerOptions);
-  const [discovery] = await runner.discoverAll([target]);
-  return { config, runner, discovery, scope, deprecatedAlias };
+  const snapshot: any = await readPaseoState(paseo);
+  const agent: any = agentId ? (snapshot.agents ?? []).find((a: any) => a?.id === agentId) ?? null : null;
+  const address = repo?.trim() || (agent ? agentScopeId(agent) ?? undefined : undefined);
+  const { target, scope, deprecatedAlias } = await resolveEntryForAddress(paseo, address, workspaceId, snapshot);
+  const runner = createRunner({ config, client: paseo, gh: createGh(), git: createGit() } as any);
+  const [discovery] = await runner.discoverAll([target], { state: snapshot });
+  return { config, runner, discovery, scope, deprecatedAlias, snapshot, agent, status: (steerStatus as any)(discovery) };
 }
 
 function switchIdentityOf(dry: any): {
@@ -956,7 +932,7 @@ async function resolveCheckpointFields(
     let steer: any;
     if (hasSteer) {
       const slot = (input.fromSteer as string).trim().toUpperCase();
-      const matches = status.steers.filter((s: any) => s.slot === slot && !s.superseded && !s.retired);
+      const matches = (liveSlotHolders as any)(status.steers, slot);
       if (matches.length > 1) throw new Error(`Steer ${slot} has several live agents`);
       steer = matches[0];
       if (!steer) throw new Error(`Steer ${slot} is not a live steer of ${discovery.forkName}`);
@@ -995,8 +971,7 @@ export async function previewCheckpoint(
   { paseo }: PluginHandlerContext,
   loader: ConfigLoader,
 ): Promise<any> {
-  const { discovery, scope, deprecatedAlias } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
-  const status: any = steerStatus(discovery);
+  const { discovery, scope, deprecatedAlias, status } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
   if (!status.workspace || !status.state) {
     throw new Error(
       "This project is not set up by the factory yet (no main workspace with steers). Run /factory plan, then /factory apply <hash>.",
@@ -1016,7 +991,7 @@ export async function previewCheckpoint(
       workspaceId: status.workspace.id,
       epoch,
       agentId: fields.agentId ?? null,
-      holderId: status.steers.filter((s: any) => s.slot === status.state.activeSteer && !s.retired && !s.superseded).map((s: any) => s.id).join(","),
+      holderId: (liveSlotHolders as any)(status.steers, status.state.activeSteer).map((s: any) => s.id).join(","),
       task: fields.task,
       tests: fields.tests,
       blockers: fields.blockers,
@@ -1030,8 +1005,7 @@ export async function writeCheckpointRpc(
   { paseo }: PluginHandlerContext,
   loader: ConfigLoader,
 ): Promise<any> {
-  const { config, discovery } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
-  const status: any = steerStatus(discovery);
+  const { config, discovery, status } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
   if (!status.workspace || !status.state) {
     throw new Error(
       "This project is not set up by the factory yet (no main workspace with steers). Run /factory plan, then /factory apply <hash>.",
@@ -1044,7 +1018,7 @@ export async function writeCheckpointRpc(
     workspaceId: status.workspace.id,
     epoch,
     agentId: fields.agentId ?? null,
-    holderId: status.steers.filter((s: any) => s.slot === status.state.activeSteer && !s.retired && !s.superseded).map((s: any) => s.id).join(","),
+    holderId: (liveSlotHolders as any)(status.steers, status.state.activeSteer).map((s: any) => s.id).join(","),
     task: fields.task,
     tests: fields.tests,
     blockers: fields.blockers,
@@ -1133,8 +1107,7 @@ export async function getWorkers(
   { paseo }: PluginHandlerContext,
   loader: ConfigLoader,
 ): Promise<any> {
-  const { discovery } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
-  const status: any = steerStatus(discovery);
+  const { discovery, status } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
   const scopeId = discovery.scope?.id ?? status.repo;
   const epoch = discovery.mainWorkspace?.metadata?.[METADATA_KEY]?.epoch ?? null;
   const report = (workersReport as any)((readWorkers as any)(discovery.mainWorkspace?.metadata ?? null));
@@ -1156,14 +1129,14 @@ export async function pickWorker(
   let repoPublic: boolean | null = null;
   let profileHealth = null;
   if (input.repo || input.workspaceId) {
-    const { discovery, scope, runner } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
+    const { discovery, scope, runner, snapshot } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
     entries = discovery.providers ?? [];
     profileHealth = readProfileHealth(discovery.mainWorkspace?.metadata);
     let priv = discovery.github?.fork?.repo?.private;
     const parent = scope?.parent ?? discovery.scope?.parent;
     const parentRepo = parent?.kind === "github" ? parent.id : typeof parent === "string" ? parent : null;
     if (priv === undefined && parentRepo) {
-      const [parentDiscovery] = await runner.discoverAll([parentRepo]).catch(() => []);
+      const [parentDiscovery] = await runner.discoverAll([parentRepo], { state: snapshot }).catch(() => []);
       priv = parentDiscovery?.github?.fork?.repo?.private;
     }
     repoPublic = priv === false ? true : priv === true ? false : null;
@@ -1530,8 +1503,7 @@ export async function previewSteerAdd(
   if (state.status !== "ready") {
     throw new Error(`Factory settings are ${state.status}: ${(state as any).error ?? "unreadable"}; open the settings page and save them again`);
   }
-  const { discovery } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
-  const status: any = (steerStatus as any)(discovery);
+  const { discovery, status } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
   if (!status.workspace || !status.state) {
     throw new Error(
       "This project is not set up by the factory yet (no main workspace with steers). Run /factory plan, then /factory apply <hash>.",
@@ -1592,8 +1564,7 @@ export async function applySteerAddRpc(
   { paseo }: PluginHandlerContext,
   loader: ConfigLoader,
 ): Promise<any> {
-  const { discovery } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
-  const status: any = (steerStatus as any)(discovery);
+  const { discovery, status } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
   if (!status.workspace || !status.state) {
     throw new Error(
       "This project is not set up by the factory yet (no main workspace with steers). Run /factory plan, then /factory apply <hash>.",

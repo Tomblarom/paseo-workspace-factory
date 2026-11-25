@@ -5,6 +5,7 @@
 // have no IO so the plugin (S-B) reuses them through plugin-sync; register
 // writes go through the workspace lock like checkpoints (see agent-state.mjs).
 import { isDeepStrictEqual } from 'node:util';
+import { liveSlotHolders } from './discovery.js';
 import { LABEL, METADATA_KEY } from './paseo.js';
 import { QUOTA_DEFAULTS, accountExhausted, allAccountsExhausted, earliestFamilyReset, earliestReset, familyExhausted, freshMaxUsedPct } from './quota.js';
 import { withLock, workspaceLockName } from './lock.js';
@@ -346,9 +347,7 @@ export function exhaustedWakeDecision({ zerosub = null, family = null, now = Dat
  * Closed or interrupted holders stay eligible (a wake reopens them).
  */
 export function resolveWakeTarget(scopeState, steers) {
-  const slot = scopeState?.activeSteer;
-  if (typeof slot !== 'string' || !slot) return null;
-  const holders = (steers ?? []).filter((s) => s && s.slot === slot && !s.archivedAt && !s.retired && !s.superseded);
+  const holders = liveSlotHolders(steers, scopeState?.activeSteer);
   return holders.length === 1 ? (holders[0].id ?? null) : null;
 }
 

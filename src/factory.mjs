@@ -30,8 +30,8 @@ function resolvePlanEntry(entry, paseoState) {
 }
 
 export function createRunner({ config, client, gh, git, readState = readPaseoState, scan = scanCheckouts, inspectTarget = inspectCloneTarget, realpath = realpathSync, existsDir } = {}) {
-  async function discoverAll(entries) {
-    const paseo = await readState(client);
+  async function discoverAll(entries, { state = null } = {}) {
+    const paseo = state ?? await readState(client);
     const liveScopes = listScopes(paseo);
     const resolved = entries.map((e) => resolvePlanEntry(e, paseo));
     const normalized = resolved.map((e) => normalizeEntry(e, config));
@@ -52,8 +52,8 @@ export function createRunner({ config, client, gh, git, readState = readPaseoSta
   const scopeSite = (d) => d.mainWorkspace?.id ?? d.expectedPath ?? d.input;
   return {
     discoverAll,
-    async runPlans(entries, { allowFork = false, adopt = {}, slots, adoptWorker = {}, detach = false, retitle = false, renameProject = null } = {}) {
-      const discoveries = await discoverAll(entries);
+    async runPlans(entries, { allowFork = false, adopt = {}, slots, adoptWorker = {}, detach = false, retitle = false, renameProject = null, state = null } = {}) {
+      const discoveries = await discoverAll(entries, { state });
       for (const [index, d] of discoveries.entries()) {
         d.siblingScopes = discoveries
           .filter((other, j) => j !== index && other.scope?.id && scopeSite(other) !== scopeSite(d))
