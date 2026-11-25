@@ -113,6 +113,8 @@ In `dist/client/contracts.d.ts` and `dist/client/buttons.d.ts`, `addComposerItem
 
 ## Product decisions
 
+Decided 2026-11-25: no **Continue in a new tab**. **Refresh** clears the context in place (Claude: native `/clear`); with the setting **Keep chat history** it rewinds instead. Codex has no native clear, so a Codex refresh always rewinds and the UI says so. A new setting **Initialize new steer** offers: send the brief at once, place the brief in the Paseo composer to go out with the next prompt, or leave the composer empty and initialize from the steer menu. Questions 2 and the upstream proposal are still open.
+
 1. Should **Refresh this tab** ship with settings changes, or should the first version offer only a new tab for a shorter recovery path?
 2. Should Maximum efficiency expose a single confirmed in-place override after an upstream guard lands, or always require a fresh route for affected warm steers?
 3. When a replacement brief is ready, should the first version stage it until the next user prompt, or deliver it immediately on the confirmed transition?
