@@ -208,7 +208,7 @@ for retries and watchdogs, and debounce wakes when events change.
 
 ## Findings and implementation order
 
-The [audit entries](../../FINDINGS.md#open) identify cold wakes, old-session Codex resume,
+The efficiency audit identified cold wakes, old-session Codex resume,
 bad failover picks, oversized briefs, wrong worker recovery scope, stale quota windows,
 costly heartbeat turns, unbounded rewind lookups and missing cost measurements. They also
 record mismatched slot configuration and actions whose labels did not match their effects.
