@@ -121,6 +121,7 @@ import { getQuotaSampledAt, getQuotaSnapshot } from "./quota.js";
 import { settingsFromConfig, validateFactorySettings, type FactorySettingsValues } from "../shared/settings-validate.js";
 import { readZerosubStateSafe } from "./zerosub-runtime.js";
 import { workerIdentityFromMetadata } from "../shared/supervise.js";
+import { filterStaleWorkerEvents } from "./worker-wakes.js";
 import { loadCatalog } from "./models-rpc.js";
 import { applySteerSettings, previewSteerSettings, revertSteerSettings } from "./steer-settings.js";
 
@@ -295,12 +296,15 @@ export function createResumeBriefBuilder(loader: ConfigLoader) {
     const runner = createRunner(runnerOptions);
     const [discovery] = await runner.discoverAll([target]);
     const status: any = steerStatus(discovery);
+    const metadata = discovery.mainWorkspace?.metadata;
+    status.openWorkers = await filterStaleWorkerEvents(paseo, metadata,
+      (status.openWorkers ?? []).map((entry: any) => ({ ...entry, workerId: entry.id })));
     const git = createGit();
     const briefOptions: any = {
       agentId,
       workerLastAnswer: await workerResumeAnswer(paseo, status, agentId),
       promptOptions: await loader.loadPromptOptions(paseo),
-      agentState: discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null,
+      agentState: metadata?.[AGENTS_KEY] ?? null,
       git: status.workspace ? readGitBrief(git, status.workspace.directory) : null,
       scope: discovery.scope ?? scope ?? null,
     };

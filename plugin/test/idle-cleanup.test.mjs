@@ -251,12 +251,11 @@ test("isCold and coldHintText describe the C6 hint", () => {
   assert.equal(coldHintText(61_200, 45 * 60_000), "Idle chat · 61k · 45m");
 });
 
-test("scanCleanupEvidence finds compaction and session signals", () => {
+test("scanCleanupEvidence finds compaction signals", () => {
   assert.deepEqual(scanCleanupEvidence([]), {
     turnReadable: false,
     compactionSeen: false,
     markerSeen: false,
-    sessionNoteSeen: false,
   });
   const entries = [
     { item: { type: "user_message", text: "/compact Keep: task." } },
@@ -267,16 +266,12 @@ test("scanCleanupEvidence finds compaction and session signals", () => {
     turnReadable: true,
     compactionSeen: true,
     markerSeen: true,
-    sessionNoteSeen: false,
   });
-  const notice = [{ item: { type: "notification", level: "info", message: "Switched to a new session" } }];
-  assert.equal(scanCleanupEvidence(notice).sessionNoteSeen, true);
-  const plain = [{ item: { type: "assistant_message", text: "Sure, I cleared nothing." } }];
+  const plain = [{ item: { type: "assistant_message", text: "Switched to a new session" } }];
   assert.deepEqual(scanCleanupEvidence(plain), {
     turnReadable: true,
     compactionSeen: false,
     markerSeen: false,
-    sessionNoteSeen: false,
   });
 });
 

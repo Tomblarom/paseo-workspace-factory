@@ -111,13 +111,15 @@ export async function updateAgentEntry({ client, workspaceId, agentId, patch, li
   return lock(workspaceLockName(workspaceId), async (held) => {
     const metadata = (await workspace.refresh())?.metadata ?? {};
     const state = { ...(metadata[AGENTS_KEY] ?? {}) };
+    const entryPatch = typeof patch === 'function' ? patch(state[agentId] ?? null) : patch;
+    if (entryPatch === null) return state[agentId] ?? null;
     if (liveIds !== null && liveIds !== undefined) {
       const live = new Set(liveIds);
       for (const id of Object.keys(state)) {
         if (!live.has(id)) delete state[id];
       }
     }
-    state[agentId] = clipEntry({ ...(state[agentId] ?? {}), ...patch });
+    state[agentId] = clipEntry({ ...(state[agentId] ?? {}), ...entryPatch });
     held.verify(); // the lock file must still be the locked inode right before the write
     await workspace.setMetadata({ [AGENTS_KEY]: state });
     const written = (await workspace.refresh())?.metadata?.[AGENTS_KEY]?.[agentId] ?? null;

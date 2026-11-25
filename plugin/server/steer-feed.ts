@@ -235,7 +235,7 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
           : null,
       }
       : null;
-    const context = agentContextInputs(agent, entry, settings, deps.zerosub ?? null, nowMs);
+    const context = agentContextInputs(agent, entry, settings, deps.zerosub ?? null, nowMs, paseoState.providers);
     const { provider, model, lastTurnEndedAt, cleanedAfter, liveThinking, liveSpeed, liveSessionId, baseline } = context;
     const needsResume = isNeedsResumeReason(asRecord(entry?.needsResume)?.reason)
       ? ((asRecord(entry?.needsResume)?.reason as "daemon-restart" | "limit" | "failed" | "cold"))

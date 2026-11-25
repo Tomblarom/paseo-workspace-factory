@@ -95,8 +95,6 @@ export interface CleanupEffect {
   compactionSeen: boolean;
   /** A `[Compacted]` marker text was found in the turn. */
   markerSeen: boolean;
-  /** A session-change notice text was found in the turn. */
-  sessionNoteSeen: boolean;
   /** Turn timeline entries could be read at all. */
   turnReadable: boolean;
 }
@@ -177,7 +175,7 @@ export function decideTurnUpdate(input: TurnDecisionInput): TurnDecision {
   // is our action, not agent work — and never a scope flag. It is also not a
   // real turn: only a completed ordinary turn clears lastActionFailed, so C5
   // cannot retry within the same idle period.
-  if (pending && command) {
+  if (pending?.kind === command && command !== null) {
     const kind = String(pending.kind ?? command);
     if (input.outcome !== "completed") {
       return {
@@ -193,7 +191,7 @@ export function decideTurnUpdate(input: TurnDecisionInput): TurnDecision {
       };
     }
     const verdict = verifyCleanupEffect(kind, input.previous, input.effect);
-    if (verdict === "failed") {
+    if (verdict === "failed" || (kind === "clear" && verdict !== "verified")) {
       return {
         entryUpdate: {
           ...base,
@@ -202,12 +200,12 @@ export function decideTurnUpdate(input: TurnDecisionInput): TurnDecision {
             error:
               kind === "compact"
                 ? "compact had no effect (no compaction marker; the command arrived as text)"
-                : "clear had no effect (session unchanged; the command arrived as text)",
+                : verdict === "failed" ? "clear had no effect (session unchanged)" : "clear could not be confirmed (session unavailable)",
           },
         },
         resolvePending: true,
-        effectFailed: true,
-        log: `cleanup turn completed without effect; pending ${kind} → lastActionFailed`,
+        effectFailed: verdict === "failed",
+        log: `cleanup effect ${verdict}; pending ${kind} → lastActionFailed`,
       };
     }
     const compacted = kind === "compact";
@@ -310,25 +308,22 @@ export function decideTurnUpdate(input: TurnDecisionInput): TurnDecision {
 }
 
 /**
- * First-attempt effect check for our own cleanup turns. `verified` marks the
- * agent (no further checks); `unverifiable` cannot tell (missing session or
- * unreadable timeline) and retries the check next time; `failed` is certain
- * enough to disable the automation: the command demonstrably arrived as text.
+ * Every clear needs independent evidence from the provider session. A
+ * compaction may reuse the provider capability check from an earlier turn.
  */
 export function verifyCleanupEffect(
   kind: string,
   previous: Record<string, unknown> | null,
   effect: CleanupEffect | null,
 ): "verified" | "unverifiable" | "failed" {
-  if (previous?.actionVerified === true) return "verified";
-  if (!effect) return "unverifiable";
   if (kind === "compact") {
+    if (previous?.actionVerified === true) return "verified";
+    if (!effect) return "unverifiable";
     if (effect.compactionSeen || effect.markerSeen) return "verified";
     return effect.turnReadable ? "failed" : "unverifiable";
   }
-  if (effect.sessionChanged === true || effect.sessionNoteSeen) return "verified";
-  if (effect.sessionChanged === false) return "failed";
-  return effect.turnReadable ? "failed" : "unverifiable";
+  if (effect?.sessionChanged === true) return "verified";
+  return effect?.sessionChanged === false ? "failed" : "unverifiable";
 }
 
 function interruptedOf(

@@ -1,62 +1,63 @@
-# paseo-workspace-factory (working title)
+# paseo-workspace-factory
 
-Workspace Factory sets up [Paseo](https://paseo.sh) projects, workspaces, and coordinating agents from a plan you review and confirm. One **steer** coordinates the project at a time and delegates bounded tasks to workers. When a provider reaches its limit or a chat grows too long, another steer can pick up the task from a compact **checkpoint**.
+Workspace Factory is a policy layer on top of Paseo for turning available
+agent quota into accepted work with as little repeated context as practical.
+
+It is designed for setups where:
+
+- work can move between multiple providers or accounts as quota becomes scarce;
+- the active coordinator must be replaceable without replaying the whole chat;
+- workers should survive coordinator handoffs and daemon/provider interruptions;
+- several projects or scopes need one scheduling and governance policy;
+- context, cache state, retries, and failover should be treated as resource costs.
+
+Paseo remains the runtime. It owns agents, provider sessions, workspaces,
+worktrees, persistence, timelines, usage sources, and the application UI.
+Workspace Factory adds scheduling policy and durable coordination state on
+top of those primitives.
+
+> Status: early preview.
+>
+> The project has an explicit efficiency measurement design, but this README
+> does not claim measured savings until equivalent-work benchmarks have been
+> completed.
+
+## Why this exists
+
+A long-lived coordinator is convenient, but it couples unfinished work to one
+provider session and one growing conversation. When quota is exhausted, a
+provider fails, the daemon restarts, or the conversation becomes expensive to
+reuse, continuing the same task can require rereading substantial history.
+
+Workspace Factory externalizes the minimum coordination state needed to
+continue:
+
+- current task and next step;
+- tests and blockers;
+- git state;
+- active workers and their assignments;
+- active coordinator slot and epoch;
+- provider/account eligibility and known quota state.
+
+Handoffs use this state to build a compact resume brief instead of treating
+the full conversation as the only source of truth.
+
+See:
+- `docs/saving-context.md`
+- `docs/design/quota-independence.md`
+- `docs/design/cold-context-resume.md`
+- `docs/design/efficiency-metrics.md`
+
+## Core loop
 
 ```mermaid
 flowchart LR
-    Plan[Preview and confirm] --> A[Active steer]
-    A --> Work[Workers]
-    A --> Checkpoint[Checkpoint]
-    Checkpoint --> B[Next steer]
-```
-
-> Status: early preview.
-
-## Requirements
-
-- Linux with util-linux (`flock`), Node.js ≥ 22, git, GitHub CLI (`gh`, authenticated)
-- A running Paseo daemon (tested with 0.16.2) and its `paseo` CLI
-
-## Quickstart
-
-Install on the Paseo host using either method.
-
-| | [Build from source](docs/getting-started.md#build-from-source) | [Install a built release](docs/getting-started.md#install-a-built-release) |
-|---|---|---|
-| Install | Clone this repository and run `paseo plugin install <checkout>/plugin`. | Run `paseo plugin install <release-dir>` with a prepared, content-hashed release directory. |
-| Update | Run `git pull` and `paseo plugin reload workspace-factory`. Settings survive reload. | Note your settings, remove the current installation, then install the next release directory. Removing the plugin deletes its settings. |
-| Findings | **Ask agents to record factory findings** is on by default and directs agents to `<checkout>/FINDINGS.md`. | Unavailable. |
-
-**Self-improvement when built from source.** An installation from the git checkout automatically adds a short passage to the prompts of new steers and workers: they record what they notice while using the factory (friction, expensive or wasted context, quota waste, unclear briefs, bugs) in `<checkout>/FINDINGS.md`. You decide which entries become tasks. Turn it off with **Ask agents to record factory findings** in the plugin settings. A normal installation from a built release never adds the passage.
-
-After [host setup](docs/getting-started.md#configure-and-use-the-factory), open a regular agent tab in Paseo and use the composer.
-
-| To | Type |
-|---|---|
-| Preview project setup | `/factory plan <you>/<repo>` |
-| Apply the reviewed plan | `/factory apply <hash>` |
-| See the active steer and its checkpoint | `/factory status` |
-| Save a steer’s last checkpoint | `/factory checkpoint --from-agent <steer-id>` and confirm |
-| Hand off to Steer B | `/factory switch --to B` and confirm |
-| Recover an interrupted steer | `/factory resume` in its tab |
-| See all commands | `/factory help` |
-
-`npm test` runs the offline suite (simulated daemon, real processes and filesystem). Live tests against a daemon are opt-in, see [docs/configuration.md](docs/configuration.md#live-tests).
-
-## Supported providers
-
-Codex and Claude are the supported providers for steers and workers. Other providers in Paseo’s live catalog can be configured. Factory defaults Muse profiles to sensitive and rejects explicit thinking levels for Claude models on Copilot. Resume and cleanup capabilities vary by provider. Native `/clear` is enabled by default only for Claude, and the manual live-check matrix covers Codex and Claude. [Provider configuration](docs/configuration.md#known-provider-exceptions) · [Resume capabilities](docs/design/cold-context-resume.md#provider-matrix-e1) · [Provider live checks](docs/provider-live-check.md)
-
-## Context and quota
-
-- Give routine work to lower-cost workers. Keep steer chats short with `CHECKPOINT` blocks. Handoffs and resumes use a brief built from the saved checkpoint, git state and open workers. [Saving context](docs/saving-context.md) · [Concepts](docs/concepts.md)
-- The plugin flags long idle chats whose cache may have expired. Optional cleanup can compact a still-warm chat mid-task. For cold context it can suggest `fresh`, which uses a same-tab rewind where supported or starts a new agent with the brief. [Cold-context design](docs/design/cold-context-resume.md) · [Cache profiles](docs/design/codex-research/spec-cache-profiles.md)
-- Model selection skips known exhausted pools. Supervision can fail over to an eligible steer in another pool, with per-account quota and account selection when ZeroSub is configured. [Quota pools](docs/concepts.md#quota-pools-and-zerosub-accounts)
-
-## Documentation
-
-- [Concepts and safety model](docs/concepts.md)
-- [Configuration](docs/configuration.md)
-- [Steer instructions and task/answer template](docs/steer-instructions.md)
-- [Optional TODO workflow](docs/todo-workflow.md)
-- [All documentation](docs/README.md)
+    Work[Accepted work] --> Route[Choose eligible provider/account]
+    Route --> Steer[Active steer]
+    Steer --> Workers[Bounded workers]
+    Steer --> State[Durable checkpoint]
+    Workers --> State
+    State --> Decide{Continue cheaply?}
+    Decide -->|yes| Steer
+    Decide -->|cold / oversized / quota / failure| Next[Renew or hand off]
+    Next --> Route

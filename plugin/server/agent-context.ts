@@ -14,10 +14,21 @@ function stampMs(value: unknown): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
-function usedTokensOf(agent: any): unknown {
+function contextUsageOf(agent: any) {
   const snapshot = agent?.lastUsage ?? agent?.LastUsage ?? null;
-  return snapshot?.contextWindowUsedTokens ?? snapshot?.ContextWindowUsedTokens ?? null;
+  return {
+    used: snapshot?.contextWindowUsedTokens ?? snapshot?.ContextWindowUsedTokens ?? null,
+    max: snapshot?.contextWindowMaxTokens ?? snapshot?.ContextWindowMaxTokens ?? null,
+  };
 }
+
+/** Snapshot checks complement turn hooks, which run asynchronously. */
+export function hasActiveAgentWork(agent: any, entry?: any): boolean {
+  return Boolean(agent?.activeTurn || agent?.status === "running" || agent?.status === "initializing" ||
+    agent?.pendingPermissions?.length || (agent?.status !== "closed" && entry?.openTurnId));
+}
+
+export class AgentBusyError extends Error {}
 
 /** Cache timing and retained context from the same snapshot across Factory paths. */
 export function agentContextInputs(
@@ -26,6 +37,7 @@ export function agentContextInputs(
   settings: CleanupSettings,
   routes: ZerosubState,
   nowMs: number,
+  providers: any[] = [],
 ) {
   const pendingDelivery = asRecord(entry?.pendingWakeBrief);
   const deliveryPhase = pendingDelivery?.phase ??
@@ -78,12 +90,16 @@ export function agentContextInputs(
     speed: baseline.speed,
   });
   const storedTokens = entry?.contextTokens;
+  const usage = contextUsageOf(agent);
+  const catalogModel = providers.find((item) => item.provider === provider)?.models?.find((item: any) =>
+    item.id === model || item.aliases?.includes(model));
   return {
     nowMs, agentId: agent.id, provider, model, lastTurnEndedAt, cleanedAfter,
     cacheTtl: cacheTtlForAgent(agent, routes),
     cacheStartAt: typeof entry?.cacheStartAt === "string" ? entry.cacheStartAt : null,
     baselineValid, prefixBreakRetained,
-    liveUsedTokens: cleanedAfter ? null : usedTokensOf(agent),
+    liveUsedTokens: cleanedAfter ? null : usage.used,
+    contextWindowMaxTokens: usage.max ?? catalogModel?.contextWindowMaxTokens,
     storedTokens, storedSameSession: baselineValid,
     cleanupProfile: settings.profile, minContextTokens: settings.minContextTokens,
     liveThinking, liveSpeed, liveSessionId, baseline,

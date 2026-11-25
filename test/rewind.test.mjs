@@ -240,6 +240,31 @@ test('rewindSameTab rewinds to the first user message and closes', async () => {
   assert.deepEqual(daemon.calls.at(-1), ['close']);
 });
 
+test('sweep rewind keeps the saved brief across pages and skips when only its turn is left', async () => {
+  const row = (messageId, turnId) => ({ turnId, item: { type: 'user_message', messageId } });
+  const head = [row('original', 't1'), row('saved-brief', 't2')];
+  const tail = [row('same-turn', 't2'), row('next-turn', 't3'), row('later', 't4')];
+  const rewinds = [];
+  const createClient = async () => ({
+    fetchAgentTimeline: async (_id, { direction }) => direction === 'tail' && tail.length
+      ? { entries: tail, hasOlder: true, startCursor: { epoch: 'timeline', seq: 3 } }
+      : { entries: head },
+    rewindAgent: async (_id, messageId) => {
+      rewinds.push(messageId);
+      tail.splice(tail.findIndex((entry) => entry.item.messageId === messageId));
+      // Paseo rebuilds the timeline after a rewind, which can expose the
+      // provider message ID and the original client ID separately.
+      Object.assign(head[1].item, { messageId: 'provider-brief', clientMessageId: 'saved-brief' });
+    },
+  });
+  const run = () => rewindSameTab('agent', { createClient, previousBriefId: 'saved-brief' });
+  assert.deepEqual(await run(), { status: 'rewound', messageId: 'next-turn', briefMessageId: 'saved-brief' });
+  assert.deepEqual(await run(), { status: 'no-op' });
+  tail.push(row('new-work', 't5'));
+  assert.deepEqual(await run(), { status: 'rewound', messageId: 'new-work', briefMessageId: 'saved-brief' });
+  assert.deepEqual(rewinds, ['next-turn', 'new-work']);
+});
+
 test('rewindSameTab distinguishes no-point, unsupported, unavailable and failed', async () => {
   const noPoint = await rewindSameTab('a', { createClient: fakeDaemon({ timeline: { entries: [{ item: { type: 'tool_call', messageId: 't' } }] } }) });
   assert.deepEqual(noPoint, { status: 'no-point' });

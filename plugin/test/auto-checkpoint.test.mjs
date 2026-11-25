@@ -211,7 +211,7 @@ test("a completed cleanup turn resolves pendingAction and does nothing else", ()
   assert.equal(withCp.entryUpdate.actionVerified, true);
 });
 
-test("an unverifiable cleanup turn resolves but stays unchecked", () => {
+test("an unverifiable clear reports failure without recording a reset", () => {
   const d = decideTurnUpdate(
     input({
       turnUserText: "/clear",
@@ -226,8 +226,9 @@ test("an unverifiable cleanup turn resolves but stays unchecked", () => {
     }),
   );
   assert.equal(d.resolvePending, true);
-  assert.equal(d.effectFailed, undefined);
-  assert.ok(d.entryUpdate.cleared);
+  assert.equal(d.effectFailed, false);
+  assert.equal(d.entryUpdate.cleared, undefined);
+  assert.match(d.entryUpdate.lastActionFailed.error, /could not be confirmed/);
   assert.ok(!("actionVerified" in d.entryUpdate));
 });
 
@@ -244,7 +245,7 @@ test("a cleanup turn without effect resolves into lastActionFailed and fails the
   assert.equal(d.effectFailed, true);
   assert.deepEqual(d.entryUpdate.lastActionFailed, {
     at: NOW,
-    error: "clear had no effect (session unchanged; the command arrived as text)",
+    error: "clear had no effect (session unchanged)",
   });
   assert.equal(d.entryUpdate.cleared, undefined);
   assert.ok(!("interrupted" in d.entryUpdate));
@@ -290,11 +291,11 @@ test("verifyCleanupEffect judges each signal", () => {
   assert.equal(verifyCleanupEffect("clear", null, null), "unverifiable");
   assert.equal(verifyCleanupEffect("clear", null, none), "unverifiable");
   assert.equal(verifyCleanupEffect("clear", null, { ...none, sessionChanged: true }), "verified");
-  assert.equal(verifyCleanupEffect("clear", null, { ...none, sessionNoteSeen: true }), "verified");
+  assert.equal(verifyCleanupEffect("clear", null, { ...none, sessionNoteSeen: true }), "unverifiable");
   assert.equal(verifyCleanupEffect("clear", null, { ...none, sessionChanged: false }), "failed");
   assert.equal(
     verifyCleanupEffect("clear", null, { ...none, sessionChanged: null, turnReadable: true }),
-    "failed",
+    "unverifiable",
   );
   assert.equal(verifyCleanupEffect("compact", null, none), "unverifiable");
   assert.equal(verifyCleanupEffect("compact", null, { ...none, compactionSeen: true }), "verified");
@@ -308,7 +309,7 @@ test("verifyCleanupEffect judges each signal", () => {
   );
   assert.equal(
     verifyCleanupEffect("clear", { actionVerified: true }, { ...none, sessionChanged: false }),
-    "verified",
+    "failed",
   );
 });
 

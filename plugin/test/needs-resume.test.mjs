@@ -917,7 +917,8 @@ test("sweepOnce maps mode clear to /compact for Codex, never /clear", async () =
 // ---------------------------------------------------------------------------
 
 test("sweepOnce rewinds a fresh-recommended Codex agent when rewindFresh is on", async () => {
-  const { world, agent, nowMs } = sweepWorld({ provider: "codex", model: "gpt-6.2-sol", idleMs: 45 * MIN });
+  const { world, ws, agent, nowMs } = sweepWorld({ provider: "codex", model: "gpt-6.2-sol", idleMs: 45 * MIN });
+  ws.metadata[AGENTS_KEY][agent.id].refreshed = { briefMessageId: "saved-brief" };
   const calls = [];
   const results = await sweep.sweepOnce({
     paseo: fakeClient(world),
@@ -926,9 +927,10 @@ test("sweepOnce rewinds a fresh-recommended Codex agent when rewindFresh is on",
     quotaSnapshot: null,
     lock: noLock,
     log: () => {},
-    rewindFn: async (id) => {
+    rewindFn: async (id, options) => {
+      assert.equal(options.previousBriefId, "saved-brief");
       calls.push(id);
-      return { status: "rewound", messageId: "msg-1" };
+      return { status: "rewound", messageId: "msg-1", briefMessageId: "saved-brief" };
     },
   });
   assert.equal(results.length, 1);
@@ -942,6 +944,7 @@ test("sweepOnce rewinds a fresh-recommended Codex agent when rewindFresh is on",
   assert.equal(entry.cleared.mode, "rewind");
   assert.equal(entry.refreshed.mode, "rewind");
   assert.equal(entry.refreshed.messageId, "msg-1");
+  assert.equal(entry.refreshed.briefMessageId, "saved-brief");
   assert.equal(entry.pendingAction, undefined);
   // The recorded cleaning keeps the next sweep quiet.
   const second = await sweep.sweepOnce({
@@ -958,6 +961,40 @@ test("sweepOnce rewinds a fresh-recommended Codex agent when rewindFresh is on",
   });
   assert.deepEqual(second, []);
   assert.deepEqual(calls, [agent.id], "no second rewind in the same idle period");
+});
+
+test("sweep daily cap counts only completed rewind RPCs, even if bookkeeping fails", async (t) => {
+  const day = Date.parse("2030-01-01T12:00:00.000Z");
+  t.mock.method(Date, "now", () => day);
+  const { world, ws, agent, nowMs } = sweepWorld({ provider: "codex", model: "gpt-6.2-sol", idleMs: 45 * MIN });
+  const workers = ["failed", "no-op", "rewound", "over-cap"].map((title) => addAgent(world, {
+    title, workspaceId: ws.id, provider: agent.provider, model: agent.model, lastUsage: agent.lastUsage,
+    labels: { [LABEL.role]: "worker", [LABEL.scope]: REPO },
+  }));
+  for (const worker of workers) {
+    ws.metadata[AGENTS_KEY][worker.id] = { lastTurnEndedAt: at(nowMs - 45 * MIN), noteAt: at(nowMs - MIN) };
+  }
+  const calls = [];
+  let failWrite = false;
+  const results = await sweep.sweepOnce({
+    paseo: fakeClient(world),
+    settings: { ...CLEANUP_DEFAULTS, mode: "compact-warm", providers: ["codex"], rewindFresh: true, dailyCap: 1 },
+    nowMs,
+    quotaSnapshot: null,
+    zerosub: null,
+    lock: (name, fn) => failWrite ? Promise.reject(new Error("metadata write failed")) : noLock(name, fn),
+    log: () => {},
+    rewindFn: async (id) => {
+      const title = world.agents.find((candidate) => candidate.id === id).title;
+      const status = id === agent.id ? "no-point" : title;
+      calls.push(status);
+      failWrite = status === "rewound";
+      return { status, ...(failWrite ? { messageId: "next-turn" } : {}) };
+    },
+  });
+  assert.deepEqual(calls, ["no-point", "failed", "no-op", "rewound"]);
+  assert.deepEqual(results.map(({ sent }) => sent), [false, false, false, true]);
+  assert.match(results.at(-1).reason, /could not record it/);
 });
 
 test("sweepOnce keeps Claude on its native path even with rewindFresh on", async () => {

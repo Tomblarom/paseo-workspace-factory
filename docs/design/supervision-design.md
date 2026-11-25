@@ -66,7 +66,8 @@ The plugin wakes the steer that is active **when the wake is sent**, read from t
 - Every actionable worker outcome queues a wake before delivery. The timer tries again after a failed send or when the active steer finishes its current turn.
 - A wake behind a `/clear` stays pending (`wsf.agents.<steer>.pendingWakeBrief`) until the brief send succeeded in the turn-after hook; a failed follow-up (hook error, busy workspace lock, plugin stopped, provider error) keeps the workers queued and retries on the next supervise tick and the boot check, at most once per tick per scope, without duplicate briefs (take-before-send under the workspace lock, `wakeId`, `briefSent` flag — same exactly-once pattern as the staged steer brief).
 - Debounced: simultaneous actionable events are collected and sent together within `wakeDebounceSeconds`; there is no 10-minute batch.
-- Watchdog: a plugin timer (every 15 minutes) marks `running` workers that are idle beyond `staleMinutes` as `stale` and wakes the steer; it also re-sends a wake that got no answer (see Failover).
+- The fallback timer polls delivery state. It processes queued wakes and pending briefs, with unanswered wake results handled by failover. A worker that is still doing its assignment does not trigger a wake simply because the timer ran.
+- Watchdog: every 15 minutes it marks a registered, live worker whose assignment is `running` and whose agent has been idle beyond `staleMinutes`. It records `stale` and queues its wake in one write. Closed workers remain available for recovery. To send a stale event, Factory rechecks the live worker and register, including when it restores a pending wake brief after restart. The watchdog also checks whether the active steer answered the latest wake, including a wake for the last completed worker (see Failover).
 - Quiet periods: no wakes while `drain` runs, and none before the boot check after a restart has finished; then one combined wake lists every interrupted worker.
 - Never woken or escalated: archived agents, agents without scope assignment, `background` agents, advisor steers.
 
@@ -77,7 +78,7 @@ Wake text (one message, English, short):
 Run `<factory> resume` (or `workers`) and continue. Ignore if your epoch is newer.
 ```
 
-Without the plugin the steer instructions ask the steer to create a heartbeat (`*/20 * * * *`) while workers run and to delete it when none are open.
+Without the plugin, use `paseo wait` during an active turn and `<factory> workers` to inspect the register. Paseo's native heartbeat sends its prompt on each run, so it cannot check the register before starting the turn.
 
 ## Failover
 
@@ -113,7 +114,7 @@ Decision F4 (accepted): when the woken steer carries `needsResume` (set after a 
 ## Limits
 
 - Paseo has no API to mute attention: steer turns started by a wake probably raise the normal attention, so F3 can be met only partly. Batching keeps this low; an upstream request for a "silent" send or per-agent notification switch is the clean fix.
-- Heartbeats stay with one agent and are only the fallback without the plugin.
+- Paseo's native heartbeats stay attached to one agent. Factory's fallback resolves the current steer from the scope when there is an event to deliver.
 - Supervision is per host; it does not watch agents of another daemon.
 
 ## Packages

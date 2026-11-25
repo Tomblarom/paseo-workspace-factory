@@ -48,7 +48,7 @@ Exactly one steer coordinates at a time.
 
 ## Supervision
 
-The two supervision lines in the block above implement the principle in [concepts](concepts.md#supervision-survives-interruptions): workers belong to the scope, the active steer is woken instead of waiting, and a ready steer takes over a failed one. Without the plugin, create a heartbeat while workers run (`paseo heartbeat create --cron "*/20 * * * *" "Check your workers with <factory> resume"`) and delete it when none are open. Archive each worker (`paseo archive <id>`) as soon as you have accepted its result against the task; never one that is running, blocked or interrupted. This is the standing exception to the no-archive rule above, for your own accepted workers only. Details: [supervision design](design/supervision-design.md).
+The plugin wakes the active steer for worker results, stale work and pending recovery. Without the plugin, use `paseo wait` during the active turn and `<factory> workers` to inspect the register. Archive each worker (`paseo archive <id>`) as soon as you have accepted its result against the task. Running, blocked and interrupted workers remain attached. This is the standing exception to the no-archive rule above, for your own accepted workers only. [Supervision design](design/supervision-design.md)
 
 
 Assigning to another scope (`assign <scope> --apply`) records you as requester; the factory reports that steer's `done`/`blocked` CHECKPOINT back to you automatically. Do not unset `PASEO_AGENT_ID` for `assign`, or pass `--report-to <your-agent-id>`. Until the report arrives, keep a background watcher on that steer like on a worker.

@@ -672,6 +672,25 @@ test("flush respects the batch window and sends nothing when empty", async () =>
   assert.equal(world.workspaces[0].metadata[WORKERS_KEY][worker.id].pendingWake, null);
 });
 
+test("heartbeat checks ignore a healthy running worker and deliver a later queued result once", async () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  const worker = addWorker(world, ws);
+  const paseo = fakeClient(world);
+  const register = ws.metadata[WORKERS_KEY] = { [worker.id]: entry("running") };
+  assert.deepEqual(await supervise.flushAllScopes(paseo, depsOf()), []);
+  assert.equal(sendsTo(world, steers.A.id).length, 0);
+
+  register[worker.id] = entry("done", "work complete", { pendingWake: { state: "done", queuedAt: at(NOW) } });
+  const checks = await Promise.all([
+    supervise.flushAllScopes(paseo, depsOf()),
+    supervise.flushAllScopes(paseo, depsOf()),
+  ]);
+  assert.equal(checks.flat().filter(({ flushed }) => flushed).length, 1);
+  assert.deepEqual(await supervise.flushAllScopes(paseo, depsOf()), []);
+  assert.equal(sendsTo(world, steers.A.id).length, 1);
+});
+
 test("wakes hint at an advisor past maxAutoResumes", async () => {
   const world = makeWorld();
   const { ws, steers } = provisioned(world);
@@ -847,6 +866,9 @@ test("a cold takeover starts its answer window only after the renewed brief is s
   // The verified clear is recorded by the turn hook, covered in wake-brief.test.
   const entry = ws.metadata[AGENTS_KEY][steers.B.id];
   entry.pendingAction = null;
+  steers.B.persistence.sessionId = "new-session";
+  entry.cleared = { mode: "clear", sessionId: "new-session" };
+  entry.actionVerified = true;
   entry.pendingWakeBrief.phase = "ready";
   assert.equal((await supervise.retryPendingWakeBrief(paseo, scope, deps)).delivered, true);
   assert.equal(sendsTo(world, steers.B.id).length, 2);
@@ -911,10 +933,22 @@ test("failover follows a switch and clears when nothing is open", async () => {
   const moved = await supervise.runFailoverCheck(paseo, scope, depsOf());
   assert.equal(moved.action, "failover");
   assert.equal(moved.to.slot, "C", "chain continues after the active slot");
+  world.workspaces[0].metadata[METADATA_KEY].switchedAt = at(NOW - 5 * MIN);
   world.workspaces[0].metadata[WORKERS_KEY] = { [worker.id]: entry("done", "old", { lastWakeAt: at(NOW - 60 * MIN) }) };
   assert.equal((await supervise.runFailoverCheck(paseo, scope, depsOf())).reason, "no-open");
   world.workspaces[0].metadata[WORKERS_KEY] = { [worker.id]: entry("blocked", "stuck") };
   assert.equal((await supervise.runFailoverCheck(paseo, scope, depsOf())).reason, "no-wake");
+});
+
+test("watchdog can fail over an unanswered final worker result and ignores an answered one", async () => {
+  for (const answered of [false, true]) {
+    const { world, ws, steers, worker } = unansweredWorld();
+    ws.metadata[WORKERS_KEY][worker.id].state = "done";
+    if (answered) ws.metadata[AGENTS_KEY][steers.A.id].lastTurnEndedAt = at(NOW - MIN);
+    const result = await supervise.watchdogScan(fakeClient(world), depsOf());
+    assert.equal(result.failovers.length, answered ? 0 : 1);
+    assert.equal(sendsTo(world, steers.B.id).length, answered ? 0 : 1);
+  }
 });
 
 test("failover log is epoch-checked and needs a task checkpoint", async () => {
@@ -1055,6 +1089,53 @@ test("watchdog marks idle running workers stale and queues the batch", async () 
   assert.deepEqual(world.workspaces[0].metadata[WORKERS_KEY][idle.id].pendingWake, { state: "stale", queuedAt: at(NOW) });
   assert.equal(world.workspaces[0].metadata[WORKERS_KEY][blocked.id].state, "blocked");
   assert.equal(sendsTo(world, steers.A.id).length, 0, "no wake was ever sent, so no failover fires");
+});
+
+test("watchdog and wake delivery ignore archived, closed and missing stale workers", async () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  const old = at(NOW - 90 * MIN);
+  const archived = addWorker(world, ws, { archivedAt: old, updatedAt: old });
+  const closed = addWorker(world, ws, { status: "closed", updatedAt: old });
+  const closedWithoutEntry = addWorker(world, ws, { status: "closed", updatedAt: old });
+  const pendingWake = { state: "stale", queuedAt: old };
+  ws.metadata[AGENTS_KEY] = {
+    [archived.id]: { note: "archived", lastTurnEndedAt: old },
+    [closed.id]: { note: "closed", lastTurnEndedAt: old },
+    [closedWithoutEntry.id]: { note: "closed without a register entry", lastTurnEndedAt: old },
+    ghost: { note: "missing", lastTurnEndedAt: old },
+  };
+  ws.metadata[WORKERS_KEY] = {
+    [closed.id]: entry("stale", "old", { pendingWake, lastWakeAt: old, startedAt: old }),
+    ghost: entry("running", "old", { pendingWake, startedAt: old }),
+  };
+  const client = fakeClient(world);
+  const scan = await supervise.watchdogScan(client, depsOf());
+  assert.deepEqual(scan.backfilled, []);
+  assert.deepEqual(scan.stale, []);
+  assert.deepEqual(scan.failovers, []);
+  const scope = { id: REPO, workspaceId: ws.id };
+  assert.equal((await supervise.flushScope(client, scope, depsOf())).flushed, false);
+  assert.equal((await supervise.sendScopeWake(client, {
+    scope, events: [{ workerId: archived.id, state: "stale" }],
+  }, depsOf())).sent, false);
+  assert.deepEqual(sendsTo(world, steers.A.id), []);
+});
+
+test("a worker removed while the watchdog is preparing a stale event stays removed", async () => {
+  const world = makeWorld();
+  const { ws } = provisioned(world);
+  const old = at(NOW - 90 * MIN);
+  const worker = addWorker(world, ws, { updatedAt: old });
+  ws.metadata[WORKERS_KEY] = { [worker.id]: entry("running", "old", { startedAt: old }) };
+  const scan = await supervise.watchdogScan(fakeClient(world), depsOf({
+    lock: (name, fn) => {
+      delete ws.metadata[WORKERS_KEY][worker.id];
+      return noLock(name, fn);
+    },
+  }));
+  assert.deepEqual(scan.stale, []);
+  assert.equal(ws.metadata[WORKERS_KEY][worker.id], undefined);
 });
 
 test("watchdog fails closed on unknown activity and refuses disabled scopes", async () => {

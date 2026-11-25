@@ -7,6 +7,7 @@
 import {
   cacheAgeMs,
   compactAtMinutes,
+  contextSizeThreshold,
   effectiveMinContextTokens,
   groupForProviderModel,
   isCleanupProfile,
@@ -280,6 +281,7 @@ export interface CleanupInput {
   pendingPermissionCount: number;
   lastTurnEndedAt: string | null;
   contextTokens: number | null;
+  contextWindowMaxTokens?: unknown;
   activeSteer: unknown;
   checkpoint: Record<string, unknown> | null;
   /** The agent's own wsf.agents entry, if any. */
@@ -362,6 +364,7 @@ export function cleanupInputOf(args: {
   cacheTtl?: CacheTtl;
   cacheStartAt?: string | null;
   prefixBreakRetained?: boolean;
+  contextWindowMaxTokens?: unknown;
   /** The agent's wsf.workers register state, if any. */
   workerState?: string | null;
   /** Quota for the compact gate (null/undefined = unknown, skipped). */
@@ -387,6 +390,7 @@ export function cleanupInputOf(args: {
       : 0,
     lastTurnEndedAt: typeof lastTurnEndedAt === "string" ? lastTurnEndedAt : null,
     contextTokens: usedContextTokens(args.agent),
+    contextWindowMaxTokens: args.contextWindowMaxTokens,
     activeSteer: args.activeSteer,
     checkpoint: args.checkpoint,
     entry: args.entry,
@@ -454,9 +458,10 @@ export function decideCleanupAction(input: CleanupInput): CleanupDecision {
   if (input.contextTokens === null || input.contextTokens === undefined) {
     return deny("context size is unknown");
   }
-  const minTokens = compacting
+  const floor = compacting
     ? effectiveMinContextTokens(profile, settings.minContextTokens)
     : settings.minContextTokens;
+  const minTokens = contextSizeThreshold(floor, input.contextWindowMaxTokens);
   if (input.contextTokens < minTokens) {
     return deny(`context ${input.contextTokens} is below ${minTokens}`);
   }
@@ -581,7 +586,6 @@ export interface CleanupEvidence {
   turnReadable: boolean;
   compactionSeen: boolean;
   markerSeen: boolean;
-  sessionNoteSeen: boolean;
 }
 
 interface TimelineItemLike {
@@ -598,25 +602,19 @@ function itemTexts(entry: unknown): string[] {
 }
 
 /**
- * Scans turn timeline entries for cleanup evidence. The notice wording is
- * best-effort until a live check pins the exact shape (C1/C7); the session-id
- * comparison in the caller stays the authoritative signal for /clear.
+ * Scans turn timeline entries for compaction evidence.
  */
 export function scanCleanupEvidence(entries: readonly unknown[]): CleanupEvidence {
   const found: CleanupEvidence = {
     turnReadable: entries.length > 0,
     compactionSeen: false,
     markerSeen: false,
-    sessionNoteSeen: false,
   };
   for (const entry of entries) {
     const item = (entry as TimelineItemLike | null)?.item;
     if (item?.type === "compaction") found.compactionSeen = true;
     for (const text of itemTexts(entry)) {
       if (/\[Compacted\]/.test(text)) found.markerSeen = true;
-      if (/new session|session changed|switched to a new session|neue Session|neuer Session/i.test(text)) {
-        found.sessionNoteSeen = true;
-      }
     }
   }
   return found;
@@ -636,11 +634,13 @@ export function pushPreviousSession(
 }
 
 /**
- * Sends a cleanup command through the plugin SDK. Never passes send options:
+ * Sends a cleanup command through the plugin SDK without a source agent:
  * any sourceAgentId would wrap the command as plain "[Message received]"
  * text without effect (and still cost a turn). Never shell out to the CLI
  * for these commands: the CLI fills sourceAgentId from PASEO_AGENT_ID.
  */
-export async function sendCleanupCommand(paseo: any, agentId: string, command: string): Promise<void> {
-  await paseo.agents.ref(agentId).send(command);
+export async function sendCleanupCommand(paseo: any, agentId: string, command: string, messageId?: string | null): Promise<void> {
+  const agent = paseo.agents.ref(agentId);
+  if (messageId) await agent.send(command, { messageId });
+  else await agent.send(command);
 }

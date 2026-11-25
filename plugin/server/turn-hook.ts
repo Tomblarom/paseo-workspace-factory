@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { finishSteerDelivery, pendingSteerDelivery, type SteerDeliveryDeps } from "./steer-delivery.js";
+import { hasActiveAgentWork } from "./agent-context.js";
 import { LEGACY_PREFIX, METADATA_KEY, readPaseoState } from "./factory/paseo.js";
 import { listScopes } from "./factory/scope.js";
 import { createGit } from "./factory/local.js";
@@ -342,7 +343,8 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
   const previous = asRecord(agents[agentId]);
   if (identity.role === "worker" && previous?.replacedBy) return;
 
-  let entries: unknown[] = [];
+  let entries: any[] = [];
+  let exactTurn: any[] = [];
   try {
     const page: any = await paseo.agents.ref(agentId).timeline.refetch({
       direction: "tail",
@@ -351,6 +353,7 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
     });
     const all = Array.isArray(page?.entries) ? page.entries : [];
     entries = payload.turnId ? all.filter((e: any) => e.turnId === undefined || e.turnId === payload.turnId) : all;
+    exactTurn = payload.turnId ? all.filter((e: any) => e.turnId === payload.turnId) : [];
   } catch {
     entries = [];
   }
@@ -362,22 +365,34 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
   const pending = asRecord(previous?.pendingAction);
   const sessionBefore = pending?.sessionId;
   const sessionNow = agent?.persistence?.sessionId;
-  const sessionChanged = typeof sessionBefore === "string" && typeof sessionNow === "string"
+  const sessionChanged = typeof sessionBefore === "string" && sessionBefore && typeof sessionNow === "string" && sessionNow
     ? sessionBefore !== sessionNow : null;
-  // A native clear may remove its user row as part of replacing the timeline.
-  const turnUserText = firstUserText(entries) ??
-    (pending?.kind === "clear" && pending.reason === RESUME_PENDING_REASON && sessionChanged ? "/clear" : null);
+  let turnUserText = firstUserText(entries);
+  if (pending?.kind === "clear") {
+    const messageId = pending.messageId;
+    const prompt = exactTurn.find(({ item }) => item?.type === "user_message")?.item ??
+      (messageId && entries.find(({ item }) => item?.type === "user_message" &&
+        (item.clientMessageId === messageId || item.messageId === messageId))?.item);
+    const commandMatches = cleanupCommandKind(prompt?.text) === "clear" &&
+      (!messageId || prompt.clientMessageId === messageId || prompt.messageId === messageId);
+    // Claude may replace the timeline, removing the command row. Require the
+    // provider's exact transition notice as well as an independently changed
+    // session, so arbitrary assistant text never supplies the effect evidence.
+    const replacedTimeline = sessionChanged === true && !prompt && (!payload.turnId || pending.previousTurnId !== payload.turnId) &&
+      entries.some(({ item }) => item?.text === `Claude switched to a new session: ${sessionBefore} -> ${sessionNow}`);
+    turnUserText = commandMatches || replacedTimeline ? "/clear" : null;
+  }
 
   // Effect evidence for our own cleanup turns: the session-id comparison is
   // authoritative for /clear, the timeline scan for /compact.
   let effect: CleanupEffect | null = null;
-  if (pending && cleanupCommandKind(turnUserText)) {
+  const isCleanupTurn = Boolean(pending && pending.kind === cleanupCommandKind(turnUserText));
+  if (isCleanupTurn) {
     const scan = scanCleanupEvidence(entries);
     effect = {
       sessionChanged,
       compactionSeen: scan.compactionSeen,
       markerSeen: scan.markerSeen,
-      sessionNoteSeen: scan.sessionNoteSeen,
       turnReadable: scan.turnReadable,
     };
   }
@@ -406,7 +421,6 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
   // E4 needsResume bookkeeping for ordinary turns (resume-cleanup turns are
   // handled after the write, once the brief is sent): a failed steer turn
   // flags, a completed turn clears. Cleanup turns of our own never flag.
-  const isCleanupTurn = Boolean(pending && cleanupCommandKind(turnUserText));
   let needsResumePatch: Record<string, unknown> | null = null;
   if (!isCleanupTurn && kind === "completed" && previous?.needsResume) {
     needsResumePatch = { needsResume: null };
@@ -450,6 +464,7 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
       : null;
 
   let readyDelivery = false;
+  let applied = false;
   // One core lock helper names and takes workspace locks (never duplicated here).
   await withWorkspaceLockRetry(mainId, async (held: any) => {
     // refresh() is raw: legacy fallback for pre-migration records.
@@ -479,6 +494,9 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
     // Merge onto the fresh entry so concurrent fields (e.g. a pendingAction
     // C5 set after our read) survive; resolving clears it explicitly.
     const prev: Record<string, any> = asRecord(freshAgents[agentId]) ?? {};
+    if (decision.resolvePending && (prev.pendingAction?.at !== pending?.at ||
+      prev.pendingAction?.messageId !== pending?.messageId || prev.pendingAction?.kind !== pending?.kind)) return;
+    const newerTurnOpen = prev.openTurnId && prev.openTurnId !== payload.turnId;
     const merged: Record<string, any> = {
       ...prev,
       ...(decision.entryUpdate ?? {}),
@@ -486,8 +504,12 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
       ...(proactiveHint?.patch ?? {}),
       ...(turnUsage ? { usage: mergeTurnUsage(prev.usage, turnUsage) } : {}),
       ...(settingsBaseline ? { settingsBaseline } : {}),
+      ...(newerTurnOpen ? { openTurnId: prev.openTurnId, turnStartedAt: prev.turnStartedAt } : {}),
     };
     if (decision.resolvePending) merged.pendingAction = null;
+    if (decision.resolvePending && pending?.kind === "clear" && decision.entryUpdate?.actionVerified === true) {
+      merged.cleared = { ...asRecord(merged.cleared), sessionId: sessionNow };
+    }
     if (decision.resolvePending && pending?.reason === RESUME_PENDING_REASON &&
         prev.pendingAction?.at === pending.at && prev.pendingAction?.reason === pending.reason) {
       // A pre-existing manual clear may only have a pendingAction, with its
@@ -500,7 +522,7 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
         note: typeof pending.note === "string" ? pending.note : "",
       };
       if (queued.renewal === "clear") {
-        readyDelivery = kind === "completed" && effect?.sessionChanged === true;
+        readyDelivery = decision.entryUpdate?.actionVerified === true;
         if (!readyDelivery) {
           merged.cleared = prev.cleared ?? null;
           merged.actionVerified = null;
@@ -524,8 +546,11 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
     }
     held.verify();
     await paseo.workspaces.ref(mainId).setMetadata(patch);
-    console.log(`[factory] turn hook: ${decision.log}`);
+    applied = true;
+    console.log(`[factory] turn hook: ${decision.log} (${agentId})`);
   }, deps);
+
+  if (!applied) return;
 
   await reportAssignment({ paseo, mainId, scopeId: scope.id, agentId, identity, kind, block, lastAnswer, deps });
 
@@ -566,7 +591,7 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
 
   if (decision.effectFailed) {
     noteEffectFailure(
-      `a cleanup command to ${agentId} arrived as text without effect (see wsf.agents.${agentId}.lastActionFailed)`,
+      `a cleanup command to ${agentId} completed without effect (see wsf.agents.${agentId}.lastActionFailed)`,
     );
   }
   if (pending?.reason === RESUME_PENDING_REASON && decision.resolvePending) {
@@ -580,11 +605,13 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
   const cleared = asRecord(decision.entryUpdate?.cleared);
   // Optional one-line seed after a verified clear: it costs one small turn and
   // tells the resumed agent to load the resume brief first.
-  if (cleared?.mode === "clear" && deps.getCleanupSettings) {
+  if (cleared?.mode === "clear" && decision.entryUpdate?.actionVerified === true && deps.getCleanupSettings) {
     try {
       const settings = await deps.getCleanupSettings();
       if (settings?.seedAfterClear) {
-        await paseo.agents.ref(agentId).send(SEED_AFTER_CLEAR);
+        const ref = paseo.agents.ref(agentId);
+        const live = (await ref.refresh())?.agent;
+        if (live && !live.archivedAt && !hasActiveAgentWork(live)) await ref.send(SEED_AFTER_CLEAR);
         console.log(`[factory] turn hook: seeded ${agentId} after clear`);
       }
     } catch (error) {

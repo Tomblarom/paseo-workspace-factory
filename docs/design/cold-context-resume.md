@@ -134,7 +134,7 @@ On a five-minute route, efficiency becomes eligible at two minutes. Balanced and
 
 Hybrid compact/fresh rule (from the Codex compact-vs-fresh measurements): mid-package agents compact while warm, because the working detail survives; at package boundaries a fresh agent plus the brief is cheaper than another compact. In order: an already-cold context is never compacted (always `fresh-recommended`); after 2 warm compactions or with a post-compact base above ~60k tokens the decision is `fresh-recommended`; at a package boundary — a valid checkpoint/note with no open workers (running/blocked/interrupted) for steers, an idle worker with a fresh note — the decision is `fresh-recommended`. The hint is recorded on the entry (once per idle period) and never auto-creates an agent. Otherwise the compact needs quota on the agent's own account: the sweep checks the ZeroSub account the agent runs on (falling back to the provider pool only when no route is known) and blocks the compact on proven exhaustion, as does a flagged `needsResume: limit`; the hint itself is free and ignores both. Unknown quota fails closed: the sweep skips the compact when no reading shows headroom, so cleanup never spends unproven quota. Agents without a valid package state (no task checkpoint or note) are left to cool untouched: cooling costs nothing, and resume creates a fresh agent when needed. Guiding rule: no agent with a large context should go cold; a small, compacted context may go cold, because that is cheaper than keeping it warm forever.
 
-Rewind execution (opt-in): with the `rewindFresh` cleanup setting on (default off), a `fresh-recommended` decision for a provider without native `/clear` (Codex) is executed as a same-tab Paseo rewind instead of only recording the hint. The sweep re-checks the decision against a fresh snapshot first (a pending action or a moved-on decision stops the rewind, like a send), then rewinds to the first user message without sending a brief — the agent resumes from its checkpoint on its next turn. The run is recorded as `cleared`/`refreshed` with mode `rewind` and counts against the daily cap; a failed rewind records `lastActionFailed` (retry needs a new real turn), while a missing rewind point or an unsupported/unreachable daemon falls back to the hint. Claude keeps its native `/clear` path and is never rewound by the sweep.
+With the `rewindFresh` cleanup setting on (default off), the sweep can apply a `fresh-recommended` decision for Codex as a same-tab rewind. It rechecks the agent and the daily cap before dispatch. Codex removes the target turn, so the sweep reuses a saved brief by rewinding at the first usable prompt in a later turn. If the saved brief is missing, it rewinds at the first usable user message. The next turn can resume from the checkpoint without a new brief. The sweep records successful rewinds as `cleared`/`refreshed` and charges them to the daily cap even if writing that record fails. A failed rewind records `lastActionFailed` and waits for a new real turn. An already-short timeline, missing rewind point or unavailable rewind produces a hint. Claude uses its native `/clear` path.
 
 ## C6 Cold hint (manual)
 
@@ -171,18 +171,23 @@ The composer pill and **Factory: context** panel show the reason the chat needs 
 ### Delivery policy
 
 Wakes, takeover requests, switch sends, and resume use the steer pill's cache
-projection and configured context-size floor. A warm or cooling steer can
+projection and context-size threshold. With a known model window, the
+threshold is the greater of the configured token floor and 30% of the window.
+Automatic wakes remain queued while the steer is busy. Factory rechecks the
+target before dispatching cleanup or a prepared brief. A warm or cooling steer can
 receive the original message. A cold or large steer gets a compact checkpoint
 brief after renewal. With unknown cache data the existing recovery flag still
 applies. CLI switch uses the same policy when the installed plugin exposes it.
 Composer staging puts a draft under the user's control.
 
 Claude uses native `/clear` when enabled in `resumeClear.providers` and **Keep
-chat history** is off. The turn hook confirms a new provider session before
-releasing the brief. Otherwise Factory uses conversation-only rewind to the
-last brief anchor, or to the first usable user message when there is no saved
-anchor. Explicit resume on providers without native clear always takes the
-rewind route.
+chat history** is off. The turn hook verifies a new provider session for the
+current clear request before recording the reset and releasing the brief.
+If the command is visible but the reset cannot be verified, Factory records
+a recovery error and holds the brief. Providers and settings that do not use
+native clear use conversation-only rewind to the last brief anchor, or to the
+first usable user message when there is no saved anchor. Explicit resume on
+providers without native clear always takes the rewind route.
 
 `pendingWakeBrief` holds events until renewal is confirmed and the compact
 brief is accepted. Retries use the same content and message ID. If a clear

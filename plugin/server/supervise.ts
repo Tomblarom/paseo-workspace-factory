@@ -12,6 +12,7 @@
 // ../shared/supervise.ts. Only erasable TypeScript: node --test imports this
 // file with type stripping (see plugin/test/ts-resolve-hooks.mjs).
 import { deliverSteer, finishSteerDelivery, pendingSteerDelivery, type EventBatch, type SteerDeliveryDeps } from "./steer-delivery.js";
+import { canMarkWorkerStale, filterStaleWorkerEvents } from "./worker-wakes.js";
 import * as paseoCore from "./factory/paseo.js";
 import { setTimeout as delay } from "node:timers/promises";
 import * as scopeCore from "./factory/scope.js";
@@ -141,6 +142,7 @@ let bootCheckDone = false;
 let draining = false;
 let lastWatchdogScanMs = 0;
 const failoverAsked = new Map<string, { activeSlot: string | null; asked: string[]; updatedAt: string }>();
+const sendingScopeWakes = new Set<string>();
 /** First sighting (epoch ms) of each agent's current ZeroSub pending move. */
 const zerosubPendingSince = new Map<string, number>();
 
@@ -186,6 +188,7 @@ export function resetSupervisionForTests(): void {
   draining = false;
   lastWatchdogScanMs = 0;
   failoverAsked.clear();
+  sendingScopeWakes.clear();
   zerosubPendingSince.clear();
 }
 
@@ -524,34 +527,37 @@ export interface SendWakeResult {
   wakeAt?: string | null;
 }
 
-/**
- * Sends one wake to the scope's active steer at send time (re-read from fresh
- * scope state, never the worker's parent), with the design text plus the
- * "archive accepted workers" hint when workers are done and the advisor hint
- * when open workers passed maxAutoResumes. Marks every included entry sent
- * (lastWakeAt, pending cleared). Never wakes background agents.
- */
-export async function sendScopeWake(
-  paseo: any,
-  args: {
-    scope: any;
-    events: WakeEvent[];
-    state?: any;
-    factoryCmd?: string;
-    /** Extra ZeroSub note (e.g. a fork warning) appended after the quota line. */
-    zerosubNote?: string | null;
-  },
-  deps: SuperviseDeps,
-): Promise<SendWakeResult> {
+interface ScopeWakeInput {
+  scope: any;
+  /** Combined restart events. Regular wakes are read from the live queue. */
+  events?: WakeEvent[];
+  state?: any;
+  factoryCmd?: string;
+  zerosubNote?: string | null;
+}
+
+/** Sends queued events to the live active steer, with one delivery in flight per scope. */
+export async function sendScopeWake(paseo: any, args: ScopeWakeInput, deps: SuperviseDeps): Promise<SendWakeResult> {
+  const workspaceId = args.scope.workspaceId;
+  if (sendingScopeWakes.has(workspaceId)) return { sent: false, reason: "wake-in-flight" };
+  sendingScopeWakes.add(workspaceId);
+  try {
+    return await deliverScopeWake(paseo, args, deps);
+  } finally {
+    sendingScopeWakes.delete(workspaceId);
+  }
+}
+
+async function deliverScopeWake(paseo: any, args: ScopeWakeInput, deps: SuperviseDeps): Promise<SendWakeResult> {
   const log = logOf(deps);
-  const events = args.events ?? [];
-  if (!events.length) return { sent: false, reason: "no-events" };
   const scope = args.scope;
   const mainId: string = scope.workspaceId;
   const freshMeta = await refreshWorkspaceMeta(paseo, mainId);
   const freshWsf = wsfOf(freshMeta);
   if (!freshWsf) return { sent: false, reason: "no-wsf" };
   const register = readWorkers(freshMeta);
+  const events = await filterStaleWorkerEvents<WakeEvent>(paseo, freshMeta, args.events ?? collectPendingWakes(register));
+  if (!events.length) return { sent: false, reason: "no-events" };
   const paseoState = args.state ?? ((await readPaseoState(paseo)) as any);
   const agentState = asRecord(freshMeta[AGENTS_KEY]) ?? {};
   const settings = await resolveSettings(deps);
@@ -636,12 +642,20 @@ export async function sendScopeWake(
     for (const event of events) {
       const current = register[event.workerId];
       if (!current || typeof current !== "object") continue;
-      const marked = markWakeSent(current, { at });
       await updateWorkerEntry({
         client: paseo,
         workspaceId: mainId,
         workerId: event.workerId,
-        patch: { lastWakeAt: marked.lastWakeAt, pendingWake: marked.pendingWake },
+        patch: (entry: any, metadata: Record<string, unknown>) => {
+          if (!entry || wsfOf(metadata)?.epoch !== freshWsf.epoch) return null;
+          const queued = entry.pendingWake;
+          const original = current.pendingWake;
+          const marked = markWakeSent(entry, {
+            at,
+            clearPending: queued?.queuedAt === original?.queuedAt && queued?.state === original?.state,
+          });
+          return { lastWakeAt: marked.lastWakeAt, pendingWake: marked.pendingWake };
+        },
         lock: lockOf(deps),
       });
     }
@@ -663,18 +677,6 @@ export async function sendScopeWake(
   await markSent();
   log(`[factory] supervise: woke ${target} for ${scope.id} (${events.length} worker(s))`);
   return { sent: true, target, events: events.length };
-}
-
-/** Queued pending wakes plus the current event (current wins per worker). */
-function mergeWakeEvents(register: Record<string, any>, workerId: string, state: string): WakeEvent[] {
-  const merged = new Map<string, string>();
-  for (const pending of collectPendingWakes(register)) {
-    merged.set(pending.workerId, pending.state);
-  }
-  merged.set(workerId, state);
-  return [...merged.entries()]
-    .map(([id, st]) => ({ workerId: id, state: st }))
-    .sort((a, b) => a.workerId.localeCompare(b.workerId));
 }
 
 /**
@@ -744,7 +746,7 @@ async function queueWake(
     client: paseo,
     workspaceId: mainId,
     workerId,
-    patch: { pendingWake: queued.pendingWake },
+    patch: (current: any) => current?.state === state ? { pendingWake: queued.pendingWake } : null,
     lock: lockOf(deps),
   });
 }
@@ -887,7 +889,7 @@ export async function runWorkerTurnAfter(
   try {
     sent = await sendScopeWake(
       paseo,
-      { scope, events: newState ? mergeWakeEvents(register, agentId, newState) : [], state, zerosubNote },
+      { scope, state, zerosubNote },
       { ...deps, zerosub },
     );
   } catch (error) {
@@ -1000,7 +1002,7 @@ export async function flushScope(
   }
   const sent = await sendScopeWake(
     paseo,
-    { scope, events: pending.map((p: any) => ({ workerId: p.workerId, state: p.state })), state: deps.state },
+    { scope, state: deps.state },
     deps,
   );
   return { flushed: sent.sent, reason: sent.sent ? undefined : (sent.reason ?? "send-failed"), target: sent.target ?? null, events: sent.events };
@@ -1012,13 +1014,12 @@ export async function flushAllScopes(paseo: any, deps: SuperviseDeps & { state?:
   const paseoState = deps.state ?? ((await readPaseoState(paseo)) as any);
   const out: FlushResult[] = [];
   for (const scope of listScopes(paseoState)) {
-    if (!settings?.enabled) {
-      const entries = Object.values(scope.workspace?.metadata?.[AGENTS_KEY] ?? {});
-      if (!entries.some((entry) => {
-        const pending = pendingSteerDelivery(entry, scope.workspaceId);
-        return pending && !pending.batch;
-      })) continue;
-    }
+    const meta = scope.workspace?.metadata;
+    const hasBrief = Object.values(meta?.[AGENTS_KEY] ?? {}).some((entry) => {
+      const pending = pendingSteerDelivery(entry, scope.workspaceId);
+      return pending && (settings?.enabled || !pending.batch);
+    });
+    if (!hasBrief && !(settings?.enabled && collectPendingWakes(readWorkers(meta)).length)) continue;
     try {
       out.push(await flushScope(paseo, scope, { ...deps, settings, state: paseoState }));
     } catch (error) {
@@ -1261,13 +1262,19 @@ export async function runFailoverCheck(
   const wsf = wsfOf(meta);
   if (!wsf) return { action: "clear", reason: "no-wsf" };
   const register = readWorkers(meta);
-  const open = openWorkers(register);
+  const eligible = await filterStaleWorkerEvents(paseo, meta,
+    workersReport(register).map((entry: any) => ({ ...entry, workerId: entry.id })));
+  const lastWake = scopeLastWakeAt(Object.fromEntries(eligible.map((entry: any) => [entry.id, entry])));
+  const switchedAt = Date.parse(wsf.switchedAt);
+  const currentWake = lastWake && (!Number.isFinite(switchedAt) || Date.parse(lastWake) >= switchedAt) ? lastWake : null;
+  // A completed worker can still have news the current steer hasn't answered.
+  const open = eligible.filter((entry: any) => entry.state !== "done" ||
+    (deps.force ? entry.pendingWake : currentWake && entry.lastWakeAt === currentWake));
   if (!open.length && !deps.force) {
     failoverAsked.delete(scope.id);
     return { action: "clear", reason: "no-open" };
   }
-  const lastWake = scopeLastWakeAt(register);
-  if (!lastWake && !deps.force) {
+  if (!currentWake && !deps.force) {
     failoverAsked.delete(scope.id);
     return { action: "clear", reason: "no-wake" };
   }
@@ -1287,8 +1294,8 @@ export async function runFailoverCheck(
     const holderAgent = (paseoState.agents ?? []).find((a: any) => a && a.id === holder) ?? null;
     const response = steerWakeResponse({
       entry: asRecord(agentState[holder]),
-      status: holderAgent?.status ?? null,
-      lastWakeAt: lastWake,
+      status: holderAgent?.activeTurn ? "running" : holderAgent?.status ?? null,
+      lastWakeAt: currentWake,
     });
     if (!deps.force && (response === "answered" || response === "busy")) {
       failoverAsked.delete(scope.id);
@@ -1316,7 +1323,7 @@ export async function runFailoverCheck(
         })
       : null;
     if (move?.decision === "wait-zerosub") return { action: "wait", reason: "wait-zerosub" };
-    if (!deps.force && lastWake && nowMs - Date.parse(lastWake) < settings.answerMinutes * 60_000) return { action: "wait" };
+    if (!deps.force && currentWake && nowMs - Date.parse(currentWake) < settings.answerMinutes * 60_000) return { action: "wait" };
     reason = deps.failoverReason ?? `no answer within ${settings.answerMinutes}m`;
   }
   // The scope may have moved since the read; never fail over a stale view.
@@ -1413,8 +1420,9 @@ export async function runFailoverCheck(
     await updateWorkerEntry({
       client: paseo,
       workspaceId: mainId,
-      workerId: entry.id,
-      patch: { lastWakeAt: nowIso },
+      workerId: entry.workerId,
+      patch: (current: any, source: Record<string, unknown>) => current && wsfOf(source)?.epoch === wsf.epoch
+        ? { lastWakeAt: nowIso } : null,
       lock: lockOf(deps),
     });
   }
@@ -1567,9 +1575,11 @@ export async function watchdogScan(paseo: any, deps: SuperviseDeps & { state?: a
       let register = readWorkers(meta);
       let agentState = asRecord(meta[AGENTS_KEY]) ?? {};
       for (const worker of workerAgents(paseoState, scope.id)) {
-        if (!worker || worker.archivedAt || worker.background === true) continue;
+        if (!worker || worker.archivedAt || worker.status === "closed" || worker.background === true) continue;
         if (register[worker.id] || asRecord(agentState[worker.id])?.replacedBy) continue;
-        await backfillWorker(paseo, scope, worker, wsf, asRecord(agentState[worker.id]), deps);
+        const live = await refreshAgent(paseo, worker.id);
+        if (!live || live.archivedAt || live.status === "closed" || live.background === true) continue;
+        await backfillWorker(paseo, scope, live, wsf, asRecord(agentState[worker.id]), deps);
         result.backfilled.push(worker.id);
       }
       meta = await refreshWorkspaceMeta(paseo, mainId);
@@ -1608,7 +1618,7 @@ export async function watchdogScan(paseo: any, deps: SuperviseDeps & { state?: a
             continue;
           }
         }
-        if (typed.state === "running" && !busy) {
+        if (typed.state === "running" && canMarkWorkerStale(agent, agentEntry)) {
           const lastActive = maxStampMs(
             agentEntry?.lastTurnEndedAt,
             agent?.lastUserMessageAt,
@@ -1623,17 +1633,29 @@ export async function watchdogScan(paseo: any, deps: SuperviseDeps & { state?: a
               staleMinutes: settings.staleMinutes,
             })
           ) {
-            const updated = await updateWorkerEntry({ client: paseo, workspaceId: mainId, workerId: id, event: "stale", lock });
-            const queued = queuePendingWake(updated ?? typed, { state: "stale", queuedAt: nowIso });
-            await updateWorkerEntry({
+            // Use one conditional write so a concurrent removal or reassignment
+            // cannot be undone by the watchdog creating an entry from old data.
+            const live = await refreshAgent(paseo, id);
+            const updated = await updateWorkerEntry({
               client: paseo,
               workspaceId: mainId,
               workerId: id,
-              patch: { pendingWake: queued.pendingWake },
+              patch: (current: any, currentMeta: Record<string, any>) => {
+                const currentAgentEntry = currentMeta[AGENTS_KEY]?.[id];
+                if (!canMarkWorkerStale(live, currentAgentEntry) || !shouldMarkStale({
+                  entry: current, nowMs, staleMinutes: settings.staleMinutes,
+                  lastActiveMs: maxStampMs(currentAgentEntry?.lastTurnEndedAt, live?.lastUserMessageAt,
+                    live?.updatedAt, current?.startedAt) ?? NaN,
+                })) return null;
+                const queued = queuePendingWake(current, { state: "stale", queuedAt: nowIso });
+                return { state: "stale", pendingWake: queued.pendingWake };
+              },
               lock,
             });
-            result.stale.push(id);
-            register[id] = { ...typed, state: "stale" };
+            if (updated?.pendingWake?.queuedAt === nowIso && updated.pendingWake.state === "stale") {
+              result.stale.push(id);
+              log(`[factory] supervise: queued stale worker ${id} for ${scope.id}`);
+            }
           }
         }
       }
@@ -1665,9 +1687,8 @@ export interface SupervisionTimerDeps {
 }
 
 /**
- * Runs flushAllScopes every tick and watchdogScan every watchdogMinutes; the
- * remover stops it (server cleanup). Ticks idle until a hook, RPC, or
- * subscription context lends a daemon handle.
+ * Polls delivery state without prompting quiet scopes. Stale work and
+ * unanswered wakes use the independent watchdog cadence.
  */
 export function startSupervisionTimer({
   getSettings,
@@ -1680,8 +1701,10 @@ export function startSupervisionTimer({
   buildBrief,
 }: SupervisionTimerDeps): () => void {
   let stopped = false;
+  let checking = false;
   const timer = setInterval(() => {
-    if (stopped || !supervisionPaseo) return;
+    if (stopped || checking || !supervisionPaseo) return;
+    checking = true;
     const paseo: any = supervisionPaseo;
     void (async () => {
       try {
@@ -1706,6 +1729,8 @@ export function startSupervisionTimer({
         }
       } catch (error) {
         log(`[factory] supervise tick failed (${error instanceof Error ? error.message : String(error)})`);
+      } finally {
+        checking = false;
       }
     })();
   }, intervalMs);

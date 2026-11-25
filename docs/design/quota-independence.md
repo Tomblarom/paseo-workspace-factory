@@ -183,8 +183,8 @@ windows, accepts unknown versions and drops move waiting state. Its single pendi
 field can misstate which route is live. Brief and CLI worker picks do not use the same
 snapshot inputs and plain launch flags omit the account pin applied by `worker start`.
 Quota display can attribute a family maximum and a generic five-hour label to the wrong route.
-The CLI lacks the plugin's quota view. Without the plugin the documented fallback is a fixed
-heartbeat that can spend model turns after takeover.
+The CLI lacks the plugin's quota view. Native recurring prompts can spend model turns
+after takeover. Factory's fallback checks delivery state before waking a steer.
 [`supervise.ts:1231–1287`](../../plugin/server/supervise.ts#L1231-L1287) ·
 [`zerosub.mjs:31–76`](../../src/zerosub.mjs#L31-L76) ·
 [`quota.mjs:168–185`](../../src/quota.mjs#L168-L185) ·

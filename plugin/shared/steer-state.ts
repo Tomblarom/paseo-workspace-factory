@@ -12,6 +12,7 @@
 // config values). All UI text is English.
 import {
   effectiveMinContextTokens,
+  contextSizeThreshold,
   cacheAgeMs,
   resolveCacheTtl,
   resolveWarmth,
@@ -119,17 +120,18 @@ export function resolveContextTokens(args: {
   return null;
 }
 
-/** Large means tokens >= effectiveMinContextTokens(profile, min). */
+/** Known windows must also reach 30% utilization before a context is large. */
 export function isLargeContext(
   tokens: number | null,
   profile: unknown,
   configuredMin: number,
+  windowTokens?: unknown,
 ): boolean {
   if (tokens === null || tokens === undefined) return false;
   const clean: CleanupProfile = isCleanupProfile(profile) ? profile : "balanced";
   const floor =
     Number.isFinite(configuredMin) && configuredMin > 0 ? configuredMin : STEER_MIN_CONTEXT_TOKENS;
-  return tokens >= effectiveMinContextTokens(clean, floor);
+  return tokens >= contextSizeThreshold(effectiveMinContextTokens(clean, floor), windowTokens);
 }
 
 // ---------------------------------------------------------------------------
@@ -582,6 +584,7 @@ export interface SteerProjectionInput {
   /** "Other" providers stay Unknown unless their route/baseline is supported. */
   otherRouteSupported?: boolean;
   liveUsedTokens?: unknown;
+  contextWindowMaxTokens?: unknown;
   storedTokens?: unknown;
   storedSameSession?: boolean;
   cleanupProfile?: unknown;
@@ -658,7 +661,7 @@ export function projectAgentContext(input: Pick<SteerProjectionInput,
   "nowMs" | "provider" | "model" | "claudeBilling" | "openaiExtendedRetention" |
   "cacheTtl" | "otherRouteSupported" | "lastTurnEndedAt" | "cacheStartAt" |
   "baselineValid" | "prefixBreakRetained" | "liveUsedTokens" | "storedTokens" |
-  "storedSameSession" | "cleanupProfile" | "minContextTokens"
+  "storedSameSession" | "cleanupProfile" | "minContextTokens" | "contextWindowMaxTokens"
 >) {
   const nowMs = input.nowMs;
   const ttl = input.cacheTtl ?? resolveCacheTtl({
@@ -690,6 +693,7 @@ export function projectAgentContext(input: Pick<SteerProjectionInput,
     tokens,
     input.cleanupProfile,
     Number.isFinite(input.minContextTokens) ? (input.minContextTokens as number) : STEER_MIN_CONTEXT_TOKENS,
+    input.contextWindowMaxTokens,
   );
   return { ttl, warmth, ageMs, tokens, large };
 }

@@ -25,7 +25,8 @@ import {
 } from "../shared/idle-cleanup.js";
 import { MAX_FRESH_REASON } from "../shared/auto-checkpoint.js";
 import { resolveZerosub, type ZerosubState } from "./zerosub-runtime.js";
-import { agentContextInputs } from "./agent-context.js";
+import { randomUUID } from "node:crypto";
+import { AgentBusyError, agentContextInputs, hasActiveAgentWork } from "./agent-context.js";
 import { CACHE_CHECK_INTERVAL_MS } from "../shared/cache-profiles.js";
 import { projectAgentContext, type CacheWarmth } from "../shared/steer-state.js";
 import { workerIdentityFromMetadata } from "../shared/supervise.js";
@@ -37,7 +38,13 @@ const LEGACY_CHECKPOINT_KEY = `${LEGACY_PREFIX}.checkpoint`;
 // too narrow for real calls, so the sweep talks to it as any (as handlers do).
 const updateEntry = updateAgentEntry as unknown as (args: any) => Promise<any>;
 const buildRewind = buildRewindRecord as unknown as (args: any) => Record<string, unknown>;
-const rewindTab = rewindSameTab as unknown as (agentId: string) => Promise<any>;
+type SweepRewind = (agentId: string, options: { previousBriefId: string | null; beforeRewind?: () => Promise<boolean> }) => Promise<{
+  status: string;
+  messageId?: string;
+  briefMessageId?: string;
+  error?: string;
+}>;
+const rewindTab = rewindSameTab as unknown as SweepRewind;
 
 /**
  * C5 effect kill-switch. A cleanup command that demonstrably arrived as text
@@ -194,7 +201,7 @@ export interface SweepDeps {
   /** Lock for the entry write; tests only (defaults to the real one). */
   lock?: (name: string, fn: (held: { verify: () => void }) => Promise<any>) => Promise<any>;
   /** Same-tab rewind runner; tests only (defaults to the synced rewind core). */
-  rewindFn?: (agentId: string) => Promise<{ status: string; messageId?: string; error?: string }>;
+  rewindFn?: SweepRewind;
 }
 
 export interface CleanupQuotaCheck {
@@ -334,7 +341,7 @@ async function sweepAgent(
   quota: Record<string, any> | null,
   quotaCtx: { zerosub?: ZerosubState; exhaustedPct?: number } = {},
   lock?: (name: string, fn: (held: { verify: () => void }) => Promise<any>) => Promise<any>,
-  rewindFn?: (agentId: string) => Promise<{ status: string; messageId?: string; error?: string }>,
+  rewindFn?: SweepRewind,
 ): Promise<SweepResult | null> {
   const scope = scopeForAgent(agent, lookup);
   const reads = scope ? scopeReads(scope) : null;
@@ -344,7 +351,7 @@ async function sweepAgent(
     cleanupInputOf({
       agent,
       entry,
-      ...agentContextInputs(agent, entry, settings, quotaCtx.zerosub ?? null, nowMs),
+      ...agentContextInputs(agent, entry, settings, quotaCtx.zerosub ?? null, nowMs, state.providers),
       checkpoint: reads.checkpoint,
       activeSteer: reads.activeSteer,
       settings,
@@ -403,7 +410,7 @@ async function sweepAgent(
     cleanupInputOf({
       agent: freshAgent,
       entry: freshEntry,
-      ...agentContextInputs(freshAgent, freshEntry, settings, quotaCtx.zerosub ?? null, recheckAt),
+      ...agentContextInputs(freshAgent, freshEntry, settings, quotaCtx.zerosub ?? null, recheckAt, state.providers),
       checkpoint: asRecord(freshMeta[CHECKPOINT_KEY]) ?? asRecord(freshMeta[LEGACY_CHECKPOINT_KEY]),
       activeSteer: freshWsf.activeSteer,
       settings,
@@ -437,32 +444,43 @@ async function sweepAgent(
     ) {
       return null;
     }
+    // The pure decision leaves fresh hints uncapped. Only the rewind RPC
+    // needs a slot, and only a successful rewind spends it.
+    if (actionsToday(recheckAt) >= settings.dailyCap) return null;
+    const briefId = asRecord(freshEntry?.refreshed)?.briefMessageId;
     const run = rewindFn ?? rewindTab;
-    let outcome: { status: string; messageId?: string; error?: string };
+    let outcome: Awaited<ReturnType<SweepRewind>>;
     try {
-      outcome = await run(agent.id);
+      outcome = await run(agent.id, {
+        previousBriefId: typeof briefId === "string" ? briefId : null,
+        beforeRewind: async () => {
+          const latest = (await paseo.agents.ref(agent.id).refresh().catch(() => null))?.agent;
+          return !!latest && !latest.archivedAt && latest.status === "idle" && !hasActiveAgentWork(latest);
+        },
+      });
     } catch (error) {
       outcome = { status: "failed", error: error instanceof Error ? error.message : String(error) };
     }
+    if (outcome?.status === "deferred") return null;
     if (outcome?.status === "rewound") {
+      countAction(recheckAt);
       const checkpoint =
         asRecord(freshMeta[CHECKPOINT_KEY]) ?? asRecord(freshMeta[LEGACY_CHECKPOINT_KEY]);
+      const reason = `rewound ${agent.id} to ${outcome.messageId ?? "first user message"} (fresh-recommended executed as rewind)`;
       try {
         await updateEntry({
           client: paseo,
           workspaceId: reads.mainId,
           agentId: agent.id,
-          patch: buildRewind({ checkpoint, messageId: outcome.messageId ?? null, briefMessageId: null }),
+          patch: buildRewind({ checkpoint, messageId: outcome.messageId ?? null, briefMessageId: outcome.briefMessageId ?? null }),
           liveIds,
           ...(lock ? { lock } : {}),
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         log(`[factory] idle cleanup: rewind of ${agent.id} not recorded (${message})`);
-        return { agentId: agent.id, action: "rewind", sent: false, reason: message };
+        return { agentId: agent.id, action: "rewind", sent: true, reason: `${reason}; could not record it (${message})` };
       }
-      countAction(nowMs);
-      const reason = `rewound ${agent.id} to ${outcome.messageId ?? "first user message"} (fresh-recommended executed as rewind)`;
       log(`[factory] idle cleanup: ${reason}`);
       return { agentId: agent.id, action: "rewind", sent: true, reason };
     }
@@ -480,8 +498,8 @@ async function sweepAgent(
       log(`[factory] idle cleanup: rewind of ${agent.id} failed (${error}); retry needs a new real turn`);
       return { agentId: agent.id, action: "fresh-recommended", sent: false, reason: `rewind failed: ${error}` };
     }
-    // No rewind point, unsupported provider, or unreachable daemon: hint-only
-    // fallback, exactly like a disabled setting.
+    // An already-renewed timeline, missing point, or unavailable rewind falls
+    // back to a hint for this idle period.
     try {
       await recordFreshHint(paseo, reads.mainId, agent.id, recheck.reason, liveIds, lock);
     } catch (error) {
@@ -507,6 +525,7 @@ async function sweepAgent(
       ...(lock ? { lock } : {}),
     });
   } catch (error) {
+    if (error instanceof AgentBusyError) return null;
     const message = error instanceof Error ? error.message : String(error);
     log(`[factory] idle cleanup: send to ${agent.id} failed (${message}); retry needs a new real turn`);
     return { agentId: agent.id, action: recheck.action, sent: false, reason: message };
@@ -528,6 +547,8 @@ export interface RunCleanupOptions {
   previousSessions?: unknown;
   /** F4 wake note, carried on pendingAction until the turn hook sends the brief. */
   note?: string;
+  /** Revalidate the delivery that requested cleanup before dispatch. */
+  beforeSend?: () => Promise<boolean>;
   /** Lock for the entry write; tests only (defaults to the real one). */
   lock?: (name: string, fn: (held: { verify: () => void }) => Promise<any>) => Promise<any>;
 }
@@ -572,21 +593,17 @@ export async function runCleanup(
       ?.previousSessions;
   }
   if (!workspaceId) throw new Error(`Agent ${agentId} has no live factory scope`);
-  let sessionId: string | null;
-  if (opts.sessionId !== undefined) {
-    sessionId = opts.sessionId;
-  } else {
-    const snap: any = await paseo.agents.ref(agentId).refresh().catch(() => null);
-    const current = snap?.agent?.persistence?.sessionId;
-    sessionId = typeof current === "string" ? current : null;
-  }
-  if (previous === undefined) {
-    const freshMeta =
-      (await paseo.workspaces.ref(workspaceId).refresh().catch(() => null))?.metadata ?? {};
-    previous = asRecord(asRecord(freshMeta[AGENTS_KEY])?.[agentId])?.previousSessions;
-  }
+  const ref = paseo.agents.ref(agentId);
+  const freshMeta = (await paseo.workspaces.ref(workspaceId).refresh())?.metadata ?? {};
+  const entry = asRecord(asRecord(freshMeta[AGENTS_KEY])?.[agentId]);
+  const live = (await ref.refresh())?.agent;
+  if (!live || live.archivedAt || hasActiveAgentWork(live, entry)) throw new AgentBusyError("The agent is unavailable for cleanup.");
+  const current = live.persistence?.sessionId;
+  const sessionId = typeof current === "string" && current ? current : opts.sessionId ?? null;
+  previous ??= entry?.previousSessions;
   const at = new Date().toISOString();
-  const pendingAction: Record<string, unknown> = { kind, at, sessionId, reason };
+  const messageId = kind === "clear" ? randomUUID() : null;
+  const pendingAction: Record<string, unknown> = { kind, at, sessionId, reason, ...(messageId ? { messageId, previousTurnId: entry?.lastTurnId ?? null } : {}) };
   if (typeof opts.note === "string" && opts.note) pendingAction.note = opts.note.slice(0, 1500);
   const patch: Record<string, unknown> = { pendingAction, actionVerified: null };
   if (kind === "clear") {
@@ -595,23 +612,35 @@ export async function runCleanup(
       sessionId,
     );
   }
-  await updateEntry({
+  const reserved = await updateEntry({
     client: paseo,
     workspaceId,
     agentId,
-    patch,
+    patch: (latest: any) => latest?.pendingAction || hasActiveAgentWork(live, latest) ? null : patch,
     liveIds,
     ...(opts.lock ? { lock: opts.lock } : {}),
   });
+  if (reserved?.pendingAction?.at !== at || reserved.pendingAction?.messageId !== pendingAction.messageId) {
+    throw new AgentBusyError("Another operation was queued while preparing cleanup.");
+  }
   try {
-    await sendCleanupCommand(paseo, agentId, kind === "clear" ? CLEAR_COMMAND : COMPACT_COMMAND);
+    if (opts.beforeSend && !await opts.beforeSend()) throw new AgentBusyError("The wake changed while preparing cleanup.");
+    const latest = (await ref.refresh())?.agent;
+    if (!latest || latest.archivedAt || hasActiveAgentWork(latest) || latest.persistence?.sessionId !== current) {
+      throw new AgentBusyError("The agent changed while preparing cleanup.");
+    }
+    await sendCleanupCommand(paseo, agentId, kind === "clear" ? CLEAR_COMMAND : COMPACT_COMMAND, messageId);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await updateEntry({
       client: paseo,
       workspaceId,
       agentId,
-      patch: { pendingAction: null, lastActionFailed: { at, error: message.slice(0, 300) } },
+      patch: (latest: any) => latest?.pendingAction?.at === at && latest.pendingAction?.messageId === pendingAction.messageId
+        ? error instanceof AgentBusyError
+          ? { pendingAction: null, actionVerified: entry?.actionVerified ?? null, ...(kind === "clear" ? { previousSessions: previous ?? null } : {}) }
+          : { pendingAction: null, lastActionFailed: { at, error: message.slice(0, 300) } }
+        : null,
       liveIds,
       ...(opts.lock ? { lock: opts.lock } : {}),
     }).catch(() => null);
@@ -796,7 +825,7 @@ export async function collectColdAgents(
     // A resume in flight still shows its pill (the RPC is idempotent); plain
     // cold rows with a pending C5 action stay hidden as before.
     if (!needsReason && entry?.pendingAction) continue;
-    const projected = projectAgentContext(agentContextInputs(agent, entry, settings, zerosub, nowMs));
+    const projected = projectAgentContext(agentContextInputs(agent, entry, settings, zerosub, nowMs, state.providers));
     const coldNow = isCold(projected.warmth.warmth, projected.large);
     // A valid stored recommendation surfaces its idle agent even when the
     // generic cold threshold is not met. Non-idle agents keep the old shape:

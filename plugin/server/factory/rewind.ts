@@ -1,8 +1,8 @@
 // @ts-nocheck
 // GENERATED from src/rewind.mjs by npm run plugin:sync. Do not edit.
 // Same-tab refresh via Paseo rewind (fresh --slot/--worker, auto-cleanup).
-// Rewinds the agent's conversation to its first user message instead of
-// creating a new agent: DaemonClient.rewindAgent(agentId, firstUserMessageId,
+// Rewinds the agent's conversation at a usable user message instead of
+// creating a new agent: DaemonClient.rewindAgent(agentId, messageId,
 // 'conversation'), using bounded canonical timeline pages. Agents driven only via `send` have
 // no user_message with a messageId and therefore no rewind point: callers fall
 // back to a new parent-free agent. Providers without rewind support answer the
@@ -32,37 +32,40 @@ import { runtime } from './runtime.js';
  * only via `send` have none.
  */
 export function firstRewindPoint(timelinePayload) {
-  return selectRewindPoint(timelinePayload, null);
+  return rewindPoints(timelinePayload).next().value?.messageId ?? null;
 }
 
-function selectRewindPoint(timelinePayload, previousBriefId) {
+function* rewindPoints(timelinePayload) {
   const rows = timelinePayload?.entries ?? timelinePayload?.rows ?? timelinePayload?.items ?? [];
-  if (!Array.isArray(rows)) return null;
-  let first = null;
+  if (!Array.isArray(rows)) return;
   for (const row of rows) {
     const item = row?.item ?? row;
-    if (!item || typeof item !== 'object') continue;
-    if (item.type !== 'user_message') continue;
-    const id = item.messageId;
-    if (typeof id !== 'string' || !id) continue;
-    if (id === previousBriefId) return id;
-    first ??= id;
-    if (!previousBriefId) break;
+    if (item?.type === 'user_message' && typeof item.messageId === 'string' && item.messageId) {
+      yield { messageId: item.messageId, clientMessageId: item.clientMessageId, turnId: row.turnId };
+    }
   }
-  return first;
 }
 
 const REWIND_PAGE_SIZE = 32;
 
-async function findRewindPoint(client, agentId, previousBriefId = null) {
+async function findRewindPoint(client, agentId, previousBriefId = null, { keepBrief = false } = {}) {
   const options = { limit: REWIND_PAGE_SIZE, projection: 'canonical' };
   if (previousBriefId) {
     let page = await client.fetchAgentTimeline(agentId, { ...options, direction: 'tail' });
     let earliest = null;
+    let nextTurn = null;
     while (true) {
-      const point = selectRewindPoint(page, previousBriefId);
-      if (point === previousBriefId) return point;
-      earliest = point ?? earliest;
+      for (const point of [...rewindPoints(page)].reverse()) {
+        // Codex removes the target turn itself. Keep the saved brief by
+        // rewinding at the first usable prompt from a later turn.
+        const sameTurn = point.turnId && point.turnId === earliest?.turnId;
+        if (point.messageId === previousBriefId || point.clientMessageId === previousBriefId) {
+          if (!keepBrief) return point;
+          return { messageId: (sameTurn ? nextTurn : earliest)?.messageId ?? null, briefMessageId: previousBriefId };
+        }
+        if (!sameTurn) nextTurn = earliest;
+        earliest = point;
+      }
       if (!page?.hasOlder) return earliest;
       const cursor = page.startCursor;
       if (!cursor) throw new Error('Missing rewind timeline cursor');
@@ -75,7 +78,7 @@ async function findRewindPoint(client, agentId, previousBriefId = null) {
     const page = await client.fetchAgentTimeline(agentId, { ...options, direction: 'after', ...(cursor ? { cursor } : {}) });
     if (page?.staleCursor) throw new Error('Rewind timeline changed while paging');
     const point = firstRewindPoint(page);
-    if (point || !page?.hasNewer) return point;
+    if (point || !page?.hasNewer) return point ? { messageId: point } : null;
     if (!page.endCursor || (cursor && page.endCursor.seq <= cursor.seq)) throw new Error('Missing or unchanged rewind timeline cursor');
     cursor = page.endCursor;
   }
@@ -121,7 +124,7 @@ export async function readRewindPoint(agentId, { url = null, cliPath = null, cre
     const target = url ?? runtime().paseo.url;
     const bin = cliPath ?? paseoBinary();
     client = await createClient({ url: target, cliPath: bin });
-    return await findRewindPoint(client, agentId, previousBriefId);
+    return (await findRewindPoint(client, agentId, previousBriefId))?.messageId ?? null;
   } catch {
     return null;
   } finally {
@@ -130,9 +133,10 @@ export async function readRewindPoint(agentId, { url = null, cliPath = null, cre
 }
 
 /**
- * Rewinds one agent's conversation to its first user message (same tab, same
- * id, same labels). Fail-soft status, never a throw for daemon failures:
- * - { status: 'rewound', messageId }: the context is empty, send the brief next.
+ * Rewinds one agent's conversation, keeping an existing brief and its turn
+ * when possible. Fail-soft status, never a throw for daemon failures:
+ * - { status: 'rewound', messageId, briefMessageId? }: the rewind happened.
+ * - { status: 'no-op' }: the saved brief has no later usable rewind point.
  * - { status: 'no-point' }: no user_message with a messageId (send-only
  *   agents); the caller falls back to a new parent-free agent.
  * - { status: 'unsupported', error }: the provider has no rewind; the caller
@@ -144,7 +148,7 @@ export async function readRewindPoint(agentId, { url = null, cliPath = null, cre
  *   failed; the caller must abort without side effects (no send, no record,
  *   no new agent).
  */
-export async function rewindSameTab(agentId, { url = null, cliPath = null, createClient = defaultCreateRewindClient } = {}) {
+export async function rewindSameTab(agentId, { url = null, cliPath = null, createClient = defaultCreateRewindClient, previousBriefId = null, beforeRewind = null } = {}) {
   if (typeof agentId !== 'string' || !agentId) return { status: 'failed', error: 'missing agent id' };
   let client = null;
   try {
@@ -155,21 +159,24 @@ export async function rewindSameTab(agentId, { url = null, cliPath = null, creat
     } catch (error) {
       return { status: 'unavailable', error: error?.message ?? String(error) };
     }
-    let messageId;
+    let point;
     try {
-      messageId = await findRewindPoint(client, agentId);
+      point = await findRewindPoint(client, agentId, previousBriefId, { keepBrief: true });
     } catch (error) {
       return { status: 'unavailable', error: error?.message ?? String(error) };
     }
-    if (!messageId) return { status: 'no-point' };
+    if (!point) return { status: 'no-point' };
+    const { messageId, briefMessageId } = point;
+    if (!messageId) return { status: 'no-op' };
     if (typeof client.rewindAgent !== 'function') return { status: 'unsupported', error: 'daemon has no rewindAgent' };
     try {
+      if (beforeRewind && !await beforeRewind()) return { status: 'deferred' };
       await client.rewindAgent(agentId, messageId, 'conversation');
     } catch (error) {
       if (isRewindUnsupportedError(error)) return { status: 'unsupported', error: error?.message ?? String(error) };
       return { status: 'failed', error: error?.message ?? String(error) };
     }
-    return { status: 'rewound', messageId };
+    return { status: 'rewound', messageId, ...(briefMessageId ? { briefMessageId } : {}) };
   } finally {
     await client?.close?.().catch(() => {});
   }
@@ -195,7 +202,7 @@ export async function rewindSameTab(agentId, { url = null, cliPath = null, creat
  *   failed; nothing was sent, and the caller must abort without side effects
  *   (no record, no new agent).
  */
-export async function rewindAndBrief(agentId, briefText, { url = null, cliPath = null, createClient = defaultCreateRewindClient, messageId: briefId = null, previousBriefId = null, skipBrief = false } = {}) {
+export async function rewindAndBrief(agentId, briefText, { url = null, cliPath = null, createClient = defaultCreateRewindClient, messageId: briefId = null, previousBriefId = null, skipBrief = false, beforeRewind = null } = {}) {
   if (typeof agentId !== 'string' || !agentId) return { status: 'failed', error: 'missing agent id' };
   if (skipBrief !== true && (typeof briefText !== 'string' || !briefText.trim())) return { status: 'failed', error: 'missing brief text' };
   let client = null;
@@ -209,13 +216,14 @@ export async function rewindAndBrief(agentId, briefText, { url = null, cliPath =
     }
     let messageId;
     try {
-      messageId = await findRewindPoint(client, agentId, previousBriefId);
+      messageId = (await findRewindPoint(client, agentId, previousBriefId))?.messageId;
     } catch (error) {
       return { status: 'unavailable', error: error?.message ?? String(error) };
     }
     if (!messageId) return { status: 'no-point' };
     if (typeof client.rewindAgent !== 'function') return { status: 'unsupported', error: 'daemon has no rewindAgent' };
     try {
+      if (beforeRewind && !await beforeRewind()) return { status: 'deferred' };
       await client.rewindAgent(agentId, messageId, 'conversation');
     } catch (error) {
       if (isRewindUnsupportedError(error)) return { status: 'unsupported', error: error?.message ?? String(error) };
