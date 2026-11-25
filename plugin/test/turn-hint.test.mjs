@@ -151,6 +151,15 @@ async function completedSteerTurn(world, steers, deps) {
   );
 }
 
+test("a superseded same-slot steer cannot save a scope checkpoint", async () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  const newer = addAgent(world, { title: "Steer A", workspaceId: ws.id, labels: { [LABEL.scope]: REPO, [LABEL.role]: "steer", [LABEL.slot]: "A" } });
+  ws.metadata[METADATA_KEY].activeAgentId = newer.id;
+  await completedSteerTurn(world, steers, {});
+  assert.equal(ws.metadata[`${METADATA_KEY}.checkpoint`], undefined);
+});
+
 test("steer turn at warnPct sends the proactive handoff and records the stamp", async () => {
   const world = makeWorld();
   const { steers } = provisioned(world);

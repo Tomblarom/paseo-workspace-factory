@@ -57,7 +57,7 @@ function fakeClient(world) {
         },
       }),
     },
-    agents: { ref: agentHandle },
+    agents: { ref: agentHandle, list: async () => ({ entries: structuredClone(world.agents), pageInfo: { hasMore: false } }) },
   };
 }
 const noLock = (_name, fn) => fn({ verify() {} });
@@ -154,6 +154,14 @@ test('epoch or steer drift between discovery and apply refuses without writes', 
   world.workspaces[0].metadata[METADATA_KEY].activeSteer = 'B';
   await assert.rejects(assign(world, stale, { apply: true }), /Scope state changed/);
   assert.ok(world.calls.every((c) => c[0] !== 'workspace.setMetadata' && c[0] !== 'agent.send'), 'no write, no delivery on drift');
+});
+
+test('assignment rejects a requester with a stale epoch', async () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  const requester = { workspaceId: ws.id, scopeId: REPO, epoch: 1, agentId: steers.A.id };
+  await assert.rejects(assign(world, discoveryOf(world), { apply: true, requester }), /Scope state changed/);
+  assert.equal(ws.metadata[CHECKPOINT_KEY], undefined);
 });
 
 test('--expect-epoch binds apply to the previewed epoch', async () => {

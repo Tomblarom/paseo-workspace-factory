@@ -24,7 +24,7 @@ function setup() {
   return {
     requests, state,
     options: {
-      client: { workspaces: { ref: () => workspace } },
+      client: { workspaces: { ref: () => workspace }, agents: { list: async () => ({ entries: [{ id: parentId, workspaceId, labels: { [LABEL.scope]: scope, [LABEL.role]: 'steer', [LABEL.slot]: 'B' } }], pageInfo: { hasMore: false } }) } },
       status: { state: structuredClone(state), workspace: { id: workspaceId }, repo: scope,
         steers: [{ id: parentId, slot: 'B', workspaceId }] },
       callerId: parentId,

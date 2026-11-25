@@ -104,7 +104,7 @@ function fakeClient(world) {
       },
     },
   });
-  return { workspaces: { ref: workspaceHandle }, agents: { ref: agentHandle } };
+  return { workspaces: { ref: workspaceHandle }, agents: { ref: agentHandle, list: async () => ({ entries: structuredClone(world.agents), pageInfo: { hasMore: false } }) } };
 }
 
 function fakeLookup(world) {
@@ -227,7 +227,7 @@ test('fresh apply: new agent of the same profile, epoch bump, both deliveries; t
   assert.ok(world.calls.some((c) => c[0] === 'receipt.lookup' && c[2] === result.idempotencyKey));
 
   const state = world.workspaces[0].metadata[METADATA_KEY];
-  assert.deepEqual({ ...state, switchedAt: undefined }, { main: true, activeSteer: 'A', epoch: 2, previousSteer: steers.A.id, switchedAt: undefined });
+  assert.deepEqual({ ...state, switchedAt: undefined }, { main: true, activeSteer: 'A', activeAgentId: result.to, epoch: 2, previousSteer: steers.A.id, switchedAt: undefined });
   assert.ok(Number.isFinite(Date.parse(state.switchedAt)));
 
   const sends = world.calls.filter((c) => c[0] === 'agent.send');

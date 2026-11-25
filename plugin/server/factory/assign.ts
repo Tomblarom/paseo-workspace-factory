@@ -8,6 +8,7 @@
 import { CHECKPOINT_KEY, checkpointRules, formatCheckpointBlock, steerStatus } from './steer.js';
 import { METADATA_KEY } from './paseo.js';
 import { withLock, workspaceLockName } from './lock.js';
+import { discoveryScopeAliases, guardScope } from './scope-guard.js';
 import { QUOTA_DEFAULTS, formatQuotaLine } from './quota.js';
 import { findingsPassage } from './findings.js';
 
@@ -53,7 +54,7 @@ export function buildAssignment(status, { slot, steerId, epoch, task, tests, blo
  * --expect-epoch from the preview), write, read back, release; delivery
  * happens after the lock is released.
  */
-export async function assignScope({ client, discovery, task, tests = [], blockers = [], next = null, apply = false, send = true, expectEpoch, assignedBy = null, reportTo = assignedBy, lock = withLock, now = () => new Date(), workerModel = null, config = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, zerosub = null, promptOptions }) {
+export async function assignScope({ client, discovery, task, tests = [], blockers = [], next = null, apply = false, send = true, expectEpoch, assignedBy = null, requester = null, reportTo = assignedBy, lock = withLock, now = () => new Date(), workerModel = null, config = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, zerosub = null, promptOptions }) {
   const status = steerStatus(discovery);
   if (!status.workspace || !status.state) throw new AssignRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
@@ -61,7 +62,7 @@ export async function assignScope({ client, discovery, task, tests = [], blocker
     throw new AssignRefused(`Scope ${status.repo} is retired${expected.movedTo ? ` (moved to ${expected.movedTo})` : ''}; assign to its successor instead`);
   }
   if (typeof task !== 'string' || !task.trim()) throw new AssignRefused('An assignment needs a task');
-  const holders = status.steers.filter((s) => s.slot === expected.activeSteer);
+  const holders = status.steers.filter((s) => s.slot === expected.activeSteer && !s.superseded && !s.retired);
   if (!holders.length) throw new AssignRefused(`No live Steer ${expected.activeSteer} to assign to for ${status.repo}; plan and apply one first`);
   if (holders.length > 1) throw new AssignRefused(`Steer ${expected.activeSteer} has several live agents (${holders.map((s) => s.id).join(', ')}); archive the retired one in Paseo, then rerun`);
   const target = holders[0];
@@ -83,12 +84,11 @@ export async function assignScope({ client, discovery, task, tests = [], blocker
   if (!apply) return result;
 
   const workspace = client.workspaces.ref(status.workspace.id);
-  await lock(workspaceLockName(status.workspace.id), async (held) => {
-    const fresh = (await workspace.refresh())?.metadata?.[METADATA_KEY];
-    if (!fresh || fresh.epoch !== expected.epoch || fresh.activeSteer !== expected.activeSteer) {
-      throw new AssignRefused(`Scope state changed (expected ${expected.activeSteer}@${expected.epoch}, found ${fresh?.activeSteer}@${fresh?.epoch}); rerun assign`);
+  const write = async (held) => {
+    const { state: fresh } = await guardScope({ client, held, workspaceId: status.workspace.id, scopeId: expected.scope?.id ?? status.repo, epoch: expected.epoch, agentId: target.id, slot: expected.activeSteer, aliases: discoveryScopeAliases(discovery), config });
+    if (requester?.workspaceId === status.workspace.id) {
+      await guardScope({ client, held, ...requester, config });
     }
-    if (fresh.retired === true) throw new AssignRefused(`Scope ${status.repo} was retired concurrently; assign to its successor instead`);
     const stamp = now().toISOString();
     const checkpoint = { ...fields, epoch: fresh.epoch, updatedAt: stamp, source: 'assign', assignedBy, capturedAt: stamp, interrupted: null };
     held.verify(); // the lock file must still be the locked inode right before the write
@@ -96,7 +96,15 @@ export async function assignScope({ client, discovery, task, tests = [], blocker
     const written = (await workspace.refresh())?.metadata?.[CHECKPOINT_KEY];
     if (written?.task !== checkpoint.task || written?.epoch !== checkpoint.epoch) throw new Error('Assignment checkpoint not verifiable after write');
     result.checkpoint = checkpoint;
-  });
+  };
+  if (requester && requester.workspaceId !== status.workspace.id) {
+    await lock(workspaceLockName(requester.workspaceId), async (held) => {
+      await guardScope({ client, held, ...requester, config });
+      await lock(workspaceLockName(status.workspace.id), write);
+    });
+  } else {
+    await lock(workspaceLockName(status.workspace.id), write);
+  }
   result.applied = true;
   if (send) {
     try {

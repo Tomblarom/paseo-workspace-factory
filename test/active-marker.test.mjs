@@ -77,7 +77,7 @@ function fakeClient(world) {
       },
     },
   });
-  return { workspaces: { ref: workspaceHandle }, agents: { ref: agentHandle } };
+  return { workspaces: { ref: workspaceHandle }, agents: { ref: agentHandle, list: async () => ({ entries: structuredClone(world.agents), pageInfo: { hasMore: false } }) } };
 }
 
 const fakePaseoCli = (world, { fail = false } = {}) => (args) => {

@@ -8,7 +8,7 @@ import { LABEL, METADATA_KEY, parentOf, restartMessage } from './paseo.js';
 import { AGENTS_KEY } from './agent-state.js';
 import { CHECKPOINT_KEY, agentUsage, isHeuristicRestart, restartInterruptions } from './steer.js';
 import { isAdvisorSlot, isSensitiveSlot } from './config.js';
-import { applyContinuations, isWorktreeWorkspace, markSupersededSlotHolders } from './discovery.js';
+import { applyContinuations, isWorktreeWorkspace, resolveSteerHolders } from './discovery.js';
 
 /** One row per live scope: id, kind, active steer, epoch, checkpoint, usage, hints. */
 export function scopeRows(paseoState, { now = () => Date.now(), daemonStartedAt = null, lastTurnCheckpoints = null, config = null, zerosubSwitches = [] } = {}) {
@@ -34,7 +34,7 @@ export function scopeRows(paseoState, { now = () => Date.now(), daemonStartedAt 
     // Same-slot newer-wins applies on top: superseded older holders are
     // listed separately and never selected as the active holder.
     const labelledFound = agents.filter((a) => a.workspaceId === scope.workspaceId && a.labels?.[LABEL.role] === 'steer');
-    const live = markSupersededSlotHolders(applyContinuations(labelledFound, agents, zerosubSwitches)).filter((a) => a && !a.archivedAt);
+    const live = resolveSteerHolders(labelledFound, agents, zerosubSwitches).filter((a) => a && !a.archivedAt);
     const candidates = live.filter((a) => a.labels?.[LABEL.slot] === state?.activeSteer);
     const active = candidates.find((a) => a.superseded !== true) ?? candidates[0] ?? null;
     const superseded = live

@@ -84,6 +84,14 @@ test("checkpointFingerprint binds workspace, epoch and fields", () => {
   assert.notEqual(checkpointFingerprint({ ...id, epoch: null }), base);
 });
 
+test("checkpoint and assign fingerprints bind the active holder", async () => {
+  const { assignFingerprint } = await import("../shared/preview.ts");
+  const assignment = { scope: "s", epoch: 1, steerId: "a", task: "t", tests: [], blockers: [], next: null };
+  assert.notEqual(assignFingerprint(assignment), assignFingerprint({ ...assignment, steerId: "b" }));
+  const checkpoint = { repo: "r", workspaceId: "w", epoch: 1, holderId: "a", task: "t", tests: [], blockers: [], next: null };
+  assert.notEqual(checkpointFingerprint(checkpoint), checkpointFingerprint({ ...checkpoint, holderId: "b" }));
+});
+
 test("freshFingerprint binds repo, slot, holder, route, settings, epoch and checkpoint", () => {
   const id = {
     repo: "o/r",

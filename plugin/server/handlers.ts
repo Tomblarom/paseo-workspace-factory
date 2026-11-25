@@ -328,6 +328,7 @@ export async function applyResumeRpc(
     },
     {
       ...extra,
+      getConfig: () => loader.loadEffectiveConfig(),
       buildBrief: extra?.buildBrief ?? createResumeBriefBuilder(loader),
       refreshWorker: async (workspaceId, workerId) => {
         const { config, discovery } = await discoverOne(paseo, loader, undefined, workspaceId);
@@ -942,7 +943,7 @@ async function resolveCheckpointFields(
   status: any,
   discovery: any,
   input: CheckpointArgs,
-): Promise<{ task: string; tests: string[]; blockers: string[]; next: string | null }> {
+): Promise<{ task: string; tests: string[]; blockers: string[]; next: string | null; agentId?: string }> {
   const hasTask = typeof input.task === "string" && input.task.trim() !== "";
   const hasAgent = typeof input.fromAgent === "string" && input.fromAgent.trim() !== "";
   const hasSteer = typeof input.fromSteer === "string" && input.fromSteer.trim() !== "";
@@ -953,12 +954,15 @@ async function resolveCheckpointFields(
     let steer: any;
     if (hasSteer) {
       const slot = (input.fromSteer as string).trim().toUpperCase();
-      steer = status.steers.find((s: any) => s.slot === slot && s.superseded !== true)
-        ?? status.steers.find((s: any) => s.slot === slot);
+      const matches = status.steers.filter((s: any) => s.slot === slot && !s.superseded && !s.retired);
+      if (matches.length > 1) throw new Error(`Steer ${slot} has several live agents`);
+      steer = matches[0];
       if (!steer) throw new Error(`Steer ${slot} is not a live steer of ${discovery.forkName}`);
     } else {
       const ref = (input.fromAgent as string).trim();
-      steer = status.steers.find((s: any) => s.id === ref || s.id.startsWith(ref));
+      const matches = status.steers.filter((s: any) => s.id === ref || s.id.startsWith(ref));
+      if (matches.length > 1) throw new Error(`${ref} matches several steers; use the full agent id`);
+      steer = matches[0];
       if (!steer) throw new Error(`${ref} is not a steer of ${discovery.forkName}`);
     }
     const text = lastAssistantText(
@@ -969,6 +973,7 @@ async function resolveCheckpointFields(
       throw new Error(`The last answer of Steer ${steer.slot} has no CHECKPOINT block with a task line`);
     }
     return {
+      agentId: steer.id,
       task: fields.task,
       tests: fields.tests ?? [],
       blockers: fields.blockers ?? [],
@@ -1008,6 +1013,8 @@ export async function previewCheckpoint(
       repo: status.repo,
       workspaceId: status.workspace.id,
       epoch,
+      agentId: fields.agentId ?? null,
+      holderId: status.steers.filter((s: any) => s.slot === status.state.activeSteer && !s.retired && !s.superseded).map((s: any) => s.id).join(","),
       task: fields.task,
       tests: fields.tests,
       blockers: fields.blockers,
@@ -1021,7 +1028,7 @@ export async function writeCheckpointRpc(
   { paseo }: PluginHandlerContext,
   loader: ConfigLoader,
 ): Promise<any> {
-  const { discovery } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
+  const { config, discovery } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
   const status: any = steerStatus(discovery);
   if (!status.workspace || !status.state) {
     throw new Error(
@@ -1034,6 +1041,8 @@ export async function writeCheckpointRpc(
     repo: status.repo,
     workspaceId: status.workspace.id,
     epoch,
+    agentId: fields.agentId ?? null,
+    holderId: status.steers.filter((s: any) => s.slot === status.state.activeSteer && !s.retired && !s.superseded).map((s: any) => s.id).join(","),
     task: fields.task,
     tests: fields.tests,
     blockers: fields.blockers,
@@ -1044,7 +1053,7 @@ export async function writeCheckpointRpc(
       "Something changed since the checkpoint preview (steer state or the agent's answer). Run /factory checkpoint again and confirm the new preview.",
     );
   }
-  const writeOptions: any = { client: paseo, discovery, ...fields };
+  const writeOptions: any = { client: paseo, discovery, config, ...fields };
   const checkpoint = await writeCheckpoint(writeOptions);
   return { checkpoint };
 }
@@ -1247,6 +1256,7 @@ export async function previewAssign(
     fingerprint: assignFingerprint({
       scope: dry.scope,
       epoch: dry.epoch,
+      steerId: dry.steerId,
       task: dry.fields.task,
       tests: dry.fields.tests,
       blockers: dry.fields.blockers,
@@ -1260,11 +1270,12 @@ export async function applyAssign(
   { paseo }: PluginHandlerContext,
   loader: ConfigLoader,
 ): Promise<any> {
-  const { discovery } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
+  const { config, discovery } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
   const promptOptions = await loader.loadPromptOptions(paseo);
   const dry: any = await (assignScope as any)({
     client: paseo,
     discovery,
+    config,
     promptOptions,
     task: input.task,
     tests: input.tests ?? [],
@@ -1275,6 +1286,7 @@ export async function applyAssign(
   const fresh = assignFingerprint({
     scope: dry.scope,
     epoch: dry.epoch,
+    steerId: dry.steerId,
     task: dry.fields.task,
     tests: dry.fields.tests,
     blockers: dry.fields.blockers,
@@ -1288,6 +1300,7 @@ export async function applyAssign(
   const applied: any = await (assignScope as any)({
     client: paseo,
     discovery,
+    config,
     promptOptions,
     task: input.task,
     tests: input.tests ?? [],

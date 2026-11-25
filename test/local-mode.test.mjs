@@ -137,7 +137,7 @@ function fakeClient(world) {
         return workspaceHandle(workspace.id);
       },
     },
-    agents: { ref: agentHandle },
+    agents: { ref: agentHandle, list: async () => ({ entries: structuredClone(world.agents), pageInfo: { hasMore: false } }) },
   };
 }
 

@@ -50,6 +50,7 @@ function fakeClient(world) {
       }),
     },
     agents: {
+      list: async () => ({ entries: structuredClone(world.agents), pageInfo: { hasMore: false } }),
       ref: (id) => ({
         send: async (text) => { world.calls.push(['agent.send', id, text]); },
         timeline: { refetch: async () => ({ entries: [{ item: { type: 'assistant_message', text: 'Done.' } }] }) },

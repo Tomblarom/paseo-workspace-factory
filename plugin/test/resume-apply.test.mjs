@@ -514,6 +514,20 @@ test("applyResume saves a newer CHECKPOINT block, keeps a newer scope checkpoint
   assert.equal(world2.workspaces[0].metadata[CHECKPOINT_KEY].task, "scope task");
 });
 
+test("resuming an inactive steer does not replace the scope checkpoint", async () => {
+  const world = makeWorld();
+  const { ws } = provisioned(world, { checkpoint: { task: "active task", capturedAt: at(NOW - 2 * HOUR) } });
+  const inactive = addAgent(world, {
+    title: "Steer B", workspaceId: ws.id,
+    labels: { [LABEL.repo]: REPO, [LABEL.role]: "steer", [LABEL.slot]: "B", [LABEL.scope]: REPO },
+  });
+  world.timelines[inactive.id] = [{ turnId: "t1", item: { type: "assistant_message", text: CHECKPOINT_TEXT("inactive task") } }];
+  await assert.rejects(resumeApply.applyResume(fakeClient(world), { workspaceId: ws.id, agentId: inactive.id }, {
+    lock: noLock, beforeDelivery: async () => { throw new Error("stop before delivery"); },
+  }), /stop before delivery/);
+  assert.equal(ws.metadata[CHECKPOINT_KEY].task, "active task");
+});
+
 test("applyResume clears claude through runCleanup and passes the F4 note", async () => {
   const world = makeWorld();
   const { ws, steer } = provisioned(world);

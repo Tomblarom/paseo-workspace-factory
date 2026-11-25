@@ -3,6 +3,7 @@ import { AGENTS_KEY } from "./factory/agent-state.js";
 import { withLock, workspaceLockName } from "./factory/lock.js";
 import { LEGACY_PREFIX, METADATA_KEY, readPaseoState } from "./factory/paseo.js";
 import { listScopes, sameScopeId } from "./factory/scope.js";
+import { guardScope, scopeHolder } from "./factory/scope-guard.js";
 import { lastAssistantText, parseCheckpointBlock } from "./factory/steer.js";
 import { WORKERS_KEY } from "./factory/supervision.js";
 import { CLEANUP_DEFAULTS, cleanupIdentity, formatResumeMessage, type ResumeClearSettings } from "../shared/idle-cleanup.js";
@@ -31,6 +32,7 @@ export interface ResumeApplyInput {
 }
 
 export interface ResumeApplyDeps extends SteerDeliveryDeps {
+  getConfig?: () => Promise<unknown>;
   note?: string;
   beforeDelivery?: () => Promise<void>;
   refreshWorker?: (workspaceId: string, agentId: string) => Promise<{
@@ -149,17 +151,15 @@ async function saveResumeCheckpoint(
   mainId: string,
   agentId: string,
   epoch: unknown,
+  slot: string | null,
+  scopeId: string,
+  config: unknown,
   block: { task: string; tests: string[]; blockers: string[]; next: string | null },
   lock: (name: string, fn: (held: { verify: () => void }) => Promise<any>) => Promise<any>,
-): Promise<void> {
-  await lock(workspaceLockName(mainId), async (held: { verify: () => void }) => {
-    const freshMeta =
-      (await paseo.workspaces.ref(mainId).refresh().catch(() => null))?.metadata ?? {};
-    const freshWsf = asRecord(freshMeta[METADATA_KEY]) ?? asRecord(freshMeta[LEGACY_PREFIX]);
-    if (!freshWsf) throw new Error("scope state is gone");
-    if (freshWsf.epoch !== epoch) {
-      throw new Error("the scope moved on (epoch changed); run /factory resume again");
-    }
+): Promise<boolean> {
+  return lock(workspaceLockName(mainId), async (held: { verify: () => void }) => {
+    const { state: freshWsf } = await (guardScope as any)({ client: paseo, held, workspaceId: mainId, scopeId, epoch, agentId, config });
+    if (freshWsf.activeSteer !== slot) return false;
     const at = new Date().toISOString();
     held.verify();
     await paseo.workspaces.ref(mainId).setMetadata({
@@ -177,6 +177,7 @@ async function saveResumeCheckpoint(
         interrupted: null,
       },
     });
+    return true;
   });
 }
 
@@ -204,9 +205,11 @@ export async function applyResume(
   const scope: any = listScopes(state).find((s: any) => sameScopeId(s.id, identity.scopeId)) ?? null;
   if (!scope) throw new Error(`Agent ${agentId} has no live factory scope`);
   const mainId: string = scope.workspaceId;
+  if (input.workspaceId !== mainId) throw new Error("The requested workspace does not match the agent's factory scope.");
   const meta = scope.workspace?.metadata ?? {};
   const wsf = asRecord(meta[METADATA_KEY]) ?? asRecord(meta[LEGACY_PREFIX]);
   if (!wsf) throw new Error(`Workspace ${mainId} has no scope state`);
+  const config = deps.getConfig ? await deps.getConfig() : null;
   const entries = asRecord(meta[AGENTS_KEY]) ?? {};
   const entry = asRecord(entries[agentId]);
   const checkpoint =
@@ -226,6 +229,10 @@ export async function applyResume(
       );
     }
   }
+  const activeHolder = (scopeHolder as any)({ agents: state.agents, workspaceId: mainId, scopeId: identity.scopeId, slot: wsf.activeSteer, ownerId: wsf.activeAgentId, previousSteer: wsf.previousSteer, strictLegacy: true });
+  await lock(workspaceLockName(mainId), async (held: { verify: () => void }) => {
+    await (guardScope as any)({ client: paseo, held, workspaceId: mainId, scopeId: identity.scopeId, epoch: wsf.epoch, agentId: activeHolder.id, config });
+  });
   if (identity.role === "worker") return applyWorkerResume(paseo, mainId, agentId, identity.scopeId, deps, lock);
   if (entry?.pendingAction) {
     const kind = asRecord(entry.pendingAction)?.kind;
@@ -248,9 +255,8 @@ export async function applyResume(
     block = null;
   }
   let checkpointSaved = false;
-  if (block && shouldSaveResumeCheckpoint({ block, checkpoint, lastTurnEndedAt: entry?.lastTurnEndedAt })) {
-    await saveResumeCheckpoint(paseo, mainId, agentId, wsf.epoch, block, lock);
-    checkpointSaved = true;
+  if (block && identity.slot === wsf.activeSteer && shouldSaveResumeCheckpoint({ block, checkpoint, lastTurnEndedAt: entry?.lastTurnEndedAt })) {
+    if (activeHolder.id === agentId) checkpointSaved = await saveResumeCheckpoint(paseo, mainId, agentId, wsf.epoch, identity.slot, identity.scopeId, config, block, lock);
   }
   await deps.beforeDelivery?.();
   const applied = await deliverSteer(paseo, {

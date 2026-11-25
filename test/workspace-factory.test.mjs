@@ -243,7 +243,7 @@ function fakeClient(world) {
         return { workspaceId: id };
       },
     },
-    agents: { ref: agentHandle },
+    agents: { ref: agentHandle, list: async () => ({ entries: structuredClone(world.agents), pageInfo: { hasMore: false } }) },
   };
 }
 
@@ -991,7 +991,7 @@ test('switch apply: locked check-and-write, one handoff; a failed delivery keeps
   const { steers } = provisioned(world);
   const result = await switchSteer({ client: fakeClient(world), discovery: await discoveryOf(world), toSlot: 'C', apply: true, git: fakeGit(world), lock: testLock });
   assert.equal(result.applied && result.delivered, true);
-  assert.deepEqual({ ...world.workspaces[0].metadata[METADATA_KEY], switchedAt: undefined }, { main: true, activeSteer: 'C', epoch: 2, previousSteer: 'A', scope: { id: FIRMWARE, kind: 'github', locator: FIRMWARE }, switchedAt: undefined });
+  assert.deepEqual({ ...world.workspaces[0].metadata[METADATA_KEY], switchedAt: undefined }, { main: true, activeSteer: 'C', activeAgentId: steers.C.id, epoch: 2, previousSteer: 'A', scope: { id: FIRMWARE, kind: 'github', locator: FIRMWARE }, switchedAt: undefined });
   assert.deepEqual(world.calls.filter((c) => c[0] === 'agent.send').map((c) => c[1]), [steers.C.id]);
   world.hooks.sendFails = true;
   const next = await switchSteer({ client: fakeClient(world), discovery: await discoveryOf(world), toSlot: 'A', apply: true, lock: testLock });

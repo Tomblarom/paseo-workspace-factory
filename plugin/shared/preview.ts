@@ -50,6 +50,8 @@ export function switchFingerprint(identity: SwitchPreviewIdentity): string {
 }
 
 export interface CheckpointPreviewIdentity {
+  agentId?: string | null;
+  holderId?: string | null;
   repo: string;
   workspaceId: string;
   epoch: number | null;
@@ -94,6 +96,7 @@ export function resumeFingerprint(identity: ResumePreviewIdentity): string {
 export interface AssignPreviewIdentity {
   scope: string;
   epoch: number;
+  steerId?: string;
   task: string;
   tests: string[];
   blockers: string[];

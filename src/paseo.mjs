@@ -110,6 +110,12 @@ async function collectPages(fetchPage) {
   throw new Error('Pagination did not terminate');
 }
 
+/** Fresh agent membership without loading unrelated projects or provider state. */
+export async function readPaseoAgents(client) {
+  const agents = await collectPages((cursor) => client.agents.list({ includeBackground: true, filter: { includeArchived: true, includeBackground: true }, page: { limit: 200, ...(cursor ? { cursor } : {}) } }));
+  return agents.map((entry) => withNormalizedPrefix(entry.agent ?? entry, 'labels'));
+}
+
 /** Complete, read-only picture of the daemon state the planner needs. */
 export async function readPaseoState(client) {
   const page = (cursor) => ({ limit: 200, ...(cursor ? { cursor } : {}) });

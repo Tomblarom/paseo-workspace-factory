@@ -347,6 +347,11 @@ export function markSupersededSlotHolders(list) {
   return agents.map((agent) => (agent && superseded.has(agent.id) ? { ...agent, superseded: true } : agent));
 }
 
+/** Resolve continuation tabs and mark superseded same-slot holders consistently. */
+export function resolveSteerHolders(labelled, agents, switches = []) {
+  return markSupersededSlotHolders(applyContinuations(labelled, agents, switches));
+}
+
 /**
  * Steer ids that match parent-linked workers: mapped steer ids plus the
  * superseded origins they stand in for (workers still point at the origin).
@@ -572,7 +577,7 @@ function buildWorktreeDiscovery(matched, { normalized, parentDir, checkouts, pas
   const digitCandidates = splitDigit.kept;
   const foreignWorkers = [...splitLegacy.foreignWorkers, ...splitDigit.foreignWorkers];
   const halfLabelled = halfLabelledSteers(paseo, mainWorkspace, matchKeys);
-  const labelled = markSupersededSlotHolders(applyContinuations(labelledFound, paseo.agents, zerosubSwitches));
+  const labelled = resolveSteerHolders(labelledFound, paseo.agents, zerosubSwitches);
   const steerIds = continuationMatchIds([...labelled, ...legacy], paseo.agents, zerosubSwitches);
   const projectWorkspaceIds = new Set(paseo.workspaces.filter((w) => projectIds.has(w.projectId)).map((w) => w.id));
   const workers = remapWorkerParents(applyContinuations(allWorkers(paseo, steerIds, forkName), paseo.agents, zerosubSwitches), paseo.agents, zerosubSwitches);
@@ -788,7 +793,7 @@ function discoverLocal(normalized, { config, checkouts, paseo, realpath, existsD
   const digitCandidates = splitDigit.kept;
   const foreignWorkers = [...splitLegacy.foreignWorkers, ...splitDigit.foreignWorkers];
   const halfLabelled = halfLabelledSteers(paseo, mainWorkspace, matchKeys);
-  const labelled = markSupersededSlotHolders(applyContinuations(labelledFound, paseo.agents, zerosubSwitches));
+  const labelled = resolveSteerHolders(labelledFound, paseo.agents, zerosubSwitches);
   const steerIds = continuationMatchIds([...labelled, ...legacy], paseo.agents, zerosubSwitches);
   const projectWorkspaceIds = new Set(paseo.workspaces.filter((w) => projectIds.has(w.projectId)).map((w) => w.id));
   const workers = remapWorkerParents(applyContinuations(allWorkers(paseo, steerIds, forkName), paseo.agents, zerosubSwitches), paseo.agents, zerosubSwitches);
@@ -961,7 +966,7 @@ export function discoverRepository(entry, { config, gh, git, checkouts, paseo, r
   const digitCandidates = splitDigit.kept;
   const foreignWorkers = [...splitLegacy.foreignWorkers, ...splitDigit.foreignWorkers];
   const halfLabelled = halfLabelledSteers(paseo, mainWorkspace, matchKeys);
-  const labelled = markSupersededSlotHolders(applyContinuations(labelledFound, paseo.agents, zerosubSwitches));
+  const labelled = resolveSteerHolders(labelledFound, paseo.agents, zerosubSwitches);
   const steerIds = continuationMatchIds([...labelled, ...legacy], paseo.agents, zerosubSwitches);
   const projectWorkspaceIds = new Set(paseo.workspaces.filter((w) => projectIds.has(w.projectId)).map((w) => w.id));
   const workers = remapWorkerParents(applyContinuations(allWorkers(paseo, steerIds, forkName), paseo.agents, zerosubSwitches), paseo.agents, zerosubSwitches);

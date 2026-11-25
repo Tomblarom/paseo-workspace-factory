@@ -7,8 +7,10 @@ import { LABEL, METADATA_KEY, parentOf } from './paseo.js';
 import { idempotencyKey, requestDigest } from './planner.js';
 import { ACCOUNT_METADATA_KEY } from './zerosub.js';
 import { findingsPassage } from './findings.js';
+import { withWorkspaceLock } from './lock.js';
+import { guardScope } from './scope-guard.js';
 
-export async function startScopedWorker({ client, status, callerId, profile, accountId, prompt, title, apply = false, promptOptions }) {
+export async function startScopedWorker({ client, status, callerId, aliases = [], profile, accountId, prompt, title, apply = false, promptOptions }) {
   const { state, workspace, repo, steers } = status;
   const slot = state?.activeSteer;
   const holders = steers.filter((steer) => steer.slot === slot && !steer.retired && !steer.superseded);
@@ -38,11 +40,11 @@ export async function startScopedWorker({ client, status, callerId, profile, acc
   // The same assignment keeps its key when prompt settings change between retries.
   const key = idempotencyKey(scopeId, 'worker', slot, `e${state.epoch}`, requestDigest({ parentId: parent.id, title: request.title, prompt }));
   const workspaceHandle = client.workspaces.ref(workspace.id);
-  const current = (await workspaceHandle.refresh())?.metadata?.[METADATA_KEY];
-  if (current?.activeSteer !== slot || current?.epoch !== state.epoch || current?.retired) {
-    throw new Error('The active steer changed since discovery. Run worker start again from the active steer.');
-  }
-  const handle = await workspaceHandle.agents.create({ ...request, idempotencyKey: key });
+  const handle = await withWorkspaceLock(workspace.id, async (held) => {
+    await guardScope({ client, held, workspaceId: workspace.id, scopeId, epoch: state.epoch, agentId: parent.id, aliases });
+    held.verify();
+    return workspaceHandle.agents.create({ ...request, idempotencyKey: key });
+  });
   const agent = (await handle.refresh())?.agent;
   if (!agent || agent.workspaceId !== workspace.id || parentOf(agent) !== parent.id || (accountId && agent.metadata?.[ACCOUNT_METADATA_KEY] !== accountId)) {
     throw new Error('Worker creation could not be verified');

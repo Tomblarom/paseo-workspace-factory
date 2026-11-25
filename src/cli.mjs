@@ -23,6 +23,7 @@ import { assignScope } from './assign.mjs';
 import { flagValue, formatCatalog, formatWorkerModel, paseoRunFlags, planAdvisorTag, planSensitiveTag, planSteerRemove, planSteerSet, planWorkerRemove, planWorkerSet, previewConfig, resolveProfile, resolveWorkerPick, steerFallbackList, workerListRows, writeConfigAtomic } from './models.mjs';
 import { scopeRows, scopeCandidates, formatScopeRows, formatScopeCandidates, formatStatus } from './scopes-view.mjs';
 import { applyContinuations } from './discovery.mjs';
+import { discoveryScopeAliases } from './scope-guard.mjs';
 import { validateProfilesAgainstCatalog } from './config.mjs';
 import { readProfileHealth, storeProfileFailure } from './quota.mjs';
 import { readZerosubState } from './zerosub.mjs';
@@ -572,6 +573,7 @@ async function main() {
       if (command === 'fresh') {
         const result = await freshSteer({
           client, discovery, config, apply: Boolean(values.apply), git,
+          callerId: process.env.PASEO_AGENT_ID ?? null,
           slot: values.slot ?? null, workerId: values.worker ?? null,
           lookupReceipt: lookupCreationReceipt, language: runtime().handoffLanguage,
           workerModel: workerModelLine(config, discovery), paseoCli: createPaseoCli(),
@@ -603,6 +605,7 @@ async function main() {
         try {
           result = await switchSteer({
             client, discovery, toSlot: values.to, apply: Boolean(values.apply), send: !values['no-send'], git,
+            callerId: process.env.PASEO_AGENT_ID ?? null,
             wait: Boolean(values.wait), notifyPrevious: Boolean(values['notify-previous']), language: values.language ?? runtime().handoffLanguage,
             config, workerModel: workerModelLine(config, discovery), paseoCli: createPaseoCli(),
             promptOptions: await readCliPromptOptions(),
@@ -619,10 +622,14 @@ async function main() {
       }
       if (command === 'checkpoint') {
         let fields;
+        let agentId = null;
         if (values['from-agent']) {
           if (values.task) throw new Error('use either --task or --from-agent');
-          const steer = steerStatus(discovery).steers.find((s) => s.id === values['from-agent'] || s.id.startsWith(values['from-agent']));
+          const matches = steerStatus(discovery).steers.filter((s) => s.id === values['from-agent'] || s.id.startsWith(values['from-agent']));
+          if (matches.length > 1) throw new Error(`${values['from-agent']} matches several steers; use the full agent id`);
+          const steer = matches[0];
           if (!steer) throw new Error(`${values['from-agent']} is not a steer of ${discovery.forkName}`);
+          agentId = steer.id;
           const text = lastAssistantText(await client.agents.ref(steer.id).timeline.refetch({ direction: 'tail', limit: 20 }));
           fields = parseCheckpointBlock(text);
           if (!fields) throw new Error(`The last answer of Steer ${steer.slot} has no CHECKPOINT block with a task line`);
@@ -631,7 +638,7 @@ async function main() {
           fields = { task: values.task, tests: values.test ?? [], blockers: values.blocker ?? [], next: null };
         }
         if (values.next) fields.next = values.next;
-        return console.log(JSON.stringify(await writeCheckpoint({ client, discovery, ...fields }), null, 2));
+        return console.log(JSON.stringify(await writeCheckpoint({ client, discovery, ...fields, agentId, callerId: process.env.PASEO_AGENT_ID, config }), null, 2));
       }
       if (command === 'assign') {
         if (!values.task) throw new Error('assign needs --task <text>');
@@ -640,10 +647,22 @@ async function main() {
           expectEpoch = Number.parseInt(values['expect-epoch'], 10);
           if (!Number.isInteger(expectEpoch)) throw new Error('--expect-epoch needs an integer epoch from the preview');
         }
+        let requester = null;
+        if (process.env.PASEO_AGENT_ID && values.apply) {
+          const observed = await readPaseoState(client);
+          const caller = observed.agents.find((agent) => agent.id === process.env.PASEO_AGENT_ID);
+          const source = listScopes(observed).find((item) => item.workspaceId === caller?.workspaceId);
+          const sourceState = source?.workspace?.metadata?.[METADATA_KEY];
+          if (!caller || !source || !Number.isInteger(sourceState?.epoch)) throw new Error('The requesting agent has no current factory scope authority');
+          requester = { workspaceId: source.workspaceId, scopeId: source.id, epoch: sourceState.epoch, agentId: caller.id,
+            aliases: [caller.labels?.[LABEL.scope], caller.labels?.[LABEL.repo]].filter(Boolean) };
+        }
         const result = await assignScope({
           client, discovery, task: values.task, tests: values.test ?? [], blockers: values.blocker ?? [],
           next: values.next ?? null, apply: Boolean(values.apply), send: !values['no-send'],
           assignedBy: process.env.PASEO_AGENT_ID ?? null,
+          requester,
+          config,
           reportTo: values['report-to'] ?? process.env.PASEO_AGENT_ID ?? null,
           workerModel: workerModelLine(config, discovery),
           promptOptions: await readCliPromptOptions(),
@@ -889,6 +908,7 @@ async function runModelCommand({ command, args, values, config, configPath, clie
       if (starting) {
         const result = await startScopedWorker({
           client, status: steerStatus(discovery, { config }), callerId: process.env.PASEO_AGENT_ID,
+          aliases: discoveryScopeAliases(discovery),
           profile, accountId: zerosubAccount, prompt: values.task, title: values.title, apply: Boolean(values.apply),
           promptOptions: await readCliPromptOptions(),
         });

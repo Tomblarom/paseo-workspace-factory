@@ -15,6 +15,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { LABEL, METADATA_KEY, parentOf, agentUsage, isRestartReason, restartMessage } from './paseo.js';
 import { withLock, workspaceLockName } from './lock.js';
+import { discoveryScopeAliases, guardScope, scopeHolder, ScopeGuardError } from './scope-guard.js';
 import { runtime } from './runtime.js';
 import { isAdvisorSlot, isSensitiveSlot } from './config.js';
 import { formatSlotProfileSuggestion, resolveProfile, steerFallbackList, usedProfilesByLiveSteers } from './models.js';
@@ -30,6 +31,13 @@ import { findingsPassage } from './findings.js';
 
 export const CHECKPOINT_KEY = `${METADATA_KEY}.checkpoint`;
 export class SwitchRefused extends Error {}
+async function guardSteerScope(args) {
+  try { return await guardScope(args); }
+  catch (error) {
+    if (error instanceof ScopeGuardError) throw new SwitchRefused(`Steer state changed: ${error.message}`);
+    throw error;
+  }
+}
 export { agentUsage };
 
 const BUSY = new Set(['running', 'initializing']);
@@ -889,7 +897,7 @@ async function waitForSwitchDelivery(workspace, agentId, deliveryId, epoch, dead
  * re-read, check the expected epoch and active steer, write, read back, release;
  * the handoff is delivered after the lock is released.
  */
-export async function switchSteer({ client, discovery, toSlot, apply = false, send = true, wait = false, waitTimeoutMs = 600_000, notifyPrevious = false, language = runtime().handoffLanguage, git, lock = withLock, now = () => new Date(), config = null, workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, zerosub = null, callerId = process.env.PASEO_AGENT_ID, paseoCli = null, promptOptions, deliverSteer = null }) {
+export async function switchSteer({ client, discovery, toSlot, apply = false, send = true, wait = false, waitTimeoutMs = 600_000, notifyPrevious = false, language = runtime().handoffLanguage, git, lock = withLock, now = () => new Date(), config = null, workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, zerosub = null, callerId = null, paseoCli = null, promptOptions, deliverSteer = null }) {
   const status = steerStatus(discovery);
   if (!status.workspace || !status.state) throw new SwitchRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
@@ -934,11 +942,14 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
 
   const workspace = client.workspaces.ref(status.workspace.id);
   await lock(workspaceLockName(status.workspace.id), async (held) => {
-    const fresh = (await workspace.refresh())?.metadata?.[METADATA_KEY];
-    if (!fresh || fresh.epoch !== expected.epoch || fresh.activeSteer !== expected.activeSteer) {
-      throw new SwitchRefused(`Steer state changed (expected ${expected.activeSteer}@${expected.epoch}, found ${fresh?.activeSteer}@${fresh?.epoch}); rerun the switch`);
+    const { state: fresh, holder, agents } = await guardSteerScope({ client, held, workspaceId: status.workspace.id, scopeId: expected.scope?.id ?? status.repo, epoch: expected.epoch, agentId: from?.id, aliases: discoveryScopeAliases(discovery), config });
+    if (BUSY.has(holder.status) || holder.activeTurn) throw new SwitchRefused(`Active Steer ${from.slot} is running; stop it or wait for its turn to end first`);
+    const liveTarget = scopeHolder({ agents, workspaceId: status.workspace.id, scopeId: expected.scope?.id ?? status.repo, slot: toSlot, aliases: discoveryScopeAliases(discovery) });
+    if (liveTarget.id !== to.id || (!selfTakeover && (BUSY.has(liveTarget.status) || liveTarget.activeTurn))) throw new SwitchRefused(`Steer ${toSlot} changed or is running; rerun the switch`);
+    if (callerId && !selfTakeover) {
+      if (callerId !== from?.id) throw new SwitchRefused('Only the active steer or the takeover target may request this switch');
     }
-    const next = { ...fresh, activeSteer: toSlot, epoch: fresh.epoch + 1, previousSteer: fresh.activeSteer, switchedAt: now().toISOString() };
+    const next = { ...fresh, activeSteer: toSlot, activeAgentId: to.id, epoch: fresh.epoch + 1, previousSteer: fresh.activeSteer, switchedAt: now().toISOString() };
     held.verify(); // the lock file must still be the locked inode right before the write
     await workspace.setMetadata({ [METADATA_KEY]: next });
     const written = (await workspace.refresh())?.metadata?.[METADATA_KEY];
@@ -1030,8 +1041,16 @@ function rewindFallbackWarning(fromId, outcomeStatus) {
  * rewind stands; resend the packet manually). With `send: false` the rewind
  * lands without a brief (stage-only: the caller stages the returned packet).
  */
-async function runTabRewind({ client, workspaceId, agentId, packet, checkpoint, lock, now, rewindClient, previousBriefId, send = true, note = null }) {
-  const outcome = await rewindAndBrief(agentId, packet, { createClient: rewindClient, previousBriefId, ...(send ? {} : { skipBrief: true }) });
+async function runTabRewind({ client, workspaceId, agentId, packet, checkpoint, lock, now, rewindClient, previousBriefId, send = true, note = null, authority = null }) {
+  const rewind = () => rewindAndBrief(agentId, packet, { createClient: rewindClient, previousBriefId, ...(send ? {} : { skipBrief: true }) });
+  const outcome = authority ? await lock(workspaceLockName(workspaceId), async (held) => {
+    await guardSteerScope({ client, held, workspaceId, agentId, ...authority });
+    if (authority.callerId) {
+      if (authority.callerId !== agentId) throw new SwitchRefused('Only the active steer may request active Fresh');
+    }
+    held.verify();
+    return rewind();
+  }) : await rewind();
   if (outcome.status === 'failed') {
     throw new SwitchRefused(`Rewind of ${agentId} failed (${outcome.error ?? 'unknown error'}); nothing sent, nothing recorded, no new agent created`);
   }
@@ -1056,7 +1075,7 @@ async function runTabRewind({ client, workspaceId, agentId, packet, checkpoint, 
  * a failed rewind throws instead of falling back (the packet travels on the
  * error for the caller to keep); the preview path still reports fallback.
  */
-async function tryActiveRewind({ client, discovery, status, expected, slot, from, apply, send = true, language, git, lock, now, workerModel, rewindClient, requireRefreshMode = null, promptOptions }) {
+async function tryActiveRewind({ client, discovery, status, expected, slot, from, config = null, apply, send = true, language, git, lock, now, workerModel, rewindClient, requireRefreshMode = null, promptOptions, callerId = null }) {
   const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;
   const entry = agentState?.[from.id] ?? null;
   const previousBriefId = entry?.refreshed?.briefMessageId;
@@ -1093,7 +1112,8 @@ async function tryActiveRewind({ client, discovery, status, expected, slot, from
     note: entry?.note ?? null, noteAt: entry?.noteAt ?? null,
     lastMessage: await hintOf(client, from.id), language, workerModel, rewound: true, promptOptions,
   });
-  const { outcome } = await runTabRewind({ client, workspaceId: status.workspace.id, agentId: from.id, packet, checkpoint: status.checkpoint, lock, now, rewindClient, previousBriefId, send });
+  const { outcome } = await runTabRewind({ client, workspaceId: status.workspace.id, agentId: from.id, packet, checkpoint: status.checkpoint, lock, now, rewindClient, previousBriefId, send,
+    authority: { scopeId: expected.scope?.id ?? status.repo, epoch: expected.epoch, aliases: discoveryScopeAliases(discovery), callerId, config } });
   if (outcome.status !== 'rewound') {
     if (requireRefreshMode === 'rewind') {
       const error = new SwitchRefused(`Bound rewind route failed (${outcome.status}${outcome.error ? `: ${outcome.error}` : ''}); nothing sent, nothing recorded, no new agent created. The brief is kept.`);
@@ -1141,7 +1161,7 @@ async function tryActiveRewind({ client, discovery, status, expected, slot, from
  * or stages it, e.g. into the composer); `notifyPrevious: false` skips the
  * notice to the retired agent (the efficient path shows a UI notice instead).
  */
-export async function freshSteer({ client, discovery, config, apply = false, send = true, notifyPrevious = true, slot: slotArg = null, workerId = null, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, now = () => new Date(), workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, quotaExhaustedPct = config?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct, zerosub = null, paseoCli = null, rewindClient = null, requireRefreshMode = null, promptOptions }) {
+export async function freshSteer({ client, discovery, config, apply = false, send = true, notifyPrevious = true, slot: slotArg = null, workerId = null, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, now = () => new Date(), workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, quotaExhaustedPct = config?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct, zerosub = null, paseoCli = null, rewindClient = null, requireRefreshMode = null, promptOptions, callerId = null }) {
   const status = steerStatus(discovery);
   if (!status.workspace || !status.state) throw new SwitchRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
@@ -1173,7 +1193,7 @@ export async function freshSteer({ client, discovery, config, apply = false, sen
   // fallback when no rewind point exists or the provider lacks rewind.
   let rewindFallback = null;
   if (typeof rewindClient === 'function' && single) {
-    const rewound = await tryActiveRewind({ client, discovery, status, expected, slot, from: single, config, apply, send, language, git, lock, now, workerModel, rewindClient, requireRefreshMode, promptOptions });
+    const rewound = await tryActiveRewind({ client, discovery, status, expected, slot, from: single, config, apply, send, language, git, lock, now, workerModel, rewindClient, requireRefreshMode, promptOptions, callerId });
     if (rewound && !rewound.fallback) return rewound;
     if (rewound?.fallback) rewindFallback = rewound.fallback;
   } else if (apply === true && requireRefreshMode === 'rewind' && single && typeof rewindClient !== 'function') {
@@ -1240,27 +1260,26 @@ export async function freshSteer({ client, discovery, config, apply = false, sen
   let from = single;
   let freshId;
   await lock(workspaceLockName(status.workspace.id), async (held) => {
-    const current = (await workspace.refresh())?.metadata?.[METADATA_KEY];
-    if (!current || current.epoch !== expected.epoch || current.activeSteer !== expected.activeSteer) {
-      throw new SwitchRefused(`Steer state changed (expected ${expected.activeSteer}@${expected.epoch}, found ${current?.activeSteer}@${current?.epoch}); rerun the fresh command`);
-    }
     const receipt = await lookupFreshReceipt(lookupReceipt, key);
+    if (receipt) {
+      checkedFreshReceipt(receipt, key);
+      if (!from) {
+        const rest = holders.filter((h) => h.id !== receipt.agentId);
+        if (!holders.some((h) => h.id === receipt.agentId) || rest.length !== 1) throw new SwitchRefused(`Steer ${slot} has several live agents; archive the retired one in Paseo, then rerun`);
+        from = rest[0];
+      }
+    }
+    if (!from) throw new SwitchRefused(`Steer ${slot} has several live agents (${holders.map((s) => s.id).join(', ')}); archive the retired one in Paseo, then rerun`);
+    const { state: current } = await guardSteerScope({ client, held, workspaceId: status.workspace.id, scopeId: expected.scope?.id ?? status.repo, epoch: expected.epoch, agentId: from?.id, excludeIds: receipt ? [receipt.agentId] : [], aliases: discoveryScopeAliases(discovery), config });
+    if (callerId) {
+      if (callerId !== from.id) throw new SwitchRefused('Only the active steer may request active Fresh');
+    }
     if (!receipt) {
       if (!from) throw new SwitchRefused(`Steer ${slot} has several live agents (${holders.map((s) => s.id).join(', ')}); archive the retired one in Paseo, then rerun`);
       freshId = (await run(op, config))?.agentId; // the executor verifies parent freedom, labels and workspace
       if (!freshId) throw new Error('Fresh agent creation returned no agent id');
     } else {
-      checkedFreshReceipt(receipt, key);
-      if (!from) {
-        // Interrupted apply: the receipt names the in-flight agent, the other
-        // holder is the old steer. Anything else stays ambiguous and stops.
-        const rest = holders.filter((h) => h.id !== receipt.agentId);
-        if (!holders.some((h) => h.id === receipt.agentId) || rest.length !== 1) {
-          throw new SwitchRefused(`Steer ${slot} has several live agents (${holders.map((s) => s.id).join(', ')}); archive the retired one in Paseo, then rerun`);
-        }
-        from = rest[0];
-        if (BUSY.has(from.status)) throw new SwitchRefused(`Active Steer ${slot} is ${from.status}; stop it or wait for its turn to end first`);
-      }
+      if (BUSY.has(from.status)) throw new SwitchRefused(`Active Steer ${slot} is ${from.status}; stop it or wait for its turn to end first`);
       const confirmedId = await confirmFreshReceipt(run, op, config, receipt);
       if (confirmedId === from.id) throw new SwitchRefused('Fresh recovery stopped: the receipt names the current Steer itself');
       freshId = confirmedId;
@@ -1268,7 +1287,7 @@ export async function freshSteer({ client, discovery, config, apply = false, sen
     }
     await verifyFreshAgentParent(client, freshId, null); // parent-free, whoever the executor was
     held.verify(); // the lock file must still be the locked inode right before the write
-    await workspace.setMetadata({ [METADATA_KEY]: { ...current, activeSteer: slot, epoch: current.epoch + 1, previousSteer: from.id, switchedAt: now().toISOString() } });
+    await workspace.setMetadata({ [METADATA_KEY]: { ...current, activeSteer: slot, activeAgentId: freshId, epoch: current.epoch + 1, previousSteer: from.id, switchedAt: now().toISOString() } });
     const written = (await workspace.refresh())?.metadata?.[METADATA_KEY];
     if (written?.epoch !== expected.epoch + 1 || written?.activeSteer !== slot) throw new Error('Fresh steer not verifiable after write');
   });
@@ -1643,14 +1662,19 @@ export function workerResumeAnswer(client, status, agentId) {
 }
 
 /** Records a short task checkpoint for the current epoch (same lock as switches). A fresh checkpoint clears the interrupted flag — except source `auto`, which never clears it. Source `failover` logs a takeover with the previous steer and reason. */
-export async function writeCheckpoint({ client, discovery, task, tests = [], blockers = [], next = null, source = 'manual', agentId = null, turnId = null, previousSteer = null, failoverReason = null, lock = withLock, now = () => new Date() }) {
+export async function writeCheckpoint({ client, discovery, task, tests = [], blockers = [], next = null, source = 'manual', agentId = null, turnId = null, callerId = null, config = null, previousSteer = null, failoverReason = null, lock = withLock, now = () => new Date() }) {
   const status = steerStatus(discovery);
   if (!status.workspace || !status.state) throw new SwitchRefused('No factory main workspace with steer state');
   if (typeof task !== 'string' || !task.trim()) throw new SwitchRefused('A checkpoint needs a task');
   const workspace = client.workspaces.ref(status.workspace.id);
+  const holders = status.steers.filter((s) => s.slot === status.state.activeSteer && !s.retired && !s.superseded);
+  const expectedHolder = holders.length === 1 ? holders[0] : null;
+  if (agentId && expectedHolder?.id !== agentId) throw new SwitchRefused('A checkpoint from an agent must come from the unique active steer');
   return lock(workspaceLockName(status.workspace.id), async (held) => {
-    const metadata = (await workspace.refresh())?.metadata ?? {};
-    const fresh = metadata[METADATA_KEY];
+    const { metadata, state: fresh } = await guardScope({ client, held, workspaceId: status.workspace.id, scopeId: status.state.scope?.id ?? status.repo, epoch: status.state.epoch, agentId: expectedHolder?.id, aliases: discoveryScopeAliases(discovery), config });
+    if (callerId) {
+      if (callerId !== expectedHolder.id) throw new SwitchRefused('Only the active steer can write this checkpoint');
+    }
     const stamp = now().toISOString();
     const checkpoint = { task: task.trim(), tests, blockers, next: next?.trim() || null, epoch: fresh?.epoch ?? null, updatedAt: stamp, source, agentId, turnId, capturedAt: stamp, interrupted: source === 'auto' ? (metadata[CHECKPOINT_KEY]?.interrupted ?? null) : null, ...(source === 'failover' ? { failover: { previousSteer, reason: failoverReason } } : {}) };
     held.verify();

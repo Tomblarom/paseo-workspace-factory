@@ -41,6 +41,7 @@ function fakeClient(world) {
       }),
     },
     agents: {
+      list: async () => ({ entries: structuredClone(world.agents), pageInfo: { hasMore: false } }),
       ref: (id) => ({
         send: async (text) => { world.calls.push(['agent.send', id, text]); },
         timeline: { refetch: async () => ({ entries: [{ item: { type: 'assistant_message', text: 'Done.' } }] }) },
@@ -317,7 +318,8 @@ test('clipText bounds stored fields', () => {
 test('writeCheckpoint records source fields and clears interruption', async () => {
   const world = makeWorld();
   const ws = addWorkspace(world, { metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1 }, [CHECKPOINT_KEY]: { task: 'old', interrupted: { agentId: 'a', at: 't' } } } });
-  const discovery = { forkName: REPO, mainWorkspace: structuredClone(ws), steers: { labelled: [], legacy: [] }, workers: [], providers: [] };
+  world.agents.push({ id: 'agent-1', labels: { [LABEL.repo]: REPO, [LABEL.role]: 'steer', [LABEL.slot]: 'A' }, workspaceId: ws.id });
+  const discovery = { forkName: REPO, mainWorkspace: structuredClone(ws), steers: { labelled: [{ id: 'agent-1', labels: { [LABEL.slot]: 'A' }, workspaceId: ws.id }], legacy: [] }, workers: [], providers: [] };
   const cp = await writeCheckpoint({ client: fakeClient(world), discovery, task: 'new', lock: noLock, now: () => new Date('2026-11-23T12:00:00.000Z') });
   assert.deepEqual(cp, { task: 'new', tests: [], blockers: [], next: null, epoch: 1, updatedAt: '2026-11-23T12:00:00.000Z', source: 'manual', agentId: null, turnId: null, capturedAt: '2026-11-23T12:00:00.000Z', interrupted: null });
   const auto = await writeCheckpoint({ client: fakeClient(world), discovery, task: 'auto', source: 'agent', agentId: 'agent-1', turnId: 'turn-9', lock: noLock });
@@ -329,12 +331,26 @@ test('writeCheckpoint records source fields and clears interruption', async () =
 test('writeCheckpoint with source auto never clears the interrupted flag', async () => {
   const world = makeWorld();
   const ws = addWorkspace(world, { metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1 }, [CHECKPOINT_KEY]: { task: 'old', interrupted: { agentId: 'a', at: 't' } } } });
-  const discovery = { forkName: REPO, mainWorkspace: structuredClone(ws), steers: { labelled: [], legacy: [] }, workers: [], providers: [] };
+  world.agents.push({ id: 'agent-1', labels: { [LABEL.repo]: REPO, [LABEL.role]: 'steer', [LABEL.slot]: 'A' }, workspaceId: ws.id });
+  const discovery = { forkName: REPO, mainWorkspace: structuredClone(ws), steers: { labelled: [{ id: 'agent-1', labels: { [LABEL.slot]: 'A' }, workspaceId: ws.id }], legacy: [] }, workers: [], providers: [] };
   const kept = await writeCheckpoint({ client: fakeClient(world), discovery, task: 'auto', source: 'auto', agentId: 'agent-1', turnId: 'turn-9', lock: noLock });
   assert.deepEqual(kept.interrupted, { agentId: 'a', at: 't' });
   const cleared = await writeCheckpoint({ client: fakeClient(world), discovery, task: 'manual', source: 'manual', lock: noLock });
   assert.equal(cleared.interrupted, null);
 });
+
+test('checkpoint rejects an inactive steer and an A → B → A stale observation', async () => {
+  const world = makeWorld();
+  const ws = addWorkspace(world, { metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1 } } });
+  const labelled = ['A', 'B'].map((slot) => ({ id: `agent-${slot}`, labels: { [LABEL.slot]: slot }, workspaceId: ws.id }));
+  const discovery = { forkName: REPO, mainWorkspace: structuredClone(ws), steers: { labelled, legacy: [] }, workers: [], providers: [] };
+  const client = fakeClient(world);
+  await assert.rejects(writeCheckpoint({ client, discovery, task: 'inactive', agentId: 'agent-B', lock: noLock }), /unique active steer/);
+  ws.metadata[METADATA_KEY] = { main: true, activeSteer: 'A', epoch: 3 };
+  await assert.rejects(writeCheckpoint({ client, discovery, task: 'stale', lock: noLock }), /changed since/);
+  assert.equal(ws.metadata[CHECKPOINT_KEY], undefined);
+});
+
 
 test('withWorkspaceLock runs under the workspace lock name', async () => {
   const { withWorkspaceLock, workspaceLockName, withLock, LockBusy } = await import('../src/lock.mjs');

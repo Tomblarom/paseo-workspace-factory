@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { finishSteerDelivery, pendingSteerDelivery, type SteerDeliveryDeps } from "./steer-delivery.js";
 import { LEGACY_PREFIX, METADATA_KEY, readPaseoState } from "./factory/paseo.js";
 import { listScopes } from "./factory/scope.js";
+import { guardScope } from "./factory/scope-guard.js";
 import { createGit } from "./factory/local.js";
 import { withLock, withWorkspaceLock, workspaceLockName } from "./factory/lock.js";
 import {
@@ -35,7 +36,6 @@ import {
   type ZerosubSource,
 } from "./zerosub-runtime.js";
 import {
-  checkRace,
   cleanupCommandKind,
   decideTurnUpdate,
   dropEntries,
@@ -135,14 +135,8 @@ async function runTurnBefore(payload: TurnBeforePayload, paseo: any, deps: TurnH
   if (identity.role === "worker" && asRecord(asRecord(meta[AGENTS_KEY])?.[agentId])?.replacedBy) return;
   const now = deps.now ? deps.now() : new Date().toISOString();
   const update = updateAgentEntry as unknown as (args: any) => Promise<any>;
-  await update({
-    client: paseo,
-    workspaceId: mainId,
-    agentId,
-    patch: { openTurnId: payload.turnId ?? null, turnStartedAt: now },
-    liveIds: null,
-    lock: lockOf(deps),
-  });
+  await update({ client: paseo, workspaceId: mainId, agentId,
+    patch: { openTurnId: payload.turnId ?? null, turnStartedAt: now }, liveIds: null, lock: lockOf(deps) });
 }
 
 function failureText(outcome: TurnPayload["outcome"]): string | null {
@@ -266,6 +260,8 @@ async function reportAssignment(args: {
   kind: string;
   block: any;
   lastAnswer: string | null;
+  epoch: unknown;
+  config: any;
   deps?: TurnHookDeps;
 }): Promise<void> {
   const { paseo, mainId, agentId } = args;
@@ -276,6 +272,8 @@ async function reportAssignment(args: {
       const meta = snap?.metadata ?? {};
       const wsf = asRecord(meta[METADATA_KEY]);
       const assignment = asRecord(meta[ASSIGNMENT_KEY]);
+      if (args.config === false) return;
+      await (guardScope as any)({ client: paseo, held, workspaceId: mainId, scopeId: args.scopeId, epoch: args.epoch, agentId, config: args.config });
       decision = decideAssignmentReport({
         assignment,
         agentId,
@@ -338,6 +336,7 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
   const agents = asRecord(meta[AGENTS_KEY]) ?? {};
   const checkpoint = asRecord(meta[CHECKPOINT_KEY]);
   const previous = asRecord(agents[agentId]);
+  const config = deps.getConfig ? await deps.getConfig().catch(() => false) : null;
   if (identity.role === "worker" && previous?.replacedBy) return;
 
   let entries: any[] = [];
@@ -478,12 +477,11 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
     let checkpointWrite = decision.checkpoint ?? null;
     let patchInterrupted = decision.patchInterrupted ?? null;
     if (checkpointWrite || patchInterrupted) {
-      const race = checkRace(
-        { activeSteer: wsf.activeSteer, epoch: wsf.epoch },
-        freshWsf ? { activeSteer: freshWsf.activeSteer, epoch: freshWsf.epoch } : null,
-      );
-      if (race) {
-        console.log(`[factory] turn hook: skip scope write for ${agentId}: ${race}`);
+      try {
+        if (config === false) throw new Error("scope configuration unavailable");
+        await (guardScope as any)({ client: paseo, held, workspaceId: mainId, scopeId: identity.scopeId, epoch: wsf.epoch, agentId, config });
+      } catch (error) {
+        console.log(`[factory] turn hook: skip scope write for ${agentId}: ${String(error)}`);
         checkpointWrite = null;
         patchInterrupted = null;
       }
@@ -549,7 +547,8 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
 
   if (!applied) return;
 
-  await reportAssignment({ paseo, mainId, scopeId: scope.id, agentId, identity, kind, block, lastAnswer, deps });
+  await reportAssignment({ paseo, mainId, scopeId: scope.id, agentId, identity, kind, block, lastAnswer,
+    epoch: wsf.epoch, config, deps });
 
   if (proactiveHint) {
     try {
