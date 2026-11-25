@@ -785,10 +785,41 @@ export interface ColdFeedDeps {
   getZerosub?: () => Promise<ZerosubState>;
 }
 
+// K10: one shared timer broadcasts to all subscribers; every push re-reads settings.
+const coldPushes = new Set<(event: any) => Promise<void>>();
+let coldTimer: ReturnType<typeof setInterval> | null = null;
+let coldPaseo: any = null;
+let coldDeps: ColdFeedDeps | null = null;
+
+async function pushColdFeed(): Promise<void> {
+  const paseo = coldPaseo, deps = coldDeps;
+  if (!paseo || !deps || coldPushes.size === 0) return;
+  try {
+    const settings = await deps.readSettings();
+    if (!settings) return;
+    const config = deps.getConfig ? await deps.getConfig().catch(() => null) : null;
+    const zerosub = await resolveZerosub(deps);
+    const cold = await collectColdAgents(paseo, settings, Date.now(), config, zerosub);
+    const event = {
+      attention: cold,
+      cold,
+      autoDisabled: isEffectBlocked(),
+      autoDisabledReason: effectBlockReason() ?? undefined,
+    };
+    await Promise.allSettled([...coldPushes].map((push) => push(event)));
+  } catch {
+    // A failed push surfaces through the subscription lifecycle; retry next tick.
+  }
+}
+
+/** Immediate shared push for lifecycle events; no-op without subscribers. */
+export function notifyColdFeed(): void { if (coldPushes.size > 0) void pushColdFeed(); }
+
 /**
  * Serves the factory.cold subscription: pushes the attention list on
- * subscribe and every minute after. Returns void — settling a promise would
- * close the subscription. Also lends the daemon handle to the sweep timer.
+ * subscribe, on lifecycle events, and every minute after (one shared timer).
+ * Returns void — settling a promise would close the subscription. Also lends
+ * the daemon handle to the sweep timer.
  */
 export function serveColdSubscription(
   _input: unknown,
@@ -796,35 +827,22 @@ export function serveColdSubscription(
   deps: ColdFeedDeps,
 ): void {
   captureSweepPaseo(context.paseo);
-  let stopped = false;
-  const push = async (): Promise<void> => {
-    if (stopped) return;
-    try {
-      const settings = await deps.readSettings();
-      if (!settings) return;
-      const config = deps.getConfig ? await deps.getConfig().catch(() => null) : null;
-      const zerosub = await resolveZerosub(deps);
-      const cold = await collectColdAgents(context.paseo, settings, Date.now(), config, zerosub);
-      await context.push({
-        attention: cold,
-        cold,
-        autoDisabled: isEffectBlocked(),
-        autoDisabledReason: effectBlockReason() ?? undefined,
-      });
-    } catch {
-      // A failed push surfaces through the subscription lifecycle; retry next tick.
+  coldPaseo = context.paseo;
+  coldDeps = deps;
+  const push = context.push;
+  coldPushes.add(push);
+  void pushColdFeed();
+  if (!coldTimer) {
+    coldTimer = setInterval(() => void pushColdFeed(), deps.intervalMs ?? CACHE_CHECK_INTERVAL_MS);
+    if (typeof (coldTimer as unknown as { unref?: unknown }).unref === "function") {
+      (coldTimer as unknown as { unref: () => void }).unref();
     }
-  };
-  void push();
-  const timer = setInterval(() => void push(), deps.intervalMs ?? CACHE_CHECK_INTERVAL_MS);
-  if (typeof (timer as unknown as { unref?: unknown }).unref === "function") {
-    (timer as unknown as { unref: () => void }).unref();
   }
   context.signal.addEventListener(
     "abort",
     () => {
-      stopped = true;
-      clearInterval(timer);
+      coldPushes.delete(push);
+      if (coldPushes.size === 0 && coldTimer) { clearInterval(coldTimer); coldTimer = null; }
     },
     { once: true },
   );

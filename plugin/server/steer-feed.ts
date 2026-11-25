@@ -330,49 +330,66 @@ export interface SteerServeDeps {
   intervalMs?: number;
 }
 
+// K10: one shared timer broadcasts to all subscribers; every push re-reads settings.
+const steerPushes = new Set<(event: any) => Promise<void>>();
+let steerTimer: ReturnType<typeof setInterval> | null = null;
+let steerPaseo: any = null;
+let steerDeps: SteerServeDeps | null = null;
+
+async function pushSteerFeed(): Promise<void> {
+  const paseo = steerPaseo, deps = steerDeps;
+  if (!paseo || !deps || steerPushes.size === 0) return;
+  try {
+    const settings = await deps.readSettings();
+    const config = deps.getConfig ? await deps.getConfig().catch(() => null) : null;
+    const supervision = deps.readSupervision ? await deps.readSupervision().catch(() => null) : null;
+    const quotaSampleMinutes = finiteNumber(supervision?.quotaSampleMinutes) ?? undefined;
+    const zerosub = deps.getZerosub ? await resolveZerosub({ getZerosub: deps.getZerosub }) : null;
+    const rows = collectSteerStates(await readPaseoState(paseo), {
+      settings,
+      config,
+      zerosub,
+      quotaSnapshot: getQuotaSnapshot(),
+      poolSampledAtMs: getQuotaSampledAt(),
+      quotaSampleMinutes,
+    });
+    const event = { steers: rows, updatedAt: new Date().toISOString() };
+    await Promise.allSettled([...steerPushes].map((push) => push(event)));
+  } catch {
+    // A failed push surfaces through the subscription lifecycle; retry next tick.
+  }
+}
+
+/** Immediate shared push for lifecycle events; no-op without subscribers. */
+export function notifySteerFeed(): void { if (steerPushes.size > 0) void pushSteerFeed(); }
+
 /**
  * Serves the factory.steers subscription: pushes the host-wide projection on
- * subscribe and every minute after. Returns void — settling a promise would
- * close the subscription. Countdown ticks stay local to the pill (step 2),
- * which re-renders at nextBoundaryAt.
+ * subscribe, on lifecycle events, and every minute after (one shared timer).
+ * Returns void — settling a promise would close the subscription. Countdown
+ * ticks stay local to the pill (step 2), which re-renders at nextBoundaryAt.
  */
 export function serveSteerSubscription(
   _input: unknown,
   context: { paseo: any; push: (event: any) => Promise<void>; signal: AbortSignal },
   deps: SteerServeDeps,
 ): void {
-  let stopped = false;
-  const push = async (): Promise<void> => {
-    if (stopped) return;
-    try {
-      const settings = await deps.readSettings();
-      const config = deps.getConfig ? await deps.getConfig().catch(() => null) : null;
-      const supervision = deps.readSupervision ? await deps.readSupervision().catch(() => null) : null;
-      const quotaSampleMinutes = finiteNumber(supervision?.quotaSampleMinutes) ?? undefined;
-      const zerosub = deps.getZerosub ? await resolveZerosub({ getZerosub: deps.getZerosub }) : null;
-      const rows = collectSteerStates(await readPaseoState(context.paseo), {
-        settings,
-        config,
-        zerosub,
-        quotaSnapshot: getQuotaSnapshot(),
-        poolSampledAtMs: getQuotaSampledAt(),
-        quotaSampleMinutes,
-      });
-      await context.push({ steers: rows, updatedAt: new Date().toISOString() });
-    } catch {
-      // A failed push surfaces through the subscription lifecycle; retry next tick.
+  steerPaseo = context.paseo;
+  steerDeps = deps;
+  const push = context.push;
+  steerPushes.add(push);
+  void pushSteerFeed();
+  if (!steerTimer) {
+    steerTimer = setInterval(() => void pushSteerFeed(), deps.intervalMs ?? CACHE_CHECK_INTERVAL_MS);
+    if (typeof (steerTimer as unknown as { unref?: unknown }).unref === "function") {
+      (steerTimer as unknown as { unref: () => void }).unref();
     }
-  };
-  void push();
-  const timer = setInterval(() => void push(), deps.intervalMs ?? CACHE_CHECK_INTERVAL_MS);
-  if (typeof (timer as unknown as { unref?: unknown }).unref === "function") {
-    (timer as unknown as { unref: () => void }).unref();
   }
   context.signal.addEventListener(
     "abort",
     () => {
-      stopped = true;
-      clearInterval(timer);
+      steerPushes.delete(push);
+      if (steerPushes.size === 0 && steerTimer) { clearInterval(steerTimer); steerTimer = null; }
     },
     { once: true },
   );

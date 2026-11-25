@@ -889,6 +889,43 @@ export async function handleWorkerTurnAfter(
   }
 }
 
+export interface ArchiveAfterResult {
+  ok: boolean;
+  action: "retired" | "skipped" | "disabled";
+  reason?: string;
+}
+
+/** K10: retires a worker the moment its agent is archived. A close event never retires. */
+export async function runArchiveAfter(
+  paseo: any,
+  hookAgent: { id?: unknown } | null,
+  deps: SuperviseDeps,
+): Promise<ArchiveAfterResult> {
+  const settings = await resolveSettings(deps);
+  if (!settings || !settings.enabled) return { ok: true, action: "disabled" };
+  const workerId = typeof hookAgent?.id === "string" ? hookAgent.id : null;
+  if (!workerId) return { ok: true, action: "skipped", reason: "no-id" };
+  for (const scope of listScopes(await readPaseoState(paseo))) {
+    const meta = await refreshWorkspaceMeta(paseo, scope.workspaceId);
+    if (!readWorkers(meta)[workerId]) continue;
+    await removeWorker({ client: paseo, workspaceId: scope.workspaceId, workerId, lock: lockOf(deps) });
+    logOf(deps)(`[factory] supervise: retired archived worker ${workerId} of ${scope.id}`);
+    return { ok: true, action: "retired" };
+  }
+  return { ok: true, action: "skipped", reason: "not-tracked" };
+}
+
+/** Never throws out of the hook (log and continue). */
+export async function handleArchiveAfter(payload: { agent: { id: string } }, context: { paseo: any }, deps: SuperviseDeps = {}): Promise<ArchiveAfterResult> {
+  captureSupervisionPaseo(context?.paseo);
+  try {
+    return await runArchiveAfter(context.paseo, payload?.agent ?? null, deps);
+  } catch (error) {
+    console.error(`[factory] supervise: archive.after failed for agent ${(payload as { agent?: { id?: unknown } })?.agent?.id ?? "?"} (${error instanceof Error ? error.message : String(error)})`);
+    return { ok: false, action: "skipped", reason: "error" };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Pending deliveries are retried one brief per scope per tick.
 export interface RetryWakeBriefResult {

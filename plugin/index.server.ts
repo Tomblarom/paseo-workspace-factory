@@ -38,11 +38,12 @@ import {
 } from "./server/handlers.js";
 import { listModels, setModels } from "./server/models-rpc.js";
 import {
+  notifyColdFeed,
   readCleanupSettings,
   serveColdSubscription,
   startCleanupTimer,
 } from "./server/cold-sweep.js";
-import { serveSteerSubscription } from "./server/steer-feed.js";
+import { notifySteerFeed, serveSteerSubscription } from "./server/steer-feed.js";
 import { readResumeSettings } from "./server/resume-apply.js";
 import { deliverSteer, type SteerDeliveryDeps } from "./server/steer-delivery.js";
 import { handleTurnAfter, handleTurnBefore } from "./server/turn-hook.js";
@@ -50,6 +51,7 @@ import { ensureBootChecked } from "./server/boot-check.js";
 import { RESUME_CLEAR_DEFAULTS } from "./shared/idle-cleanup.js";
 import {
   captureSupervisionPaseo,
+  handleArchiveAfter,
   handleBootFinished,
   handleCreateAfter,
   handleWorkerTurnAfter,
@@ -226,29 +228,41 @@ export default function contribute(server: PluginServerContext) {
       getZerosub,
     });
   });
-  const removeTurnBefore = server.addHook("agent.turn.before", (payload, context) => {
+  // K10: lifecycle events push the shared feed projections immediately.
+  const notifyFeeds = (): void => { notifySteerFeed(); notifyColdFeed(); };
+  const removeTurnBefore = server.addHook("agent.turn.before", async (payload, context) => {
     bootOnce(context.paseo);
-    return handleTurnBefore(payload, context);
+    await handleTurnBefore(payload, context);
+    notifyFeeds();
   });
-  const removeTurnHook = server.addHook("agent.turn.after", (payload, context) => {
+  const removeTurnHook = server.addHook("agent.turn.after", async (payload, context) => {
     bootOnce(context.paseo);
-    return handleTurnAfter(payload, context, {
+    await handleTurnAfter(payload, context, {
       getResumeBrief: buildResumeBrief,
       delivery,
       getConfig: () => loader.loadEffectiveConfig(),
       getSupervisionSettings: readSupervision,
       getZerosub,
     });
+    notifyFeeds();
   });
   const removeCreateHook = server.addHook("agent.create.after", async (payload, context) => {
     captureSupervisionPaseo(context.paseo);
     await handleCreateAfter(payload, context, { getSettings: readSupervision });
+    notifyFeeds();
   });
   // Second turn.after hook for worker supervision (own metadata key, own lock
   // pass; hook order is irrelevant).
   const removeSuperviseHook = server.addHook("agent.turn.after", async (payload, context) => {
     captureSupervisionPaseo(context.paseo);
     await handleWorkerTurnAfter(payload, context, { getSettings: readSupervision, getConfig: () => loader.loadEffectiveConfig(), delivery, getZerosub, buildBrief: buildResumeBrief });
+    notifyFeeds();
+  });
+  // Immediate worker retirement on archive; a close alone never retires.
+  const removeArchiveHook = server.addHook("agent.archive.after", async (payload, context) => {
+    captureSupervisionPaseo(context.paseo);
+    await handleArchiveAfter(payload, context, { getSettings: readSupervision });
+    notifyFeeds();
   });
   const stopCleanupTimer = startCleanupTimer({ readSettings, getZerosub, getQuotaSettings: readQuotaSettings });
   const stopSupervisionTimer = startSupervisionTimer({ getSettings: readSupervision, getConfig: () => loader.loadEffectiveConfig(), delivery, getZerosub, buildBrief: buildResumeBrief });
@@ -258,6 +272,7 @@ export default function contribute(server: PluginServerContext) {
     removeTurnHook();
     removeCreateHook();
     removeSuperviseHook();
+    removeArchiveHook();
     stopCleanupTimer();
     stopSupervisionTimer();
     stopQuotaTimer();
