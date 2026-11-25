@@ -15,6 +15,7 @@ interface ListRow {
   selected?: boolean;
   slot?: string;
   fallback?: string | null;
+  skipReason?: string | null;
 }
 
 /** Badges after a profile: [advisor] and [sensitive: sanitized tasks only]. */
@@ -40,6 +41,7 @@ export function formatModelList(kind: "worker" | "steer", list: { workers: ListR
     const flags = [row.selected ? "→ selected" : null, row.fallback ? `fallback: ${row.fallback}` : null].filter(Boolean);
     lines.push(`  ${head}  ${mark(row)} ${describe(row)}${flags.length ? `  ${flags.join(", ")}` : ""}`);
     if (!row.available) for (const reason of row.reasons) lines.push(`        ${reason}`);
+    else if (row.skipReason && !row.selected) lines.push(`        skipped: ${row.skipReason}`);
   }
   if (list.catalogError) lines.push("", `Availability unknown: ${list.catalogError}`);
   lines.push("", "✓ available, ✗ not available now (kept in the list, skipped when starting).");

@@ -120,7 +120,7 @@ function fixture(doc = v2doc()) {
 
 test("factory.models.list: priority rows with availability and selection", async () => {
   const f = fixture();
-  const list = await listModels({}, f.ctx, f.loader, f.hostSettings);
+  const list = await listModels({}, f.ctx, f.loader, f.hostSettings, Date.now, async () => null);
   assert.equal(list.revision, "r1");
   assert.deepEqual(list.workers.map((w) => [w.profile, w.available, w.sensitive, w.selected]), [["muse", false, true, false]]);
   // muse is unavailable and the only worker: nothing selected
@@ -130,8 +130,24 @@ test("factory.models.list: priority rows with availability and selection", async
   const text = formatModelList("worker", list);
   assert.match(text, /✗ muse/);
   assert.match(text, /sensitive/);
-  await listModels({}, f.ctx, f.loader, f.hostSettings);
+  await listModels({}, f.ctx, f.loader, f.hostSettings, Date.now, async () => null);
   assert.equal(f.calls(), 1, "catalog is cached for 60 s");
+});
+
+test("factory.models.list: an exhausted ZeroSub family is not selected and shows the pick reason", async () => {
+  const doc = v2doc();
+  doc.workerPriority = ["codex", "anti"];
+  const f = fixture(doc);
+  const reset = new Date(Date.now() + 3 * 3600_000).toISOString();
+  const zerosub = {
+    accounts: [{ id: "c1", family: "codex", label: "c1", status: "active", limitedUntil: null, windows: [{ id: "five_hour", usedPct: 99, resetsAt: reset }], maxUsedPct: 99, exhausted: false }],
+    agentAccount: {}, pending: {}, waiting: {}, version: null,
+  };
+  const list = await listModels({}, f.ctx, f.loader, f.hostSettings, Date.now, async () => zerosub);
+  assert.equal(list.selectedWorker, "anti");
+  assert.deepEqual(list.workers.map((w) => [w.profile, w.selected]), [["codex", false], ["anti", true]]);
+  assert.match(list.workers[0].skipReason, /accounts exhausted/);
+  assert.match(formatModelList("worker", list), /skipped: accounts exhausted/);
 });
 
 test("factory.models.set: worker-set returns a new settings document, no write", async () => {

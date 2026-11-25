@@ -18,6 +18,7 @@ import {
   resolveProfile,
   steerFallbackList,
 } from "./factory/models.js";
+import { readZerosubStateSafe } from "./zerosub-runtime.js";
 
 export const CATALOG_TTL_MS = 60_000;
 
@@ -59,6 +60,7 @@ export async function listModels(
   loader: ConfigLoader,
   hostSettings: HostSettingsReader | null,
   now: () => number = Date.now,
+  readZerosub: () => Promise<any> = readZerosubStateSafe,
 ) {
   const config = await loader.loadEffectiveConfig();
   let entries: any[] = [];
@@ -70,13 +72,18 @@ export async function listModels(
   }
   const state = hostSettings ? await hostSettings.read() : null;
   // Sensitivity does not block "selected" here: the list assumes a public repo.
-  const picked = catalogError
-    ? { profile: null as any }
-    : resolveProfile(config, entries, workerPriority(config), { role: "worker", repoPublic: true } as any);
+  // Quota uses the same ZeroSub snapshot as worker pick, so an exhausted
+  // profile is never marked selected.
+  const zerosub = catalogError ? null : await readZerosub().catch(() => null);
+  const picked: any = catalogError
+    ? { profile: null, skipped: [] }
+    : resolveProfile(config, entries, workerPriority(config), { role: "worker", repoPublic: true, zerosub } as any);
   const selectedName: string | null = picked.profile?.name ?? null;
+  const skipReasons = new Map<string, string>((picked.skipped ?? []).map((s: any) => [s?.name, s?.reason]));
   const workers = workerPriority(config).map((name: string, index: number) => ({
     ...row(config, entries, name, index + 1),
     selected: name === selectedName,
+    skipReason: skipReasons.get(name) ?? null,
   }));
   const steers = slotOrder(config).map((slot: string, index: number) => {
     const name = config.steers.slots[slot] as string;
