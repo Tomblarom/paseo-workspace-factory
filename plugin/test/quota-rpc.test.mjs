@@ -90,7 +90,7 @@ test("quota view tolerates a missing snapshot, pools wrapper, and missing thresh
   });
   assert.deepEqual(wrapped.pools.map((pool) => [pool.pool, pool.sessionPct, pool.state]), [["codex", 50, "ok"]]);
   assert.equal(wrapped.warnPct, 75);
-  assert.equal(wrapped.exhaustedPct, 90);
+  assert.equal(wrapped.exhaustedPct, 95);
 });
 
 test("quota view lists ZeroSub accounts with warn states", () => {

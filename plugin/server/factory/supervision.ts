@@ -376,7 +376,7 @@ export function isStaleWake(wakeEpoch, currentEpoch) {
  * slot: a slot appears once (its first entry in the final order), so no
  * duplicate candidate is asked twice.
  */
-export function failoverChain({ steers = [], activeSlot = null, retiredIds = [], interruptedIds = [], advisorIds = [], domainSteer = null, hubSteer = null, failingPool = null, zerosub = null, failingAccountId = null, exhaustedPct = 90, now = Date.now() } = {}) {
+export function failoverChain({ steers = [], activeSlot = null, retiredIds = [], interruptedIds = [], advisorIds = [], domainSteer = null, hubSteer = null, failingPool = null, zerosub = null, failingAccountId = null, exhaustedPct = 95, now = Date.now() } = {}) {
   const retired = new Set(retiredIds ?? []);
   const interrupted = new Set(interruptedIds ?? []);
   const advisors = new Set(advisorIds ?? []);

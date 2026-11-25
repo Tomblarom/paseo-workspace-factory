@@ -42,7 +42,7 @@ export const SUPERVISION_SETTINGS_DEFAULTS: SupervisionSettings = {
   staleMinutes: 60,
   answerMinutes: 10,
   maxAutoResumes: 2,
-  quota: { exhaustedPct: 90, warnPct: 75 },
+  quota: { exhaustedPct: 95, warnPct: 75 },
   quotaSampleMinutes: 10,
 };
 

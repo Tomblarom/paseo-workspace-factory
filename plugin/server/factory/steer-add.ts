@@ -183,7 +183,7 @@ function findProfileByModelKey(profiles, key, exclude = null) {
 export function planSteerAdd(config, providerEntries, liveSteers, {
   slot = null, spec = null, thinking = undefined, mode = undefined, profile: profileOption = undefined,
   scopeId = null, workspaceId = null, repo = null,
-  usedProfiles = [], quotaSnapshot = null, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 90,
+  usedProfiles = [], quotaSnapshot = null, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 95,
   quotaWarnPct = config?.quota?.warnPct ?? 75, profileHealth = null, now = Date.now(), zerosub = null,
 } = {}) {
   const { target, classification } = checkedTargetSlot(config, liveSteers, scopeId, slot);
@@ -433,7 +433,7 @@ export async function applySteerAdd(config, providerEntries, liveSteers, {
   slot = null, spec = null, thinking = undefined, mode = undefined, profile: profileOption = undefined,
   scopeId = null, workspaceId = null, repo = null, fingerprint = null,
   fingerprintOf = null, usedProfiles = [], quotaSnapshot = null,
-  quotaExhaustedPct = config?.quota?.exhaustedPct ?? 90, quotaWarnPct = config?.quota?.warnPct ?? 75,
+  quotaExhaustedPct = config?.quota?.exhaustedPct ?? 95, quotaWarnPct = config?.quota?.warnPct ?? 75,
   profileHealth = null, now = Date.now(), zerosub = null, lookupReceipt = null, execute = null,
 } = {}) {
   if (typeof fingerprint !== 'string' || !fingerprint) throw new SteerAddStale('Steer add needs the fingerprint of a confirmed preview.');

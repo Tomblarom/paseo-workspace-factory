@@ -31,7 +31,7 @@ test('resolveProfile skips an exhausted quota pool', () => {
   const result = resolveProfile(config, [
     { provider: 'claude', enabled: true, status: 'ready', models: [{ id: 'a' }] },
     { provider: 'codex', enabled: true, status: 'ready', models: [{ id: 'b' }] },
-  ], ['a', 'b'], { role: 'worker', quotaSnapshot: { shared: { sessionPct: 90 }, codex: { sessionPct: 10 } } });
+  ], ['a', 'b'], { role: 'worker', quotaSnapshot: { shared: { sessionPct: 95 }, codex: { sessionPct: 10 } } });
   assert.equal(result.profile.name, 'b');
   assert.equal(result.skipped[0].reason, 'pool exhausted');
 });

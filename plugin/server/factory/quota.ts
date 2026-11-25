@@ -2,7 +2,7 @@
 // GENERATED from src/quota.mjs by npm run plugin:sync. Do not edit.
 /** Quota pools and the deliberately lenient `paseo usage --json` adapter. */
 
-export const QUOTA_DEFAULTS = { warnPct: 75, exhaustedPct: 90 };
+export const QUOTA_DEFAULTS = { warnPct: 75, exhaustedPct: 95 };
 export const PROFILE_UNHEALTHY_MINUTES = 10;
 
 /** Classify a provider failure for short-lived profile failover. */

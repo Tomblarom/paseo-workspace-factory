@@ -1032,7 +1032,7 @@ async function tryActiveRewind({ client, discovery, status, expected, slot, from
  * or stages it, e.g. into the composer); `notifyPrevious: false` skips the
  * notice to the retired agent (the efficient path shows a UI notice instead).
  */
-export async function freshSteer({ client, discovery, config, apply = false, send = true, notifyPrevious = true, slot: slotArg = null, workerId = null, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, now = () => new Date(), workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 90, zerosub = null, paseoCli = null, rewindClient = null, promptOptions }) {
+export async function freshSteer({ client, discovery, config, apply = false, send = true, notifyPrevious = true, slot: slotArg = null, workerId = null, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, now = () => new Date(), workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 95, zerosub = null, paseoCli = null, rewindClient = null, promptOptions }) {
   const status = steerStatus(discovery);
   if (!status.workspace || !status.state) throw new SwitchRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;

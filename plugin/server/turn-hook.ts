@@ -189,7 +189,7 @@ async function proactiveHintForTurn(args: {
       zerosub,
       nowMs: args.nowMs,
       warnPct: config?.quota?.warnPct ?? supervision?.quota?.warnPct ?? 75,
-      exhaustedPct: config?.quota?.exhaustedPct ?? supervision?.quota?.exhaustedPct ?? 90,
+      exhaustedPct: config?.quota?.exhaustedPct ?? supervision?.quota?.exhaustedPct ?? 95,
     });
     if (hint.decision !== "hint" || !hint.text) return null;
     const last = asRecord(args.previous?.proactiveHint);

@@ -26,7 +26,7 @@ The config is looked up in this order: `--config <path>`, `$PASEO_FACTORY_CONFIG
 | `workers.defaultProfile` | First entry of `workers.priority`, kept for backwards compatibility. Prefer `workers.priority`. |
 | `advisors.profiles` | Optional purpose → profile name mapping for second opinions (see below). A validation warning is shown when a mapped profile is not advisor-tagged. |
 | `usage.warnContextTokens` | Optional positive integer (default off): `status` warns for agents above it, with a switch/fresh recommendation. |
-| `quota.warnPct` / `quota.exhaustedPct` | Session quota warning/exhaustion thresholds (defaults `75` and `90`). |
+| `quota.warnPct` / `quota.exhaustedPct` | Session quota warning/exhaustion thresholds (defaults `75` and `95`). |
 | `profiles.<name>.pool` | Optional quota-pool name. Defaults to the profile's provider; profiles in one pool share availability and failover preference. |
 | `profileHealth` (workspace metadata) | Runtime-only profile failure marks. `worker pick --failed <profile> --reason <text>` records the failure; the profile is skipped for 10 minutes with its classified reason, without changing config or the provider catalog. |
 | `runtime.stateDir` | Plans, progress, journals and locks (default `$XDG_STATE_HOME/paseo-workspace-factory`). |
@@ -192,7 +192,7 @@ A profile with `"advisor": true` marks its model as a second-opinion candidate f
 
 ## Quota pools
 
-In the Paseo composer, run `/factory quota` (or press **Quota** in the Factory panel) to see provider quota pools with their warn/exhausted state plus which steer or worker uses each pool. The view is read-only. Thresholds live in Settings → Plugins → Factory → Quota: `warnPct` (default 75), `exhaustedPct` (default 90), and the sample cadence `quotaSampleMinutes` (whole minutes, at least 10). The plugin samples quota in the background (result pill; the sidebar warns when a non-advisor steer's pool reaches the warn level).
+In the Paseo composer, run `/factory quota` (or press **Quota** in the Factory panel) to see provider quota pools with their warn/exhausted state plus which steer or worker uses each pool. The view is read-only. Thresholds live in Settings → Plugins → Factory → Quota: `warnPct` (default 75), `exhaustedPct` (default 95), and the sample cadence `quotaSampleMinutes` (whole minutes, at least 10). The plugin samples quota in the background (result pill; the sidebar warns when a non-advisor steer's pool reaches the warn level).
 
 Profiles belong to a quota pool named by `profiles.<name>.pool`, or by their provider when `pool` is omitted. A pool at `quota.exhaustedPct` is skipped by profile resolution. Briefs show a preferred different pool at `quota.warnPct`; configure at least two non-advisor steer pools to make that failover useful.
 

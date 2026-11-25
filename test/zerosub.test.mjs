@@ -238,7 +238,7 @@ test('quota line uses real account percents with ZeroSub state', () => {
 
 test('behavior without ZeroSub state is unchanged', () => {
   const legacy = resolveProfile(CONFIG, PROVIDERS, ['sonnet', 'codex'], {
-    role: 'worker', repoPublic: true, quotaSnapshot: { claude: { sessionPct: 90 }, codex: { sessionPct: 10 } },
+    role: 'worker', repoPublic: true, quotaSnapshot: { claude: { sessionPct: 95 }, codex: { sessionPct: 10 } },
   });
   assert.equal(legacy.profile.name, 'codex');
   assert.equal(legacy.skipped[0].reason, 'pool exhausted');

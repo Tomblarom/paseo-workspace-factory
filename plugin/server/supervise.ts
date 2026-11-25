@@ -565,7 +565,7 @@ export async function sendScopeWake(
   const activeRow = rows.find((row: any) => row.id === target) ?? null;
   const activeProfile = active && config?.profiles?.[config?.steers?.slots?.[active]];
   const activePool = activeProfile ? profilePool(activeProfile) : null;
-  const exhaustedPct = config?.quota?.exhaustedPct ?? settings?.quota?.exhaustedPct ?? 90;
+  const exhaustedPct = config?.quota?.exhaustedPct ?? settings?.quota?.exhaustedPct ?? 95;
   const exhausted = activePool && quotaExhausted(
     getQuotaSnapshot(),
     activePool,
@@ -1229,7 +1229,7 @@ export async function runFailoverCheck(
   }
   const scopes = deps.scopes ?? listScopes(paseoState);
   const retired = retiredAgentId(wsf);
-  const exhaustedPct = config?.quota?.exhaustedPct ?? settings?.quota?.exhaustedPct ?? 90;
+  const exhaustedPct = config?.quota?.exhaustedPct ?? settings?.quota?.exhaustedPct ?? 95;
   const chain = failoverChain({
     steers: rows,
     activeSlot,

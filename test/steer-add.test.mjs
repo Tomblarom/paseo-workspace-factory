@@ -220,7 +220,7 @@ test('resolveSteerAdd honors a custom warn threshold', () => {
 test('resolveSteerAdd keeps pool families on the exhausted threshold', () => {
   const warned = resolveSteerAdd(CONFIG, PROVIDERS, { quotaSnapshot: { 'fake-x': { sessionPct: 80 } }, now: NOW });
   assert.equal(warned.profile.name, 'alpha', 'a warned pool without accounts stays eligible');
-  const spent = resolveSteerAdd(CONFIG, PROVIDERS, { quotaSnapshot: { 'fake-x': { sessionPct: 90 } }, now: NOW });
+  const spent = resolveSteerAdd(CONFIG, PROVIDERS, { quotaSnapshot: { 'fake-x': { sessionPct: 95 } }, now: NOW });
   assert.equal(spent.profile.name, 'beta');
   assert.equal(spent.skipped[0].reason, 'pool exhausted');
 });

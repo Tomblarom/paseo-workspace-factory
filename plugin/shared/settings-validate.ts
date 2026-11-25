@@ -66,7 +66,7 @@ export function settingsFromConfig(config: any, current: FactorySettingsValues):
     prepare: [...(config.steers?.prepare ?? current.prepare)],
     initialActive: config.steers?.initialActive ?? current.initialActive,
     workerPriority: priority,
-    quota: current.quota ?? { exhaustedPct: 90, warnPct: 75 },
+    quota: current.quota ?? { exhaustedPct: 95, warnPct: 75 },
     quotaSampleMinutes: current.quotaSampleMinutes ?? 10,
     githubOwner: current.githubOwner ?? null,
     checkoutRoot: current.checkoutRoot ?? null,

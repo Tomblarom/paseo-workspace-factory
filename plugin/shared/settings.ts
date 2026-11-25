@@ -69,7 +69,7 @@ export const factoryConfigSettings = defineSettings({
     quota: z.object({
       exhaustedPct: z.number().min(0).max(100).default(90),
       warnPct: z.number().min(0).max(100).default(75),
-    }).default({ exhaustedPct: 90, warnPct: 75 }),
+    }).default({ exhaustedPct: 95, warnPct: 75 }),
     quotaSampleMinutes: z.number().int().min(10).default(10),
     githubOwner: z.string().nullable().default(null),
     checkoutRoot: z.string().nullable().default(null),
@@ -176,7 +176,7 @@ export const factorySupervisionSettings = defineSettings({
     quota: z.object({
       exhaustedPct: z.number().min(0).max(100).default(90),
       warnPct: z.number().min(0).max(100).default(75),
-    }).default({ exhaustedPct: 90, warnPct: 75 }),
+    }).default({ exhaustedPct: 95, warnPct: 75 }),
     quotaSampleMinutes: z.number().int().min(10).default(10),
   }),
 });
