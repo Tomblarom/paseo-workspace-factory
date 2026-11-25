@@ -22,8 +22,6 @@ import { FRESH_BASE_TOKENS, MAX_WARM_COMPACTIONS } from "./auto-checkpoint.js";
 
 export const CLEAR_COMMAND = "/clear";
 export const COMPACT_COMMAND = "/compact Keep: task, decisions, open ids, next step.";
-export const SEED_AFTER_CLEAR =
-  "Context was cleared to save prompt-cache cost. Run the factory resume brief before the next task.";
 /** Old session ids kept per agent for "open old history" (C6). */
 export const PREVIOUS_SESSIONS_MAX = 5;
 
@@ -202,7 +200,6 @@ export interface CleanupSettings {
   minContextTokens: number;
   providers: string[];
   roles: string[];
-  seedAfterClear: boolean;
   clearAcknowledged: boolean;
   dailyCap: number;
   /**
@@ -221,7 +218,6 @@ export const CLEANUP_DEFAULTS: CleanupSettings = {
   minContextTokens: 60000,
   providers: ["claude"],
   roles: ["steer", "worker"],
-  seedAfterClear: false,
   clearAcknowledged: false,
   dailyCap: 20,
   rewindFresh: false,

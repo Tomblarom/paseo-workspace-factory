@@ -78,7 +78,16 @@ function addSteer(world, ws, slot = 'A') {
 function fakeClient(world) {
   const findWs = (id) => world.workspaces.find((w) => w.id === id) ?? null;
   const findAgent = (id) => world.agents.find((a) => a.id === id) ?? null;
-  const agentHandle = (id) => ({ id, refresh: async () => ({ agent: structuredClone(findAgent(id)) }) });
+  const agentHandle = (id) => ({
+    id,
+    refresh: async () => ({ agent: structuredClone(findAgent(id)) }),
+    detach: async () => {
+      world.calls.push(['sdk', 'agent.detach', id]);
+      const agent = findAgent(id);
+      if (!agent) throw new Error('agent missing');
+      delete agent.labels[PARENT_LABEL];
+    },
+  });
   const workspaceHandle = (id) => ({
     id,
     refresh: async () => structuredClone(findWs(id)),
@@ -107,12 +116,6 @@ function fakePaseoCli(world) {
         const [k, v] = pair.split('=');
         agent.labels[k] = v;
       }
-      return { id: agent.id };
-    }
-    if (args[0] === 'agent' && args[1] === 'detach') {
-      const agent = world.agents.find((a) => a.id === args[2]);
-      if (!agent) throw new Error('agent missing');
-      delete agent.labels[PARENT_LABEL];
       return { id: agent.id };
     }
     throw new Error(`unexpected paseo ${args.join(' ')}`);
@@ -243,9 +246,10 @@ test('--detach plans a native detach before the adoption; apply verifies freedom
   const adopted = world.agents.find((a) => a.id === candidate.id);
   assert.equal(adopted.labels[PARENT_LABEL], undefined);
   assert.equal(adopted.labels[LABEL.role], 'steer');
-  const detachCall = world.calls.findIndex((c) => c[0] === 'paseo' && c[1] === 'agent' && c[2] === 'detach');
+  const detachCall = world.calls.findIndex((c) => c[0] === 'sdk' && c[1] === 'agent.detach');
   const adoptCall = world.calls.findIndex((c) => c[0] === 'paseo' && c[1] === 'agent' && c[2] === 'update');
   assert.ok(detachCall !== -1 && adoptCall !== -1 && detachCall < adoptCall, 'detach runs before labelling');
+  assert.ok(!world.calls.some((c) => c[0] === 'paseo' && c[1] === 'agent' && c[2] === 'detach'), 'no CLI subprocess for detach');
 });
 
 test('detach executor refuses parentless and missing agents', async () => {

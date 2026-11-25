@@ -212,9 +212,7 @@ export function validateConfig(config) {
   if (config.handoffLanguage !== undefined && !['en', 'de'].includes(config.handoffLanguage)) errors.push('handoffLanguage must be "en" or "de"');
   const runtime = config.runtime ?? {};
   if (typeof runtime !== 'object') errors.push('runtime must be an object');
-  for (const key of ['stateDir', 'scratchDir']) {
-    if (runtime[key] !== undefined && (typeof runtime[key] !== 'string' || !runtime[key])) errors.push(`runtime.${key} must be a path`);
-  }
+  if (runtime.stateDir !== undefined && (typeof runtime.stateDir !== 'string' || !runtime.stateDir)) errors.push('runtime.stateDir must be a path');
   for (const key of ['url', 'bin', 'passwordFile']) {
     if (runtime.paseo?.[key] !== undefined && runtime.paseo[key] !== null && typeof runtime.paseo[key] !== 'string') errors.push(`runtime.paseo.${key} must be a string`);
   }
@@ -238,17 +236,8 @@ export function validateConfig(config) {
       }
     }
   }
-  if (config.advisors !== undefined) {
-    if (typeof config.advisors !== 'object' || config.advisors === null || Array.isArray(config.advisors)) errors.push('advisors must be an object');
-    else {
-      const advisorProfiles = config.advisors.profiles ?? {};
-      if (typeof advisorProfiles !== 'object' || advisorProfiles === null || Array.isArray(advisorProfiles)) errors.push('advisors.profiles must be an object');
-      else for (const [purpose, profile] of Object.entries(advisorProfiles)) {
-        if (!purpose) errors.push('advisors.profiles has an empty purpose name');
-        else if (!profiles[profile]) errors.push(`advisors.profiles.${purpose} references unknown profile "${profile}"`);
-      }
-    }
-  }
+  // Removed keys (advisors, runtime.scratchDir, top-level quotaSampleMinutes)
+  // are ignored silently for old installs; they are not validated.
   if (config.usage !== undefined) {
     if (typeof config.usage !== 'object' || config.usage === null || Array.isArray(config.usage)) errors.push('usage must be an object');
     else if (config.usage.warnContextTokens !== undefined && (!Number.isInteger(config.usage.warnContextTokens) || config.usage.warnContextTokens <= 0)) {
@@ -267,22 +256,14 @@ export function validateConfig(config) {
 }
 
 /**
- * Non-blocking config warnings (never thrown by loadConfig): advisor purposes
- * pointing at untagged profiles, advisor-tagged worker entries (never picked),
- * and advisor profiles that are also sensitive.
+ * Non-blocking config warnings (never thrown by loadConfig):
+ * advisor-tagged worker entries (never picked) and advisor profiles that
+ * are also sensitive.
  */
 export function configWarnings(config) {
   const warnings = [];
   if (!config || typeof config !== 'object') return warnings;
   const profiles = config.profiles ?? {};
-  const advisorProfiles = config.advisors?.profiles;
-  if (advisorProfiles && typeof advisorProfiles === 'object' && !Array.isArray(advisorProfiles)) {
-    for (const [purpose, name] of Object.entries(advisorProfiles)) {
-      if (profiles[name] && profiles[name].advisor !== true) {
-        warnings.push(`advisors.profiles.${purpose} uses profile "${name}" without the advisor tag`);
-      }
-    }
-  }
   for (const name of workerPriority(config)) {
     if (profiles[name]?.advisor === true) {
       warnings.push(`workers.priority lists advisor profile "${name}" (never picked for workers)`);

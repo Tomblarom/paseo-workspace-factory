@@ -31,8 +31,8 @@ function isAttentionReason(value: unknown): value is AttentionReason {
 }
 
 /**
- * Reads the attention feed, tolerating the pre-R-A server shape: rows come
- * from `attention` when present, else from the `factory.cold` alias `cold`.
+ * Reads the attention feed: rows come from `attention` when present, else
+ * from `cold` (the server sends both).
  */
 export function attentionRowsOf(event: unknown): AttentionRow[] {
   const record = event as { attention?: unknown; cold?: unknown } | null;

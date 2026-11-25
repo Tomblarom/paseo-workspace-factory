@@ -156,14 +156,13 @@ test("quota args take no scope, flags, or positionals", () => {
 });
 
 test("quota settings validation accepts boundaries and rejects bad numbers", () => {
-  assert.deepEqual(validateQuotaSettings({ quota: { exhaustedPct: 100, warnPct: 0 }, quotaSampleMinutes: 10 }), []);
+  assert.deepEqual(validateQuotaSettings({ quota: { exhaustedPct: 100, warnPct: 0 } }), []);
   assert.deepEqual(validateQuotaSettings(null), ["settings must be an object"]);
-  const errors = validateQuotaSettings({ quota: { exhaustedPct: 101, warnPct: -1 }, quotaSampleMinutes: 9 });
+  const errors = validateQuotaSettings({ quota: { exhaustedPct: 101, warnPct: -1 } });
   assert.match(JSON.stringify(errors), /quota\.exhaustedPct/);
   assert.match(JSON.stringify(errors), /quota\.warnPct/);
-  assert.match(JSON.stringify(errors), /quotaSampleMinutes/);
   assert.match(
-    JSON.stringify(validateQuotaSettings({ quota: { exhaustedPct: NaN, warnPct: 75 }, quotaSampleMinutes: 10.5 })),
-    /quota\.exhaustedPct|quotaSampleMinutes/,
+    JSON.stringify(validateQuotaSettings({ quota: { exhaustedPct: NaN, warnPct: 75 } })),
+    /quota\.exhaustedPct/,
   );
 });

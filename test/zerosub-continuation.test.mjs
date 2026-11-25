@@ -13,7 +13,6 @@ import {
 } from '../src/zerosub.mjs';
 import { applyContinuations, discoverRepository, remapWorkerParents } from '../src/discovery.mjs';
 import { planLabelFixes } from '../src/labels.mjs';
-import { assessWorker } from '../src/workers.mjs';
 import { resolveProfile } from '../src/models.mjs';
 import { steerStatus } from '../src/steer.mjs';
 import { LABEL, METADATA_KEY, PARENT_LABEL, parentOf } from '../src/paseo.mjs';
@@ -302,32 +301,6 @@ test('labels audit still flags the same agents without a continuation', () => {
     labels: { [CONTINUED_FROM_LABEL]: 'agent-missing' },
   };
   assert.deepEqual(planLabelFixes(scopeState([unattributed])), []);
-});
-
-// ---------------------------------------------------------------- worker assessment
-
-test('assessWorker refuses superseded origins and assesses continuations as the same worker', () => {
-  const ws = { id: 'w1', workspaceKind: 'worktree', project: { checkout: { isPaseoOwnedWorktree: true } } };
-  const clean = { dirty: false, untracked: 0, ignored: 0, detached: false, ahead: 0 };
-  const origin = { id: 'w-origin', status: 'idle', workspaceId: 'w1', labels: { [PARENT_LABEL]: 'steer-e' }, pendingPermissions: [] };
-  const cont = { id: 'w-cont', status: 'idle', workspaceId: 'w1', labels: { [CONTINUED_FROM_LABEL]: 'w-origin' }, pendingPermissions: [] };
-  const ctx = { agents: [origin, cont], workspaces: [ws], gitState: clean, backgroundWork: [], terminals: [] };
-  const refused = assessWorker(origin, ctx);
-  assert.equal(refused.archiveAgent, false);
-  assert.deepEqual(refused.reasons, ['superseded by continuation w-cont; retire it instead']);
-  // The continuation inherits the origin's parent: no 'has no parent' refusal.
-  const live = assessWorker(cont, ctx);
-  assert.equal(live.archiveAgent, true);
-  assert.equal(live.reasons.some((r) => r.includes('has no parent')), false);
-  // Subagents of the origin still belong to the live worker.
-  const sub = { id: 'sub1', workspaceId: 'w9', labels: { [PARENT_LABEL]: 'w-origin' } };
-  const withChild = assessWorker(cont, { ...ctx, agents: [origin, cont, sub] });
-  assert.equal(withChild.archiveAgent, false);
-  assert.ok(withChild.reasons.includes('has 1 live subagent(s)'));
-  // Without a known origin the continuation is assessed as-is.
-  const dangling = assessWorker(cont, { ...ctx, agents: [cont] });
-  assert.equal(dangling.archiveAgent, false);
-  assert.ok(dangling.reasons.includes('has no parent; not a delegated worker'));
 });
 
 // ---------------------------------------------------------------- worker pick pin

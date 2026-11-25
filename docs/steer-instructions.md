@@ -160,7 +160,7 @@ why: <why the worker cannot decide this alone>
 
 The steer decides: answer it itself, reject the request with a reason, or brief an advisor. Steers may also consult an advisor on their own initiative, without a worker request.
 
-Advisors always go through the native Paseo advisor mechanism (skill `paseo-advisor`): single agent, `[Advisor] <topic>` title, self-contained briefing, read-only plan mode. When `advisors.profiles` maps the purpose to a factory profile, use that profile; otherwise let the skill match its own profiles. Limits, no exceptions:
+Advisors always go through the native Paseo advisor mechanism (skill `paseo-advisor`): single agent, `[Advisor] <topic>` title, self-contained briefing, read-only plan mode. Let the skill match its own profiles. Limits, no exceptions:
 
 - Analysis only: no edits, no files, no code, no workers, no writes.
 - Close the advisor after its answer; synthesize verdict plus own recommendation. No persistent advisor unless the user asks for one.

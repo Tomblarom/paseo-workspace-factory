@@ -398,7 +398,7 @@ export function main(argv, deps = {}) {
     out('Rollback to the previous snapshot:');
     out(`  ${commands.rollback}`);
   }
-  out('Then verify: paseo plugin ls (running), paseo plugin logs workspace-factory, /factory ping');
+  out('Then verify: paseo plugin ls (running), paseo plugin logs workspace-factory, /factory status');
   if (args.install) {
     try {
       installSnapshot({ run, snapshotDir: built.snapshotDir, hash12: built.hash12, confirm: args.confirm });

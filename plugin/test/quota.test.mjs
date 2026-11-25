@@ -130,9 +130,9 @@ test("quota sampling parses paseo usage without host arguments and fails soft", 
   assert.equal(sampleQuota(() => { throw new Error("offline"); }, () => {}).claude.sessionPct, 78);
 });
 
-test("quota settings validate thresholds and sample floor", () => {
-  assert.deepEqual(validateQuotaSettings({ quota: { exhaustedPct: 90, warnPct: 75 }, quotaSampleMinutes: 10 }), []);
-  assert.match(JSON.stringify(validateQuotaSettings({ quota: { exhaustedPct: 101, warnPct: -1 }, quotaSampleMinutes: 5 })), /quota.exhaustedPct|quota.warnPct|quotaSampleMinutes/);
+test("quota settings validate thresholds", () => {
+  assert.deepEqual(validateQuotaSettings({ quota: { exhaustedPct: 90, warnPct: 75 } }), []);
+  assert.match(JSON.stringify(validateQuotaSettings({ quota: { exhaustedPct: 101, warnPct: -1 } })), /quota.exhaustedPct|quota.warnPct/);
 });
 
 test("failover chain prefers a different quota pool", () => {

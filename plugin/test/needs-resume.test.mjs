@@ -680,7 +680,7 @@ test("turn hook sends the resume brief after a verified resume clear", () => {
 test("server entry registers resume RPC, attention feed, and F4 wiring", () => {
   const serverEntry = readFileSync(new URL("../index.server.ts", import.meta.url), "utf8");
   assert.ok(serverEntry.includes("factoryResumeApply"), "resume RPC registered");
-  assert.ok(serverEntry.includes("factoryAttention"), "attention feed registered");
+  assert.ok(serverEntry.includes("factoryCold"), "attention feed registered");
   assert.ok(serverEntry.includes("factoryResumeSettings"), "resume settings registered");
   assert.ok(serverEntry.includes("delivery, getZerosub"), "supervision uses the shared delivery policy");
   assert.ok(serverEntry.includes("getResumeBrief"), "turn hook gets the brief builder");

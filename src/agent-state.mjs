@@ -52,7 +52,7 @@ function clipEntry(entry) {
     if (typeof clipped.interrupted.excerpt === 'string') clipped.interrupted.excerpt = clipText(clipped.interrupted.excerpt, EXCERPT_MAX);
     if (typeof clipped.interrupted.error === 'string') clipped.interrupted.error = clipText(clipped.interrupted.error, ERROR_MAX);
   }
-  for (const key of ['settingsBaseline', 'settingsConfirmed', 'settingsObserved']) {
+  for (const key of ['settingsBaseline', 'settingsConfirmed']) {
     const baseline = clipped[key];
     if (baseline && typeof baseline === 'object') {
       const next = { ...baseline };

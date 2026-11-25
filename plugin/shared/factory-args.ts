@@ -71,12 +71,6 @@ export const FACTORY_COMMANDS: Record<string, CommandHelp> = {
     details: ["Read-only. Without a scope it shows the project of this workspace."],
     examples: ["/factory workers", "/factory workers me/my-repo"],
   },
-  retire: {
-    usage: "/factory retire <agent-id>",
-    summary: "Check whether an agent could be archived (preview only).",
-    details: ["Read-only. Archiving itself stays disabled; this only reports blockers."],
-    examples: ["/factory retire agent-12345678"],
-  },
   models: {
     usage: "/factory models",
     summary: "List the providers and models Paseo offers right now.",
@@ -271,7 +265,6 @@ export type FactoryCommand =
   | { command: "relocate"; repo?: string; to: string }
   | { command: "assign"; repo?: string; task: string; tests: string[]; blockers: string[]; next?: string }
   | { command: "workers"; repo?: string }
-  | { command: "retire"; agentId: string }
   | { command: "models" }
   | { command: "drain"; timeout?: string }
   | { command: "quota" }
@@ -286,8 +279,6 @@ interface ModelEdit {
   mode?: string;
   profile?: string;
   dryRun: boolean;
-  /** Deprecation note for the slot/worker-default aliases. */
-  note?: string;
 }
 
 /** worker/steer list, set, rm and model advisor|sensitive: the lists live in the plugin settings. */
@@ -295,7 +286,7 @@ export type ModelsCommand =
   | { command: "worker" | "steer"; action: "list" }
   | { command: "worker"; action: "pick"; repo?: string }
   | ({ command: "worker" | "steer"; action: "set"; n: string } & ModelEdit)
-  | { command: "worker" | "steer"; action: "rm"; n: string; dryRun: boolean; note?: string }
+  | { command: "worker" | "steer"; action: "rm"; n: string; dryRun: boolean }
   | { command: "model"; flag: "advisor" | "sensitive"; spec: string; on: boolean; dryRun: boolean };
 
 // Subcommand being parsed, so errors can point at its usage and examples.
@@ -881,11 +872,6 @@ export function parseFactoryArgs(args: string): FactoryCommand {
       ? { command: "workers", repo: flags.positionals[0] }
       : { command: "workers" };
   }
-  if (sub === "retire") {
-    checkNoFlags(flags, "retire");
-    if (flags.positionals.length !== 1) fail("retire needs exactly one agent id.");
-    return { command: "retire", agentId: flags.positionals[0] };
-  }
   if (sub === "models") {
     checkNoFlags(flags, "models");
     if (flags.positionals.length) fail("models takes no arguments.");
@@ -979,54 +965,6 @@ export function parseFactoryArgs(args: string): FactoryCommand {
       };
     }
     return fail(sub === "worker" ? `${sub} needs list, pick, set or rm.` : `${sub} needs list, add, set or rm.`);
-  }
-  if (sub === "slot") {
-    // Deprecated alias of `steer set|rm` (letters only, like the CLI).
-    const [action, ...args] = flags.positionals;
-    const dryRun = flags.bools.has("dry-run");
-    const note = 'Note: "slot" is deprecated, use "steer" instead.';
-    if (action === "set") {
-      checkAllowed(flags, "slot set", ["thinking", "mode", "profile", "dry-run"]);
-      if (args.length !== 2) fail("slot set needs a slot letter A-Z and a provider/model.");
-      if (!args[1].includes("/")) fail("slot set needs a provider/model, e.g. codex/gpt-6.2-sol.");
-      return {
-        command: "steer",
-        action: "set",
-        n: checkSlot(args[0], "slot set"),
-        spec: args[1],
-        ...(flags.singles.get("thinking") !== undefined ? { thinking: flags.singles.get("thinking") as string } : {}),
-        ...(flags.singles.get("mode") !== undefined ? { mode: flags.singles.get("mode") as string } : {}),
-        ...(flags.singles.get("profile") !== undefined ? { profile: flags.singles.get("profile") as string } : {}),
-        dryRun,
-        note,
-      };
-    }
-    if (action === "rm") {
-      checkAllowed(flags, "slot rm", ["dry-run"]);
-      if (args.length !== 1) fail("slot rm needs exactly one slot letter A-Z.");
-      return { command: "steer", action: "rm", n: checkSlot(args[0], "slot rm"), dryRun, note };
-    }
-    return fail('slot needs set or rm; "slot" itself is deprecated, use "steer" instead.');
-  }
-  if (sub === "worker-default") {
-    // Deprecated alias of `worker set 1`.
-    checkAllowed(flags, "worker-default", ["thinking", "mode", "profile", "dry-run"]);
-    const [spec, ...rest] = flags.positionals;
-    if (!spec || rest.length) fail("worker-default needs a profile or provider/model.");
-    if (!spec.includes("/") && (flags.singles.get("thinking") !== undefined || flags.singles.get("mode") !== undefined || flags.singles.get("profile") !== undefined)) {
-      fail("--thinking, --mode and --profile only go with provider/model; a profile name is used as it is.");
-    }
-    return {
-      command: "worker",
-      action: "set",
-      n: "1",
-      spec,
-      ...(flags.singles.get("thinking") !== undefined ? { thinking: flags.singles.get("thinking") as string } : {}),
-      ...(flags.singles.get("mode") !== undefined ? { mode: flags.singles.get("mode") as string } : {}),
-      ...(flags.singles.get("profile") !== undefined ? { profile: flags.singles.get("profile") as string } : {}),
-      dryRun: flags.bools.has("dry-run"),
-      note: 'Note: "worker-default" is deprecated, use "worker set 1" instead.',
-    };
   }
   if (sub === "model") {
     checkAllowed(flags, "model", ["dry-run"]);

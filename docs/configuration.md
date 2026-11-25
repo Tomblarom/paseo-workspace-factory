@@ -24,18 +24,16 @@ The config is looked up in this order: `--config <path>`, `$PASEO_FACTORY_CONFIG
 | `steers.activeMarker` | Tab-title prefix on the active steer (`▷ Steer E`; default `"▷"`). `switch --apply`, `fresh` and resume-takeover move it to the new active steer and strip it from the old one (best-effort renames via `paseo agent update --name`); empty disables the marker. Title matching tolerates the prefix. |
 | `workers.priority` | Ordered profile-name list for workers, highest priority first. A missing `priority` reads as `[defaultProfile]`; writing sets `defaultProfile` to `priority[0]` for older readers. |
 | `workers.defaultProfile` | First entry of `workers.priority`, kept for backwards compatibility. Prefer `workers.priority`. |
-| `advisors.profiles` | Optional purpose → profile name mapping for second opinions (see below). A validation warning is shown when a mapped profile is not advisor-tagged. |
 | `usage.warnContextTokens` | Optional positive integer (default off): `status` warns for agents above it, with a switch/fresh recommendation. |
 | `quota.warnPct` / `quota.exhaustedPct` | Session quota warning/exhaustion thresholds (defaults `75` and `95`). |
 | `profiles.<name>.pool` | Optional quota-pool name. Defaults to the profile's provider; profiles in one pool share availability and failover preference. |
 | `wsf.profileHealth` (workspace metadata) | Runtime-only profile failure marks, written under the workspace lock from a fresh read as their own top-level key (never inside the `wsf` scope state, so a concurrent switch/epoch is kept). `worker pick --failed <profile> --reason <text>` records the failure; the profile is skipped for 10 minutes with its classified reason, without changing config or the provider catalog. A legacy nested `profileHealth` field inside the `wsf` scope state is still read. |
 | `runtime.stateDir` | Plans, progress, journals and locks (default `$XDG_STATE_HOME/paseo-workspace-factory`). |
-| `runtime.scratchDir` | Scratch repositories of live tests (default `<stateDir>/scratch`). |
 | `runtime.paseo.url` | Daemon WebSocket URL (default `ws://127.0.0.1:6767/ws`). |
 | `runtime.paseo.bin` | `paseo` CLI (default `paseo` on PATH); its installation also provides the SDK. |
 | `runtime.paseo.passwordFile` | File with the daemon password, if the daemon requires one. |
 
-Environment overrides: `PASEO_FACTORY_STATE_DIR`, `PASEO_FACTORY_SCRATCH_DIR`, `PASEO_WS_URL`, `PASEO_FACTORY_PASEO_BIN`, `PASEO_PASSWORD_FILE`, `PASEO_PASSWORD`.
+Environment overrides: `PASEO_FACTORY_STATE_DIR`, `PASEO_WS_URL`, `PASEO_FACTORY_PASEO_BIN`, `PASEO_PASSWORD_FILE`, `PASEO_PASSWORD`.
 
 Per-run slot selection: `plan <repo> --slots D` (comma-separated, e.g. `--slots B,D`) plans only those slots instead of `steers.prepare`. `--adopt X=<agent-id>` accepts any slot defined in `steers.slots`; adopting a slot outside `prepare` plans only the adopted slot(s), not the rest of `prepare`.
 
@@ -176,23 +174,13 @@ Settings → Plugins → Factory → Steer menu:
 
 ## Advisors
 
-Second opinions ("Advisor") are policy only: the factory creates no advisor agents itself. Steers brief advisors through the native Paseo advisor mechanism (skill `paseo-advisor`); workers that get stuck end their answer with an `ADVISOR-REQUEST` block and stop, and the steer decides whether to answer, reject, or consult an advisor. Format and limits (read-only, close after the answer, sanitized context only) live in [steer instructions](steer-instructions.md#advisor-policy).
+Second opinions ("Advisor") are policy only: the factory creates no advisor agents itself. Steers brief advisors through the native Paseo advisor mechanism (skill `paseo-advisor`); workers that get stuck end their answer with an `ADVISOR-REQUEST` block and stop, and the steer decides whether to answer, reject, or consult an advisor. Format and limits (read-only, close after the answer, sanitized context only) live in [steer instructions](steer-instructions.md#advisor-policy). The steer lets the skill match its own profiles. The factory never launches advisors by itself and never reports their usage.
 
-Optional `advisors.profiles` maps an advisor purpose to a factory profile from `profiles` (validated on load; unknown profiles are rejected):
-
-```json
-"advisors": {
-  "profiles": { "design": "senior-reviewer", "routine": "cheap" }
-}
-```
-
-Without a mapping the steer lets the skill match its own profiles. The factory never launches advisors by itself and never reports their usage.
-
-A profile with `"advisor": true` marks its model as a second-opinion candidate for the `paseo-advisor` skill. The tag doubles as the explicit approval for expensive models ("expensive models only on explicit request"). Skipped profiles are reported with their reason; advisor-tagged profiles are never picked for workers or non-advisor slots, and a validation warning is shown when `advisors.profiles` names a profile without the tag. A steer slot whose profile carries the tag is an advisor steer: it answers only and never coordinates (see [concepts](concepts.md#advisor-steers-and-priority)).
+A profile with `"advisor": true` marks its model as a second-opinion candidate for the `paseo-advisor` skill. The tag doubles as the explicit approval for expensive models ("expensive models only on explicit request"). Skipped profiles are reported with their reason; advisor-tagged profiles are never picked for workers or non-advisor slots. A steer slot whose profile carries the tag is an advisor steer: it answers only and never coordinates (see [concepts](concepts.md#advisor-steers-and-priority)).
 
 ## Quota pools
 
-In the Paseo composer, run `/factory quota` (or press **Quota** in the Factory panel) to see provider quota pools with their warn/exhausted state plus which steer or worker uses each pool. The view is read-only. Thresholds live in Settings → Plugins → Factory → Quota: `warnPct` (default 75), `exhaustedPct` (default 95), and the sample cadence `quotaSampleMinutes` (whole minutes, at least 10). The plugin samples quota in the background (result pill; the sidebar warns when a non-advisor steer's pool reaches the warn level).
+In the Paseo composer, run `/factory quota` (or press **Quota** in the Factory panel) to see provider quota pools with their warn/exhausted state plus which steer or worker uses each pool. The view is read-only. Thresholds live in Settings → Plugins → Factory → Quota: `warnPct` (default 75) and `exhaustedPct` (default 95). The plugin samples quota in the background (result pill; the sidebar warns when a non-advisor steer's pool reaches the warn level).
 
 Profiles belong to a quota pool named by `profiles.<name>.pool`, or by their provider when `pool` is omitted. A pool at `quota.exhaustedPct` is skipped by profile resolution. Briefs show a preferred different pool at `quota.warnPct`; configure at least two non-advisor steer pools to make that failover useful.
 
@@ -212,8 +200,6 @@ Use these commands in the Paseo composer. The catalog and priority checks also a
 Use `/factory steer add [slot] [profile|provider/model]` to create a steer in the current scope. Omit the slot to suggest a free one. Omit the profile to use the configured profile for the slot or pick an eligible one by priority. The preview shows the model, any selected ZeroSub account, and why alternatives were skipped. Confirm in the panel to save the slot and create the agent. Use `/factory switch` to activate it. The default slots for other scopes stay unchanged.
 
 Model lists are ordered by priority, highest first. `worker set <n> <model>` inserts the model at position n; the entries from n onwards move down by one, and an existing copy of the same model is removed, so every model appears once. `worker rm <n>` removes an entry and closes the gap. Steer slots never shift: `steer set <n|slot>` replaces the slot's profile (`steer set 2 X` is `steer set B X`); a number past the end is refused, a free letter within reach creates the slot without opening a gap. `set` creates or updates a profile (named by `--profile`, otherwise the slot's/entry's current profile, or `<provider>-<model>` for a new entry) after validating against the live catalog including `knownLimits`. Omitted `--thinking`/`--mode` keep the stored value (new profiles default to `"thinking": null` and no mode); use `--thinking null` for the provider default. A temporarily unavailable model is still stored, but with a warning — a fallback list may hold such entries; an unknown provider/model syntax is an error. When a model is not available in the live catalog, the next entry that is available and allowed for the role and repository (advisor and sensitive rules) is used. `rm` keeps the profile; `steer rm` also repairs `prepare`/`initialActive`. Writes act directly (reversible, no hash), like saving in Settings; plan and apply only concern agents. CLI writes are atomic (tmp + rename, file mode kept); `--dry-run` prints the new config instead of writing it. From the plugin, `/factory worker|steer|model …` calls an RPC that writes the host settings document, which overlays the file and is therefore the effective source.
-
-Aliases (deprecated, print a hint on use): `slot set B …` is `steer set B …`, `slot rm B` is `steer rm B`, and `worker-default X` is `worker set 1 X`.
 
 Resolution with availability fallback: the factory picks the first list entry that passes the catalog check and matches the role. Workers use `workers.priority` and always skip advisor profiles; sensitive profiles are skipped unless the repository is provably public. Steer slot S uses `[slots[S], then the profiles of the following slots, then the previous ones]`; a non-advisor slot takes only non-advisor profiles, an advisor slot only advisor profiles, and a fallback never picks a profile a living steer of the same scope already uses (no duplicates). Skipped profiles appear as notes (`B: muse not available → copilot-sonnet`); when nothing is available, steers get a plan conflict and workers an error listing the reasons. The fallback applies only when creating (`plan`, `fresh`, `relocate`, `worker pick`): running agents never change their model — a failed steer is taken over by the next slot via failover. When `fresh` creates with a fallback profile, the result suggests the `steer set` command that would point the slot at the created model. The plugin caches the catalog for 60 s.
 

@@ -30,7 +30,7 @@ import {
 } from "../shared/settings-validate.js";
 import { setCheckpointInChat } from "./checkpoint-display.js";
 import { AutosaveInput, SettingsSaveError, useAutosave } from "./settings-autosave.js";
-import { commaSeparated, percentage, wholeNumber, type SettingsEdit } from "./settings-edit.js";
+import { commaSeparated, percentage, type SettingsEdit } from "./settings-edit.js";
 
 const STEERS_INFO =
   "One steer coordinates a project at a time. Set up multiple slots to hand over with /factory switch.";
@@ -656,19 +656,6 @@ function FactoryConfigSections({ theme, layout }: PluginSurfaceProps) {
               }}
             />
           ))}
-          <AutosaveInput
-            label="Sample at most every (minutes)"
-            hint="Default 10."
-            stored={String(draft.quotaSampleMinutes)}
-            save={change("Quota")}
-            edit={(text) => {
-              const quotaSampleMinutes = wholeNumber(text);
-              if (!Number.isSafeInteger(quotaSampleMinutes) || quotaSampleMinutes < 10) {
-                return "Enter a whole number of minutes, at least 10.";
-              }
-              return (current) => ({ ...current, quotaSampleMinutes });
-            }}
-          />
           <SettingsSaveError error={saveErrors.Quota} />
         </SettingsCard>
       </SettingsSection>

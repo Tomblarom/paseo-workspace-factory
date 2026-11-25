@@ -24,7 +24,7 @@ const {
 } = await import("../shared/idle-cleanup.ts");
 import { resumeFingerprint } from "../shared/preview.ts";
 import { factoryResumeSettings } from "../shared/settings.ts";
-import { factoryAttention, factoryCold, factoryResumeApply } from "../shared/factory.ts";
+import { factoryCold, factoryResumeApply } from "../shared/factory.ts";
 import { LABEL, METADATA_KEY, readPaseoState } from "../../src/paseo.mjs";
 import { AGENTS_KEY } from "../../src/agent-state.mjs";
 import { CHECKPOINT_KEY, buildResumeBrief, freshSteer, steerStatus, workerResumeAnswer } from "../../src/steer.mjs";
@@ -156,14 +156,13 @@ test("factory.resume.apply contract and resume settings defaults", () => {
     factoryResumeApply.output.parse({ agentId: "a", cleared: true, detail: "d" }),
     { agentId: "a", cleared: true, detail: "d" },
   );
-  assert.equal(factoryAttention.name, "factory.attention");
   assert.equal(factoryCold.name, "factory.cold");
   const payload = {
     attention: [],
     cold: [],
     autoDisabled: false,
   };
-  assert.deepEqual(factoryAttention.event.parse(payload).attention, []);
+  assert.deepEqual(factoryCold.event.parse(payload).attention, []);
   assert.deepEqual(factoryCold.event.parse(payload).cold, []);
   const row = {
     workspaceId: "w",
@@ -174,14 +173,14 @@ test("factory.resume.apply contract and resume settings defaults", () => {
     canFresh: false,
     reason: "limit",
   };
-  assert.equal(factoryAttention.event.parse({ ...payload, attention: [row] }).attention[0].reason, "limit");
+  assert.equal(factoryCold.event.parse({ ...payload, cold: [row] }).cold[0].reason, "limit");
   const freshRow = { ...row, reason: "cold", freshHint: "package boundary" };
   assert.equal(
-    factoryAttention.event.parse({ ...payload, attention: [freshRow] }).attention[0].freshHint,
+    factoryCold.event.parse({ ...payload, cold: [freshRow] }).cold[0].freshHint,
     "package boundary",
   );
   assert.equal(
-    factoryAttention.event.parse({ ...payload, attention: [row] }).attention[0].freshHint,
+    factoryCold.event.parse({ ...payload, cold: [row] }).cold[0].freshHint,
     undefined,
     "pre-change rows without the hint still parse",
   );

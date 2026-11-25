@@ -4,7 +4,7 @@ Workspace Factory provisions and steers standardized Paseo workspaces from GitHu
 
 The plugin speaks to the daemon through RPCs. Reads show status and dry run plans. Writes stay two stage: a plan or preview first, then a confirm step that quotes the stored plan hash or the preview fingerprint. The server recomputes the fingerprint from fresh state and refuses stale previews, so a write never runs without the preview shown in the panel.
 
-The `/factory` slash command offers status, scopes, cleanup, plan, apply, checkpoint, switch, and resume. Without a scope address, commands use the scope of the current workspace; in workers the command refuses with a hint. The Factory panel shows results with confirm buttons. Command Center items open the same panel. A sidebar entry shows a compact steer status; it is shown or hidden in Paseo's own sidebar settings.
+The `/factory` slash command offers status, scopes, cleanup, plan, apply, checkpoint, switch, and resume. Without a scope address, commands use the scope of the current workspace; in workers the command refuses with a hint. The Factory panel shows results with confirm buttons. One Command Center item opens the same panel. A sidebar entry shows a compact steer status; it is shown or hidden in Paseo's own sidebar settings.
 
 ## Cold context
 

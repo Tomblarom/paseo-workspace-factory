@@ -218,8 +218,8 @@ test("validateCleanupSettings accepts the defaults and reports each bad field", 
     minContextTokens: 10,
     providers: [],
     roles: ["advisor"],
-    seedAfterClear: "yes",
     clearAcknowledged: 1,
+    rewindFresh: "yes",
     dailyCap: 0,
   };
   const errors = validateCleanupSettings(bad);
@@ -229,8 +229,8 @@ test("validateCleanupSettings accepts the defaults and reports each bad field", 
   assert.match(JSON.stringify(errors), /minContextTokens must be an integer of at least 1000/);
   assert.match(JSON.stringify(errors), /at least one provider/);
   assert.match(JSON.stringify(errors), /steer or worker/);
-  assert.match(JSON.stringify(errors), /seedAfterClear must be a boolean/);
   assert.match(JSON.stringify(errors), /clearAcknowledged must be a boolean/);
+  assert.match(JSON.stringify(errors), /rewindFresh must be a boolean/);
   assert.match(JSON.stringify(errors), /dailyCap must be an integer of at least 1/);
 });
 
@@ -262,4 +262,18 @@ test("validateCleanupSettings and the schema cover rewindFresh (default off)", a
   const stored = { ...CLEANUP_DEFAULTS };
   delete stored.rewindFresh;
   assert.equal(factoryCleanupSettings.schema.parse(stored).rewindFresh, false);
+});
+
+test("removed settings keys are ignored silently (old installs)", async () => {
+  const { factoryCleanupSettings, factoryConfigSettings } = await import("../shared/settings.ts");
+  // Old factory-config documents with the removed quotaSampleMinutes copy.
+  const oldConfig = { ...validSettings(), quota: { exhaustedPct: 95, warnPct: 75 }, quotaSampleMinutes: 10 };
+  assert.deepEqual(validateFactorySettings(oldConfig), []);
+  const parsedConfig = factoryConfigSettings.schema.parse(oldConfig);
+  assert.equal("quotaSampleMinutes" in parsedConfig, false);
+  // Old factory-cleanup documents with the removed seedAfterClear key.
+  const oldCleanup = { ...CLEANUP_DEFAULTS, seedAfterClear: true };
+  assert.deepEqual(validateCleanupSettings(oldCleanup), []);
+  const parsedCleanup = factoryCleanupSettings.schema.parse(oldCleanup);
+  assert.equal("seedAfterClear" in parsedCleanup, false);
 });

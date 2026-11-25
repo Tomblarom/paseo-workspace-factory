@@ -423,7 +423,7 @@ export function createExecutors({ client, gh, git, paseoCli, sleep = (ms) => new
       const before = await client.workspaces.ref(workspaceId).refresh();
       if (!before) throw new Error(`Workspace ${workspaceId} is missing`);
       if ((before.title ?? before.name) === title) throw new Error(`Workspace ${workspaceId} is already titled ${JSON.stringify(title)}`);
-      paseoCli(['workspace', 'rename', workspaceId, title]);
+      await client.workspaces.ref(workspaceId).setTitle(title);
       const after = await client.workspaces.ref(workspaceId).refresh();
       if ((after?.title ?? after?.name) !== title) throw new Error(`Workspace ${workspaceId} title is ${JSON.stringify(after?.title ?? after?.name)}, expected ${JSON.stringify(title)}`);
       return { workspaceId, title };
@@ -447,7 +447,7 @@ export function createExecutors({ client, gh, git, paseoCli, sleep = (ms) => new
       const current = parentOf(before);
       if (!current) throw new Error(`Agent ${agentId} has no parent; nothing to detach`);
       if (parent !== undefined && current !== parent) throw new Error(`Agent ${agentId} parent is ${current}, expected ${parent}`);
-      paseoCli(['agent', 'detach', agentId]);
+      await handle.detach();
       const after = (await handle.refresh())?.agent;
       if (parentOf(after)) throw new Error(`Agent ${agentId} still has parent ${parentOf(after)} after detach`);
       return { agentId, detachedFrom: current };

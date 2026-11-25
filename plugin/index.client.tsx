@@ -266,54 +266,10 @@ export default function contribute(client: PluginClientContext) {
     { onClosed: () => markSteerPillsDisconnected(steerPills) },
   );
   client.addCommandCenterItem({
-    id: "factory-status",
-    title: "Factory: status",
-    icon: "Factory",
-    keywords: ["steer", "checkpoint"],
-    context: "agent",
-    onSelect: (ctx) => {
-      guardAgent(ctx.agent, "Factory");
-      openFactory(ctx);
-    },
-  });
-  client.addCommandCenterItem({
-    id: "factory-plan",
-    title: "Factory: plan",
-    icon: "Factory",
-    keywords: ["steer", "provision"],
-    context: "agent",
-    onSelect: (ctx) => {
-      guardAgent(ctx.agent, "Factory");
-      openFactory(ctx);
-    },
-  });
-  client.addCommandCenterItem({
-    id: "factory-checkpoint",
-    title: "Factory: checkpoint",
-    icon: "Factory",
-    keywords: ["steer", "task"],
-    context: "agent",
-    onSelect: (ctx) => {
-      guardAgent(ctx.agent, "Factory");
-      openFactory(ctx);
-    },
-  });
-  client.addCommandCenterItem({
-    id: "factory-switch",
-    title: "Factory: switch steer",
-    icon: "Factory",
-    keywords: ["steer", "handoff"],
-    context: "agent",
-    onSelect: (ctx) => {
-      guardAgent(ctx.agent, "Factory");
-      openFactory(ctx);
-    },
-  });
-  client.addCommandCenterItem({
     id: "factory-open-panel",
     title: "Factory: open panel",
     icon: "Factory",
-    keywords: ["steer", "panel"],
+    keywords: ["steer", "panel", "status", "checkpoint", "plan", "switch"],
     context: "workspace",
     onSelect: openFactory,
   });

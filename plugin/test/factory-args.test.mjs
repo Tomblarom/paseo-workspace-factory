@@ -303,9 +303,7 @@ test("fresh, workers, models and drain parse", () => {
   assert.throws(() => parseFactoryArgs("models x"), /takes no arguments/);
   assert.throws(() => parseFactoryArgs("drain a/b"), /whole instance/);
   assert.throws(() => parseFactoryArgs("drain --timeout"), /needs a value/);
-  assert.throws(() => parseFactoryArgs("retire"), /exactly one agent id/);
-  assert.deepEqual(parseFactoryArgs("retire agent-9"), { command: "retire", agentId: "agent-9" });
-  assert.throws(() => parseFactoryArgs("retire a b"), /exactly one agent id/);
+  assert.throws(() => parseFactoryArgs("retire agent-9"), /Unknown subcommand/);
 });
 
 test("relocate needs a target, assign needs a task", () => {
@@ -343,33 +341,10 @@ test("worker pick takes an optional scope", () => {
   assert.throws(() => parseFactoryArgs("steer pick"), /no pick/);
 });
 
-test("slot and worker-default are deprecated aliases of steer and worker set 1", () => {
-  assert.deepEqual(parseFactoryArgs("slot set B codex/gpt-6.2-sol"), {
-    command: "steer",
-    action: "set",
-    n: "B",
-    spec: "codex/gpt-6.2-sol",
-    dryRun: false,
-    note: 'Note: "slot" is deprecated, use "steer" instead.',
-  });
-  assert.deepEqual(parseFactoryArgs("slot rm B"), {
-    command: "steer",
-    action: "rm",
-    n: "B",
-    dryRun: false,
-    note: 'Note: "slot" is deprecated, use "steer" instead.',
-  });
-  assert.deepEqual(parseFactoryArgs("worker-default codex/gpt-6.2-sol"), {
-    command: "worker",
-    action: "set",
-    n: "1",
-    spec: "codex/gpt-6.2-sol",
-    dryRun: false,
-    note: 'Note: "worker-default" is deprecated, use "worker set 1" instead.',
-  });
-  assert.throws(() => parseFactoryArgs("slot set B my-profile"), /provider\/model/);
-  assert.throws(() => parseFactoryArgs("slot"), /set or rm/);
-  assert.throws(() => parseFactoryArgs("worker-default"), /needs a profile/);
+test("removed slot and worker-default aliases fail as unknown subcommands", () => {
+  assert.throws(() => parseFactoryArgs("slot set B codex/gpt-6.2-sol"), /Unknown subcommand/);
+  assert.throws(() => parseFactoryArgs("slot rm B"), /Unknown subcommand/);
+  assert.throws(() => parseFactoryArgs("worker-default codex/gpt-6.2-sol"), /Unknown subcommand/);
 });
 
 test("model advisor and sensitive take a profile and on|off", () => {

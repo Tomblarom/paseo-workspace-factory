@@ -113,12 +113,6 @@ export function CleanupSettingsSection() {
           onValueChange={(clearAcknowledged) => void save((current) => ({ ...current, clearAcknowledged }))}
         />
         <SettingsSwitch
-          label="Remind the agent after clearing"
-          hint="Asks the agent to run resume before its next task. Costs one small turn."
-          value={values.seedAfterClear}
-          onValueChange={(seedAfterClear) => void save((current) => ({ ...current, seedAfterClear }))}
-        />
-        <SettingsSwitch
           label="Rewind “fresh” Codex chats in place"
           hint="When cleanup recommends a fresh Codex agent, rewind the chat in its existing tab. The agent continues from its checkpoint with /factory resume."
           value={values.rewindFresh}

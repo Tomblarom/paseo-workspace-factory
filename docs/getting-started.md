@@ -103,7 +103,6 @@ For first-time setup, open **Settings → Plugins → Factory** in Paseo. Under 
 | move a project to another checkout | `/factory relocate --to <path>`, then confirm in the panel |
 | send a task to a project's steer (hub/domain) | `/factory assign --task "…"`, then confirm in the panel |
 | see the helper agents of a project | `/factory workers` |
-| check whether an agent could be archived | `/factory retire <agent-id>` (preview only) |
 | list providers and models | `/factory models` |
 | see quota pools and who uses them | `/factory quota` |
 | wait until nothing runs (safe restart) | `/factory drain` |

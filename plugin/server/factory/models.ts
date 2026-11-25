@@ -4,7 +4,7 @@
 // Validation reuses validateProfilesAgainstCatalog() from config.mjs, the same
 // check the planner runs (live catalog shape plus knownLimits).
 import { chmod, rename, stat, unlink, writeFile } from 'node:fs/promises';
-import { SLOT_PATTERN, isAdvisorProfile, isAdvisorSlot, isSensitiveProfile, slotOrder, validateConfig, validateProfilesAgainstCatalog, workerPriority } from './config.js';
+import { isAdvisorProfile, isAdvisorSlot, isSensitiveProfile, slotOrder, validateConfig, validateProfilesAgainstCatalog, workerPriority } from './config.js';
 import { profileIsUnhealthy, quotaExhausted, profilePool, profileFamily, familyAccounts, familyExhausted, bestFamilyAccount, earliestFamilyReset } from './quota.js';
 import { suggestAccountPin } from './zerosub.js';
 
@@ -547,14 +547,6 @@ export function planWorkerRemove(config, n) {
 }
 
 /**
- * Plan `worker-default`: alias of `worker set 1` (insert at the front,
- * duplicates move). Deprecated; the CLI prints a hint.
- */
-export function planWorkerDefault(config, providerEntries, { spec, thinking, mode, profile }) {
-  return planWorkerSet(config, providerEntries, { n: 1, spec, thinking, mode, profile });
-}
-
-/**
  * Resolve a `steer set|rm` target: a slot letter (existing, or a free one for
  * set) or a 1-based position in slot order (2 is B). Steer slots never shift:
  * positions address the current order, replacements keep every letter. A new
@@ -656,20 +648,10 @@ export function planSteerSet(config, providerEntries, { target, spec, thinking, 
   };
 }
 
-/**
- * Plan `slot set`: alias of `steer set` with provider/model (replace, no
- * shifting). Deprecated; the CLI prints a hint.
- */
-export function planSlotSet(config, providerEntries, { slot, provider, model, thinking, mode, profile }) {
-  if (!provider || !model) throw new Error('slot set needs <provider>/<model>');
-  return planSteerSet(config, providerEntries, { target: slot, spec: `${provider}/${model}`, thinking, mode, profile });
-}
-
-/** Plan `slot rm`: drop the slot, keep its profile, repair prepare/initialActive. */
-export function planSlotRemove(config, slot) {
-  if (!SLOT_PATTERN.test(slot ?? '')) throw new Error(`Slot must be a single capital letter A-Z, got ${JSON.stringify(slot)}`);
+/** Plan `steer rm <n|slot>`: drop the slot, keep its profile, repair prepare/initialActive. */
+export function planSteerRemove(config, target) {
+  const slot = resolveSteerTarget(config, target, { allowNewLetter: false });
   const slots = config.steers?.slots ?? {};
-  if (!slots[slot]) throw new Error(`Slot ${slot} is not defined in steers.slots`);
   if (Object.keys(slots).length === 1) throw new Error(`Cannot remove slot ${slot}: at least one slot must remain`);
   const next = structuredClone(config);
   const before = slotList(config);
@@ -684,11 +666,6 @@ export function planSlotRemove(config, slot) {
     config: next, slot, removedProfile, before, after,
     summary: `steer slots: [${before.join(', ')}] → [${after.join(', ')}] (slot ${slot} removed, profile "${removedProfile}" kept)`,
   };
-}
-
-/** Plan `steer rm <n|slot>`: same as slot rm, addressed by letter or position. */
-export function planSteerRemove(config, target) {
-  return planSlotRemove(config, resolveSteerTarget(config, target, { allowNewLetter: false }));
 }
 
 /**

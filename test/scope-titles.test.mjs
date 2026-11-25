@@ -80,6 +80,13 @@ function fakeClient(world) {
     id,
     refresh: async () => structuredClone(findWs(id)),
     setMetadata: async (patch) => { Object.assign(findWs(id).metadata, structuredClone(patch)); },
+    setTitle: async (title) => {
+      world.calls.push(['sdk', 'workspace.setTitle', id, title]);
+      const ws = findWs(id);
+      if (!ws) throw new Error('workspace missing');
+      ws.title = title;
+      ws.name = title;
+    },
     agents: {
       create: async (opts) => {
         const [provider, ...rest] = opts.config.provider.split('/');
@@ -118,13 +125,6 @@ function fakePaseoCli(world) {
       if (!project) throw new Error('project missing');
       project.projectDisplayName = args[3];
       return { projectId: project.projectId };
-    }
-    if (args[0] === 'workspace' && args[1] === 'rename') {
-      const ws = world.workspaces.find((w) => w.id === args[2]);
-      if (!ws) throw new Error('workspace missing');
-      ws.title = args[3];
-      ws.name = args[3];
-      return { id: ws.id };
     }
     if (args[0] === 'project') return { projectId: addProject(world, args[2]).projectId, path: args[2] };
     throw new Error(`unexpected paseo ${args.join(' ')}`);
@@ -275,7 +275,8 @@ test('retitle apply renames and verifies; rerun is clean', async () => {
   });
   assert.equal(result.report[0].status, 'complete', result.report[0].error);
   assert.equal(world.workspaces[0].title, 'demo · Main');
-  assert.ok(world.calls.some((c) => c[0] === 'paseo' && c[1] === 'workspace' && c[2] === 'rename'));
+  assert.ok(world.calls.some((c) => c[0] === 'sdk' && c[1] === 'workspace.setTitle' && c[3] === 'demo · Main'));
+  assert.ok(!world.calls.some((c) => c[0] === 'paseo' && c[1] === 'workspace' && c[2] === 'rename'), 'no CLI subprocess for rename');
   const [after] = await runner.runPlans(entries, { retitle: true });
   assert.equal(after.status, 'complete');
 });

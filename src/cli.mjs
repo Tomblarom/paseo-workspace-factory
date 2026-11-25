@@ -17,10 +17,10 @@ import { AGENTS_KEY } from './agent-state.mjs';
 import { listScopes, resolveScope, domainFirstPlanOrder } from './scope.mjs';
 import { planLabelFixes, formatLabelFixes } from './labels.mjs';
 import { DRAIN_DEFAULT_TIMEOUT_MS, drain, parseTimeout } from './drain.mjs';
-import { assessWorker, readGitState, startScopedWorker } from './workers.mjs';
+import { startScopedWorker } from './workers.mjs';
 import { formatWorkersPruneText, formatWorkersText, pruneWorkerRegister, readWorkers, staleWorkerEntries, workersReport } from './supervision.mjs';
 import { assignScope } from './assign.mjs';
-import { flagValue, formatCatalog, formatWorkerModel, parseProviderModel, paseoRunFlags, planAdvisorTag, planSensitiveTag, planSlotRemove, planSlotSet, planSteerRemove, planSteerSet, planWorkerDefault, planWorkerRemove, planWorkerSet, previewConfig, resolveProfile, resolveWorkerPick, steerFallbackList, workerListRows, writeConfigAtomic } from './models.mjs';
+import { flagValue, formatCatalog, formatWorkerModel, paseoRunFlags, planAdvisorTag, planSensitiveTag, planSteerRemove, planSteerSet, planWorkerRemove, planWorkerSet, previewConfig, resolveProfile, resolveWorkerPick, steerFallbackList, workerListRows, writeConfigAtomic } from './models.mjs';
 import { scopeRows, scopeCandidates, formatScopeRows, formatScopeCandidates, formatStatus } from './scopes-view.mjs';
 import { applyContinuations } from './discovery.mjs';
 import { validateProfilesAgainstCatalog } from './config.mjs';
@@ -78,7 +78,6 @@ const USAGE = `Usage: paseo-factory <command> [options]
   resume [scope] [--agent <id>] [--json]   cold-start brief: task, next step, git, workers
   resume [scope] --agent <worker> --apply   continue an interrupted worker via the plugin
   workers [scope] [--prune] [--apply] [--json]   print the worker register (task, state, resumes); --prune removes entries whose agent is gone
-  retire <agent-id>                  preview only; archiving is disabled
   cleanup [--json]                   read-only cleanup report over the whole instance
   cleanup --plan [--allow-destructive] [--allow-ignored] [--only <id,...>] [--json]
   models [--json]                    list the live provider catalog
@@ -92,8 +91,6 @@ const USAGE = `Usage: paseo-factory <command> [options]
   steer rm <n|slot> [--dry-run]
   model advisor <profile|provider/model> on|off [--dry-run]
   model sensitive <profile|provider/model> on|off [--dry-run]
-  slot set <A-Z> ... (deprecated, use steer set) | slot rm <A-Z> (deprecated, use steer rm)
-  worker-default ... (deprecated, use worker set 1 ...)
   scopes [--json] [--candidates]   one line per live scope; --candidates lists unadopted workspaces
   labels [scope|agent-id] [--apply] [--json]   list missing/wrong factory agent labels (dry-run); --apply sets them
   drain [--timeout 10m] [--json]   wait until no factory agent runs; marks leftovers planned-restart (exit 2), never restarts itself
@@ -289,7 +286,7 @@ async function main() {
     options: {
       config: { type: 'string' }, 'repos-file': { type: 'string' }, 'allow-fork': { type: 'boolean' },
       json: { type: 'boolean' }, confirm: { type: 'string' }, to: { type: 'string' }, apply: { type: 'boolean' },
-      'no-send': { type: 'boolean' }, 'report-to': { type: 'string' }, 'archive-workspace': { type: 'boolean' }, help: { type: 'boolean' },
+      'no-send': { type: 'boolean' }, 'report-to': { type: 'string' }, help: { type: 'boolean' },
       adopt: { type: 'string', multiple: true }, slots: { type: 'string', multiple: true }, out: { type: 'string' }, task: { type: 'string' },
       test: { type: 'string', multiple: true }, blocker: { type: 'string', multiple: true },
       next: { type: 'string' }, 'from-agent': { type: 'string' }, wait: { type: 'boolean' }, 'expect-epoch': { type: 'string' },
@@ -340,10 +337,10 @@ async function main() {
     return { local: abs, hub: true };
   });
   let entries = [...args, ...(values['repos-file'] ? JSON.parse(readFileSync(values['repos-file'], 'utf8')) : []), ...localFlags.map((p) => ({ local: resolve(p) })), ...hubEntries];
-  if (localFlags.length && (command === 'models' || command === 'model' || command === 'slot' || command === 'steer' || command === 'worker' || command === 'worker-default' || command === 'retire')) {
+  if (localFlags.length && (command === 'models' || command === 'model' || command === 'steer' || command === 'worker')) {
     throw new Error(`--local is not accepted with ${command}`);
   }
-  if (hubFlags.length && (command === 'models' || command === 'model' || command === 'slot' || command === 'steer' || command === 'worker' || command === 'worker-default' || command === 'retire')) {
+  if (hubFlags.length && (command === 'models' || command === 'model' || command === 'steer' || command === 'worker')) {
     throw new Error(`--hub is not accepted with ${command}`);
   }
   if (values.name !== undefined) {
@@ -413,7 +410,7 @@ async function main() {
   const client = await connect();
   const runner = createRunner({ config, client, gh, git });
   try {
-    if (command === 'models' || command === 'model' || command === 'slot' || command === 'steer' || command === 'worker' || command === 'worker-default') {
+    if (command === 'models' || command === 'model' || command === 'steer' || command === 'worker') {
       return await runModelCommand({ command, args, values, config, configPath, client, runner });
     }
     if (command === 'scopes') {
@@ -740,18 +737,6 @@ async function main() {
       return;
     }
 
-    if (command === 'retire') {
-      if (entries.length !== 1) throw new Error('retire needs one agent id');
-      if (values.apply || values['archive-workspace']) throw new Error('Worker archiving is disabled for the pilot (Paseo removes owned worktrees with --force); retire is preview only');
-      const paseo = await readPaseoState(client);
-      const worker = paseo.agents.find((a) => a.id === entries[0]);
-      const ws = paseo.workspaces.find((w) => w.id === worker?.workspaceId);
-      const backgroundWork = worker ? await client.agents.ref(worker.id).backgroundWork.list().catch(() => null) : null;
-      const terminals = ws ? await client.terminals.list({ workspaceId: ws.id }).then((r) => r.entries ?? []).catch(() => null) : null;
-      const gitState = ws ? readGitState(git, ws.workspaceDirectory) : null;
-      return console.log(JSON.stringify(assessWorker(worker, { ...paseo, gitState, backgroundWork, terminals }), null, 2));
-    }
-
     if (command === 'cleanup') {
       if (entries.length) throw new Error('cleanup takes no repository; it reports on the whole instance');
       const paseo = await attachProjectArchivedAgents(await readPaseoState(client), client);
@@ -965,33 +950,7 @@ async function runModelCommand({ command, args, values, config, configPath, clie
     }
     throw new Error(`Unknown steer command ${sub ?? '(none)'}\n${USAGE}`);
   }
-  if (command === 'slot') {
-    const [sub, slotArg, specArg, ...rest] = args;
-    if (sub === 'set') {
-      if (!slotArg || !specArg || rest.length) throw new Error('slot set needs <A-Z> <provider/model>');
-      console.error('Note: "slot set" is deprecated, use "steer set".');
-      const { provider, model } = parseProviderModel(specArg);
-      const planned = planSlotSet(config, await catalog(), {
-        slot: slotArg.toUpperCase(), provider, model,
-        thinking: flagValue(values.thinking), mode: flagValue(values.mode), profile: values.profile,
-      });
-      return writePlanned({ planned, configPath, dryRun, hint: planned.hint });
-    }
-    if (sub === 'rm') {
-      if (!slotArg || specArg || rest.length) throw new Error('slot rm needs <A-Z>');
-      console.error('Note: "slot rm" is deprecated, use "steer rm".');
-      const planned = planSlotRemove(config, slotArg.toUpperCase());
-      return writePlanned({ planned, configPath, dryRun });
-    }
-    throw new Error(`Unknown slot command ${sub ?? '(none)'}\n${USAGE}`);
-  }
-  const [specArg, ...rest] = args;
-  if (!specArg || rest.length) throw new Error('worker-default needs <profile|provider/model>');
-  console.error('Note: "worker-default" is deprecated, use "worker set 1".');
-  const planned = planWorkerDefault(config, await catalog(), {
-    spec: specArg, thinking: flagValue(values.thinking), mode: flagValue(values.mode), profile: values.profile,
-  });
-  return writePlanned({ planned, configPath, dryRun });
+  throw new Error(`Unknown model command ${command}\n${USAGE}`);
 }
 
 function formatDrain(result) {

@@ -74,7 +74,7 @@ Consequences for reusing `src/`:
 
 `client.addCommandCenterItem({ id, title, icon, keywords?, context, onSelect })` ([reference](https://paseo.sh/docs/plugins/reference.md#command-center-items)). `context` is `global`, `workspace`, or `agent`; workspace items need an active cached workspace, agent items a focused agent tab. Every callback receives `paseo`, `rpc`, `openScreen`, the `workspace`/`agent` snapshots, and `openPanel`. Open with Cmd/Ctrl+K.
 
-Design: workspace-context items bound to the focused Main workspace, reusing the same RPCs as (a): "Factory: status", "Factory: plan", "Factory: checkpoint", "Factory: switch steer…", each opening the factory panel with the result. Global items are possible but add repo-selection UI; keep the first cut workspace-scoped.
+Design: one workspace-context item ("Factory: open panel") bound to the focused Main workspace, opening the factory panel. Global items are possible but add repo-selection UI; keep the first cut workspace-scoped.
 
 ## (d) Settings screen
 
@@ -136,7 +136,7 @@ RPC set (thin wrapper over the CLI operations in `src/cli.mjs`): read-only first
 
 ## Development checks
 
-Run `npm run typecheck` and `npm test` in `plugin/`. On a test daemon, use `paseo plugin ls` to check that the plugin is running and exercise the contribution and its error state. The plugin’s `factory.ping` RPC reports the daemon subprocess’s Node version, which must be 22 or later.
+Run `npm run typecheck` and `npm test` in `plugin/`. On a test daemon, use `paseo plugin ls` to check that the plugin is running and exercise the contribution and its error state. The daemon subprocess runs Node 22 or later.
 
 Receipt lookup verifies the `creation.subscribe` capability (internal `DaemonClient`, `creationLifecycle` feature, response shape) and fails closed. Re-verify it after a Paseo upgrade with the crash test in `docs/configuration.md`.
 
@@ -149,7 +149,7 @@ Receipt lookup verifies the `creation.subscribe` capability (internal `DaemonCli
 - Tab order: read-only recommendation only (steers A-Z, then workers); no layout manipulation, no state file edits.
 - Tests: pure logic (`shared/factory-args.ts`, `shared/preview.ts`, `shared/settings-validate.ts`) runs under `node --test` with type stripping; the root script passes `--experimental-strip-types` so Node 22.6+ works too.
 - Optional scope address: every `/factory` subcommand resolves the scope of the current workspace when no address is given (server-side, same resolution as the CLI). A workspace without a scope gets a clear error plus the adopting `plan` call. `scopes`/`cleanup` report on the whole instance and take no address.
-- Worker guard: the slash command and the four Command Center entries use agent context and reject workers at runtime (parented or `wsf.role=worker`); Paseo shows the refusal as a toast. One extra workspace entry (**Factory: open panel**) keeps the panel reachable from drafts. Tradeoff: the command stays in autocomplete everywhere (the API has no visibility predicate) and is unavailable in drafts. Upstream proposal: an `isAvailable(context)` predicate for `addSlashCommand` (and Command Center items).
+- Worker guard: the slash command uses agent context and rejects workers at runtime (parented or `wsf.role=worker`); Paseo shows the refusal as a toast. One workspace Command Center entry (**Factory: open panel**) keeps the panel reachable from drafts. Tradeoff: the command stays in autocomplete everywhere (the API has no visibility predicate) and is unavailable in drafts. Upstream proposal: an `isAvailable(context)` predicate for `addSlashCommand` (and Command Center items).
 
 ## Notification suppression for workers: research
 
@@ -200,7 +200,7 @@ npm ci --prefix plugin && npm run build-snapshot
 
 1. The builder (`scripts/build-snapshot.mjs`) verifies `plugin/server/factory/`, then typechecks and tests the plugin. If the mirror is stale, run `npm run plugin:sync` first. The builder copies the plugin sources into `<releases-dir>/workspace-factory-<hash12>` and omits `node_modules`, `package-lock.json`, and `test/`. The releases dir defaults to `~/projects/paseo/releases` and can be set with `--out-dir`. The sorted list of files and their hashes produces the same 12-character SHA-256 prefix for identical content.
 2. The script prints install and rollback commands. The release installs as a directory source. **Removing an existing `workspace-factory` installation deletes its settings.** Save the values you need before running the printed commands. Scripted installation requires `npm run build-snapshot -- --install --confirm <hash12>` with the built hash. [Install a built release](../getting-started.md#install-a-built-release)
-3. Use `paseo plugin ls` to check for `running`, `paseo plugin logs workspace-factory` to check startup, and `/factory ping` to check the app connection. `npm run build-snapshot -- --prune` previews cleanup of old snapshots while keeping the installed and previous snapshots. Deletion requires `--prune --confirm`.
+3. Use `paseo plugin ls` to check for `running`, `paseo plugin logs workspace-factory` to check startup, and `/factory status` to check the app connection. `npm run build-snapshot -- --prune` previews cleanup of old snapshots while keeping the installed and previous snapshots. Deletion requires `--prune --confirm`.
 
 Never edit Paseo state files directly.
 

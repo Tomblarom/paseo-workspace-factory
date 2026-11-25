@@ -19,7 +19,6 @@ import { tmpdir, hostname } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { assessWorker, retireWorker } from '../src/workers.mjs';
 import { LABEL, METADATA_KEY, PARENT_LABEL } from '../src/paseo.mjs';
 
 // ---------------------------------------------------------------- fixtures
@@ -1416,55 +1415,6 @@ test('runtime settings: environment beats config beats defaults; config path loo
     Object.assign(process.env, saved);
     configureRuntime({});
   }
-});
-
-// ---------------------------------------------------------------- worker lifecycle (preview only)
-
-test('worker retirement preview is conservative about turns, processes, references and git state', () => {
-  const ws = { id: 'w1', workspaceKind: 'worktree', project: { checkout: { isPaseoOwnedWorktree: true } } };
-  const worker = { id: 'k1', status: 'idle', workspaceId: 'w1', labels: { [PARENT_LABEL]: 's1' }, pendingPermissions: [] };
-  const clean = { dirty: false, untracked: 0, ignored: 0, detached: false, ahead: 0 };
-  const base = { agents: [worker], workspaces: [ws], gitState: clean, backgroundWork: [], terminals: [] };
-  const ok = assessWorker(worker, base);
-  assert.deepEqual([ok.archiveAgent, ok.archiveWorkspace], [true, true]);
-  const agentStays = [
-    [{ ...worker, status: 'running' }, base],
-    [{ ...worker, activeTurn: { id: 't' } }, base],
-    [{ ...worker, labels: { ...worker.labels, 'wsf.lifecycle': 'reusable' } }, base],
-    [worker, { ...base, agents: [worker, { id: 'c', workspaceId: 'w9', labels: { [PARENT_LABEL]: 'k1' } }] }],
-    [worker, { ...base, backgroundWork: [{ id: 'b' }] }],
-    [worker, { ...base, backgroundWork: null }],
-    [{ ...worker, labels: {} }, base],
-  ];
-  for (const [w, ctx] of agentStays) assert.equal(assessWorker(w, ctx).archiveAgent, false, JSON.stringify(w).slice(0, 80));
-  const workspaceStays = [
-    { gitState: { ...clean, dirty: true } },
-    { gitState: { ...clean, untracked: 1 } },
-    { gitState: { ...clean, ignored: 3 } },
-    { gitState: { ...clean, detached: true } },
-    { gitState: { ...clean, ahead: null } },
-    { gitState: { ...clean, ahead: 2 } },
-    { gitState: null },
-    { terminals: [{ id: 'term' }] },
-    { terminals: null },
-    { workspaces: [{ id: 'w1', workspaceKind: 'worktree', project: { checkout: { isPaseoOwnedWorktree: false } } }] },
-    { workspaces: [{ id: 'w1', workspaceKind: 'local_checkout' }] },
-    { agents: [worker, { id: 'o', workspaceId: 'w1', labels: {} }] },
-  ];
-  for (const patch of workspaceStays) assert.equal(assessWorker(worker, { ...base, ...patch }).archiveWorkspace, false, JSON.stringify(patch));
-});
-
-test('archiving is disabled for the pilot and refuses before any call', async () => {
-  const world = makeWorld();
-  const worker = addAgent(world, { title: 'Worker 1', workspaceId: 'w', labels: { [PARENT_LABEL]: 's' } });
-  let loaded = false;
-  const loadContext = async () => {
-    loaded = true;
-    return { agents: world.agents, workspaces: [], gitState: null, backgroundWork: [], terminals: [] };
-  };
-  await assert.rejects(retireWorker({ client: fakeClient(world), workerId: worker.id, loadContext }), /disabled for the pilot/);
-  assert.equal(loaded, false);
-  assert.equal(world.calls.filter((c) => c[0] === 'agent.archive' || c[0] === 'workspace.archive').length, 0);
 });
 
 // ---------------------------------------------------------------- recovery of an unrecorded workspace.main

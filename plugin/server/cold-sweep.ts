@@ -748,10 +748,9 @@ export interface ColdFeedDeps {
 }
 
 /**
- * Serves the factory.attention subscription (factory.cold stays as an alias):
- * pushes the attention list on subscribe and every minute after. Returns
- * void — settling a promise would close the subscription. Also lends the
- * daemon handle to the sweep timer.
+ * Serves the factory.cold subscription: pushes the attention list on
+ * subscribe and every minute after. Returns void — settling a promise would
+ * close the subscription. Also lends the daemon handle to the sweep timer.
  */
 export function serveColdSubscription(
   _input: unknown,

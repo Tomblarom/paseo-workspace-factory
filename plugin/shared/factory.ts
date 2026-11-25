@@ -1,12 +1,6 @@
 import { defineRpc, defineSubscription } from "@getpaseo/plugin";
 import { z } from "zod";
 
-export const factoryPing = defineRpc({
-  name: "factory.ping",
-  input: z.object({}),
-  output: z.object({ ok: z.literal(true), nodeVersion: z.string() }),
-});
-
 const steerSummary = z.looseObject({
   slot: z.string(),
   id: z.string(),
@@ -292,25 +286,18 @@ const attentionAgent = coldAgent.extend({
   reason: z.enum(["daemon-restart", "limit", "failed", "cold"]).optional(),
 });
 
-const attentionEvent = (required: "attention" | "cold") =>
-  z.looseObject({
-    attention: required === "attention" ? z.array(attentionAgent) : z.array(attentionAgent).optional(),
-    cold: required === "cold" ? z.array(attentionAgent) : z.array(attentionAgent).optional(),
-    autoDisabled: z.boolean(),
-    autoDisabledReason: z.unknown().optional(),
-  });
-
-export const factoryAttention = defineSubscription({
-  name: "factory.attention",
-  input: z.object({}),
-  event: attentionEvent("attention"),
+const attentionEvent = z.looseObject({
+  attention: z.array(attentionAgent).optional(),
+  cold: z.array(attentionAgent),
+  autoDisabled: z.boolean(),
+  autoDisabledReason: z.unknown().optional(),
 });
 
-/** Legacy alias of factory.attention; the payload carries both keys. */
+/** Attention feed (cold agents, resume needs, fresh hints); the payload carries both keys. */
 export const factoryCold = defineSubscription({
   name: "factory.cold",
   input: z.object({}),
-  event: attentionEvent("cold"),
+  event: attentionEvent,
 });
 
 export const factoryResumeApply = defineRpc({
@@ -606,17 +593,6 @@ export const factoryWorkers = defineRpc({
     scope: z.string(),
     epoch: z.number().nullable(),
     workers: z.unknown(),
-    text: z.string(),
-  }),
-});
-
-// Retire assessment of one agent (preview only, like the CLI `retire`).
-export const factoryRetire = defineRpc({
-  name: "factory.retire",
-  input: z.object({ agentId: z.string().min(1) }),
-  output: z.looseObject({
-    agentId: z.string(),
-    assessment: z.unknown(),
     text: z.string(),
   }),
 });

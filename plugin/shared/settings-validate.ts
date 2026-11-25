@@ -17,7 +17,6 @@ export interface FactorySettingsValues {
   initialActive: string;
   workerPriority: string[];
   quota: { exhaustedPct: number; warnPct: number };
-  quotaSampleMinutes: number;
   /** Null/empty means "from the config file"; a saved value replaces it. */
   githubOwner: string | null;
   /** Null/empty means "from the config file"; a saved value replaces it. */
@@ -67,7 +66,6 @@ export function settingsFromConfig(config: any, current: FactorySettingsValues):
     initialActive: config.steers?.initialActive ?? current.initialActive,
     workerPriority: priority,
     quota: current.quota ?? { exhaustedPct: 95, warnPct: 75 },
-    quotaSampleMinutes: current.quotaSampleMinutes ?? 10,
     githubOwner: current.githubOwner ?? null,
     checkoutRoot: current.checkoutRoot ?? null,
   };
@@ -111,7 +109,6 @@ export interface CleanupSettingsValues {
   minContextTokens: number;
   providers: string[];
   roles: string[];
-  seedAfterClear: boolean;
   clearAcknowledged: boolean;
   dailyCap: number;
   rewindFresh: boolean;
@@ -119,7 +116,6 @@ export interface CleanupSettingsValues {
 
 export interface QuotaSettingsValues {
   quota: { exhaustedPct: number; warnPct: number };
-  quotaSampleMinutes: number;
 }
 
 export function validateQuotaSettings(values: QuotaSettingsValues): string[] {
@@ -131,10 +127,6 @@ export function validateQuotaSettings(values: QuotaSettingsValues): string[] {
     if (!Number.isFinite(value) || value < 0 || value > 100) {
       errors.push(`quota.${key} must be a number from 0 to 100`);
     }
-  }
-  if (values.quotaSampleMinutes !== undefined &&
-      (!Number.isInteger(values.quotaSampleMinutes) || values.quotaSampleMinutes < 10)) {
-    errors.push("quotaSampleMinutes must be an integer of at least 10 minutes");
   }
   return errors;
 }
@@ -247,7 +239,7 @@ export function validateCleanupSettings(values: CleanupSettingsValues): string[]
       }
     }
   }
-  for (const key of ["seedAfterClear", "clearAcknowledged", "rewindFresh"] as const) {
+  for (const key of ["clearAcknowledged", "rewindFresh"] as const) {
     if (typeof values[key] !== "boolean") errors.push(`${key} must be a boolean`);
   }
   if (!Number.isInteger(values.dailyCap) || values.dailyCap < 1) {
@@ -345,7 +337,6 @@ export function mergeFactoryConfig(fileConfig: any, settings: FactorySettingsVal
     defaultProfile: settings.workerPriority[0],
   };
   next.quota = { ...(fileConfig.quota ?? {}), ...settings.quota };
-  next.quotaSampleMinutes = settings.quotaSampleMinutes;
   const owner = normalizeGithubOwner(settings?.githubOwner);
   if (owner !== null) {
     next.github = { ...(next.github ?? {}), owner };

@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { finishSteerDelivery, pendingSteerDelivery, type SteerDeliveryDeps } from "./steer-delivery.js";
-import { hasActiveAgentWork } from "./agent-context.js";
 import { LEGACY_PREFIX, METADATA_KEY, readPaseoState } from "./factory/paseo.js";
 import { listScopes } from "./factory/scope.js";
 import { createGit } from "./factory/local.js";
@@ -16,7 +15,6 @@ import { speedOfLiveOptions } from "../shared/steer-settings.js";
 import { captureSweepPaseo, noteEffectFailure } from "./cold-sweep.js";
 import {
   RESUME_PENDING_REASON,
-  SEED_AFTER_CLEAR,
   needsResumeForFailedTurn,
   scanCleanupEvidence,
 } from "../shared/idle-cleanup.js";
@@ -66,8 +64,6 @@ interface TurnBeforePayload {
 
 export interface TurnHookDeps extends ZerosubSource {
   delivery?: SteerDeliveryDeps;
-  /** Reads the C5 settings for the seed-after-clear step; absent means no seed. */
-  getCleanupSettings?: () => Promise<{ seedAfterClear: boolean } | null>;
   /** Builds the resume brief after a verified resume clear; absent means none. */
   getResumeBrief?: (paseo: any, workspaceId: string, agentId: string) => Promise<string>;
   /** Clock for open-turn tracking; defaults to the current time. */
@@ -602,22 +598,7 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
     }
     return;
   }
-  const cleared = asRecord(decision.entryUpdate?.cleared);
-  // Optional one-line seed after a verified clear: it costs one small turn and
-  // tells the resumed agent to load the resume brief first.
-  if (cleared?.mode === "clear" && decision.entryUpdate?.actionVerified === true && deps.getCleanupSettings) {
-    try {
-      const settings = await deps.getCleanupSettings();
-      if (settings?.seedAfterClear) {
-        const ref = paseo.agents.ref(agentId);
-        const live = (await ref.refresh())?.agent;
-        if (live && !live.archivedAt && !hasActiveAgentWork(live)) await ref.send(SEED_AFTER_CLEAR);
-        console.log(`[factory] turn hook: seeded ${agentId} after clear`);
-      }
-    } catch (error) {
-      console.error(
-        `[factory] turn hook: seed after clear to ${agentId} failed (${error instanceof Error ? error.message : String(error)})`,
-      );
-    }
-  }
+  // After a verified sweep clear the agent reloads its task via the resume
+  // brief (instruction rule) or the optional Claude SessionStart hook; no
+  // extra model turn is sent.
 }

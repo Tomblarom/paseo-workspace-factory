@@ -23,7 +23,6 @@ import {
   factoryRelocatePreview,
   factoryResume,
   factoryResumeApply,
-  factoryRetire,
   factoryScopes,
   factoryScopesCandidates,
   factoryStatus,
@@ -88,7 +87,6 @@ import { defaultCreateRewindClient } from "./factory/rewind.js";
 import { deliverSteerBrief, stageSteerBrief } from "./steer-brief.js";
 import { relocateScope } from "./factory/relocate.js";
 import { formatWorkersText, readWorkers, workersReport } from "./factory/supervision.js";
-import { assessWorker, readGitState } from "./factory/workers.js";
 import {
   LABEL,
   LEGACY_PREFIX,
@@ -1135,34 +1133,6 @@ export async function getWorkers(
     workers: report,
     text: (formatWorkersText as any)(scopeId, epoch, report),
   };
-}
-
-export async function getRetire(
-  input: RpcInput<typeof factoryRetire>,
-  { paseo }: PluginHandlerContext,
-): Promise<any> {
-  const agentId = input.agentId.trim();
-  const state: any = await readPaseoState(paseo);
-  const worker = state.agents.find((a: any) => a.id === agentId);
-  const ws = state.workspaces.find((w: any) => w.id === worker?.workspaceId);
-  const backgroundWork = worker
-    ? await paseo.agents.ref(worker.id).backgroundWork.list().catch(() => null)
-    : null;
-  const terminals = ws
-    ? await paseo.terminals.list({ workspaceId: ws.id }).then((r: any) => r.entries ?? []).catch(() => null)
-    : null;
-  const gitState = ws ? (readGitState as any)(createGit(), ws.workspaceDirectory) : null;
-  const assessment: any = (assessWorker as any)(worker, { ...state, gitState, backgroundWork, terminals });
-  const lines = [
-    `Retire preview for ${agentId} (preview only; archiving is disabled).`,
-    assessment.archiveAgent
-      ? "Agent: archivable."
-      : `Agent: blocked (${(assessment.reasons ?? []).join("; ") || "unknown reason"}).`,
-    assessment.archiveWorkspace
-      ? "Workspace: archivable."
-      : `Workspace: kept (${(assessment.workspaceReasons ?? []).join("; ") || "unknown reason"}).`,
-  ];
-  return { agentId, assessment, text: lines.join("\n") };
 }
 
 export async function pickWorker(

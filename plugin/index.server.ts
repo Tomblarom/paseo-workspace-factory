@@ -17,7 +17,6 @@ import {
   getModelsCatalog,
   getPlan,
   getResume,
-  getRetire,
   getScopeCandidates,
   getScopes,
   getStatus,
@@ -38,7 +37,6 @@ import {
   writeCheckpointRpc,
 } from "./server/handlers.js";
 import { listModels, setModels } from "./server/models-rpc.js";
-import { ping } from "./server/ping.js";
 import {
   readCleanupSettings,
   serveColdSubscription,
@@ -66,7 +64,6 @@ import {
   factoryApply,
   factoryAssign,
   factoryAssignPreview,
-  factoryAttention,
   factoryCheckpoint,
   factoryCheckpointPreview,
   factoryCleanup,
@@ -81,14 +78,12 @@ import {
   factoryModelsCatalog,
   factoryModelsList,
   factoryModelsSet,
-  factoryPing,
   factoryPlan,
   factoryQuota,
   factoryRelocate,
   factoryRelocatePreview,
   factoryResume,
   factoryResumeApply,
-  factoryRetire,
   factoryScopes,
   factoryScopesCandidates,
   factoryStatus,
@@ -164,7 +159,6 @@ export default function contribute(server: PluginServerContext) {
       handleBootFinished(paseo, marks, { getSettings: readSupervision, getConfig: () => loader.loadEffectiveConfig(), delivery, getZerosub, buildBrief: buildResumeBrief }),
     );
   };
-  server.handle(factoryPing, ping);
   server.handle(factoryStatus, (input, ctx) => {
     bootOnce(ctx.paseo);
     return getStatus(input, ctx, loader);
@@ -190,7 +184,6 @@ export default function contribute(server: PluginServerContext) {
   server.handle(factoryFresh, (input, ctx) => applyFresh(input, ctx, loader));
   server.handle(factoryHistoryOpen, openHistory);
   server.handle(factoryWorkers, (input, ctx) => getWorkers(input, ctx, loader));
-  server.handle(factoryRetire, getRetire);
   server.handle(factoryModelsCatalog, getModelsCatalog);
   server.handle(factoryWorkerPick, (input, ctx) => pickWorker(input, ctx, loader));
   server.handle(factoryDrain, runDrain);
@@ -220,12 +213,10 @@ export default function contribute(server: PluginServerContext) {
     bootOnce(ctx.paseo);
     return applyResumeRpc(input, ctx, loader, delivery);
   });
-  const serveAttention = (input: unknown, ctx: { paseo: any; push: (event: any) => Promise<void>; signal: AbortSignal }) => {
+  server.handle(factoryCold, (input: unknown, ctx: { paseo: any; push: (event: any) => Promise<void>; signal: AbortSignal }) => {
     bootOnce(ctx.paseo);
     serveColdSubscription(input, ctx, { readSettings, getZerosub, getConfig: () => loader.loadEffectiveConfig() });
-  };
-  server.handle(factoryCold, serveAttention);
-  server.handle(factoryAttention, serveAttention);
+  });
   server.handle(factorySteers, (input, ctx) => {
     bootOnce(ctx.paseo);
     serveSteerSubscription(input, ctx, {
@@ -242,7 +233,6 @@ export default function contribute(server: PluginServerContext) {
   const removeTurnHook = server.addHook("agent.turn.after", (payload, context) => {
     bootOnce(context.paseo);
     return handleTurnAfter(payload, context, {
-      getCleanupSettings: readSettings,
       getResumeBrief: buildResumeBrief,
       delivery,
       getConfig: () => loader.loadEffectiveConfig(),

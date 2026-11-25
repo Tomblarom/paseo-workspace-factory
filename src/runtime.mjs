@@ -11,7 +11,6 @@ function defaults() {
   return {
     stateDir: join(state, 'paseo-workspace-factory'),
     paseo: { url: 'ws://127.0.0.1:6767/ws', bin: 'paseo', passwordFile: null },
-    scratchDir: null,
   };
 }
 
@@ -28,7 +27,7 @@ export function configureRuntime(config = {}) {
     planDir: join(stateDir, 'plans'),
     journalDir: stateDir,
     integrationDir: join(stateDir, 'integration'),
-    scratchDir: resolve(expand(env('PASEO_FACTORY_SCRATCH_DIR') ?? file.scratchDir ?? join(stateDir, 'scratch'))),
+    scratchDir: join(stateDir, 'scratch'),
     paseo: {
       url: env('PASEO_WS_URL') ?? file.paseo?.url ?? base.paseo.url,
       bin: env('PASEO_FACTORY_PASEO_BIN') ?? expand(file.paseo?.bin) ?? base.paseo.bin,

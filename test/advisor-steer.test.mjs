@@ -49,15 +49,22 @@ test('validateConfig refuses advisor-only and advisor-led slot sets', () => {
   assert.match(errors, /profiles\.muse\.sensitive must be a boolean/);
 });
 
-test('configWarnings flags untagged advisor purposes and sensitive advisors', () => {
-  const config = structuredClone(CONFIG);
-  config.advisors = { profiles: { design: 'opus', routine: 'sol' } };
-  const warnings = configWarnings(config);
-  assert.ok(warnings.some((w) => /advisors\.profiles\.routine uses profile "sol" without the advisor tag/.test(w)));
-  assert.ok(!warnings.some((w) => w.includes('design')), 'tagged purpose stays quiet');
+test('configWarnings flags sensitive advisors and advisor worker entries', () => {
   const sens = structuredClone(CONFIG);
   sens.profiles.opus.sensitive = true;
   assert.ok(configWarnings(sens).some((w) => /profile "opus" is both advisor and sensitive/.test(w)));
+  const listed = structuredClone(CONFIG);
+  listed.workers.priority = ['opus', 'muse'];
+  assert.ok(configWarnings(listed).some((w) => /workers\.priority lists advisor profile "opus"/.test(w)));
+});
+
+test('removed config keys are ignored silently (old installs)', () => {
+  const old = structuredClone(CONFIG);
+  old.advisors = { profiles: { design: 'opus', routine: 'missing' } };
+  old.runtime = { stateDir: '/tmp/wsf-state', scratchDir: '/tmp/wsf-scratch' };
+  old.quotaSampleMinutes = 10;
+  assert.deepEqual(validateConfig(old), []);
+  assert.deepEqual(configWarnings(old).filter((w) => w.includes('advisors.profiles')), []);
 });
 
 test('sensitive flag: explicit wins, otherwise muse migrates to true', () => {

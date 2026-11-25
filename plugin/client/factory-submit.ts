@@ -17,7 +17,6 @@ import {
   factoryRelocatePreview,
   factoryResume,
   factoryResumeApply,
-  factoryRetire,
   factoryScopes,
   factoryScopesCandidates,
   factoryStatus,
@@ -144,11 +143,6 @@ export async function submitFactoryCommand(
     );
     setFactoryResult({ kind: "info", at, text: workers.text });
     return pill("Workers");
-  }
-  if (parsed.command === "retire") {
-    const retire = await ctx.rpc(factoryRetire, { agentId: parsed.agentId });
-    setFactoryResult({ kind: "info", at, text: retire.text });
-    return pill("Retire");
   }
   if (parsed.command === "models") {
     const catalog = await ctx.rpc(factoryModelsCatalog, {});
@@ -365,7 +359,6 @@ async function submitModels(
       throw new Error(`Not saved: ${saved.error}. Run the command again.`);
     }
   }
-  const note = parsed.command !== "model" && parsed.note ? `${parsed.note}\n` : "";
-  setFactoryResult({ kind: "info", at, text: `${note}${formatModelChange(change as any, !parsed.dryRun)}` });
+  setFactoryResult({ kind: "info", at, text: formatModelChange(change as any, !parsed.dryRun) });
   return pill("Models");
 }

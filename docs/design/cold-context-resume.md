@@ -90,7 +90,7 @@ step. Do not use the provider's own session resume. Read only what the brief
 points to.
 ```
 
-Verify in C1 that a cleared Claude session still loads the project instructions that carry this rule. If not, see `seedAfterClear` in C5.
+Verify in C1 that a cleared Claude session still loads the project instructions that carry this rule.
 
 ## C5 Idle cleanup (plugin timer)
 
@@ -106,10 +106,10 @@ The plugin checks once per minute. All conditions must hold, checked again right
 | Mode | Action | Cost |
 |---|---|---|
 | `off` | nothing; C6 hint only | 0 |
-| `clear` (default) | send `/clear`; optional `seedAfterClear` sends a one-line "context was cleared, run resume before the next task". Codex agents are compacted instead (no native `/clear`), without needing the acknowledgement | 0 (seed: one small turn; Codex compact: one turn) |
+| `clear` (default) | send `/clear`; the agent reloads its task via the resume brief (instruction rule) or the optional SessionStart hook. Codex agents are compacted instead (no native `/clear`), without needing the acknowledgement | 0 (Codex compact: one turn) |
 | `compact-warm` | compact mid-package agents while the cache is still warm (profile threshold ≤ idle < group TTL), only with provider quota available; cold, over-compacted, or boundary agents get `fresh-recommended` (recorded hint, no send) | one turn on cached context, also when nobody returns |
 
-Automatic `fresh` (new agent) is not offered: creating agents stays behind plan → confirm. Safety: per-agent cooldown (one action per idle period), daily cap per host, every action logged (`paseo plugin logs`) and recorded in `wsf.agents`. Settings (host scope): `mode`, `profile`, `idleMinutes`, `minContextTokens`, `providers`, `roles`, `seedAfterClear`, `rewindFresh`.
+Automatic `fresh` (new agent) is not offered: creating agents stays behind plan → confirm. Safety: per-agent cooldown (one action per idle period), daily cap per host, every action logged (`paseo plugin logs`) and recorded in `wsf.agents`. Settings (host scope): `mode`, `profile`, `idleMinutes`, `minContextTokens`, `providers`, `roles`, `clearAcknowledged`, `dailyCap`, `rewindFresh`.
 
 ### Cache reference and cost profiles
 
