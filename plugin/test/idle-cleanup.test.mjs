@@ -57,20 +57,17 @@ function input(overrides = {}) {
   };
 }
 
-test("cleanupIdentity accepts steers/workers incl. legacy labels", () => {
+test("cleanupIdentity accepts steers/workers and ignores other labels", () => {
   assert.deepEqual(cleanupIdentity(LABELS), { scopeId: "s", role: "steer", slot: "A" });
   assert.deepEqual(cleanupIdentity({ "wsf.scope": "s", "wsf.role": "worker" }), {
     scopeId: "s",
     role: "worker",
     slot: null,
   });
-  assert.deepEqual(
-    cleanupIdentity({ "ari.wsf.scope": "s", "ari.wsf.role": "steer", "ari.wsf.slot": "B" }),
-    { scopeId: "s", role: "steer", slot: "B" },
-  );
+  assert.equal(cleanupIdentity({ "ari.wsf.scope": "s", "ari.wsf.role": "steer", "ari.wsf.slot": "B" }), null);
   // Older steers carry only the repo label (no wsf.scope): repo = scope id.
   assert.deepEqual(
-    cleanupIdentity({ "ari.wsf.repo": "o/r", "wsf.repo": "o/r", "wsf.role": "steer", "wsf.slot": "D" }),
+    cleanupIdentity({ "wsf.repo": "o/r", "wsf.role": "steer", "wsf.slot": "D" }),
     { scopeId: "o/r", role: "steer", slot: "D" },
   );
   assert.equal(cleanupIdentity({ "wsf.scope": "s", "wsf.role": "advisor" }), null);
@@ -78,9 +75,9 @@ test("cleanupIdentity accepts steers/workers incl. legacy labels", () => {
   assert.equal(cleanupIdentity(null), null);
 });
 
-test("hasKeepContext honors the current and legacy keys", () => {
+test("hasKeepContext honors the keepContext key only", () => {
   assert.equal(hasKeepContext({ "wsf.keepContext": "true" }), true);
-  assert.equal(hasKeepContext({ "ari.wsf.keepContext": "true" }), true);
+  assert.equal(hasKeepContext({ "ari.wsf.keepContext": "true" }), false);
   assert.equal(hasKeepContext({ "wsf.keepContext": "false" }), false);
   assert.equal(hasKeepContext({}), false);
   assert.equal(hasKeepContext(null), false);
@@ -152,13 +149,13 @@ test("busy, running, or permission-blocked agents are skipped", () => {
   assert.match(decideCleanupAction(input({ pendingPermissionCount: 1 })).reason, /permission/);
 });
 
-test("pendingAction and lastActionFailed block retries in the same idle period", () => {
+test("cleanup and lastActionFailed block retries in the same idle period", () => {
   assert.match(
-    decideCleanupAction(input({ entry: { pendingAction: { kind: "clear", at: at(NOW) } } })).reason,
+    decideCleanupAction(input({ entry: { action: { cleanup: { kind: "clear", at: at(NOW) } } } })).reason,
     /already pending/,
   );
   assert.match(
-    decideCleanupAction(input({ entry: { lastActionFailed: { at: at(NOW), error: "x" } } })).reason,
+    decideCleanupAction(input({ entry: { action: { facts: { lastActionFailed: { at: at(NOW), error: "x" } } } } })).reason,
     /new real turn/,
   );
 });
@@ -229,11 +226,11 @@ test("other agents need a note from the last turn", () => {
 
 test("already cleaned and opted-out agents are skipped", () => {
   assert.match(
-    decideCleanupAction(input({ entry: { cleared: { at: at(NOW - 30 * MIN), mode: "clear" } } })).reason,
+    decideCleanupAction(input({ entry: { action: { facts: { cleared: { at: at(NOW - 30 * MIN), mode: "clear" } } } } })).reason,
     /already cleaned/,
   );
   assert.ok(
-    decideCleanupAction(input({ entry: { cleared: { at: at(NOW - 3 * HOUR), mode: "clear" } } })).action,
+    decideCleanupAction(input({ entry: { action: { facts: { cleared: { at: at(NOW - 3 * HOUR), mode: "clear" } } } } })).action,
     "an older cleaning does not block a new idle period",
   );
   assert.match(
@@ -618,7 +615,7 @@ test("fresh is recommended once per idle period, without quota or cap gates", ()
   const hinted = decideCleanupAction(
     input({
       openWorkers: 0,
-      entry: { freshHint: { at: at(NOW - 10 * MIN), reason: "boundary" } },
+      entry: { action: { facts: { freshHint: { at: at(NOW - 10 * MIN), reason: "boundary" } } } },
     }),
   );
   assert.equal(hinted.action, null);
@@ -627,7 +624,7 @@ test("fresh is recommended once per idle period, without quota or cap gates", ()
   const stale = decideCleanupAction(
     input({
       openWorkers: 0,
-      entry: { freshHint: { at: at(NOW - 2 * HOUR), reason: "boundary" } },
+      entry: { action: { facts: { freshHint: { at: at(NOW - 2 * HOUR), reason: "boundary" } } } },
     }),
   );
   assert.equal(stale.action, "fresh-recommended");
@@ -646,7 +643,7 @@ test("fresh is recommended once per idle period, without quota or cap gates", ()
   const reopened = decideCleanupAction(
     input({
       openWorkers: 3,
-      entry: { freshHint: { at: at(NOW - 10 * MIN), reason: "boundary" } },
+      entry: { action: { facts: { freshHint: { at: at(NOW - 10 * MIN), reason: "boundary" } } } },
     }),
   );
   assert.equal(reopened.action, "compact-warm");
@@ -674,13 +671,13 @@ test("currentFreshHint keeps only current hints, freshHintText labels the pill",
   assert.equal(currentFreshHint(null), null);
   assert.equal(currentFreshHint(undefined), null);
   assert.equal(currentFreshHint({}), null);
-  assert.equal(currentFreshHint({ freshHint: null, lastTurnEndedAt: at(NOW - HOUR) }), null);
-  assert.equal(currentFreshHint({ freshHint: { at: at(NOW - 10 * MIN), reason: "  " } }), null);
-  assert.equal(currentFreshHint({ freshHint: { at: "not-a-date", reason: "x" } }), null);
+  assert.equal(currentFreshHint({ action: { facts: { freshHint: null } }, lastTurnEndedAt: at(NOW - HOUR) }), null);
+  assert.equal(currentFreshHint({ action: { facts: { freshHint: { at: at(NOW - 10 * MIN), reason: "  " } } } }), null);
+  assert.equal(currentFreshHint({ action: { facts: { freshHint: { at: "not-a-date", reason: "x" } } } }), null);
   assert.equal(
     currentFreshHint({
       lastTurnEndedAt: at(NOW - HOUR),
-      freshHint: { at: at(NOW - 2 * HOUR), reason: "old" },
+      action: { facts: { freshHint: { at: at(NOW - 2 * HOUR), reason: "old" } } },
     }),
     null,
     "recorded before the last turn: stale",
@@ -688,12 +685,12 @@ test("currentFreshHint keeps only current hints, freshHintText labels the pill",
   assert.equal(
     currentFreshHint({
       lastTurnEndedAt: at(NOW - HOUR),
-      freshHint: { at: at(NOW - 10 * MIN), reason: "package\n  boundary" },
+      action: { facts: { freshHint: { at: at(NOW - 10 * MIN), reason: "package\n  boundary" } } },
     }),
     "package boundary",
   );
   assert.equal(
-    currentFreshHint({ freshHint: { at: at(NOW - 10 * MIN), reason: "boundary" } }),
+    currentFreshHint({ action: { facts: { freshHint: { at: at(NOW - 10 * MIN), reason: "boundary" } } } }),
     "boundary",
     "unknown last turn keeps the hint, mirroring the resume brief",
   );

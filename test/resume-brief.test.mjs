@@ -141,11 +141,11 @@ test('brief shows only the caller’s current fresh recommendation', () => {
   const agentState = {
     [steers.A.id]: {
       lastTurnEndedAt: hoursAgo(2),
-      freshHint: { at: hoursAgo(1), reason: 'Fresh recommended at the package boundary' },
+      action: { facts: { freshHint: { at: hoursAgo(1), reason: 'Fresh recommended at the package boundary' } } },
     },
     [steers.B.id]: {
       lastTurnEndedAt: hoursAgo(1),
-      freshHint: { at: hoursAgo(2), reason: 'Stale recommendation' },
+      action: { facts: { freshHint: { at: hoursAgo(2), reason: 'Stale recommendation' } } },
     },
   };
   assert.match(buildResumeBrief(status, { agentId: steers.A.id, agentState }), /Context recommendation: Fresh recommended at the package boundary/);

@@ -32,7 +32,7 @@ const S = supervisionCore as unknown as Record<string, any>;
 const AS = agentStateCore as unknown as Record<string, any>;
 const ST = steerCore as unknown as Record<string, any>;
 const Q = quotaCore as unknown as Record<string, any>;
-const { LEGACY_PREFIX, METADATA_KEY, readPaseoState } = P;
+const { METADATA_KEY, readPaseoState } = P;
 const { listScopes, sameScopeId } = SC;
 const { LockBusy, withLock, workspaceLockName } = L;
 const {
@@ -93,9 +93,7 @@ import {
 } from "../shared/supervise.js";
 
 const CHECKPOINT_KEY = `${METADATA_KEY}.checkpoint`;
-const LEGACY_CHECKPOINT_KEY = `${LEGACY_PREFIX}.checkpoint`;
 const OWNER_KEY = "wsf.owner";
-const LEGACY_OWNER_KEY = "ari.wsf.owner";
 const BUSY_STATUSES = ["running", "initializing"];
 const FACTORY_CMD = "paseo-factory";
 
@@ -259,7 +257,7 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 }
 
 function wsfOf(meta: Record<string, unknown>): Record<string, any> | null {
-  return (asRecord(meta[METADATA_KEY]) ?? asRecord(meta[LEGACY_PREFIX])) as Record<string, any> | null;
+  return asRecord(meta[METADATA_KEY]) as Record<string, any> | null;
 }
 
 function findScope(scopes: any[], scopeId: string): any | null {
@@ -404,7 +402,7 @@ export async function backfillWorker(
     workspaceId: scope.workspaceId,
     workerId: agent.id,
     task: clipTask(typeof note === "string" ? note : ""),
-    startedBy: labels[OWNER_KEY] ?? labels[LEGACY_OWNER_KEY] ?? null,
+    startedBy: labels[OWNER_KEY] ?? null,
     epoch: wsf?.epoch ?? null,
     lock: lockOf(deps),
     now: () => stampsOf(deps).nowIso,
@@ -947,7 +945,7 @@ export async function retryPendingWakeBrief(
   const entries = asRecord(meta[AGENTS_KEY]) ?? {};
   const candidates = Object.entries(entries)
     .flatMap(([agentId, entry]) => {
-      const pending = pendingSteerDelivery(entry, mainId);
+      const pending = pendingSteerDelivery(entry);
       return pending && (deps.allowBatches !== false || !pending.batch) ? [{ agentId, pending }] : [];
     })
     .sort((a, b) => a.pending.queuedAt.localeCompare(b.pending.queuedAt));
@@ -1025,7 +1023,7 @@ export async function flushAllScopes(paseo: any, deps: SuperviseDeps & { state?:
   for (const scope of listScopes(paseoState)) {
     const meta = scope.workspace?.metadata;
     const hasBrief = Object.values(meta?.[AGENTS_KEY] ?? {}).some((entry) => {
-      const pending = pendingSteerDelivery(entry, scope.workspaceId);
+      const pending = pendingSteerDelivery(entry);
       return pending && (settings?.enabled || !pending.batch);
     });
     if (!hasBrief && !(settings?.enabled && collectPendingWakes(readWorkers(meta)).length)) continue;
@@ -1210,7 +1208,7 @@ export async function logFailoverCheckpoint(
       log("[factory] supervise: failover log skipped (scope moved on)");
       return false;
     }
-    const checkpoint = asRecord(meta[CHECKPOINT_KEY]) ?? asRecord(meta[LEGACY_CHECKPOINT_KEY]);
+    const checkpoint = asRecord(meta[CHECKPOINT_KEY]);
     if (!checkpoint || typeof checkpoint.task !== "string" || !checkpoint.task.trim()) {
       log("[factory] supervise: failover log skipped (no task checkpoint)");
       return false;

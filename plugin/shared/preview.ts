@@ -107,15 +107,6 @@ export function assignFingerprint(identity: AssignPreviewIdentity): string {
   return fingerprintOf({ kind: "factory.assign", ...identity });
 }
 
-export interface LabelsPreviewIdentity {
-  address: string | null;
-  rows: unknown;
-}
-
-export function labelsFingerprint(identity: LabelsPreviewIdentity): string {
-  return fingerprintOf({ kind: "factory.labels", ...identity });
-}
-
 export interface SteerAddPreviewIdentity {
   scope: string | null;
   repo: string | null;

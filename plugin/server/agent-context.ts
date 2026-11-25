@@ -41,7 +41,7 @@ export function agentContextInputs(
   nowMs: number,
   providers: any[] = [],
 ) {
-  const pendingDelivery = asRecord(readSteerAction(entry, ""));
+  const pendingDelivery = asRecord(readSteerAction(entry));
   const deliveryPhase = pendingDelivery?.phase ??
     (pendingDelivery ? readCleanupAction(entry) ? "renewing" : actionFact(entry, "actionVerified") === true ? "ready" : "blocked" : null);
   const cleanup = readCleanupAction(entry);

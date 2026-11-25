@@ -1,7 +1,7 @@
 // K11 consolidation: one daemon snapshot per call, one holder selector.
 // Fake state only; no daemon. The runner reuses a passed snapshot instead
 // of re-reading, and every holder pick (liveSlotHolders, scopeHolder,
-// resolveWakeTarget) agrees on legacy labels, ZeroSub multi-hop
+// resolveWakeTarget) agrees on plain labels, ZeroSub multi-hop
 // continuations and same-slot newer-wins cases.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRunner } from '../src/factory.mjs';
 import { liveSlotHolders, resolveSteerHolders } from '../src/discovery.mjs';
-import { LABEL, LEGACY_PREFIX, METADATA_KEY } from '../src/paseo.mjs';
+import { LABEL, METADATA_KEY } from '../src/paseo.mjs';
 import { scopeHolder } from '../src/scope-guard.mjs';
 import { resolveWakeTarget } from '../src/supervision.mjs';
 import { CONTINUED_FROM_LABEL } from '../src/zerosub.mjs';
@@ -55,7 +55,7 @@ function scopeState(agents) {
 }
 
 /** Status/supervision row shape for one resolved agent (slot/id/archivedAt/superseded/retired). */
-const rowOf = (a) => ({ slot: a.labels?.[LABEL.slot] ?? a.labels?.[`${LEGACY_PREFIX}.slot`] ?? null, id: a.id, archivedAt: a.archivedAt ?? null, retired: false, superseded: a.superseded === true });
+const rowOf = (a) => ({ slot: a.labels?.[LABEL.slot] ?? null, id: a.id, archivedAt: a.archivedAt ?? null, retired: false, superseded: a.superseded === true });
 
 // ------------------------------------------------------- one snapshot
 
@@ -80,27 +80,25 @@ test('discoverAll and runPlans reuse a passed snapshot instead of re-reading', a
 // ------------------------------------------------------- one selector
 
 function agreementWorld() {
-  const legacyA = agent('legacy-a', {
-    labels: { [`${LEGACY_PREFIX}.scope`]: SCOPE, [`${LEGACY_PREFIX}.role`]: 'steer', [`${LEGACY_PREFIX}.slot`]: 'A' },
-  });
+  const holderA = agent('holder-a', { labels: steerLabels('A') });
   const originB = agent('origin-b', { labels: steerLabels('B') });
   const midB = agent('mid-b', { labels: { [CONTINUED_FROM_LABEL]: 'origin-b' } });
   const liveB = agent('live-b', { labels: { [CONTINUED_FROM_LABEL]: 'mid-b' } });
   const oldC = agent('old-c', { labels: steerLabels('C'), createdAt: '2026-11-24T09:00:00.000Z' });
   const newC = agent('new-c', { labels: steerLabels('C'), createdAt: '2026-11-24T10:00:00.000Z' });
-  const agents = [legacyA, originB, midB, liveB, oldC, newC];
-  const labelled = agents.filter((a) => a.labels?.[LABEL.role] === 'steer' || a.labels?.[`${LEGACY_PREFIX}.role`] === 'steer');
+  const agents = [holderA, originB, midB, liveB, oldC, newC];
+  const labelled = agents.filter((a) => a.labels?.[LABEL.role] === 'steer');
   const resolved = resolveSteerHolders(labelled, agents, []);
   return { agents, resolved };
 }
 
-test('holder selectors agree on legacy, ZeroSub multi-hop and same-slot cases', () => {
+test('holder selectors agree on labelled, ZeroSub multi-hop and same-slot cases', () => {
   const { agents, resolved } = agreementWorld();
   const rows = resolved.map(rowOf);
   const viaHelper = (slot) => liveSlotHolders(resolved, slot).map((a) => a.id);
   const viaGuard = (slot) => scopeHolder({ agents, workspaceId: MAIN, scopeId: SCOPE, slot }).id;
   const viaWake = (slot) => resolveWakeTarget({ activeSteer: slot }, rows);
-  for (const [slot, winner] of [['A', 'legacy-a'], ['B', 'live-b'], ['C', 'new-c']]) {
+  for (const [slot, winner] of [['A', 'holder-a'], ['B', 'live-b'], ['C', 'new-c']]) {
     assert.deepEqual(viaHelper(slot), [winner], `liveSlotHolders picks ${winner} for slot ${slot}`);
     assert.equal(viaGuard(slot), winner, `scopeHolder picks ${winner} for slot ${slot}`);
     assert.equal(viaWake(slot), winner, `resolveWakeTarget picks ${winner} for slot ${slot}`);

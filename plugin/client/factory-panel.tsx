@@ -14,8 +14,6 @@ import {
   factoryCleanup,
   factoryFresh,
   factoryFreshPreview,
-  factoryLabels,
-  factoryLabelsPreview,
   factoryPlan,
   factoryQuota,
   factoryResume,
@@ -82,7 +80,6 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
   const callResumeApply = useRpc(factoryResumeApply);
   const callFresh = useRpc(factoryFresh);
   const callAssign = useRpc(factoryAssign);
-  const callLabels = useRpc(factoryLabels);
   const callQuota = useRpc(factoryQuota);
   const callSteerAdd = useRpc(factorySteerAdd);
   const callSteerAddPreview = useRpc(factorySteerAddPreview);
@@ -291,20 +288,6 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
       }),
     onError: fail,
   });
-  const labelsMutation = useMutation({
-    mutationFn: async (vars: { address?: string; fingerprint: string }) =>
-      vars.address
-        ? callLabels({ address: vars.address, fingerprint: vars.fingerprint })
-        : callLabels({ fingerprint: vars.fingerprint }),
-    onSuccess: (applied, vars) =>
-      setFactoryResult({
-        kind: "labelsApplied",
-        address: vars.address,
-        at: new Date().toISOString(),
-        applied,
-      }),
-    onError: fail,
-  });
   const quotaMutation = useMutation({
     mutationFn: async () => callQuota({}),
     onSuccess: (quota) =>
@@ -365,7 +348,6 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
     resumeApplyMutation.isPending ||
     freshMutation.isPending ||
     assignMutation.isPending ||
-    labelsMutation.isPending ||
     steerAddMutation.isPending;
 
   const confirmCheckpoint = () => {
@@ -406,13 +388,6 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
       workspaceId: result.workspaceId,
       fingerprint: result.preview.fingerprint,
       inputs: result.inputs,
-    });
-  };
-  const confirmLabels = () => {
-    if (result?.kind !== "labelsPreview") return;
-    labelsMutation.mutate({
-      address: result.address,
-      fingerprint: result.preview.fingerprint,
     });
   };
   const confirmSteerAdd = () => {
@@ -538,7 +513,6 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
           confirmResume,
           confirmFresh,
           confirmAssign,
-          confirmLabels,
           confirmSteerAdd,
         }}
       />
@@ -570,7 +544,6 @@ export interface FactoryResultActions {
   confirmResume: () => void;
   confirmFresh: () => void;
   confirmAssign: () => void;
-  confirmLabels: () => void;
   confirmSteerAdd: () => void;
 }
 
@@ -651,21 +624,6 @@ export function ResultView({
   }
   if (result.kind === "assignPreview") {
     return <AssignPreviewView at={result.at} preview={result.preview} styles={styles} actions={actions} />;
-  }
-  if (result.kind === "labelsPreview") {
-    return (
-      <LabelsPreviewView
-        address={result.address}
-        requestedApply={result.requestedApply}
-        at={result.at}
-        preview={result.preview}
-        styles={styles}
-        actions={actions}
-      />
-    );
-  }
-  if (result.kind === "labelsApplied") {
-    return <LabelsAppliedView at={result.at} applied={result.applied} styles={styles} />;
   }
   if (result.kind === "steerAddPreview") {
     return <SteerAddPreviewView at={result.at} preview={result.preview} styles={styles} actions={actions} />;
@@ -1302,75 +1260,6 @@ function AssignPreviewView({
       >
         <Text style={styles.buttonText}>Assign and deliver</Text>
       </Pressable>
-    </View>
-  );
-}
-
-function LabelsPreviewView({
-  address,
-  requestedApply,
-  at,
-  preview,
-  styles,
-  actions,
-}: {
-  address?: string;
-  requestedApply: boolean;
-  at: string;
-  preview: RpcOutput<typeof factoryLabelsPreview>;
-  styles: Styles;
-  actions: PanelActions;
-}) {
-  const rows = preview.rows.length;
-  return (
-    <View style={styles.card}>
-      <Text style={styles.body}>
-        Labels preview{address ? ` for ${address}` : ""}: {rows} agent(s) need attention (
-        {preview.fixable} fixable)
-      </Text>
-      <Text style={styles.label}>{at}</Text>
-      {requestedApply ? (
-        <Text style={styles.label}>You asked for --apply: review and confirm below.</Text>
-      ) : null}
-      <Text style={styles.body}>{preview.text}</Text>
-      {preview.fixable > 0 ? (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Confirm setting the previewed labels"
-          style={styles.button}
-          disabled={actions.busy}
-          onPress={actions.confirmLabels}
-        >
-          <Text style={styles.buttonText}>Set labels</Text>
-        </Pressable>
-      ) : (
-        <Text style={styles.label}>
-          Nothing to set: the rows above need manual fixes (see the notes).
-        </Text>
-      )}
-    </View>
-  );
-}
-
-function LabelsAppliedView({
-  at,
-  applied,
-  styles,
-}: {
-  at: string;
-  applied: RpcOutput<typeof factoryLabels>;
-  styles: Styles;
-}) {
-  const failed = asList(applied.applied).filter(
-    (row) => (row as { ok?: unknown }).ok === false,
-  ).length;
-  return (
-    <View style={styles.card}>
-      <Text style={failed ? styles.conflict : styles.ok}>
-        Labels {failed ? "partially applied" : "applied"}.
-      </Text>
-      <Text style={styles.label}>{at}</Text>
-      <Text style={styles.body}>{applied.text}</Text>
     </View>
   );
 }

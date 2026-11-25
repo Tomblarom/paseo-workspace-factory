@@ -4,7 +4,6 @@ import { registerPromptSettings } from "./server/prompt-settings.js";
 import {
   applyAssign,
   applyFresh,
-  applyLabels,
   applyPlan,
   applyResumeRpc,
   applySteerAddRpc,
@@ -25,7 +24,6 @@ import {
   previewAssign,
   previewCheckpoint,
   previewFresh,
-  previewLabels,
   previewSteerAdd,
   previewSteerSettingsRpc,
   previewSwitch,
@@ -71,8 +69,6 @@ import {
   factoryFresh,
   factoryFreshPreview,
   factoryHistoryOpen,
-  factoryLabels,
-  factoryLabelsPreview,
   factoryModelsCatalog,
   factoryModelsList,
   factoryModelsSet,
@@ -186,8 +182,6 @@ export default function contribute(server: PluginServerContext) {
   server.handle(factoryQuota, (input, ctx) => getQuota(input, ctx, loader, { getZerosub }));
   server.handle(factoryAssignPreview, (input, ctx) => previewAssign(input, ctx, loader));
   server.handle(factoryAssign, (input, ctx) => applyAssign(input, ctx, loader));
-  server.handle(factoryLabelsPreview, previewLabels);
-  server.handle(factoryLabels, (input, ctx) => applyLabels(input, ctx, loader));
   server.handle(factoryModelsList, (input, ctx) => listModels(input, ctx, loader, hostSettings));
   server.handle(factoryModelsSet, (input, ctx) => setModels(input, ctx, loader, hostSettings));
   server.handle(factorySteerAddPreview, (input, ctx) => previewSteerAdd(input, ctx, loader, hostSettings));

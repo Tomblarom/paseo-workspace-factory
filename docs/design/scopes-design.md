@@ -79,7 +79,7 @@ Plan → `apply --confirm <hash>` for everything the Factory executes itself. Th
 
 ## Decision 6 — public and host-neutral
 
-Neutral prefix `wsf.*` for labels and metadata; `ari.wsf.*` is still read and a planned `labels.migrate` op rewrites it. Scope ids and locators come from user config or the plan command line, never from repository files. Tests and docs use example owners and paths only.
+Neutral prefix `wsf.*` for labels and metadata; the pilot `ari.wsf.*` prefix was migrated once (`migrate --apply`, K16a) and its readers removed (K16b), so lingering duplicate agent labels are ignored. Scope ids and locators come from user config or the plan command line, never from repository files. Tests and docs use example owners and paths only.
 
 ## Decision 7 — domains between hub and scope
 

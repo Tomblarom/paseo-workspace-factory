@@ -152,7 +152,7 @@ test("recovery flags, operations and open turns map to faces", () => {
         entries: {
           "steer-a": { ...TURN, needsResume: { reason: "daemon-restart", at: iso(NOW - MIN) } },
           "steer-b": { ...TURN },
-          "steer-c": { ...TURN, openTurnId: "turn-1", turnStartedAt: iso(NOW - MIN), pendingAction: { kind: "compact", at: iso(NOW - MIN) } },
+          "steer-c": { ...TURN, openTurnId: "turn-1", turnStartedAt: iso(NOW - MIN), action: { kind: "cleanup", wakeId: "c", phase: "renewing", cleanup: { kind: "compact", at: iso(NOW - MIN) } } },
         },
       },
     ),
@@ -192,13 +192,13 @@ test("pool quota and ZeroSub routes feed the Limited and Waiting faces", () => {
 test("only fresh hints valid for the idle period surface", () => {
   const hinted = feed(
     paseoState([agent("steer-a")], {
-      entries: { "steer-a": { ...TURN, freshHint: { at: iso(NOW - MIN), reason: "package boundary" } } },
+      entries: { "steer-a": { ...TURN, action: { kind: "memory", wakeId: "context-facts", phase: "done", facts: { freshHint: { at: iso(NOW - MIN), reason: "package boundary" } } } } },
     }),
   );
   assert.ok(hinted[0].headerFacts.includes("Refresh recommended"));
   const stale = feed(
     paseoState([agent("steer-a")], {
-      entries: { "steer-a": { ...TURN, freshHint: { at: iso(NOW - 10 * MIN), reason: "package boundary" } } },
+      entries: { "steer-a": { ...TURN, action: { kind: "memory", wakeId: "context-facts", phase: "done", facts: { freshHint: { at: iso(NOW - 10 * MIN), reason: "package boundary" } } } } },
     }),
   );
   assert.ok(!stale[0].headerFacts.includes("Refresh recommended"));
@@ -226,7 +226,7 @@ test("the feed exposes pending permissions and staged briefs", () => {
       {
         entries: {
           "steer-a": { ...TURN },
-          "steer-b": { ...TURN, stagedBrief: { packet: "PACKET", at: iso(NOW), kind: "switch" } },
+          "steer-b": { ...TURN, action: { kind: "stage", wakeId: "s", phase: "staged", packet: "PACKET", stageKind: "switch" } },
         },
       },
     ),
@@ -236,12 +236,12 @@ test("the feed exposes pending permissions and staged briefs", () => {
   assert.equal(byId["steer-a"].stagedBrief, false);
   assert.equal(byId["steer-b"].permissionNeeded, false);
   assert.equal(byId["steer-b"].stagedBrief, true);
-  const empty = feed(
+  const delivered = feed(
     paseoState([agent("steer-a")], {
-      entries: { "steer-a": { ...TURN, stagedBrief: { packet: "  ", at: iso(NOW), kind: "switch" } } },
+      entries: { "steer-a": { ...TURN, action: { kind: "delivery", wakeId: "d", phase: "done" } } },
     }),
   );
-  assert.equal(empty[0].stagedBrief, false);
+  assert.equal(delivered[0].stagedBrief, false);
 });
 
 test("the feed exposes live thinking, speed, session and baseline", () => {

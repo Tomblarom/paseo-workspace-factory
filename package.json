@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "license": "MIT",
-  "description": "Provision and steer standardized Paseo workspaces from GitHub repositories.",
+  "description": "Enroll one existing Paseo workspace per scope and steer its coordinator agents.",
   "type": "module",
   "bin": {
     "paseo-factory": "src/cli.mjs"

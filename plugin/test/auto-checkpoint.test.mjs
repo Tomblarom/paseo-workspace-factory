@@ -51,7 +51,7 @@ function input(overrides = {}) {
   };
 }
 
-test("factoryIdentity accepts steers/workers incl. legacy labels", () => {
+test("factoryIdentity accepts steers/workers and ignores other labels", () => {
   assert.deepEqual(
     factoryIdentity({ "wsf.scope": "s", "wsf.role": "steer", "wsf.slot": "B" }),
     { scopeId: "s", role: "steer", slot: "B" },
@@ -60,10 +60,7 @@ test("factoryIdentity accepts steers/workers incl. legacy labels", () => {
     factoryIdentity({ "wsf.scope": "s", "wsf.role": "worker" }),
     { scopeId: "s", role: "worker", slot: null },
   );
-  assert.deepEqual(
-    factoryIdentity({ "ari.wsf.scope": "s", "ari.wsf.role": "steer", "ari.wsf.slot": "A" }),
-    { scopeId: "s", role: "steer", slot: "A" },
-  );
+  assert.equal(factoryIdentity({ "ari.wsf.scope": "s", "ari.wsf.role": "steer", "ari.wsf.slot": "A" }), null);
   assert.equal(factoryIdentity({ "wsf.scope": "s", "wsf.role": "advisor" }), null);
   assert.equal(factoryIdentity({ "wsf.role": "steer" }), null);
   assert.equal(factoryIdentity(null), null);

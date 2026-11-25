@@ -3,7 +3,7 @@ import { AGENTS_KEY } from "./factory/agent-state.js";
 import { readSteerAction, readCleanupAction, actionEntry, newSteerAction, reconcileSteerSend } from "./factory/steer-action.js";
 import { actionFact, mergeActionFacts } from "./factory/action-facts.js";
 import { withLock, workspaceLockName } from "./factory/lock.js";
-import { METADATA_KEY, LEGACY_PREFIX, readPaseoState } from "./factory/paseo.js";
+import { METADATA_KEY, readPaseoState } from "./factory/paseo.js";
 import { guardScope } from "./factory/scope-guard.js";
 import { defaultCreateRewindClient, rewindAndBrief } from "./factory/rewind.js";
 import { listScopes, sameScopeId } from "./factory/scope.js";
@@ -78,7 +78,6 @@ export interface PendingSteerDelivery {
   kind?: string;
   sendOptions?: { activeTurnBehavior: "steer" };
   attemptedAt?: string;
-  legacyStage?: any;
   lastDeliveryId?: string;
   observedAt?: string;
   authority?: { scopeId: string; agentId: string };
@@ -105,16 +104,16 @@ const formatWorkerWake = formatWakeMessage as unknown as (args: {
 }) => string | null;
 
 function scopeState(meta: any) {
-  return meta[METADATA_KEY] ?? meta[LEGACY_PREFIX];
+  return meta[METADATA_KEY];
 }
 
 function checkpointRevision(meta: any) {
-  const checkpoint = meta[`${METADATA_KEY}.checkpoint`] ?? meta[`${LEGACY_PREFIX}.checkpoint`];
+  const checkpoint = meta[`${METADATA_KEY}.checkpoint`];
   return checkpoint?.updatedAt ?? checkpoint?.capturedAt ?? null;
 }
 
-export function pendingSteerDelivery(entry: any, workspaceId: string): PendingSteerDelivery | null {
-  const action = readSteerAction(entry, workspaceId);
+export function pendingSteerDelivery(entry: any): PendingSteerDelivery | null {
+  const action = readSteerAction(entry);
   return action && !["cleanup", "rewind", "fresh-delivery"].includes(action.kind) && action.phase !== "staged" && action.phase !== "done" ? action : null;
 }
 
@@ -146,7 +145,7 @@ async function changeEntry(
     if (!patch) return false;
     held.verify();
     const merged = mergeActionFacts(entry, patch);
-    await workspace.setMetadata({ [AGENTS_KEY]: { ...entries, [input.agentId]: actionEntry(merged, "action" in patch ? merged.action : readSteerAction(merged, input.workspaceId)) } });
+    await workspace.setMetadata({ [AGENTS_KEY]: { ...entries, [input.agentId]: actionEntry(merged, "action" in patch ? merged.action : readSteerAction(merged)) } });
     return true;
   });
 }
@@ -156,13 +155,12 @@ function replacePending(
   patch: Record<string, unknown> | ((entry: any) => Record<string, unknown>),
 ) {
   return changeEntry(paseo, input, lock, (entry) => {
-    if (readSteerAction(entry, input.workspaceId)?.wakeId !== pending.wakeId) return null;
+    if (readSteerAction(entry)?.wakeId !== pending.wakeId) return null;
     return typeof patch === "function" ? patch(entry) : patch;
   });
 }
 
 function afterDelivery(pending: PendingSteerDelivery, complete: boolean) {
-  if (pending.legacyStage) return { ...newSteerAction({ kind: "stage", text: pending.legacyStage.packet }), phase: "staged", at: pending.legacyStage.at, stageKind: pending.legacyStage.kind, lastDeliveryId: complete ? pending.wakeId : pending.lastDeliveryId };
   return complete ? { ...pending, phase: "done" } : pending.lastDeliveryId ? { wakeId: pending.lastDeliveryId, phase: "done" } : null;
 }
 
@@ -195,14 +193,6 @@ async function staleBatchStillValid(paseo: any, batch: EventBatch | undefined): 
   return (await filterStaleWorkerEvents(paseo, source, batch.events)).length === batch.events.length;
 }
 
-function legacyStaleEvents({ note, packet }: PendingSteerDelivery): WakeEvent[] {
-  // Old resume actions could save generated wake text without a batch.
-  const wakeLines = typeof packet === "string" ? packet.split("\n").filter((line) => line.startsWith("[factory] Scope ")) : [];
-  const text = [note, ...wakeLines].join("\n");
-  const ids = [...text.matchAll(/\bworker ([^\s;,.]+) stale\b/g)].map((match) => match[1]);
-  return [...new Set(ids)].map((workerId) => ({ workerId, state: "stale" }));
-}
-
 const finishing = new Set<string>();
 
 /** Releases a staged brief after the rewind RPC or the clear hook confirmed renewal. */
@@ -216,7 +206,7 @@ export async function finishSteerDelivery(
   try {
     const meta = (await paseo.workspaces.ref(input.workspaceId).refresh())?.metadata ?? {};
     const entry = meta[AGENTS_KEY]?.[input.agentId];
-    let pending = pendingSteerDelivery(entry, input.workspaceId);
+    let pending = pendingSteerDelivery(entry);
     if (!pending) return null;
     const cleared = pending.renewal === "clear";
     const targetScope = scopeState(meta);
@@ -236,13 +226,6 @@ export async function finishSteerDelivery(
         return { status: "pending", cleared, detail: "Context renewal is in progress. The brief follows confirmation." };
       }
       const batch = pending.batch;
-      if (!batch && !pending.attemptedAt) {
-        const legacy = legacyStaleEvents(pending);
-        if (legacy.length && (await filterStaleWorkerEvents(paseo, meta, legacy)).length !== legacy.length) {
-          await replacePending(paseo, input, lock, pending, { action: afterDelivery(pending, false) });
-          return null;
-        }
-      }
       if (!pending.attemptedAt && batch?.events.some(({ state }) => state === "stale")) {
         const source = (await paseo.workspaces.ref(batch.workspaceId).refresh())?.metadata ?? {};
         const events = await filterStaleWorkerEvents(paseo, source, batch.events);
@@ -287,7 +270,7 @@ ${pending.note}` : brief;
         }
         const current = (await paseo.workspaces.ref(input.workspaceId).refresh())?.metadata ?? {};
         const currentEntry = current[AGENTS_KEY]?.[input.agentId];
-        if (readSteerAction(currentEntry, input.workspaceId)?.wakeId !== pending.wakeId ||
+        if (readSteerAction(currentEntry)?.wakeId !== pending.wakeId ||
             (pending.epoch !== null && pending.epoch !== scopeState(current)?.epoch)) {
           return { status: "pending", cleared, detail: "Steer state changed while preparing the brief." };
         }
@@ -321,7 +304,7 @@ ${pending.note}` : brief;
           agentId: input.agentId, actionId: pending.wakeId, lock, now: deps.now });
         if (result.status !== "sent") {
           if (result.status === "blocked") await replacePending(paseo, input, lock, pending, (current) => {
-            const action = readSteerAction(current, input.workspaceId);
+            const action = readSteerAction(current);
             return action?.phase === "sent" || action?.phase === "done" ? {} :
               { action: { ...action, phase: "blocked", lastError: result.detail ?? "Delivery authority changed." } };
           });
@@ -393,7 +376,7 @@ export async function deliverSteer(
   if (input.epoch !== undefined && input.epoch !== scope.epoch) return blocked("The scope moved before the steer could be reached.");
   const entry = meta[AGENTS_KEY]?.[input.agentId];
   if (hasActiveAgentWork(agent, entry)) return deferred();
-  const existing = pendingSteerDelivery(entry, input.workspaceId);
+  const existing = pendingSteerDelivery(entry);
   if (existing && existing.epoch === scope.epoch && existing.wakeId !== input.actionId) {
     if (existing.phase === "blocked") return blocked(existing.lastError ?? "Context renewal needs attention.");
     if (input.manual && existing.phase !== "renewing") {
@@ -442,7 +425,7 @@ export async function deliverSteer(
     if (identity.slot === scope.activeSteer) pending.authority = { scopeId: identity.scopeId, agentId: input.agentId };
     const reserved = await changeEntry(paseo, input, lock, (current, currentMeta) => {
       if (scopeState(currentMeta)?.epoch !== scope.epoch || readCleanupAction(current)) return null;
-      const prior = readSteerAction(current, input.workspaceId);
+      const prior = readSteerAction(current);
       if (prior && prior.phase !== "done" && prior.wakeId !== input.actionId) return null;
       return { action: { ...pending, ...(prior?.phase === "done" ? { lastDeliveryId: prior.wakeId } : prior?.lastDeliveryId ? { lastDeliveryId: prior.lastDeliveryId } : {}) } };
     });
@@ -462,11 +445,11 @@ export async function deliverSteer(
     needsResumeAt,
     ...(input.sendOptions ? { sendOptions: input.sendOptions } : {}),
     ...(identity.slot === scope.activeSteer ? { authority: { scopeId: identity.scopeId, agentId: input.agentId } } : {}),
-    ...(readSteerAction(entry, input.workspaceId)?.phase === "done" ? { lastDeliveryId: readSteerAction(entry, input.workspaceId).wakeId } : {}),
+    ...(readSteerAction(entry)?.phase === "done" ? { lastDeliveryId: readSteerAction(entry).wakeId } : {}),
   };
   const reserved = await changeEntry(paseo, input, lock, (current, currentMeta) => {
     if (scopeState(currentMeta)?.epoch !== scope.epoch || readCleanupAction(current)) return null;
-    const priorAction = readSteerAction(current, input.workspaceId);
+    const priorAction = readSteerAction(current);
     if (priorAction && priorAction.phase !== "done" && priorAction.wakeId !== input.actionId) return null;
     return { action: pending };
   });
@@ -497,7 +480,7 @@ export async function deliverSteer(
       const latest = (await paseo.agents.ref(input.agentId).refresh())?.agent;
       const agentEntry = current[AGENTS_KEY]?.[input.agentId];
       return latest && !latest.archivedAt && !hasActiveAgentWork(latest, agentEntry) &&
-        scopeState(current)?.epoch === scope.epoch && readSteerAction(agentEntry, input.workspaceId)?.wakeId === pending.wakeId;
+        scopeState(current)?.epoch === scope.epoch && readSteerAction(agentEntry)?.wakeId === pending.wakeId;
     };
     if (!await stillIdle()) throw new AgentBusyError(STEER_BUSY);
     if (mode === "clear") {
@@ -513,7 +496,7 @@ export async function deliverSteer(
       const workspace = paseo.workspaces.ref(input.workspaceId);
       const meta = (await workspace.refresh())?.metadata ?? {};
       const entries = meta[AGENTS_KEY] ?? {};
-      const current = readSteerAction(entries[input.agentId], input.workspaceId);
+      const current = readSteerAction(entries[input.agentId]);
       if (current?.wakeId !== pending.wakeId || current.rewindAttempt) throw new AgentBusyError(STEER_BUSY);
       held.verify();
       await workspace.setMetadata({ [AGENTS_KEY]: { ...entries, [input.agentId]: actionEntry(entries[input.agentId], { ...current, rewindAttempt: { at, phase: "uncertain" } }) } });
@@ -533,14 +516,14 @@ export async function deliverSteer(
           outcome.error ?? outcome.status;
         const detail = `Context rewind cannot run (${why}). Use Fresh to prepare a new tab or retry recovery.`;
         await replacePending(paseo, input, lock, pending, (current) => {
-          const { rewindAttempt: _dropped, ...action } = readSteerAction(current, input.workspaceId) ?? {};
+          const { rewindAttempt: _dropped, ...action } = readSteerAction(current) ?? {};
           return { action: { ...action, phase: "blocked", lastError: detail.slice(0, 300) } };
         });
         return blocked(detail);
       }
       const detail = `The rewind outcome for ${input.agentId} is uncertain (${outcome.error ?? outcome.status}). Inspect its tab before recovery.`;
       await replacePending(paseo, input, lock, pending, (current) => ({
-        action: { ...readSteerAction(current, input.workspaceId), phase: "blocked", lastError: detail.slice(0, 300) },
+        action: { ...readSteerAction(current), phase: "blocked", lastError: detail.slice(0, 300) },
       }));
       return blocked(detail);
     }
@@ -562,7 +545,7 @@ export async function deliverSteer(
     const message = error instanceof Error ? error.message : String(error);
     const detail = mode === "clear" ? `The clear outcome for ${input.agentId} is uncertain (${message}). Inspect its tab before recovery.` : message;
     await replacePending(paseo, input, lock, pending, (current) => ({
-      action: { ...readSteerAction(current, input.workspaceId), phase: "blocked", lastError: detail.slice(0, 300) },
+      action: { ...readSteerAction(current), phase: "blocked", lastError: detail.slice(0, 300) },
     }));
     return blocked(detail);
   }

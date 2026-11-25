@@ -7,7 +7,7 @@
 // finds nothing to mark. Never throws out of ensureBootChecked.
 import { actionEntry, readSteerAction } from "./factory/steer-action.js";
 import { execFileSync } from "node:child_process";
-import { LEGACY_PREFIX, METADATA_KEY, paseoBinary, readPaseoState } from "./factory/paseo.js";
+import { METADATA_KEY, paseoBinary, readPaseoState } from "./factory/paseo.js";
 import { listScopes } from "./factory/scope.js";
 import { withWorkspaceLock } from "./factory/lock.js";
 import { createGit } from "./factory/local.js";
@@ -22,7 +22,6 @@ import { RESUME_CLEAR_DEFAULTS, bootResumeReason } from "../shared/idle-cleanup.
 
 const CHECKPOINT_KEY = `${METADATA_KEY}.checkpoint`;
 const AGENTS_KEY = `${METADATA_KEY}.agents`;
-const LEGACY_CHECKPOINT_KEY = `${LEGACY_PREFIX}.checkpoint`;
 
 export interface BootMark {
   agentId: string;
@@ -250,7 +249,7 @@ export async function runBootCheck({
   for (const scope of scopes) {
     const entries = asRecord(scope.workspace?.metadata?.[AGENTS_KEY]) ?? {};
     for (const [agentId, raw] of Object.entries(entries)) {
-      const action = readSteerAction(raw, scope.workspaceId);
+      const action = readSteerAction(raw);
       const stale = action && Date.parse(action.queuedAt) < Date.parse(daemonStartedAt) &&
         ((action.phase === "renewing" && action.kind !== "fresh-delivery") || action.phase === "rewinding");
       if (stale) {
@@ -312,7 +311,7 @@ export async function runBootCheck({
       const freshMeta = freshSnap?.metadata ?? {};
       const freshAgents = asRecord(freshMeta[AGENTS_KEY]) ?? {};
       const freshCheckpoint =
-        asRecord(freshMeta[CHECKPOINT_KEY]) ?? asRecord(freshMeta[LEGACY_CHECKPOINT_KEY]);
+        asRecord(freshMeta[CHECKPOINT_KEY]);
       const nextAgents: Record<string, unknown> = { ...freshAgents };
       let firstMarked: string | null = null;
       let resumeMarked = 0;
@@ -385,7 +384,7 @@ export async function runBootCheck({
       let renewalsInterrupted = 0;
       for (const agentId of group.renewals) {
         const entry = asRecord(nextAgents[agentId]);
-        const action = readSteerAction(entry, mainId);
+        const action = readSteerAction(entry);
         if (!action || !(Date.parse(action.queuedAt) < Date.parse(daemonStartedAt))) continue;
         if (action.phase === "rewinding") {
           nextAgents[agentId] = actionEntry(entry,

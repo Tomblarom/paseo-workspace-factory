@@ -1,6 +1,6 @@
 import { AGENTS_KEY, currentFreshHint, updateAgentEntry } from "./factory/agent-state.js";
 import { isAdvisorSlot } from "./factory/config.js";
-import { LEGACY_PREFIX, METADATA_KEY, readPaseoState } from "./factory/paseo.js";
+import { METADATA_KEY, readPaseoState } from "./factory/paseo.js";
 import { QUOTA_DEFAULTS, accountExhausted, freshMaxUsedPct, quotaEntry, quotaExhausted, quotaPct } from "./factory/quota.js";
 import { listScopes } from "./factory/scope.js";
 import { WORKERS_KEY } from "./factory/supervision.js";
@@ -35,7 +35,6 @@ import { projectAgentContext, type CacheWarmth } from "../shared/steer-state.js"
 import { workerIdentityFromMetadata } from "../shared/supervise.js";
 
 const CHECKPOINT_KEY = `${METADATA_KEY}.checkpoint`;
-const LEGACY_CHECKPOINT_KEY = `${LEGACY_PREFIX}.checkpoint`;
 
 // The synced core is unchecked (@ts-nocheck): its inferred parameter types are
 // too narrow for real calls, so the sweep talks to it as any (as handlers do).
@@ -150,13 +149,13 @@ function scopeReads(scope: any): {
 } | null {
   const mainId = scope?.workspaceId;
   const meta = scope?.workspace?.metadata ?? {};
-  const wsf = asRecord(meta[METADATA_KEY]) ?? asRecord(meta[LEGACY_PREFIX]);
+  const wsf = asRecord(meta[METADATA_KEY]);
   if (typeof mainId !== "string" || !wsf) return null;
   return {
     mainId,
     activeSteer: wsf.activeSteer,
     checkpoint:
-      asRecord(meta[CHECKPOINT_KEY]) ?? asRecord(meta[LEGACY_CHECKPOINT_KEY]),
+      asRecord(meta[CHECKPOINT_KEY]),
     entries: asRecord(meta[AGENTS_KEY]) ?? {},
     workers: asRecord((meta as Record<string, unknown>)[WORKERS_KEY as string]) ?? {},
   };
@@ -403,7 +402,7 @@ async function sweepAgent(
   const freshAgent: any = freshSnap?.agent ?? null;
   if (!freshAgent) return null;
   const freshMeta = (await paseo.workspaces.ref(reads.mainId).refresh().catch(() => null))?.metadata ?? {};
-  const freshWsf = asRecord(freshMeta[METADATA_KEY]) ?? asRecord(freshMeta[LEGACY_PREFIX]);
+  const freshWsf = asRecord(freshMeta[METADATA_KEY]);
   if (!freshWsf) return null;
   const freshEntries = asRecord(freshMeta[AGENTS_KEY]) ?? {};
   const freshEntry = asRecord(freshEntries[agent.id]);
@@ -414,7 +413,7 @@ async function sweepAgent(
       agent: freshAgent,
       entry: freshEntry,
       ...agentContextInputs(freshAgent, freshEntry, settings, quotaCtx.zerosub ?? null, recheckAt, state.providers),
-      checkpoint: asRecord(freshMeta[CHECKPOINT_KEY]) ?? asRecord(freshMeta[LEGACY_CHECKPOINT_KEY]),
+      checkpoint: asRecord(freshMeta[CHECKPOINT_KEY]),
       activeSteer: freshWsf.activeSteer,
       settings,
       actionsToday: actionsToday(recheckAt),
@@ -459,7 +458,7 @@ async function sweepAgent(
       const meta = (await workspace.refresh())?.metadata ?? {};
       const entries = meta[AGENTS_KEY] ?? {};
       const entry = entries[agent.id] ?? {};
-      const current = readSteerAction(entry, reads.mainId);
+      const current = readSteerAction(entry);
       if (readCleanupAction(entry) || (current && !["done", "staged"].includes(current.phase))) return false;
       const identity = cleanupIdentity(freshAgent.labels);
       if (identity?.role === "steer" && identity.slot === freshWsf.activeSteer) {
@@ -502,7 +501,7 @@ async function sweepAgent(
     if (outcome?.status === "deferred") return null;
     if (outcome?.status === "rewound") {
       const checkpoint =
-        asRecord(freshMeta[CHECKPOINT_KEY]) ?? asRecord(freshMeta[LEGACY_CHECKPOINT_KEY]);
+        asRecord(freshMeta[CHECKPOINT_KEY]);
       const reason = `rewound ${agent.id} to ${outcome.messageId ?? "first user message"} (fresh-recommended executed as rewind)`;
       try {
         await updateEntry({
@@ -635,20 +634,20 @@ export async function runCleanup(
   const messageId = randomUUID();
   const pendingAction: Record<string, unknown> = { kind, at, sessionId, reason, ...(messageId ? { messageId, previousTurnId: entry?.lastTurnId ?? null } : {}) };
   if (typeof opts.note === "string" && opts.note) pendingAction.note = opts.note.slice(0, 1500);
-  const patch: Record<string, unknown> = { pendingAction: undefined, actionVerified: null };
+  const patch: Record<string, unknown> = { actionVerified: null };
   const reserved = await updateEntry({
     client: paseo,
     workspaceId,
     agentId,
     patch: (latest: any) => {
-      const action = readSteerAction(latest, workspaceId);
+      const action = readSteerAction(latest);
       if (readCleanupAction(latest) || hasActiveAgentWork(live, latest) ||
           (action && action.phase !== "done" && !(action.renewal === "clear" && action.phase === "renewing"))) return null;
       return { ...patch, action: { ...(action?.renewal === "clear" && action.phase === "renewing" ? action : { kind: "cleanup", wakeId: messageId, phase: "renewing" }), cleanup: pendingAction } };
     },
     liveIds,
     guard: async ({ held, metadata }: any) => {
-      const scopeState = metadata[METADATA_KEY] ?? metadata[LEGACY_PREFIX];
+      const scopeState = metadata[METADATA_KEY];
       const identity = cleanupIdentity(live.labels);
       if (identity?.role === "steer" && identity.slot === scopeState?.activeSteer) {
         await guardScope({ client: paseo, held, workspaceId, scopeId: identity.scopeId, epoch: scopeState.epoch, agentId });

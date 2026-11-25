@@ -5,7 +5,7 @@
 // imports this file with type stripping (see plugin/test/ts-resolve-hooks.mjs).
 import { AGENTS_KEY, buildSettingsBaseline, updateAgentEntry } from "./factory/agent-state.js";
 import { withLock, workspaceLockName } from "./factory/lock.js";
-import { LEGACY_PREFIX, METADATA_KEY, paseoBinary, readPaseoState } from "./factory/paseo.js";
+import { METADATA_KEY, paseoBinary, readPaseoState } from "./factory/paseo.js";
 import { runtime } from "./factory/runtime.js";
 import { listScopes } from "./factory/scope.js";
 import { buildRewindRecord, freshRewindIdempotent } from "./factory/steer.js";
@@ -156,7 +156,7 @@ async function steerScope(
     throw new Error(`Agent ${agentId} belongs to workspace ${mainId}, not ${workspaceId}.`);
   }
   const meta = scope.workspace?.metadata ?? {};
-  const wsf = asRecord(meta[METADATA_KEY]) ?? asRecord(meta[LEGACY_PREFIX]);
+  const wsf = asRecord(meta[METADATA_KEY]);
   const entries = asRecord(meta[AGENTS_KEY]) ?? {};
   return {
     agent,
@@ -484,7 +484,7 @@ export async function applySteerSettings(
   const checked = await lock(lockName(preview.workspaceId), async (held: { verify: () => void }) => {
     const workspace = paseo.workspaces.ref(preview.workspaceId);
     const metadata = (await workspace.refresh())?.metadata ?? {};
-    const wsf = asRecord(metadata[METADATA_KEY]) ?? asRecord(metadata[LEGACY_PREFIX]);
+    const wsf = asRecord(metadata[METADATA_KEY]);
     if (!wsf) throw new Error("Scope state is gone.");
     if (typeof wsf.epoch === "number" && typeof preview.epoch === "number" && wsf.epoch !== preview.epoch) {
       throw new Error(

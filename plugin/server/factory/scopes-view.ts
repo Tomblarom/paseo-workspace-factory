@@ -65,15 +65,6 @@ export function scopeRows(paseoState, { now = () => Date.now(), daemonStartedAt 
     }
     const restartInterrupted = [...marked, ...heuristic].sort((a, b) => a.agentId.localeCompare(b.agentId));
     const hints = [];
-    // The legacy-prefix hint fires only while migration is still pending: a
-    // workspace or live steer agent with legacy keys but no persisted wsf.*
-    // counterpart (legacyPending). Fully migrated records (counterpart present,
-    // old agent labels linger — Paseo cannot remove them) stay hint-free; their
-    // JSON row only carries the migrated info below, never the text hint.
-    const wsPending = Array.isArray(scope.workspace.legacyPending) && scope.workspace.legacyPending.length > 0;
-    const agentPending = live.some((a) => Array.isArray(a.legacyPending) && a.legacyPending.length > 0);
-    if (wsPending || agentPending) hints.push('legacy-prefix');
-    const hasLegacyKeys = Boolean(scope.workspace.legacyPrefix || live.some((a) => a.legacyPrefix));
     const legacyAlias = (scope.kind === 'dir' || scope.kind === 'workspace') && scope.directory
       ? `local/${basename(scope.directory)}`
       : null;
@@ -118,7 +109,6 @@ export function scopeRows(paseoState, { now = () => Date.now(), daemonStartedAt 
       ...(inbox.length ? { inbox } : {}),
       ...(legacyAlias ? { legacyAlias } : {}),
       ...(hints.length ? { hints } : {}),
-      ...(!hints.includes('legacy-prefix') && hasLegacyKeys ? { legacyKeysMigrated: true } : {}),
     };
   });
 }
@@ -186,7 +176,7 @@ export function formatScopeRows(rows) {
     if (row.domain) parts.push(`domain ${row.domain}`);
     if ((row.children ?? []).length) parts.push(`domain (${row.children.length} children)`);
     if (row.legacyAlias) parts.push(`alias ${row.legacyAlias} (deprecated)`);
-    for (const hint of row.hints ?? []) parts.push(hint === 'legacy-prefix' ? 'uses ari.wsf keys (legacy-prefix)' : hint);
+    for (const hint of row.hints ?? []) parts.push(hint);
     for (const r of row.restartInterrupted ?? []) {
       parts.push(`! ${restartMessage(r.agentId)} (${r.reason}${r.heuristic ? ', vermutet' : ''})`);
     }

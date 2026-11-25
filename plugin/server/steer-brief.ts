@@ -1,7 +1,7 @@
 // Manual stage is an action with no effect until the user requests delivery.
 import { AGENTS_KEY } from "./factory/agent-state.js";
 import { withLock, workspaceLockName } from "./factory/lock.js";
-import { METADATA_KEY, LEGACY_PREFIX, readPaseoState } from "./factory/paseo.js";
+import { METADATA_KEY, readPaseoState } from "./factory/paseo.js";
 import { actionEntry, newSteerAction, readSteerAction } from "./factory/steer-action.js";
 import { deliverSteer, type SteerDeliveryDeps } from "./steer-delivery.js";
 import { cleanupIdentity } from "../shared/idle-cleanup.js";
@@ -23,10 +23,10 @@ export async function stageSteerBrief(paseo: any, input: { workspaceId: string; 
   await (deps.lock ?? takeLock)(workspaceLockName(input.workspaceId), async (held: any) => {
     const meta = (await workspace.refresh())?.metadata ?? {};
     const entries = meta[AGENTS_KEY] ?? {};
-    const previous = readSteerAction(entries[input.agentId], input.workspaceId);
+    const previous = readSteerAction(entries[input.agentId]);
     if (previous && previous.phase !== "done" && previous.phase !== "staged") throw new Error("A steer delivery is already pending.");
     const at = deps.now?.() ?? new Date().toISOString();
-    const epoch = (meta[METADATA_KEY] ?? meta[LEGACY_PREFIX])?.epoch ?? null;
+    const epoch = meta[METADATA_KEY]?.epoch ?? null;
     const action = { ...newSteerAction({ kind: "stage", epoch, at, text: input.packet, phase: "staged" }), at, stageKind: input.kind, ...(previous?.phase === "done" ? { lastDeliveryId: previous.wakeId } : previous?.lastDeliveryId ? { lastDeliveryId: previous.lastDeliveryId } : {}) };
     held.verify();
     await workspace.setMetadata({ [AGENTS_KEY]: { ...entries, [input.agentId]: actionEntry(entries[input.agentId], action) } });
@@ -41,9 +41,9 @@ export async function deliverSteerBrief(paseo: any, input: { workspaceId: string
   const action = await (deps.lock ?? takeLock)(workspaceLockName(input.workspaceId), async (held: any) => {
     const meta = (await workspace.refresh())?.metadata ?? {};
     const entries = meta[AGENTS_KEY] ?? {};
-    const previous = readSteerAction(entries[agentId], input.workspaceId);
+    const previous = readSteerAction(entries[agentId]);
     if (!previous || previous.phase !== "staged") return null;
-    const next = input.action === "dismiss" ? (previous.lastDeliveryId ? { wakeId: previous.lastDeliveryId, phase: "done" } : null) : { ...previous, phase: "reserved", needsResumeAt: entries[agentId]?.needsResume?.at ?? null, queuedAt: previous.queuedAt ?? previous.at ?? new Date().toISOString(), epoch: (meta[METADATA_KEY] ?? meta[LEGACY_PREFIX])?.epoch ?? null,
+    const next = input.action === "dismiss" ? (previous.lastDeliveryId ? { wakeId: previous.lastDeliveryId, phase: "done" } : null) : { ...previous, phase: "reserved", needsResumeAt: entries[agentId]?.needsResume?.at ?? null, queuedAt: previous.queuedAt ?? new Date().toISOString(), epoch: meta[METADATA_KEY]?.epoch ?? null,
       note: previous.stageKind === "switch" ? "" : previous.packet };
     held.verify();
     await workspace.setMetadata({ [AGENTS_KEY]: { ...entries, [agentId]: actionEntry(entries[agentId], next) } });

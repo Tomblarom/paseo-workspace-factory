@@ -15,7 +15,6 @@ import { applyPlans, createExecutors, createAuthorization, storeAuthorization, f
 import { CHECKPOINT_KEY, restartInterruptions, steerStatus, switchSteer, freshSteer, writeCheckpoint, parseCheckpointBlock, lastAssistantText, resolveTargetEntry, buildResumeBrief, readGitBrief, workerResumeAnswer } from './steer.mjs';
 import { AGENTS_KEY } from './agent-state.mjs';
 import { listScopes, resolveScope } from './scope.mjs';
-import { planMigration, formatMigration, applyMigration, formatMigrationResult } from './migrate.mjs';
 import { DRAIN_DEFAULT_TIMEOUT_MS, drain, parseTimeout } from './drain.mjs';
 import { startScopedWorker } from './workers.mjs';
 import { formatWorkersPruneText, formatWorkersText, pruneWorkerRegister, readWorkers, staleWorkerEntries, workersReport } from './supervision.mjs';
@@ -90,7 +89,6 @@ const USAGE = `Usage: paseo-factory <command> [options]
   model advisor <profile|provider/model> on|off [--dry-run]
   model sensitive <profile|provider/model> on|off [--dry-run]
   scopes [--json] [--candidates]   one line per live scope; --candidates lists unadopted workspaces
-  migrate [--apply] [--json]   one-time migration of legacy factory state (dry-run); --apply backs up, then writes
   drain [--timeout 10m] [--json]   wait until no factory agent runs; marks leftovers planned-restart (exit 2), never restarts itself
 plan enrolls exactly one existing Paseo workspace as a factory scope (or repairs it); open the workspace natively first, then plan it by scope id, workspace:<id> or --local <path>.
 --local plans an existing directory without GitHub; it may carry --name for the scope id.
@@ -380,20 +378,6 @@ async function main() {
       const heuristic = await heuristicInputsForScopes(client, paseo).catch(() => null);
       const rows = scopeRows(paseo, { ...(heuristic ?? {}), config });
       return console.log(values.json ? JSON.stringify(rows, null, 2) : formatScopeRows(rows));
-    }
-    if (command === 'migrate') {
-      if (entries.length) throw new Error('migrate takes no repository; use paseo-factory migrate [--apply] [--json]');
-      const paseo = await readPaseoState(client);
-      const plan = planMigration(paseo);
-      if (!values.apply) {
-        return console.log(values.json ? JSON.stringify(plan, null, 2) : formatMigration(plan));
-      }
-      const result = await applyMigration({ client, paseoCli: createPaseoCli(), plan, paseoState: paseo });
-      if (values.json) return console.log(JSON.stringify(result, null, 2));
-      console.log(`Backup: ${result.backupPath}`);
-      console.log(formatMigrationResult(result));
-      if (result.summary?.failed) process.exitCode = 1;
-      return;
     }
     if (command === 'drain') {
       if (entries.length) throw new Error('drain takes no repository; use paseo-factory drain [--timeout 10m] [--json]');

@@ -5,7 +5,7 @@
 import { createHash } from 'node:crypto';
 import { isAdvisorSlot, providerIsSensitive, slotProfile, configWarnings } from './config.mjs';
 import { resolveProfile, steerFallbackList, usedProfilesByLiveSteers } from './models.mjs';
-import { LABEL, METADATA_KEY, describeParent, parentOf, pendingLegacyKeys, agentUsage } from './paseo.mjs';
+import { LABEL, METADATA_KEY, describeParent, parentOf, agentUsage } from './paseo.mjs';
 import { STEER_TITLE, STEER_DIGIT_TITLE, liveSlotHolders } from './discovery.mjs';
 import { validScope } from './scope.mjs';
 import { buildSteerCreate, idempotencyKey, requestDigest, steerCreateLabels } from './steer-create.mjs';
@@ -168,30 +168,8 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
   }
   const workspaceId = main?.id ?? null;
 
-  // 3b. Legacy prefix migration: `ari.wsf*` keys are still read, but new state
-  // uses `wsf*`. One op rewrites the main workspace metadata (old keys are
-  // removed); one op per agent rewrites its labels (old labels linger: Paseo
-  // cannot remove agent labels). Stored `legacyPending` wins over a recomputed
-  // check: normalization adds inferred new keys that were never persisted.
-  const pendingOf = (record, field) => record?.legacyPending ?? pendingLegacyKeys(record?.[field]);
-  if (main && pendingOf(main, 'metadata').length) {
-    add('labels.migrate.workspace', 'labels.migrate', `Rewrite legacy ari.wsf metadata keys of workspace ${main.id} to wsf.*`, {
-      target: 'workspace', workspaceId: main.id, migrate: [...pendingOf(main, 'metadata')],
-    });
-  }
-  const seenAgents = new Set();
-  for (const agent of [...discovery.steers.labelled.filter((a) => !a.archivedAt), ...discovery.workers]) {
-    if (seenAgents.has(agent.id)) continue;
-    seenAgents.add(agent.id);
-    if (!pendingOf(agent, 'labels').length) continue;
-    add(`labels.migrate.agent.${agent.id}`, 'labels.migrate', `Rewrite legacy ari.wsf labels of agent ${agent.id} to wsf.*`, {
-      target: 'agent', agentId: agent.id, migrate: [...pendingOf(agent, 'labels')],
-    });
-  }
-
   // 3c. Scope supplement: an existing main workspace without a scope field gets
   // a non-destructive top-up (other metadata untouched, verified after write).
-  // Planned after the prefix migration so the supplement lands on migrated keys.
   const stateNow = main?.metadata?.[METADATA_KEY];
   if (main && plannedScope && stateNow && !validScope(stateNow.scope) && plannedScope.kind !== 'hub') {
     add('workspace.main.scope', 'paseo.workspace.scope', `Record scope ${JSON.stringify(plannedScope.id)} (${plannedScope.kind}) on workspace ${main.id} (other metadata untouched)`, {
@@ -423,15 +401,14 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
     }
   }
 
-  // Half-labelled steers (role=steer without wsf.scope/wsf.repo, usually legacy
-  // ari.wsf.role/slot only) are conflicts with a hint: archive the agent in
-  // Paseo or complete its labels. Archived and scope-less closed agents are
-  // already ignored by discovery.
+  // Half-labelled steers (role=steer without wsf.scope/wsf.repo) are conflicts
+  // with a hint: archive the agent in Paseo or complete its labels. Archived
+  // and scope-less closed agents are already ignored by discovery.
   for (const agent of discovery.steers.halfLabelled ?? []) {
     const rawSlot = agent.labels?.[LABEL.slot] ?? null;
     const slot = typeof rawSlot === 'string' && /^[A-Za-z]$/.test(rawSlot) ? rawSlot.toUpperCase() : null;
     conflict(slot ? `steer.${slot}` : `labels.half.${agent.id}`,
-      `Half-labelled Steer ${slot ?? '?'} ${agent.id} (${agent.provider}/${agent.model}, ${agent.status}) has wsf.role without wsf.scope/wsf.repo (legacy ari.wsf.role/slot only); archive it in Paseo or complete its labels`);
+      `Half-labelled Steer ${slot ?? '?'} ${agent.id} (${agent.provider}/${agent.model}, ${agent.status}) has wsf.role without wsf.scope/wsf.repo; archive it in Paseo or complete its labels`);
   }
 
   // 4b. Worker adoption (--adopt-worker <id>[@<slot>]): label only, the agent

@@ -10,7 +10,7 @@ import { join, resolve } from 'node:path';
 import { withLock, workspaceLockName } from './lock.mjs';
 import { planHash, WORKSPACE_REF } from './planner.mjs';
 import { checkedCreationReceipt, confirmCreationReceipt, lookupCreation, verifySteerPlacement } from './steer-create.mjs';
-import { LABEL, METADATA_KEY, LEGACY_PREFIX, parentOf, newKeyForLegacyKey } from './paseo.mjs';
+import { LABEL, METADATA_KEY, parentOf } from './paseo.mjs';
 import { validScope } from './scope.mjs';
 import { isWorktreeWorkspace } from './discovery.mjs';
 
@@ -317,7 +317,7 @@ export function createExecutors({ client, paseoCli }) {
       return withLock(workspaceLockName(workspaceId), async (held) => {
         const handle = client.workspaces.ref(workspaceId);
         const before = (await handle.refresh())?.metadata ?? {};
-        const base = { ...(before[LEGACY_PREFIX] ?? {}), ...(before[METADATA_KEY] ?? {}) };
+        const base = { ...(before[METADATA_KEY] ?? {}) };
         if (base.main !== true) throw new Error(`Workspace ${workspaceId} carries no factory main metadata`);
         if (validScope(base.scope)) throw new Error(`Workspace ${workspaceId} already carries scope ${JSON.stringify(base.scope.id)}`);
         held.verify();
@@ -366,7 +366,7 @@ export function createExecutors({ client, paseoCli }) {
       if (!validScope(scope) || scope.kind !== 'hub') throw new Error('scope.convert needs a hub scope { id, kind: "hub", locator? }');
       const handle = client.workspaces.ref(workspaceId);
       const before = (await handle.refresh())?.metadata ?? {};
-      const base = { ...(before[LEGACY_PREFIX] ?? {}), ...(before[METADATA_KEY] ?? {}) };
+      const base = { ...(before[METADATA_KEY] ?? {}) };
       if (base.main !== true) throw new Error(`Workspace ${workspaceId} carries no factory main metadata`);
       if (validScope(base.scope) && base.scope.kind !== 'hub' && base.scope.kind !== 'dir') {
         throw new Error(`Workspace ${workspaceId} carries a ${base.scope.kind} scope; only dir scopes convert to hub`);
@@ -450,37 +450,6 @@ export function createExecutors({ client, paseoCli }) {
       return { agentId: after.id };
     },
 
-    async 'labels.migrate'(op) {
-      const { target, migrate } = op.params;
-      if (!Array.isArray(migrate) || !migrate.length) throw new Error('labels.migrate needs at least one legacy key');
-      for (const oldKey of migrate) {
-        if (!newKeyForLegacyKey(oldKey)) throw new Error(`Not a legacy key: ${oldKey}`);
-      }
-      if (target === 'workspace') return migrateWorkspaceMetadata(client, op.params);
-      if (target === 'agent') return migrateAgentLabels(client, paseoCli, op.params);
-      throw new Error(`labels.migrate needs target workspace or agent, got ${target}`);
-    },
-
-    async 'labels.set'(op) {
-      const { agentId, labels } = op.params ?? {};
-      if (!agentId || !labels || typeof labels !== 'object' || !Object.keys(labels).length) {
-        throw new Error('labels.set needs agentId and at least one label');
-      }
-      const known = new Set(Object.values(LABEL));
-      for (const [key, value] of Object.entries(labels)) {
-        if (!known.has(key)) throw new Error(`labels.set refuses unknown label ${JSON.stringify(key)} (only wsf.* factory labels)`);
-        if (typeof value !== 'string' || !value) throw new Error(`labels.set needs a non-empty string for ${key}`);
-      }
-      const handle = client.agents.ref(agentId);
-      const before = (await handle.refresh())?.agent;
-      if (!before || before.archivedAt) throw new Error(`Agent ${agentId} is missing or archived`);
-      paseoCli(['agent', 'update', before.id, '--label', Object.entries(labels).map(([k, v]) => `${k}=${v}`).join(',')]);
-      const after = (await handle.refresh())?.agent;
-      for (const [key, value] of Object.entries(labels)) {
-        if (after?.labels?.[key] !== value) throw new Error(`Agent ${before.id} label ${key} is ${after?.labels?.[key]}, expected ${value}`);
-      }
-      return { agentId: before.id, labels: { ...labels } };
-    },
   };
   return async function execute(op, config) {
     const handler = handlers[op.kind];
@@ -492,64 +461,6 @@ export function createExecutors({ client, paseoCli }) {
     }
     return handler(op, config);
   };
-}
-
-/**
- * Copies legacy workspace metadata keys to their new counterparts and removes
- * the old ones (`null` removes a top-level key). A persisted new key always
- * wins and is never overwritten. Verified by re-reading afterwards.
- */
-async function migrateWorkspaceMetadata(client, { workspaceId, migrate }) {
-  return withLock(workspaceLockName(workspaceId), async (held) => {
-    const handle = client.workspaces.ref(workspaceId);
-    const before = (await handle.refresh())?.metadata ?? {};
-    const patch = {};
-    const expected = {};
-    for (const oldKey of migrate) {
-      const newKey = newKeyForLegacyKey(oldKey);
-      if (before[newKey] === undefined && before[oldKey] !== undefined) patch[newKey] = before[oldKey];
-      if (before[oldKey] !== undefined) patch[oldKey] = null;
-      if (before[newKey] !== undefined) expected[newKey] = before[newKey];
-      else if (before[oldKey] !== undefined) expected[newKey] = before[oldKey];
-    }
-    if (Object.keys(patch).length) {
-      held.verify();
-      await handle.setMetadata(patch);
-    }
-    const after = (await handle.refresh())?.metadata ?? {};
-    for (const oldKey of migrate) {
-      if (after[oldKey] !== undefined) throw new Error(`Legacy key ${oldKey} still present in workspace ${workspaceId}`);
-      const newKey = newKeyForLegacyKey(oldKey);
-      if (expected[newKey] !== undefined && !isDeepStrictEqual(after[newKey], expected[newKey])) {
-        throw new Error(`Migrated key ${newKey} not verifiable in workspace ${workspaceId}`);
-      }
-    }
-    return { workspaceId, migrated: migrate };
-  });
-}
-
-/**
- * Persists the new counterparts of legacy agent labels via the native CLI.
- * Old labels are left in place: neither the SDK nor `paseo agent update`
- * can remove agent labels. Verified by re-reading afterwards.
- */
-async function migrateAgentLabels(client, paseoCli, { agentId, migrate }) {
-  const handle = client.agents.ref(agentId);
-  const before = (await handle.refresh())?.agent;
-  if (!before || before.archivedAt) throw new Error(`Agent ${agentId} is missing or archived`);
-  const labels = {};
-  for (const oldKey of migrate) {
-    const newKey = newKeyForLegacyKey(oldKey);
-    if (before.labels?.[newKey] === undefined && before.labels?.[oldKey] !== undefined) labels[newKey] = before.labels[oldKey];
-  }
-  if (Object.keys(labels).length) {
-    paseoCli(['agent', 'update', before.id, '--label', Object.entries(labels).map(([k, v]) => `${k}=${v}`).join(',')]);
-  }
-  const after = (await handle.refresh())?.agent;
-  for (const [newKey, value] of Object.entries(labels)) {
-    if (after?.labels?.[newKey] !== value) throw new Error(`Agent ${before.id} label ${newKey} is ${after?.labels?.[newKey]}, expected ${value}`);
-  }
-  return { agentId: before.id, migrated: migrate, oldLabelsRemain: true };
 }
 
 /**

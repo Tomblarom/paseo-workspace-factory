@@ -7,7 +7,6 @@ import {
   factoryCleanup,
   factoryDrain,
   factoryFreshPreview,
-  factoryLabelsPreview,
   factoryModelsCatalog,
   factoryModelsList,
   factoryModelsSet,
@@ -246,25 +245,6 @@ export async function submitFactoryCommand(
       workspaceId: ctx.workspaceId,
       at,
       inputs,
-      preview,
-    });
-    return PANEL;
-  }
-  if (parsed.command === "labels") {
-    const preview = await ctx.rpc(
-      factoryLabelsPreview,
-      parsed.address ? { address: parsed.address } : {},
-    );
-    if (!preview.rows.length) {
-      setFactoryResult({ kind: "info", at, text: preview.text });
-      return pill("Labels");
-    }
-    // --apply only marks the intent; the write itself always needs the panel button.
-    setFactoryResult({
-      kind: "labelsPreview",
-      address: parsed.address,
-      requestedApply: parsed.apply,
-      at,
       preview,
     });
     return PANEL;

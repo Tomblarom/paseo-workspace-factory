@@ -423,7 +423,7 @@ test("applyResume is idempotent while a cleanup is pending", async () => {
     checkpoint: { task: "t", tests: [], blockers: [], next: null },
   });
   world.workspaces[0].metadata[AGENTS_KEY] = {
-    [steer.id]: { pendingAction: { kind: "clear", at: at(NOW), sessionId: "s", reason: "resume" } },
+    [steer.id]: { action: { kind: "cleanup", wakeId: "w1", phase: "renewing", cleanup: { kind: "clear", at: at(NOW), sessionId: "s", reason: "resume" } } },
   };
   const result = await resumeApply.applyResume(
     fakeClient(world),
@@ -576,7 +576,7 @@ test("applyResume rewinds to the last brief before delivering for providers with
   const { ws, steer } = provisioned(world);
   steer.provider = "codex";
   world.workspaces[0].metadata[AGENTS_KEY] = {
-    [steer.id]: { needsResume: { reason: "limit", at: at(NOW - HOUR) }, refreshed: { briefMessageId: "latest-brief" } },
+    [steer.id]: { needsResume: { reason: "limit", at: at(NOW - HOUR) }, action: { kind: "memory", wakeId: "context-facts", phase: "done", facts: { refreshed: { briefMessageId: "latest-brief" } } } },
   };
   const briefs = [];
   const result = await resumeApply.applyResume(

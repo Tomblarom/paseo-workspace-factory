@@ -89,24 +89,11 @@ test('failure write keeps a concurrent switch: the epoch survives', async () => 
   assert.ok(calls.every((keys) => keys.length === 1 && keys[0] === PROFILE_HEALTH_KEY), `only the health key is patched, got ${JSON.stringify(calls)}`);
 });
 
-test('health reads legacy nested marks and migrates them on write', async () => {
-  const legacy = recordProfileFailure('first', 'quota exceeded', { now: NOW });
-  const { live, client } = fakeClient({ wsf: { main: true, activeSteer: 'A', epoch: 1, profileHealth: { first: legacy } } });
-  assert.deepEqual(readProfileHealth(live.metadata), { first: legacy });
-  const record = await storeProfileFailure({ client, workspaceId: 'wks_test', profile: 'next', text: '429 rate limit', lock: testLock, now: NOW });
-  assert.equal(record.profile, 'next');
-  assert.deepEqual(readProfileHealth(live.metadata), { first: legacy, next: record });
-  assert.equal(live.metadata.wsf.epoch, 1);
-  assert.deepEqual(live.metadata.wsf.profileHealth, { first: legacy });
-});
-
-test('readProfileHealth prefers the top-level key per profile', () => {
-  const old = recordProfileFailure('first', 'quota exceeded', { now: NOW });
-  const fresh = recordProfileFailure('first', '503 capacity', { now: NOW + 60_000 });
-  assert.deepEqual(
-    readProfileHealth({ wsf: { profileHealth: { first: old } }, [PROFILE_HEALTH_KEY]: { first: fresh } }),
-    { first: fresh },
-  );
+test('health reads the top-level key only; nested marks are ignored', () => {
+  const nested = recordProfileFailure('first', 'quota exceeded', { now: NOW });
+  assert.equal(readProfileHealth({ wsf: { profileHealth: { first: nested } } }), null);
+  const current = recordProfileFailure('next', '503 capacity', { now: NOW });
+  assert.deepEqual(readProfileHealth({ [PROFILE_HEALTH_KEY]: { next: current } }), { next: current });
   assert.equal(readProfileHealth({ wsf: {} }), null);
   assert.equal(readProfileHealth(null), null);
 });

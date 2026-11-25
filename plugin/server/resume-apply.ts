@@ -3,7 +3,7 @@ import { AGENTS_KEY } from "./factory/agent-state.js";
 import { readCleanupAction } from "./factory/steer-action.js";
 import { actionFact } from "./factory/action-facts.js";
 import { withLock, workspaceLockName } from "./factory/lock.js";
-import { LEGACY_PREFIX, METADATA_KEY, readPaseoState } from "./factory/paseo.js";
+import { METADATA_KEY, readPaseoState } from "./factory/paseo.js";
 import { listScopes, sameScopeId } from "./factory/scope.js";
 import { guardScope, scopeHolder } from "./factory/scope-guard.js";
 import { lastAssistantText, parseCheckpointBlock } from "./factory/steer.js";
@@ -17,7 +17,6 @@ import { resolveZerosub } from "./zerosub-runtime.js";
 import { workerIdentityFromMetadata } from "../shared/supervise.js";
 
 const CHECKPOINT_KEY = `${METADATA_KEY}.checkpoint`;
-const LEGACY_CHECKPOINT_KEY = `${LEGACY_PREFIX}.checkpoint`;
 
 const asLastAnswer = lastAssistantText as unknown as (payload: unknown) => string | null;
 const asParseBlock = parseCheckpointBlock as unknown as (text: string | null) => {
@@ -50,7 +49,7 @@ async function applyWorkerResume(paseo: any, mainId: string, agentId: string, sc
     ]);
     const agent = snapshot?.agent;
     const meta = workspace?.metadata ?? {};
-    const scope = asRecord(meta[METADATA_KEY]) ?? asRecord(meta[LEGACY_PREFIX]);
+    const scope = asRecord(meta[METADATA_KEY]);
     if (!scope || scope.retired === true) throw new Error("The worker scope is no longer active.");
     const identity = cleanupIdentity(agent?.labels) ?? workerIdentityFromMetadata(agent);
     const entry = asRecord(meta[AGENTS_KEY]?.[agentId]);
@@ -209,13 +208,13 @@ export async function applyResume(
   const mainId: string = scope.workspaceId;
   if (input.workspaceId !== mainId) throw new Error("The requested workspace does not match the agent's factory scope.");
   const meta = scope.workspace?.metadata ?? {};
-  const wsf = asRecord(meta[METADATA_KEY]) ?? asRecord(meta[LEGACY_PREFIX]);
+  const wsf = asRecord(meta[METADATA_KEY]);
   if (!wsf) throw new Error(`Workspace ${mainId} has no scope state`);
   const config = deps.getConfig ? await deps.getConfig() : null;
   const entries = asRecord(meta[AGENTS_KEY]) ?? {};
   const entry = asRecord(entries[agentId]);
   const checkpoint =
-    asRecord(meta[CHECKPOINT_KEY]) ?? asRecord(meta[LEGACY_CHECKPOINT_KEY]);
+    asRecord(meta[CHECKPOINT_KEY]);
   if (typeof input.fingerprint === "string" && input.fingerprint) {
     const sessionId =
       typeof agent?.persistence?.sessionId === "string" ? agent.persistence.sessionId : null;

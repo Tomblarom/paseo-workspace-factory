@@ -19,7 +19,7 @@ import { runtime } from './runtime.mjs';
 export class LockBusy extends Error {}
 export class LockError extends Error {}
 
-/** Shared lock name for one workspace's factory metadata (switch, checkpoint, fresh, retire, migrate, scope top-up). */
+/** Shared lock name for one workspace's factory metadata (switch, checkpoint, fresh, retire, scope top-up). */
 export function workspaceLockName(workspaceId) {
   return `workspace-${workspaceId}`;
 }

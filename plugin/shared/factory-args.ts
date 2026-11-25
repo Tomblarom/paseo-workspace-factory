@@ -181,15 +181,6 @@ export const FACTORY_COMMANDS: Record<string, CommandHelp> = {
     ],
     examples: ["/factory model advisor claude-opus on", "/factory model sensitive muse-contributor off"],
   },
-  labels: {
-    usage: "/factory labels [scope|agent-id] [--apply]",
-    summary: "Show agents with missing or wrong factory labels, and fix them.",
-    details: [
-      "Read-only. Without an address it audits every project; with one it audits that project or agent.",
-      "Shows a preview; confirm it in the Factory panel. --apply only marks the intent, it still needs the panel button.",
-    ],
-    examples: ["/factory labels", "/factory labels me/my-repo --apply"],
-  },
 };
 
 export const FACTORY_USAGE = Object.values(FACTORY_COMMANDS)
@@ -256,7 +247,6 @@ export type FactoryCommand =
   | { command: "models" }
   | { command: "drain"; timeout?: string }
   | { command: "quota" }
-  | { command: "labels"; address?: string; apply: boolean }
   | ModelsCommand
   | { command: "steerAdd"; slot?: string; spec?: string; thinking?: string; mode?: string; profile?: string; dryRun: boolean }
   | { command: "help"; topic?: string };
@@ -847,15 +837,6 @@ export function parseFactoryArgs(args: string): FactoryCommand {
     if (flags.positionals.length !== 3 || !spec) fail(`model ${flag} needs a profile or provider/model and on|off.`);
     if (state !== "on" && state !== "off") fail(`model ${flag} ends with on or off, got ${JSON.stringify(state)}.`);
     return { command: "model", flag, spec, on: state === "on", dryRun: flags.bools.has("dry-run") };
-  }
-  if (sub === "labels") {
-    checkAllowed(flags, "labels", ["apply"]);
-    if (flags.positionals.length > 1) fail("labels takes at most one scope or agent address; leave it out to audit every project.");
-    return {
-      command: "labels",
-      ...(flags.positionals.length === 1 ? { address: flags.positionals[0] } : {}),
-      apply: flags.bools.has("apply"),
-    };
   }
   return fail(`Unknown subcommand ${JSON.stringify(sub)}. Try one of the commands below.`);
 }

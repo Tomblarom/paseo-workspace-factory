@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Legacy removal: the one-time `migrate` tool, the `ari.wsf.*` label/metadata readers, the K7 old per-agent field folding, the nested `profileHealth` fallback, the `labels` audit (`factory.labels` RPC, `/factory labels`, `labels.set`/`labels.migrate` ops) and the old delivery shapes are gone; lingering duplicate `ari.wsf.*` agent labels are ignored. Other installs must run `migrate --apply` from commit `fc118f6` before upgrading past this change.
 - Assignment reports: `assign` records the requester (`--report-to`, default the calling agent) and the plugin sends the assigned steer's done/blocked CHECKPOINT back to it once; assignment packets carry the exact CHECKPOINT format; the parser also reads `## CHECKPOINT` / `**CHECKPOINT**` headings.
 - Configuration outside the repository (`--config`, `$PASEO_FACTORY_CONFIG`, XDG path) with `config.example.json`; host settings (state dir, daemon URL, `paseo` binary, password file) in `runtime` or environment variables.
 - Checkpoints: `next` field, `--from-agent` reads the CHECKPOINT block of a steer's last answer, `status` shows the checkpoint and marks one from an older epoch.

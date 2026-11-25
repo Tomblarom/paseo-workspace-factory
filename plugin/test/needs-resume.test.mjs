@@ -516,29 +516,32 @@ test("collectColdAgents surfaces a valid freshHint below the cold threshold", as
     // Still cooling on the short Claude route, with a stored recommendation.
     [hinted.id]: {
       lastTurnEndedAt: at(NOW - 4 * MIN),
-      freshHint: { at: at(NOW - 2 * MIN), reason: hint },
+      action: { kind: "memory", wakeId: "context-facts", phase: "done", facts: { freshHint: { at: at(NOW - 2 * MIN), reason: hint } } },
     },
     // Recorded before the last turn: stale, stays hidden.
     [stale.id]: {
       lastTurnEndedAt: at(NOW - 4 * MIN),
-      freshHint: { at: at(NOW - 2 * HOUR), reason: hint },
+      action: { kind: "memory", wakeId: "context-facts", phase: "done", facts: { freshHint: { at: at(NOW - 2 * HOUR), reason: hint } } },
     },
     // Valid hint, but the agent is not idle.
     [running.id]: {
       lastTurnEndedAt: at(NOW - 4 * MIN),
-      freshHint: { at: at(NOW - 2 * MIN), reason: hint },
+      action: { kind: "memory", wakeId: "context-facts", phase: "done", facts: { freshHint: { at: at(NOW - 2 * MIN), reason: hint } } },
     },
     // A pending C5 action hides the hint like a plain cold row.
     [pending.id]: {
       lastTurnEndedAt: at(NOW - 4 * MIN),
-      freshHint: { at: at(NOW - 2 * MIN), reason: hint },
-      pendingAction: { kind: "compact", at: at(NOW - MIN), reason: "idle" },
+      action: {
+        kind: "cleanup", wakeId: "c", phase: "renewing",
+        cleanup: { kind: "compact", at: at(NOW - MIN), reason: "idle" },
+        facts: { freshHint: { at: at(NOW - 2 * MIN), reason: hint } },
+      },
     },
     // needsResume keeps its reason; the hint rides along for after the resume.
     [flagged.id]: {
       lastTurnEndedAt: at(NOW - 2 * MIN),
       needsResume: { reason: "limit", at: at(NOW - MIN) },
-      freshHint: { at: at(NOW - MIN), reason: hint },
+      action: { kind: "memory", wakeId: "context-facts", phase: "done", facts: { freshHint: { at: at(NOW - MIN), reason: hint } } },
     },
   };
   const rows = await sweep.collectColdAgents(
@@ -941,7 +944,7 @@ test("sweepOnce maps mode clear to /compact for Codex, never /clear", async () =
 
 test("sweepOnce rewinds a fresh-recommended Codex agent when rewindFresh is on", async () => {
   const { world, ws, agent, nowMs } = sweepWorld({ provider: "codex", model: "gpt-6.2-sol", idleMs: 45 * MIN });
-  ws.metadata[AGENTS_KEY][agent.id].refreshed = { briefMessageId: "saved-brief" };
+  ws.metadata[AGENTS_KEY][agent.id].action = { kind: "memory", wakeId: "context-facts", phase: "done", facts: { refreshed: { briefMessageId: "saved-brief" } } };
   const calls = [];
   const results = await sweep.sweepOnce({
     paseo: fakeClient(world),
@@ -968,7 +971,7 @@ test("sweepOnce rewinds a fresh-recommended Codex agent when rewindFresh is on",
   assert.equal(entry.action.facts.refreshed.mode, "rewind");
   assert.equal(entry.action.facts.refreshed.messageId, "msg-1");
   assert.equal(entry.action.facts.refreshed.briefMessageId, "saved-brief");
-  assert.equal(entry.pendingAction, undefined);
+  assert.equal(entry.action.cleanup, undefined);
   // The recorded cleaning keeps the next sweep quiet.
   const second = await sweep.sweepOnce({
     paseo: fakeClient(world),

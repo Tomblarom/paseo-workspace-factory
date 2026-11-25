@@ -19,13 +19,9 @@ export const COMPACTIONS_STORED_MAX = 99;
 const SCOPE_KEY = "wsf.scope";
 const ROLE_KEY = "wsf.role";
 const SLOT_KEY = "wsf.slot";
-const LEGACY_SCOPE_KEY = "ari.wsf.scope";
 // Steers created before wsf.scope carry only the repo label;
 // for steers the repo label is the scope id, as in core discovery.
 const REPO_KEY = "wsf.repo";
-const LEGACY_REPO_KEY = "ari.wsf.repo";
-const LEGACY_ROLE_KEY = "ari.wsf.role";
-const LEGACY_SLOT_KEY = "ari.wsf.slot";
 
 export interface FactoryIdentity {
   scopeId: string;
@@ -33,16 +29,15 @@ export interface FactoryIdentity {
   slot: string | null;
 }
 
-/** Factory steer/worker from agent labels (legacy prefix accepted), else null. */
+/** Factory steer/worker from agent labels, else null. */
 export function factoryIdentity(
   labels: Record<string, string> | null | undefined,
 ): FactoryIdentity | null {
   if (!labels) return null;
-  const scopeId =
-    labels[SCOPE_KEY] ?? labels[LEGACY_SCOPE_KEY] ?? labels[REPO_KEY] ?? labels[LEGACY_REPO_KEY] ?? "";
-  const role = labels[ROLE_KEY] ?? labels[LEGACY_ROLE_KEY] ?? "";
+  const scopeId = labels[SCOPE_KEY] ?? labels[REPO_KEY] ?? "";
+  const role = labels[ROLE_KEY] ?? "";
   if (!scopeId || (role !== "steer" && role !== "worker")) return null;
-  const slot = labels[SLOT_KEY] ?? labels[LEGACY_SLOT_KEY] ?? null;
+  const slot = labels[SLOT_KEY] ?? null;
   return { scopeId, role, slot: slot || null };
 }
 

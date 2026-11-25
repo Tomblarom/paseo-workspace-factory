@@ -337,20 +337,20 @@ test('buildRewindRecord marks cleared/refreshed with mode rewind and wipes the d
 test('freshRewindIdempotent guards pending actions and rewound tabs', () => {
   assert.equal(freshRewindIdempotent(null), null);
   assert.equal(freshRewindIdempotent({}), null);
-  assert.match(freshRewindIdempotent({ pendingAction: { kind: 'clear' } }), /already pending/);
+  assert.match(freshRewindIdempotent({ action: { kind: 'cleanup', wakeId: 'c', phase: 'renewing', cleanup: { kind: 'clear' } } }), /already pending/);
   assert.match(
-    freshRewindIdempotent({ cleared: { at: '2026-11-24T12:00:00.000Z', mode: 'rewind' }, lastTurnEndedAt: '2026-11-24T11:00:00.000Z' }),
+    freshRewindIdempotent({ action: { facts: { cleared: { at: '2026-11-24T12:00:00.000Z', mode: 'rewind' } } }, lastTurnEndedAt: '2026-11-24T11:00:00.000Z' }),
     /already rewound after the last turn/,
   );
   assert.match(
-    freshRewindIdempotent({ cleared: { at: '2026-11-24T12:00:00.000Z', mode: 'rewind' } }),
+    freshRewindIdempotent({ action: { facts: { cleared: { at: '2026-11-24T12:00:00.000Z', mode: 'rewind' } } } }),
     /no new turn recorded/,
   );
   assert.equal(
-    freshRewindIdempotent({ cleared: { at: '2026-11-24T10:00:00.000Z', mode: 'rewind' }, lastTurnEndedAt: '2026-11-24T11:00:00.000Z' }),
+    freshRewindIdempotent({ action: { facts: { cleared: { at: '2026-11-24T10:00:00.000Z', mode: 'rewind' } } }, lastTurnEndedAt: '2026-11-24T11:00:00.000Z' }),
     null, 'a turn after the rewind re-arms the refresh',
   );
-  assert.equal(freshRewindIdempotent({ cleared: { at: '2026-11-24T12:00:00.000Z', mode: 'clear' } }), null);
+  assert.equal(freshRewindIdempotent({ action: { facts: { cleared: { at: '2026-11-24T12:00:00.000Z', mode: 'clear' } } } }), null);
   assert.match(
     freshRewindIdempotent({ action: { kind: 'rewind', phase: 'done', queuedAt: '2026-11-24T12:00:00.000Z' }, lastTurnEndedAt: '2026-11-24T11:00:00.000Z' }),
     /already rewound after the last turn/,
@@ -428,7 +428,7 @@ test('fresh --slot preview shows rewind vs new agent', async () => {
 test('fresh preview and apply use the recorded resume brief when it is still a user message', async () => {
   const world = makeWorld();
   const { ws, steers } = provisioned(world);
-  ws.metadata[AGENTS_KEY] = { [steers.B.id]: { refreshed: { briefMessageId: 'brief-previous' } } };
+  ws.metadata[AGENTS_KEY] = { [steers.B.id]: { action: { kind: 'delivery', wakeId: 'prev', phase: 'done', facts: { refreshed: { briefMessageId: 'brief-previous' } } } } };
   const timeline = userTimeline('original');
   timeline.entries.push({ item: { type: 'user_message', messageId: 'brief-previous' } });
   const daemon = fakeDaemon({ timeline });
@@ -653,7 +653,7 @@ test('double-click apply is idempotent: the second run rewinds nothing', async (
 test('a pending cleanup action makes the rewind apply idempotent without daemon calls', async () => {
   const world = makeWorld();
   const { steers } = provisioned(world);
-  world.workspaces[0].metadata[AGENTS_KEY] = { [steers.B.id]: { pendingAction: { kind: 'clear', at: '2026-11-24T11:00:00.000Z' } } };
+  world.workspaces[0].metadata[AGENTS_KEY] = { [steers.B.id]: { action: { kind: 'cleanup', wakeId: 'c', phase: 'renewing', cleanup: { kind: 'clear', at: '2026-11-24T11:00:00.000Z' } } } };
   const daemon = fakeDaemon({ timeline: userTimeline() });
   const result = await freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon });
   assert.equal(result.applied, false);

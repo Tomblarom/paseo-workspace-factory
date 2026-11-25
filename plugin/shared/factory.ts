@@ -704,52 +704,6 @@ export const factoryQuota = defineRpc({
   }),
 });
 
-const labelRow = z.looseObject({
-  agentId: z.string(),
-  title: z.string().nullable(),
-  workspaceId: z.string().nullable(),
-  scope: z.string().nullable(),
-  kind: z.string().nullable(),
-  slot: z.string().nullable(),
-  owner: z.string().nullable(),
-  labels: z.record(z.string(), z.string()),
-  was: z.record(z.string(), z.string().nullable()),
-  migrate: z.array(z.string()),
-  note: z.string().nullable(),
-});
-
-// Label audit over the whole instance, one scope, or one agent (read-only).
-// Without an address every project is audited, like the CLI `labels`.
-export const factoryLabelsPreview = defineRpc({
-  name: "factory.labels.preview",
-  input: z.object({
-    address: z.string().min(1).optional(),
-  }),
-  output: z.looseObject({
-    address: z.string().nullable(),
-    rows: z.array(labelRow),
-    fixable: z.number(),
-    text: z.string(),
-    fingerprint: z.string(),
-  }),
-});
-
-// Sets the previewed labels; the server recomputes the audit from fresh state
-// and refuses the write when the fingerprint no longer matches.
-export const factoryLabels = defineRpc({
-  name: "factory.labels",
-  input: z.object({
-    address: z.string().min(1).optional(),
-    fingerprint: z.string().min(1),
-  }),
-  output: z.looseObject({
-    address: z.string().nullable(),
-    rows: z.array(labelRow),
-    applied: z.array(z.unknown()),
-    text: z.string(),
-  }),
-});
-
 const steerAddArgs = {
   repo: z.string().min(1).optional(),
   workspaceId: z.string().min(1).optional(),

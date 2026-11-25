@@ -41,17 +41,14 @@ export function profileIsUnhealthy(profileHealth, name, now = Date.now()) {
 }
 
 /**
- * Profile failure marks from workspace metadata: the current top-level
- * `wsf.profileHealth` map merged over the legacy nested `profileHealth` field
- * inside the `wsf` scope state (the top-level entry wins per profile). Null
- * when neither exists. A copy; mutating it changes nothing stored.
+ * Profile failure marks from workspace metadata: the top-level
+ * `wsf.profileHealth` map, or null when absent. A copy; mutating it changes
+ * nothing stored.
  */
 export function readProfileHealth(metadata) {
-  const usable = (value) => (value && typeof value === 'object' && !Array.isArray(value) ? value : null);
-  const legacy = usable(metadata?.[METADATA_KEY]?.profileHealth);
-  const current = usable(metadata?.[PROFILE_HEALTH_KEY]);
-  if (!legacy && !current) return null;
-  return { ...(legacy ?? {}), ...(current ?? {}) };
+  const current = metadata?.[PROFILE_HEALTH_KEY];
+  if (!current || typeof current !== 'object' || Array.isArray(current)) return null;
+  return { ...current };
 }
 
 /**

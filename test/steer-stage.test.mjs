@@ -156,7 +156,7 @@ test('switch delegates delivery after the epoch changes and waits for the delive
       assert.equal(ws.metadata[METADATA_KEY].activeSteer, 'B');
       assert.match(input.renewalNote, /Handoff from Steer A to Steer B/);
       // The clear hook can confirm delivery before the RPC result comes back.
-      ws.metadata['wsf.agents'] = { [steers.B.id]: { lastSteerDeliveryId: 'handoff-id' } };
+      ws.metadata['wsf.agents'] = { [steers.B.id]: { action: { kind: 'delivery', wakeId: 'handoff-id', phase: 'done' } } };
       return { status: 'pending', deliveryId: 'handoff-id' };
     },
   });

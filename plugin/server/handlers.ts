@@ -14,8 +14,6 @@ import {
   factoryFresh,
   factoryFreshPreview,
   factoryHistoryOpen,
-  factoryLabels,
-  factoryLabelsPreview,
   factoryModelsCatalog,
   factoryPlan,
   factoryResume,
@@ -39,7 +37,6 @@ import {
   checkpointFingerprint,
   freshFingerprint,
   isPlanHash,
-  labelsFingerprint,
   steerAddFingerprint,
   switchFingerprint,
 } from "../shared/preview.js";
@@ -68,7 +65,6 @@ import { isAdvisorSlot, isSensitiveProfile, workerPriority } from "./factory/con
 import { DRAIN_DEFAULT_TIMEOUT_MS, drain, parseTimeout } from "./factory/drain.js";
 import { createRunner } from "./factory/factory.js";
 import { createGh } from "./factory/github.js";
-import { formatLabelFixes, planLabelFixes } from "./factory/labels.js";
 import { createGit } from "./factory/local.js";
 import { formatCatalog, paseoRunFlags, resolveProfile, usedProfilesByLiveSteers } from "./factory/models.js";
 import { QUOTA_DEFAULTS, readProfileHealth } from "./factory/quota.js";
@@ -79,7 +75,6 @@ import { deliverSteerBrief, stageSteerBrief } from "./steer-brief.js";
 import { formatWorkersText, readWorkers, workersReport } from "./factory/supervision.js";
 import {
   LABEL,
-  LEGACY_PREFIX,
   METADATA_KEY,
   createPaseoCli,
   daemonPassword,
@@ -121,10 +116,9 @@ function workspaceIdFromAddress(address: string): string | null {
   return null;
 }
 
-/** Scope id of one agent snapshot: scope/repo labels (legacy included), else worker metadata. */
+/** Scope id of one agent snapshot: scope/repo labels, else worker metadata. */
 function agentScopeId(agent: any): string | null {
-  const id = agent?.labels?.[LABEL.scope] ?? agent?.labels?.[`${LEGACY_PREFIX}.scope`] ??
-    agent?.labels?.[LABEL.repo] ?? agent?.labels?.[`${LEGACY_PREFIX}.repo`] ?? workerIdentityFromMetadata(agent)?.scopeId;
+  const id = agent?.labels?.[LABEL.scope] ?? agent?.labels?.[LABEL.repo] ?? workerIdentityFromMetadata(agent)?.scopeId;
   return typeof id === "string" && id ? id : null;
 }
 
@@ -327,7 +321,7 @@ async function takeoverIfNonActive(
   const snapshot: any = await readPaseoState(paseo);
   const found: any = snapshot.agents.find((a: any) => a.id === agentId);
   const scopeId = agentScopeId(found);
-  const slot = found?.labels?.[LABEL.slot] ?? found?.labels?.[`${LEGACY_PREFIX}.slot`];
+  const slot = found?.labels?.[LABEL.slot];
   if (!scopeId) throw new Error("agent has no factory scope label");
   if (typeof slot !== "string" || !/^[A-Z]$/.test(slot)) throw new Error("agent has no steer slot label");
   const config = await loader.loadEffectiveConfig();
@@ -622,9 +616,7 @@ export async function openHistory(
   const state: any = await readPaseoState(paseo);
   const agent: any = state.agents.find((a: any) => a.id === agentId);
   if (!agent) throw new Error(`Unknown agent ${JSON.stringify(agentId)}`);
-  const scopeId =
-    agent.labels?.[LABEL.scope] ?? agent.labels?.[`${LEGACY_PREFIX}.scope`] ??
-    agent.labels?.[LABEL.repo] ?? agent.labels?.[`${LEGACY_PREFIX}.repo`] ?? null;
+  const scopeId = agent.labels?.[LABEL.scope] ?? agent.labels?.[LABEL.repo] ?? null;
   const scope: any = typeof scopeId === "string" && scopeId
     ? (listScopes(state) as any[]).find((s: any) => s.id === scopeId) ?? null
     : null;
@@ -1252,86 +1244,6 @@ export async function applyAssign(
     assignedBy: null,
   });
   return applied;
-}
-
-function labelsAddress(input: { address?: string }): string | undefined {
-  const address = input.address?.trim();
-  return address ? address : undefined;
-}
-
-export async function previewLabels(
-  input: RpcInput<typeof factoryLabelsPreview>,
-  { paseo }: PluginHandlerContext,
-): Promise<any> {
-  const address = labelsAddress(input);
-  const rows: any[] = (planLabelFixes as any)(
-    await readPaseoState(paseo),
-    address ? { address } : {},
-  );
-  const fixable = rows.filter((row) => Object.keys(row.labels).length);
-  return {
-    address: address ?? null,
-    rows,
-    fixable: fixable.length,
-    text: (formatLabelFixes as any)(rows),
-    fingerprint: labelsFingerprint({ address: address ?? null, rows }),
-  };
-}
-
-export async function applyLabels(
-  input: RpcInput<typeof factoryLabels>,
-  { paseo }: PluginHandlerContext,
-  loader: ConfigLoader,
-  extra?: { paseoCli?: (args: string[]) => unknown },
-): Promise<any> {
-  const config = await loader.loadEffectiveConfig();
-  const address = labelsAddress(input);
-  const paseoState: any = await readPaseoState(paseo);
-  const rows: any[] = (planLabelFixes as any)(paseoState, address ? { address } : {});
-  const fresh = labelsFingerprint({ address: address ?? null, rows });
-  if (fresh !== input.fingerprint) {
-    throw new Error(
-      "Something changed since the labels preview (for example an agent was relabelled). Run /factory labels again and confirm the new preview.",
-    );
-  }
-  const fixable = rows.filter((row) => Object.keys(row.labels).length);
-  const executeOptions: any = {
-    client: paseo,
-    gh: createGh(),
-    git: createGit(),
-    paseoCli: extra?.paseoCli ?? createPaseoCli(),
-  };
-  const execute: any = (createExecutors as any)(executeOptions);
-  const applied: { agentId: string; ok: boolean; error?: string }[] = [];
-  for (const row of fixable) {
-    try {
-      await execute(
-        {
-          key: `labels.${row.agentId}`,
-          kind: "labels.set",
-          summary: `Set ${Object.keys(row.labels).join(", ")} on agent ${row.agentId}`,
-          params: { agentId: row.agentId, labels: row.labels },
-        },
-        config,
-      );
-      applied.push({ agentId: row.agentId, ok: true });
-    } catch (error) {
-      applied.push({
-        agentId: row.agentId,
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-  const failed = applied.filter((r) => !r.ok).length;
-  const skipped = rows.length - fixable.length;
-  const lines = applied.map((r) =>
-    r.ok ? `${r.agentId}: labels set` : `${r.agentId}: FAILED: ${r.error}`,
-  );
-  lines.push(
-    `Labels: ${applied.length - failed} agent(s) fixed${skipped ? `, ${skipped} reported without a fix` : ""}${failed ? `, ${failed} failed` : ""}.`,
-  );
-  return { address: address ?? null, rows, applied, text: lines.join("\n") };
 }
 
 export async function previewSteerAdd(

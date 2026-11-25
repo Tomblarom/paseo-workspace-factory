@@ -6,8 +6,6 @@ import type {
   factoryCheckpointPreview,
   factoryCleanup,
   factoryFreshPreview,
-  factoryLabels,
-  factoryLabelsPreview,
   factoryPlan,
   factoryQuota,
   factoryResume,
@@ -90,19 +88,6 @@ export type FactoryPanelResult =
       at: string;
       inputs: AssignPreviewInputs;
       preview: RpcOutput<typeof factoryAssignPreview>;
-    }
-  | {
-      kind: "labelsPreview";
-      address?: string;
-      requestedApply: boolean;
-      at: string;
-      preview: RpcOutput<typeof factoryLabelsPreview>;
-    }
-  | {
-      kind: "labelsApplied";
-      address?: string;
-      at: string;
-      applied: RpcOutput<typeof factoryLabels>;
     }
   | {
       kind: "steerAddPreview";

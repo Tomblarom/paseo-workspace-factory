@@ -337,22 +337,9 @@ test("model advisor and sensitive take a profile and on|off", () => {
   assert.match(FACTORY_USAGE, /\/factory model advisor\|sensitive/);
 });
 
-test("labels takes an optional scope-or-agent address and --apply", () => {
-  assert.deepEqual(parseFactoryArgs("labels"), { command: "labels", apply: false });
-  assert.deepEqual(parseFactoryArgs("labels me/my-repo"), {
-    command: "labels",
-    address: "me/my-repo",
-    apply: false,
-  });
-  assert.deepEqual(parseFactoryArgs("labels agent-12345678 --apply"), {
-    command: "labels",
-    address: "agent-12345678",
-    apply: true,
-  });
-  assert.deepEqual(parseFactoryArgs("labels --apply"), { command: "labels", apply: true });
-  assert.throws(() => parseFactoryArgs("labels a b"), /at most one scope or agent address/);
-  assert.throws(() => parseFactoryArgs("labels a/b --dry-run"), /Unknown flag/);
-  assert.match(FACTORY_USAGE, /\/factory labels \[scope\|agent-id\] \[--apply\]/);
+test("labels is no longer a subcommand", () => {
+  assert.throws(() => parseFactoryArgs("labels"), /Unknown subcommand/);
+  assert.doesNotMatch(FACTORY_USAGE, /\/factory labels/);
 });
 
 test("plan --adopt takes legacy SLOT=<agent-id> pairs", () => {

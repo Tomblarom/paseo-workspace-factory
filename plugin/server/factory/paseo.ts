@@ -19,46 +19,6 @@ export const LABEL = {
 export const PARENT_LABEL = 'paseo.parent-agent-id';
 export const METADATA_KEY = 'wsf';
 
-/**
- * Host-specific prefix the pilot used for factory labels and metadata keys.
- * Still read (see below); a planned `labels.migrate` op rewrites it.
- */
-export const LEGACY_PREFIX = 'ari.wsf';
-
-/** Maps one legacy key to its new counterpart (`ari.wsf.x` -> `wsf.x`); null for non-legacy keys. */
-export function newKeyForLegacyKey(oldKey) {
-  if (oldKey === LEGACY_PREFIX) return METADATA_KEY;
-  if (typeof oldKey === 'string' && oldKey.startsWith(`${LEGACY_PREFIX}.`)) return `${METADATA_KEY}${oldKey.slice(LEGACY_PREFIX.length)}`;
-  return null;
-}
-
-/** Legacy keys that still need migration: old keys without a persisted new counterpart. */
-export function pendingLegacyKeys(dict) {
-  if (!dict || typeof dict !== 'object') return [];
-  return Object.keys(dict).filter((key) => {
-    const mapped = newKeyForLegacyKey(key);
-    return mapped !== null && dict[mapped] === undefined;
-  });
-}
-
-/**
- * Adds the new counterparts of legacy keys to a labels/metadata dict so all
- * readers work unchanged. Mixed records keep both: the new prefix wins on read.
- * Records with legacy keys are marked `legacyPrefix: true`; records that still
- * need migration also carry `legacyPending: [old keys...]` (a plain
- * counterpart check cannot tell persisted new keys from these inferred ones).
- */
-function withNormalizedPrefix(record, field) {
-  const dict = record?.[field];
-  if (!dict || typeof dict !== 'object') return record;
-  const pending = pendingLegacyKeys(dict);
-  const legacy = pending.length > 0 || Object.keys(dict).some((key) => newKeyForLegacyKey(key) !== null);
-  if (!legacy) return record;
-  const normalized = { ...dict };
-  for (const key of pending) normalized[newKeyForLegacyKey(key)] = dict[key];
-  return { ...record, [field]: normalized, legacyPrefix: true, ...(pending.length ? { legacyPending: pending } : {}) };
-}
-
 const SILENT = { debug() {}, info() {}, warn() {}, error() {} };
 
 /** Absolute path of the configured `paseo` binary (PATH lookup for bare names). */
@@ -115,7 +75,7 @@ async function collectPages(fetchPage) {
 /** Fresh agent membership without loading unrelated projects or provider state. */
 export async function readPaseoAgents(client) {
   const agents = await collectPages((cursor) => client.agents.list({ includeBackground: true, filter: { includeArchived: true, includeBackground: true }, page: { limit: 200, ...(cursor ? { cursor } : {}) } }));
-  return agents.map((entry) => withNormalizedPrefix(entry.agent ?? entry, 'labels'));
+  return agents.map((entry) => entry.agent ?? entry);
 }
 
 /** Complete, read-only picture of the daemon state the planner needs. */
@@ -129,8 +89,8 @@ export async function readPaseoState(client) {
   ]);
   return {
     projects,
-    workspaces: workspaces.map((workspace) => withNormalizedPrefix(workspace, 'metadata')),
-    agents: agentEntries.map((entry) => withNormalizedPrefix(entry.agent ?? entry, 'labels')),
+    workspaces,
+    agents: agentEntries.map((entry) => entry.agent ?? entry),
     providers,
   };
 }

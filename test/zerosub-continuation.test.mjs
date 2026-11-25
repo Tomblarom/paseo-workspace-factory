@@ -12,7 +12,6 @@ import {
   resolveContinuations, suggestAccountPin, switchesFromTimeline, latestSwitchRow, parseSwitchData,
 } from '../src/zerosub.mjs';
 import { applyContinuations, discoverRepository, remapWorkerParents } from '../src/discovery.mjs';
-import { planLabelFixes } from '../src/labels.mjs';
 import { resolveProfile } from '../src/models.mjs';
 import { steerStatus } from '../src/steer.mjs';
 import { LABEL, METADATA_KEY, PARENT_LABEL, parentOf } from '../src/paseo.mjs';
@@ -239,68 +238,6 @@ test('discovery follows timeline switches the same way', () => {
   assert.deepEqual(discovery.steers.labelled.map((a) => a.id), ['agent-cont2']);
   assert.equal(discovery.steers.labelled[0].labels[LABEL.slot], 'E');
   assert.equal(parentOf(discovery.workers[0]), 'agent-cont2');
-});
-
-// ---------------------------------------------------------------- labels audit
-
-function scopeState(agents, workspace = null) {
-  const ws = workspace ?? {
-    id: 'wks_test0000000001', projectId: 'prj_1', workspaceDirectory: '/p/proj',
-    workspaceKind: 'local_checkout', title: 'Main', name: 'Main',
-    metadata: { [METADATA_KEY]: { main: true, activeSteer: 'E', epoch: 1, scope: { id: 'proj', kind: 'dir', locator: '/p/proj' } } },
-  };
-  return { workspaces: [ws], agents };
-}
-
-test('labels audit never flags continuations or their superseded origins', () => {
-  const ws = scopeState([]).workspaces[0];
-  const origin = {
-    id: 'agent-origin', workspaceId: ws.id, title: 'Steer E', archivedAt: null,
-    labels: { [LABEL.repo]: 'proj', [LABEL.scope]: 'proj', [LABEL.role]: 'steer', [LABEL.slot]: 'E' },
-  };
-  const cont = {
-    id: 'agent-cont', workspaceId: ws.id, title: 'Steer E', archivedAt: null,
-    labels: { [CONTINUED_FROM_LABEL]: 'agent-origin' },
-  };
-  assert.deepEqual(planLabelFixes(scopeState([origin, cont])), []);
-  assert.deepEqual(planLabelFixes(scopeState([origin, cont]), { address: 'agent-cont' }), []);
-  // A superseded origin that alone would be flagged stays silent too.
-  const partial = {
-    id: 'agent-partial', workspaceId: ws.id, title: 'Steer F', archivedAt: null,
-    labels: { [LABEL.role]: 'steer', [LABEL.slot]: 'F' },
-  };
-  const partialCont = {
-    id: 'agent-partial-cont', workspaceId: ws.id, title: 'Steer F', archivedAt: null,
-    labels: { [CONTINUED_FROM_LABEL]: 'agent-partial' },
-  };
-  assert.deepEqual(planLabelFixes(scopeState([partial, partialCont])), []);
-});
-
-test('labels audit still flags the same agents without a continuation', () => {
-  const ws = scopeState([]).workspaces[0];
-  const partial = {
-    id: 'agent-partial', workspaceId: ws.id, title: 'Steer F', archivedAt: null,
-    labels: { [LABEL.role]: 'steer', [LABEL.slot]: 'F' },
-  };
-  const rows = planLabelFixes(scopeState([partial]));
-  assert.equal(rows.length, 1);
-  assert.deepEqual(rows[0].labels, { [LABEL.repo]: 'proj', [LABEL.scope]: 'proj' });
-  // A dangling continued-from falls back to normal classification: with its
-  // own factory signal the agent is flagged like any other, without one it
-  // stays unattributed (never claimed).
-  const dangling = {
-    id: 'agent-dangling', workspaceId: ws.id, title: 'Steer E', archivedAt: null,
-    labels: { [LABEL.scope]: 'proj', [CONTINUED_FROM_LABEL]: 'agent-missing' },
-  };
-  const danglingRows = planLabelFixes(scopeState([dangling]));
-  assert.equal(danglingRows.length, 1);
-  assert.equal(danglingRows[0].agentId, 'agent-dangling');
-  assert.ok(danglingRows[0].labels[LABEL.role]);
-  const unattributed = {
-    id: 'agent-unattributed', workspaceId: ws.id, title: 'Steer E', archivedAt: null,
-    labels: { [CONTINUED_FROM_LABEL]: 'agent-missing' },
-  };
-  assert.deepEqual(planLabelFixes(scopeState([unattributed])), []);
 });
 
 // ---------------------------------------------------------------- worker pick pin

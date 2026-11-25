@@ -6,23 +6,21 @@ import { scopeRows, scopeCandidates, formatScopeRows, formatScopeCandidates } fr
 const NOW = Date.parse('2026-11-23T12:00:00.000Z');
 const ago = (ms) => new Date(NOW - ms).toISOString();
 
-function steer({ id, workspaceId, slot, repo, provider = 'codex', model = 'gpt-6.2-sol', used = 12000, max = 200000, archivedAt = null, legacy = false }) {
+function steer({ id, workspaceId, slot, repo, provider = 'codex', model = 'gpt-6.2-sol', used = 12000, max = 200000, archivedAt = null }) {
   return {
     id, workspaceId, archivedAt, title: `Steer ${slot}`, provider, model, status: 'idle',
     labels: { 'wsf.role': 'steer', 'wsf.repo': repo, 'wsf.slot': slot },
     ...(used === null ? {} : { lastUsage: { contextWindowUsedTokens: used, contextWindowMaxTokens: max } }),
-    ...(legacy ? { legacyPrefix: true } : {}),
   };
 }
 
-function mainWorkspace({ id, dir, scope, activeSteer, epoch, checkpoint = null, legacy = false, title = 'Main' }) {
+function mainWorkspace({ id, dir, scope, activeSteer, epoch, checkpoint = null, title = 'Main' }) {
   return {
     id, projectId: 'proj-1', title, name: title, workspaceDirectory: dir,
     metadata: {
       wsf: { main: true, activeSteer, epoch, ...(scope ? { scope } : {}) },
       ...(checkpoint ? { 'wsf.checkpoint': checkpoint } : {}),
     },
-    ...(legacy ? { legacyPrefix: true, legacyPending: ['ari.wsf'] } : {}),
   };
 }
 
@@ -83,34 +81,6 @@ test('dir scopes show the deprecated local alias and workspaces without metadata
   assert.equal(dir.kind, 'dir');
   assert.equal(dir.legacyAlias, 'local/notes');
   assert.match(formatScopeRows([dir]), /alias local\/notes \(deprecated\)/);
-});
-
-test('legacy-prefix hint fires only while migration is pending', () => {
-  const pending = githubState();
-  pending.workspaces[0].legacyPrefix = true;
-  pending.workspaces[0].legacyPending = ['ari.wsf'];
-  const [crow] = scopeRows(pending, { now: () => NOW });
-  assert.deepEqual(crow.hints, ['legacy-prefix']);
-  assert.match(formatScopeRows([crow]), /legacy-prefix/);
-
-  const agentPending = githubState();
-  agentPending.agents[0].legacyPrefix = true;
-  agentPending.agents[0].legacyPending = ['ari.wsf.role'];
-  const [arow] = scopeRows(agentPending, { now: () => NOW });
-  assert.deepEqual(arow.hints, ['legacy-prefix']);
-  assert.match(formatScopeRows([arow]), /legacy-prefix/);
-});
-
-test('migrated legacy keys (counterpart present) stay hint-free, JSON-only info', () => {
-  const state = githubState();
-  state.workspaces[0].legacyPrefix = true;
-  state.agents[0].legacyPrefix = true;
-  const [row] = scopeRows(state, { now: () => NOW });
-  assert.equal(row.hints, undefined);
-  assert.equal(row.legacyKeysMigrated, true);
-  assert.ok(!formatScopeRows([row]).includes('legacy-prefix'));
-  const clean = scopeRows(githubState(), { now: () => NOW })[0];
-  assert.equal(clean.legacyKeysMigrated, undefined);
 });
 
 test('one text line per scope carries all hub fields', () => {

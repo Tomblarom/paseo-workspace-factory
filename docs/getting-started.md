@@ -107,7 +107,6 @@ For first-time setup, open **Settings → Plugins → Factory** in Paseo. Under 
 | see quota pools and who uses them | `/factory quota` |
 | wait until nothing runs (safe restart) | `/factory drain` |
 | tidy up leftovers | `/factory cleanup`, then archive natively (`paseo archive`, `paseo workspace archive`, `paseo project delete`) |
-| audit and repair Factory labels | `/factory labels <scope-or-agent-id>`, then select **Set labels** to apply the previewed fixes |
 | manage the worker model priority | `/factory worker list`, `/factory worker set 1 <model>`, `/factory worker pick` |
 | manage steer slots and models | `/factory steer list`, `/factory steer set B <model>` |
 | mark a model as advisor-only or sensitive | `/factory model advisor <profile> on`, `/factory model sensitive <profile> on` |
@@ -162,4 +161,4 @@ Details: [concepts and safety model](concepts.md).
 
 - **Work has stopped after an interruption.** Open the active steer and use `/factory resume --brief` and `/factory workers` to check the saved next step and see which workers finished. If you want that steer to resume, use `/factory resume` in its own tab.
 - **A worker result is missing.** Find the worker by ID in `/factory workers` and check its last answer. A completed worker needs a CHECKPOINT with `task:`, `tests:`, `blockers:` and `next:` inside a fenced code block. [Checkpoint format](steer-instructions.md#answer-format)
-- **A confirmation is refused.** Refresh the preview and inspect the current state. Factory checks the preview against the current scope or labels before it applies the change.
+- **A confirmation is refused.** Refresh the preview and inspect the current state. Factory checks the preview against the current scope before it applies the change.

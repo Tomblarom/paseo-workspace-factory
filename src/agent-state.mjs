@@ -11,7 +11,7 @@
 //   interrupted: { at, outcome, error, excerpt, git, reason } | null,
 //   action: one live operation per target (steer-action.mjs) with facts
 //     (cleared, actionVerified, lastActionFailed, refreshed, freshHint) and
-//     an optional cleanup intent; legacy top-level fields migrate on write.
+//     an optional cleanup intent.
 //   previousSessions: bounded history of pre-clear sessions (kept: UI + import)
 //   settingsBaseline: { provider, model, thinking, speed, sessionId, turnId, at } | null
 //   settingsConfirmed: { provider, model, thinking, speed, fingerprint, at } | null

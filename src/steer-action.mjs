@@ -3,42 +3,20 @@
 import { randomUUID } from 'node:crypto';
 import { AGENTS_KEY } from './agent-state.mjs';
 import { withLock, workspaceLockName } from './lock.mjs';
-import { METADATA_KEY, LEGACY_PREFIX } from './paseo.mjs';
+import { METADATA_KEY } from './paseo.mjs';
 import { guardScope } from './scope-guard.mjs';
-import { actionFact, mergeActionFacts } from './action-facts.mjs';
+import { mergeActionFacts } from './action-facts.mjs';
 
-export function readSteerAction(entry, workspaceId) {
-  if (entry?.action) return entry.pendingAction && !entry.action.cleanup ? { ...entry.action, cleanup: entry.pendingAction } : entry.action;
-  const old = entry?.pendingWakeBrief;
-  if (old?.wakeId) {
-    let action = { ...old, kind: 'delivery' };
-    if (!old.renewal && Array.isArray(old.events)) {
-      const phase = old.briefSent ? 'sent' : entry.pendingAction ? 'renewing' :
-        actionFact(entry, 'cleared')?.mode === 'clear' && actionFact(entry, 'actionVerified') === true ? 'ready' : 'blocked';
-      action = { ...action, renewal: 'clear', phase, queuedAt: old.queuedAt ?? '', epoch: old.epoch ?? null,
-        batch: { workspaceId, epoch: old.epoch ?? null, events: old.events },
-        ...(phase === 'blocked' ? { lastError: 'The previous context clear could not be confirmed.' } : {}) };
-    }
-    // Old versions allowed an independent stage while renewal was pending.
-    if (entry.stagedBrief?.packet) action = { ...action, legacyStage: entry.stagedBrief };
-    if (entry.lastSteerDeliveryId) action.lastDeliveryId = entry.lastSteerDeliveryId;
-    if (entry.pendingAction) action.cleanup = entry.pendingAction;
-    return action;
-  }
-  if (entry?.pendingAction) return { kind: 'cleanup', wakeId: entry.pendingAction.messageId ?? `legacy-cleanup-${entry.pendingAction.at ?? 'unknown'}`, phase: 'renewing', cleanup: entry.pendingAction };
-  if (entry?.stagedBrief?.packet?.trim()) return { kind: 'stage', wakeId: randomUUID(), phase: 'staged', ...entry.stagedBrief, ...(entry.lastSteerDeliveryId ? { lastDeliveryId: entry.lastSteerDeliveryId } : {}) };
-  if (entry?.lastSteerDeliveryId) return { kind: 'delivery', wakeId: entry.lastSteerDeliveryId, phase: 'done' };
-  return null;
+export function readSteerAction(entry) {
+  return entry?.action ?? null;
 }
 
 export function actionEntry(entry, action) {
-  const { pendingWakeBrief, stagedBrief, lastSteerDeliveryId, pendingAction, ...rest } = entry ?? {};
-  if (pendingAction && action && !action.cleanup) action = { ...action, cleanup: pendingAction };
-  return mergeActionFacts(rest, { action });
+  return mergeActionFacts(entry, { action });
 }
 
 export function readCleanupAction(entry) {
-  return entry?.action?.cleanup ?? entry?.pendingAction ?? null;
+  return entry?.action?.cleanup ?? null;
 }
 
 /** @param {any} input @returns {any} */
@@ -59,11 +37,11 @@ export async function reconcileSteerSend({ client, workspaceId, agentId, actionI
   const claim = await lock(workspaceLockName(workspaceId), async (held) => {
     const meta = (await workspace.refresh())?.metadata ?? {};
     const entries = meta[AGENTS_KEY] ?? {};
-    const action = readSteerAction(entries[agentId], workspaceId);
+    const action = readSteerAction(entries[agentId]);
     if (!action || action.wakeId !== actionId) return { status: 'missing' };
     if (action.phase === 'sent' || action.phase === 'done') return { status: 'sent', action };
     if (!['ready', 'uncertain'].includes(action.phase) || typeof action.packet !== 'string') return { status: 'pending', action };
-    const scope = meta[METADATA_KEY] ?? meta[LEGACY_PREFIX];
+    const scope = meta[METADATA_KEY];
     if (scope?.retired || (action.epoch != null && action.epoch !== scope?.epoch)) return { status: 'blocked', action, detail: 'Scope authority changed before delivery.' };
     if (action.authority) {
       try { await guardScope({ client, held, workspaceId, scopeId: action.authority.scopeId, epoch: action.epoch, agentId: action.authority.agentId }); }
@@ -83,7 +61,7 @@ export async function reconcileSteerSend({ client, workspaceId, agentId, actionI
     await lock(workspaceLockName(workspaceId), async (held) => {
       const meta = (await workspace.refresh())?.metadata ?? {};
       const entries = meta[AGENTS_KEY] ?? {};
-      const current = readSteerAction(entries[agentId], workspaceId);
+      const current = readSteerAction(entries[agentId]);
       if (current?.wakeId !== actionId || current.phase !== 'uncertain') return;
       held.verify();
       await workspace.setMetadata({ [AGENTS_KEY]: { ...entries, [agentId]: actionEntry(entries[agentId], { ...current, lastError: detail.slice(0, 300) }) } });
@@ -93,7 +71,7 @@ export async function reconcileSteerSend({ client, workspaceId, agentId, actionI
   return lock(workspaceLockName(workspaceId), async (held) => {
     const current = (await workspace.refresh())?.metadata ?? {};
     const entries = current[AGENTS_KEY] ?? {};
-    const action = readSteerAction(entries[agentId], workspaceId);
+    const action = readSteerAction(entries[agentId]);
     if (action?.wakeId !== actionId) return { status: 'uncertain', action: claim.action, detail: 'Delivery accepted but its record changed.' };
     if (action.phase === 'done' || action.phase === 'sent') return { status: 'sent', action };
     const sent = { ...action, phase: 'sent', observedAt: now() };

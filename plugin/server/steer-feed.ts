@@ -7,7 +7,7 @@ import { readSteerAction } from "./factory/steer-action.js";
 import { AGENTS_KEY, currentFreshHint } from "./factory/agent-state.js";
 import { isAdvisorSlot } from "./factory/config.js";
 import { liveSlotHolders, resolveSteerHolders } from "./factory/discovery.js";
-import { LEGACY_PREFIX, METADATA_KEY, readPaseoState } from "./factory/paseo.js";
+import { METADATA_KEY, readPaseoState } from "./factory/paseo.js";
 import { QUOTA_DEFAULTS } from "./factory/quota.js";
 import { listScopes } from "./factory/scope.js";
 import { resolveContinuations } from "./factory/zerosub.js";
@@ -131,7 +131,7 @@ interface ScopeReads {
 function scopeReads(scope: any): ScopeReads | null {
   const mainId = scope?.workspaceId;
   const meta = scope?.workspace?.metadata ?? {};
-  const wsf = asRecord(meta[METADATA_KEY]) ?? asRecord(meta[LEGACY_PREFIX]);
+  const wsf = asRecord(meta[METADATA_KEY]);
   if (typeof mainId !== "string" || !wsf) return null;
   return {
     mainId,
@@ -279,7 +279,7 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
       active: slot !== null && slot === reads.activeSteer,
       permissionNeeded,
       stagedBrief:
-        readSteerAction(entry, reads.mainId)?.phase === "staged",
+        readSteerAction(entry)?.phase === "staged",
       successor: liveFor[agent.id] ?? (superseded ? uniqueHolder : null),
       state: projection.state,
       warmth: projection.warmth,

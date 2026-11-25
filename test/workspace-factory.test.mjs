@@ -748,7 +748,7 @@ test('an operation that was not confirmed aborts apply', async () => {
   let step = 0;
   const { report } = await apply(world, [FIRMWARE], {
     tamper: (plans) => {
-      if (step++ > 0) plans[0].ops.unshift({ key: 'surprise', kind: 'labels.set', params: {} });
+      if (step++ > 0) plans[0].ops.unshift({ key: 'surprise', kind: 'paseo.agent.create', params: {} });
       return plans;
     },
   });
@@ -776,7 +776,7 @@ test('rediscovered parameters never extend the authorization (metadata, config, 
     ['adopt metadata', (p) => (p.ops[0].params.metadata[METADATA_KEY].activeSteer = 'C'), /metadata differs/, 0],
     ['steer scope', (p) => (p.ops.find((o) => o.key === 'steer.A').params.labels['wsf.scope'] = 'evil'), /labels differs/, 1],
     ['repository identity', (p) => (p.repo = 'example-owner/other'), /identity changed/, 0],
-    ['operation kind', (p) => (p.ops[0].kind = 'labels.set'), /kind labels.set instead of paseo.workspace.metadata/, 0],
+    ['operation kind', (p) => (p.ops[0].kind = 'paseo.agent.create'), /kind paseo.agent.create instead of paseo.workspace.metadata/, 0],
   ];
   for (const [name, mutate, expected, adopted] of cases) {
     const { world, report } = await applyWithObservedChange(mutate);

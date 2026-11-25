@@ -480,14 +480,14 @@ const freshVerifyFail = (freshId) => (message) => new SwitchRefused(`Fresh agent
 // on recovery even if the newly built packet has changed meanwhile.
 async function deliverFreshPacket({ client, workspaceId, agentId, packet, epoch, lock, authority = null, messageId = null }) {
   const reserved = await updateAgentEntry({ client, workspaceId, agentId, lock, patch: (entry) => {
-    const existing = readSteerAction(entry, workspaceId);
+    const existing = readSteerAction(entry);
     if (existing?.kind === 'fresh-delivery') return null;
     if (existing && existing.phase !== 'done') return null;
     const action = newSteerAction({ kind: 'fresh-delivery', id: messageId ?? crypto.randomUUID(), epoch, text: packet });
     if (authority) action.authority = authority;
     return { action };
   } });
-  const action = readSteerAction(reserved, workspaceId);
+  const action = readSteerAction(reserved);
   if (action?.kind !== 'fresh-delivery') return { status: 'blocked', detail: 'Another agent action needs reconciliation.' };
   const result = await reconcileSteerSend({ client, workspaceId, agentId, actionId: action.wakeId, lock });
   if (result.status === 'sent') await updateAgentEntry({ client, workspaceId, agentId, lock, patch: (entry) =>
@@ -850,7 +850,7 @@ async function waitForSwitchDelivery(workspace, agentId, deliveryId, epoch, dead
     const meta = (await workspace.refresh())?.metadata ?? {};
     if (meta[METADATA_KEY]?.epoch !== epoch) return 'The scope moved before the handoff brief arrived.';
     const entry = meta[AGENTS_KEY]?.[agentId];
-    const pending = readSteerAction(entry, workspace.id);
+    const pending = readSteerAction(entry);
     if ((pending?.wakeId === deliveryId && (pending.phase === 'sent' || pending.phase === 'done')) || pending?.lastDeliveryId === deliveryId) return null;
     if (pending?.wakeId !== deliveryId) return 'The queued handoff brief could no longer be found.';
     if (pending.phase === 'blocked') return pending.lastError ?? 'Handoff context renewal needs attention.';
@@ -920,7 +920,7 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
     const next = { ...fresh, activeSteer: toSlot, activeAgentId: to.id, epoch: fresh.epoch + 1, previousSteer: fresh.activeSteer, switchedAt: now().toISOString() };
     const entries = metadata[AGENTS_KEY] ?? {};
     if (!selfTakeover && (send || stage)) {
-      const prior = readSteerAction(entries[to.id], status.workspace.id);
+      const prior = readSteerAction(entries[to.id]);
       if (prior && prior.phase !== 'done') throw new SwitchRefused('Target has a pending steer delivery; finish it before switching');
       switchAction = newSteerAction({ kind: stage ? 'stage' : 'switch', epoch: next.epoch, at: next.switchedAt,
         text: packet, note: `Handoff from Steer ${fromInfo.slot} to Steer ${toSlot} in round ${next.epoch}.`, phase: stage ? 'staged' : 'reserved' });
@@ -1037,7 +1037,7 @@ async function runTabRewind({ client, workspaceId, agentId, packet, checkpoint, 
     const metadata = (await workspace.refresh())?.metadata ?? {};
     const agents = metadata[AGENTS_KEY] ?? {};
     const entry = agents[agentId] ?? {};
-    const previous = readSteerAction(entry, workspaceId);
+    const previous = readSteerAction(entry);
     if (readCleanupAction(entry) || (previous && !['done', 'staged'].includes(previous.phase))) {
       throw new SwitchRefused('An existing agent action needs reconciliation before rewind');
     }

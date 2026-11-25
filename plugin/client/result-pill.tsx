@@ -24,7 +24,6 @@ export const READONLY_FACTORY_RESULT_ACTIONS: FactoryResultActions = {
   confirmResume: () => {},
   confirmFresh: () => {},
   confirmAssign: () => {},
-  confirmLabels: () => {},
   confirmSteerAdd: () => {},
 };
 

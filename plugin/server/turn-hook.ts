@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { finishSteerDelivery, pendingSteerDelivery, type SteerDeliveryDeps } from "./steer-delivery.js";
-import { LEGACY_PREFIX, METADATA_KEY, readPaseoState } from "./factory/paseo.js";
+import { METADATA_KEY, readPaseoState } from "./factory/paseo.js";
 import { listScopes } from "./factory/scope.js";
 import { guardScope } from "./factory/scope-guard.js";
 import { readCleanupAction, readSteerAction } from "./factory/steer-action.js";
@@ -48,7 +48,6 @@ import {
 
 const CHECKPOINT_KEY = `${METADATA_KEY}.checkpoint`;
 const AGENTS_KEY = `${METADATA_KEY}.agents`;
-const LEGACY_CHECKPOINT_KEY = `${LEGACY_PREFIX}.checkpoint`;
 
 interface TurnPayload {
   agent: { id: string };
@@ -470,10 +469,9 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
   let applied = false;
   // One core lock helper names and takes workspace locks (never duplicated here).
   await withWorkspaceLockRetry(mainId, async (held: any) => {
-    // refresh() is raw: legacy fallback for pre-migration records.
     const freshSnap: any = await paseo.workspaces.ref(mainId).refresh().catch(() => null);
     const freshMeta = freshSnap?.metadata ?? {};
-    const freshWsf = asRecord(freshMeta[METADATA_KEY]) ?? asRecord(freshMeta[LEGACY_PREFIX]);
+    const freshWsf = asRecord(freshMeta[METADATA_KEY]);
     const freshAgents = asRecord(freshMeta[AGENTS_KEY]) ?? {};
     if (decision.dropSelf) {
       held.verify();
@@ -493,7 +491,7 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
         patchInterrupted = null;
       }
     }
-    // Merge onto the fresh entry so concurrent fields (e.g. a pendingAction
+    // Merge onto the fresh entry so concurrent fields (e.g. a cleanup intent
     // C5 set after our read) survive; resolving clears it explicitly.
     const prev: Record<string, any> = asRecord(freshAgents[agentId]) ?? {};
     const currentCleanup = readCleanupAction(prev);
@@ -510,8 +508,7 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
       ...(newerTurnOpen ? { openTurnId: prev.openTurnId, turnStartedAt: prev.turnStartedAt } : {}),
     };
     if (decision.resolvePending) {
-      delete merged.pendingAction;
-      const action = readSteerAction(prev, mainId);
+      const action = readSteerAction(prev);
       if (action) merged.action = decision.cleanupUncertain
         ? { ...action, phase: "blocked", cleanup: { ...currentCleanup, uncertain: true } }
         : action.kind === "cleanup" ? { ...action, phase: "done", cleanup: null } : { ...action, cleanup: null };
@@ -522,9 +519,9 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
     }
     if (decision.resolvePending && pending?.reason === RESUME_PENDING_REASON &&
         currentCleanup?.at === pending.at && currentCleanup?.reason === pending.reason) {
-      // A pre-existing manual clear may only have a pendingAction, with its
-      // brief note stored there. Adopt it into the same delivery queue.
-      const queued = pendingSteerDelivery(prev, mainId) ?? {
+      // A pre-existing manual clear carries its brief note in the cleanup
+      // record. Adopt it into the same delivery queue.
+      const queued = pendingSteerDelivery(prev) ?? {
         wakeId: randomUUID(),
         renewal: "clear",
         queuedAt: pending.at,
@@ -537,19 +534,14 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
           merged.cleared = actionFact(prev, "cleared") ?? null;
           merged.actionVerified = null;
         }
-        delete merged.pendingWakeBrief;
-        delete merged.stagedBrief;
-        delete merged.lastSteerDeliveryId;
         merged.action = readyDelivery
           ? { ...queued, cleanup: null, phase: "ready" }
           : { ...queued, cleanup: decision.cleanupUncertain ? { ...currentCleanup, uncertain: true } : null, phase: "blocked", lastError: "Claude context clear could not be confirmed. Inspect the agent before recovery." };
       }
     }
     const normalized = mergeActionFacts(prev, merged);
-    if (decision.resolvePending) delete normalized.pendingAction;
     const patch: Record<string, unknown> = { [AGENTS_KEY]: { ...freshAgents, [agentId]: normalized } };
-    const freshCheckpoint =
-      asRecord(freshMeta[CHECKPOINT_KEY]) ?? asRecord(freshMeta[LEGACY_CHECKPOINT_KEY]);
+    const freshCheckpoint = asRecord(freshMeta[CHECKPOINT_KEY]);
     if (checkpointWrite) {
       patch[CHECKPOINT_KEY] = checkpointWrite;
     } else if (patchInterrupted) {

@@ -27,9 +27,9 @@ export const PREVIOUS_SESSIONS_MAX = 5;
 
 /** Header marking a resume brief in the agent timeline (R-A). */
 export const RESUME_BRIEF_HEADER = "[Factory resume]";
-/** pendingAction.reason for a resume clear; the turn hook sends the brief for these. */
+/** cleanup.reason for a resume clear; the turn hook sends the brief for these. */
 export const RESUME_PENDING_REASON = "resume";
-/** pendingAction.reason for an automatic C5 sweep clear (seed path, unchanged). */
+/** cleanup.reason for an automatic C5 sweep clear (seed path, unchanged). */
 export const SWEEP_PENDING_REASON = "idle";
 /** Notice heading the brief when it arrives without a cleared context. */
 export const RESUME_NOT_CLEARED_NOTICE =
@@ -183,14 +183,9 @@ const SCOPE_KEY = "wsf.scope";
 const ROLE_KEY = "wsf.role";
 const SLOT_KEY = "wsf.slot";
 const KEEP_KEY = "wsf.keepContext";
-const LEGACY_SCOPE_KEY = "ari.wsf.scope";
 // Steers created before wsf.scope carry only the repo label;
 // for steers the repo label is the scope id, as in core discovery.
 const REPO_KEY = "wsf.repo";
-const LEGACY_REPO_KEY = "ari.wsf.repo";
-const LEGACY_ROLE_KEY = "ari.wsf.role";
-const LEGACY_SLOT_KEY = "ari.wsf.slot";
-const LEGACY_KEEP_KEY = "ari.wsf.keepContext";
 
 export interface CleanupSettings {
   mode: "off" | "clear" | "compact-warm";
@@ -229,25 +224,22 @@ export interface FactoryIdentity {
   slot: string | null;
 }
 
-/** Factory steer/worker from agent labels (legacy prefix accepted), else null. */
+/** Factory steer/worker from agent labels, else null. */
 export function cleanupIdentity(
   labels: Record<string, string> | null | undefined,
 ): FactoryIdentity | null {
   if (!labels) return null;
-  const scopeId =
-    labels[SCOPE_KEY] ?? labels[LEGACY_SCOPE_KEY] ?? labels[REPO_KEY] ?? labels[LEGACY_REPO_KEY] ?? "";
-  const role = labels[ROLE_KEY] ?? labels[LEGACY_ROLE_KEY] ?? "";
+  const scopeId = labels[SCOPE_KEY] ?? labels[REPO_KEY] ?? "";
+  const role = labels[ROLE_KEY] ?? "";
   if (!scopeId || (role !== "steer" && role !== "worker")) return null;
-  const slot = labels[SLOT_KEY] ?? labels[LEGACY_SLOT_KEY] ?? null;
+  const slot = labels[SLOT_KEY] ?? null;
   return { scopeId, role, slot: slot || null };
 }
 
 /** Explicit per-agent opt-out survives every mode. */
 export function hasKeepContext(labels: Record<string, string> | null | undefined): boolean {
   if (!labels) return false;
-  return (
-    labels[KEEP_KEY] === "true" || labels[LEGACY_KEEP_KEY] === "true"
-  );
+  return labels[KEEP_KEY] === "true";
 }
 
 export interface CleanupInput {
@@ -410,7 +402,7 @@ export function cleanupInputOf(args: {
  */
 function cleanupFact(entry: Record<string, unknown> | null | undefined, key: string): unknown {
   const facts = (entry?.action as { facts?: Record<string, unknown> } | undefined)?.facts;
-  return facts && Object.hasOwn(facts, key) ? facts[key] : entry?.[key];
+  return facts && Object.hasOwn(facts, key) ? facts[key] : undefined;
 }
 
 export function decideCleanupAction(input: CleanupInput): CleanupDecision {
@@ -442,7 +434,7 @@ export function decideCleanupAction(input: CleanupInput): CleanupDecision {
   }
   if (input.status !== "idle") return deny(`agent is ${input.status}`);
   if (input.pendingPermissionCount > 0) return deny("a permission request is pending");
-  if (input.entry?.pendingAction || (input.entry?.action as any)?.cleanup || input.entry?.pendingWakeBrief) return deny("a cleanup action is already pending");
+  if ((input.entry?.action as any)?.cleanup) return deny("a cleanup action is already pending");
   const activeAction = input.entry?.action as Record<string, unknown> | undefined;
   if (activeAction?.kind === "rewind" && (activeAction.phase === "rewinding" || activeAction.phase === "uncertain")) return deny("rewind outcome is uncertain");
   if (cleanupFact(input.entry, "lastActionFailed")) {

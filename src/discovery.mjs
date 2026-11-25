@@ -4,7 +4,7 @@ import { basename, join, resolve } from 'node:path';
 import { realpathSync, statSync } from 'node:fs';
 import { resolveGitHub, parseRepoInput } from './github.mjs';
 import { classifyCheckouts } from './local.mjs';
-import { LABEL, LEGACY_PREFIX, METADATA_KEY, PARENT_LABEL, parentOf } from './paseo.mjs';
+import { LABEL, METADATA_KEY, PARENT_LABEL, parentOf } from './paseo.mjs';
 import { validScope } from './scope.mjs';
 import { continuedFromId, inheritContinuationLabels, resolveContinuations } from './zerosub.mjs';
 
@@ -337,16 +337,16 @@ export function resolveSteerHolders(labelled, agents, switches = []) {
 }
 
 /**
- * Live holders of one slot from a resolved list: matching slot (legacy slot
- * labels count, new prefix wins), not archived, not superseded, not retired
- * unless `includeRetired`. Agents and status rows share this one selector.
+ * Live holders of one slot from a resolved list: matching slot label, not
+ * archived, not superseded, not retired unless `includeRetired`. Agents and
+ * status rows share this one selector.
  */
 export function liveSlotHolders(list, slot, { includeRetired = false } = {}) {
   if (typeof slot !== 'string' || !slot) return [];
   return (list ?? []).filter((entry) => {
     if (!entry || entry.archivedAt || entry.superseded === true) return false;
     if (!includeRetired && entry.retired === true) return false;
-    return (entry.labels?.[LABEL.slot] ?? entry.labels?.[`${LEGACY_PREFIX}.slot`] ?? entry.slot ?? null) === slot;
+    return (entry.labels?.[LABEL.slot] ?? entry.slot ?? null) === slot;
   });
 }
 
@@ -421,12 +421,11 @@ function splitCandidates(candidates, matchKeys, agentsById) {
 
 /**
  * Half-labelled steers: live agents in the main workspace with role=steer but
- * without a scope identity — typically legacy ari.wsf.role/slot only
- * (normalized to wsf.role/slot, no wsf.scope/wsf.repo). Labelled steers (repo
- * present) and foreign-labelled agents (a scope label outside matchKeys) are
- * not half-labelled. Archived agents are ignored; closed ones stay visible
- * when they carry a scope assignment (a daemon restart closes real steers
- * too) and are ignored only without one.
+ * without a scope identity (role/slot present, no scope/repo). Labelled
+ * steers (repo present) and foreign-labelled agents (a scope label outside
+ * matchKeys) are not half-labelled. Archived agents are ignored; closed ones
+ * stay visible when they carry a scope assignment (a daemon restart closes
+ * real steers too) and are ignored only without one.
  */
 function halfLabelledSteers(paseo, mainWorkspace, matchKeys) {
   if (!mainWorkspace) return [];
