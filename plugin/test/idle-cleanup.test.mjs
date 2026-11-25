@@ -273,6 +273,7 @@ test("scanCleanupEvidence finds compaction signals", () => {
     compactionSeen: false,
     markerSeen: false,
   });
+  assert.equal(scanCleanupEvidence([{ item: { type: "compaction", status: "loading" } }]).compactionSeen, false);
 });
 
 test("pushPreviousSession deduplicates and bounds the history", () => {

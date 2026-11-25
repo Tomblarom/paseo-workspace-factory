@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { firstRewindPoint, isRewindUnsupportedError, readRewindPoint, rewindAndBrief, rewindSameTab } from '../src/rewind.mjs';
+import { firstRewindPoint, readRewindPoint, rewindAndBrief, rewindSameTab } from '../src/rewind.mjs';
 import { buildRewindRecord, buildRefreshPacket, freshRewindIdempotent, freshSteer, steerStatus } from '../src/steer.mjs';
 import { withLock } from '../src/lock.mjs';
 import { LABEL, METADATA_KEY, PARENT_LABEL } from '../src/paseo.mjs';
@@ -86,6 +86,7 @@ function fakeClient(world) {
     id,
     refresh: async () => structuredClone(findWs(id)),
     setMetadata: async (patch) => {
+      if (world.hooks.beforeMetadataWrite) world.hooks.beforeMetadataWrite(patch);
       world.calls.push(['workspace.setMetadata', id, patch]);
       Object.assign(findWs(id).metadata, structuredClone(patch));
     },
@@ -184,14 +185,6 @@ test('firstRewindPoint takes the first user_message id and skips tool calls', ()
   assert.equal(firstRewindPoint({ entries: 'nope' }), null);
 });
 
-test('isRewindUnsupportedError matches provider-capability failures only', () => {
-  assert.equal(isRewindUnsupportedError(new Error('rewind not supported for this provider')), true);
-  assert.equal(isRewindUnsupportedError(new Error('Unsupported method')), true);
-  assert.equal(isRewindUnsupportedError(new Error('socket closed')), false);
-  assert.equal(isRewindUnsupportedError(new Error('could not find user message')), false);
-  assert.equal(isRewindUnsupportedError(null), false);
-});
-
 // ------------------------------------------------------------- rewind core
 
 test('readRewindPoint returns the id and fails soft to null', async () => {
@@ -270,7 +263,7 @@ test('rewindSameTab distinguishes no-point, unsupported, unavailable and failed'
   assert.deepEqual(noPoint, { status: 'no-point' });
 
   const unsupported = await rewindSameTab('a', { createClient: fakeDaemon({ timeline: userTimeline(), rewindFails: new Error('method not supported') }) });
-  assert.equal(unsupported.status, 'unsupported');
+  assert.equal(unsupported.status, 'failed');
 
   const noMethod = await rewindSameTab('a', {
     createClient: async () => ({ fetchAgentTimeline: async () => userTimeline(), close: async () => {} }),
@@ -358,6 +351,14 @@ test('freshRewindIdempotent guards pending actions and rewound tabs', () => {
     null, 'a turn after the rewind re-arms the refresh',
   );
   assert.equal(freshRewindIdempotent({ cleared: { at: '2026-11-24T12:00:00.000Z', mode: 'clear' } }), null);
+  assert.match(
+    freshRewindIdempotent({ action: { kind: 'rewind', phase: 'done', queuedAt: '2026-11-24T12:00:00.000Z' }, lastTurnEndedAt: '2026-11-24T11:00:00.000Z' }),
+    /already rewound after the last turn/,
+  );
+  assert.equal(
+    freshRewindIdempotent({ action: { kind: 'rewind', phase: 'done', queuedAt: '2026-11-24T10:00:00.000Z' }, lastTurnEndedAt: '2026-11-24T11:00:00.000Z' }),
+    null, 'a turn after the recorded rewind re-arms the refresh',
+  );
 });
 
 test('buildRefreshPacket heads the same tab when rewound', async () => {
@@ -478,10 +479,10 @@ test('fresh --slot apply rewinds the same tab and records cleared/refreshed', as
   assert.ok(!('sourceAgentId' in sendCall[3]));
 
   const entry = world.workspaces[0].metadata[AGENTS_KEY][steers.B.id];
-  assert.equal(entry.cleared.mode, 'rewind');
-  assert.equal(entry.refreshed.mode, 'rewind');
-  assert.equal(entry.refreshed.messageId, 'msg-a');
-  assert.equal(entry.refreshed.briefMessageId, result.briefMessageId);
+  assert.equal(entry.action.facts.cleared.mode, 'rewind');
+  assert.equal(entry.action.facts.refreshed.mode, 'rewind');
+  assert.equal(entry.action.facts.refreshed.messageId, 'msg-a');
+  assert.equal(entry.action.facts.refreshed.briefMessageId, result.briefMessageId);
   assert.equal(entry.compactions, 0);
   const kept = world.agents.find((a) => a.id === steers.B.id);
   assert.equal(kept.title, 'Steer B');
@@ -503,7 +504,7 @@ test('fresh --worker apply rewinds the same tab with its owner', async () => {
   assert.equal(result.to, worker.id);
   assert.match(result.packet, /keeps its tab \(rewound context/);
   assert.equal(world.agents.length, 3, 'no new worker created');
-  assert.equal(world.workspaces[0].metadata[AGENTS_KEY][worker.id].cleared.mode, 'rewind');
+  assert.equal(world.workspaces[0].metadata[AGENTS_KEY][worker.id].action.facts.cleared.mode, 'rewind');
 });
 
 test('active fresh apply rewinds without an epoch bump or retire notice', async () => {
@@ -520,7 +521,7 @@ test('active fresh apply rewinds without an epoch bump or retire notice', async 
   assert.match(result.packet, /keeps agent .* in the same tab/);
   assert.deepEqual(world.workspaces[0].metadata[METADATA_KEY], { main: true, activeSteer: 'A', epoch: 1 });
   assert.ok(!world.calls.some((c) => c[0] === 'agent.send'), 'no retire notice: the tab survives');
-  assert.equal(world.workspaces[0].metadata[AGENTS_KEY][steers.A.id].refreshed.mode, 'rewind');
+  assert.equal(world.workspaces[0].metadata[AGENTS_KEY][steers.A.id].action.facts.refreshed.mode, 'rewind');
 });
 
 // ------------------------------------------------------ fallback and failure
@@ -540,30 +541,90 @@ test('no rewind point falls back to a new parent-free agent', async () => {
   assert.deepEqual(world.calls.filter((c) => c[0] === 'agent.send').map((c) => c[1]), [result.to, steers.B.id]);
 });
 
-test('unsupported rewind falls back to a new agent', async () => {
+test('unsupported error after rewind dispatch remains uncertain and does not fall back', async () => {
   const world = makeWorld();
-  provisioned(world);
+  const { steers } = provisioned(world);
   const daemon = fakeDaemon({ timeline: userTimeline(), rewindFails: new Error('rewindAgent not supported') });
-  const result = await freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon });
-  assert.equal(result.refreshMode, 'new-agent');
-  assert.equal(result.rewindFallback, 'unsupported');
-  assert.ok(result.to);
+  const run = () => freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon });
+  await assert.rejects(run(), /uncertain outcome/);
+  assert.equal(world.workspaces[0].metadata[AGENTS_KEY][steers.B.id].action.phase, 'uncertain');
+  const result = await run();
+  assert.equal(result.idempotent, true);
+  assert.equal(daemon.calls.filter((c) => c[0] === 'rewindAgent').length, 1);
+  assert.equal(world.agents.length, 2);
 });
 
-test('rewind failure aborts with no side effects', async () => {
+test('rewind failure leaves a durable uncertain action', async () => {
   const world = makeWorld();
   const { steers } = provisioned(world);
   world.workspaces[0].metadata[AGENTS_KEY] = { [steers.B.id]: { note: 'keep me', noteAt: '2026-11-24T10:00:00.000Z' } };
   const daemon = fakeDaemon({ timeline: userTimeline(), rewindFails: new Error('could not find user message') });
   await assert.rejects(
     freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon }),
-    /Rewind of .* failed \(could not find user message\); nothing sent, nothing recorded, no new agent created/,
+    /Rewind of .* has an uncertain outcome \(could not find user message\)/,
   );
   assert.equal(world.agents.length, 2, 'no agent created');
-  assert.deepEqual(world.calls, [], 'no send, no metadata write, no creation, no receipt lookup');
+  assert.ok(!world.calls.some((c) => c[0] === 'agent.send' || c[0] === 'agent.create'));
   assert.ok(!daemon.calls.some((c) => c[0] === 'sendMessage'), 'no brief sent');
-  assert.deepEqual(world.workspaces[0].metadata[AGENTS_KEY][steers.B.id], { note: 'keep me', noteAt: '2026-11-24T10:00:00.000Z' });
+  assert.equal(world.workspaces[0].metadata[AGENTS_KEY][steers.B.id].action.phase, 'uncertain');
   assert.deepEqual(world.workspaces[0].metadata[METADATA_KEY], { main: true, activeSteer: 'A', epoch: 1 });
+});
+
+test('lost metadata write after a committed rewind cannot repeat it', async () => {
+  const world = makeWorld();
+  const { steers } = provisioned(world);
+  const daemon = fakeDaemon({ timeline: userTimeline() });
+  let fail = true;
+  world.hooks.beforeMetadataWrite = (patch) => {
+    if (fail && patch[AGENTS_KEY]?.[steers.B.id]?.action?.phase === 'done') {
+      fail = false;
+      throw new Error('metadata disconnected after rewind');
+    }
+  };
+  const run = () => freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon });
+  await assert.rejects(run(), /metadata disconnected/);
+  assert.equal(world.workspaces[0].metadata[AGENTS_KEY][steers.B.id].action.phase, 'rewinding');
+  assert.equal((await run()).idempotent, true);
+  assert.equal(daemon.calls.filter((c) => c[0] === 'rewindAgent').length, 1);
+  assert.equal(world.agents.length, 2);
+});
+
+test('a landed rewind with a failed brief send records done, not uncertain', async () => {
+  const world = makeWorld();
+  const { steers } = provisioned(world);
+  const daemon = fakeDaemon({ timeline: userTimeline(), sendFails: new Error('brief transport down') });
+  const run = () => freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon });
+  const result = await run();
+  assert.equal(result.applied, true);
+  assert.equal(result.delivered, false);
+  assert.match(result.deliveryError ?? '', /brief transport down/);
+  const entry = world.workspaces[0].metadata[AGENTS_KEY][steers.B.id];
+  assert.equal(entry.action.phase, 'done');
+  assert.match(entry.action.sendError ?? '', /brief transport down/);
+  const second = await run();
+  assert.equal(second.idempotent, true);
+  assert.equal(daemon.calls.filter((c) => c[0] === 'rewindAgent').length, 1, 'the landed rewind is not repeated');
+});
+
+test('lost facts write after a settled rewind stays idempotent via the action', async () => {
+  const world = makeWorld();
+  const { steers } = provisioned(world);
+  world.workspaces[0].metadata[AGENTS_KEY] = { [steers.B.id]: { lastTurnEndedAt: '2026-11-24T11:00:00.000Z' } };
+  const daemon = fakeDaemon({ timeline: userTimeline() });
+  let fail = true;
+  world.hooks.beforeMetadataWrite = (patch) => {
+    if (fail && patch[AGENTS_KEY]?.[steers.B.id]?.action?.facts?.cleared?.mode === 'rewind') {
+      fail = false;
+      throw new Error('metadata disconnected after settle');
+    }
+  };
+  const run = () => freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon, now: () => new Date('2026-11-24T12:00:00.000Z') });
+  await assert.rejects(run(), /metadata disconnected after settle/);
+  const entry = world.workspaces[0].metadata[AGENTS_KEY][steers.B.id];
+  assert.equal(entry.action.phase, 'done');
+  assert.equal(entry.action.facts?.cleared, undefined);
+  assert.equal((await run()).idempotent, true);
+  assert.equal(daemon.calls.filter((c) => c[0] === 'rewindAgent').length, 1);
 });
 
 // -------------------------------------------------------------- idempotency

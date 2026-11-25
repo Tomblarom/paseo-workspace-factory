@@ -867,10 +867,9 @@ test("a cold takeover starts its answer window only after the renewed brief is s
 
   // The verified clear is recorded by the turn hook, covered in wake-brief.test.
   const entry = ws.metadata[AGENTS_KEY][steers.B.id];
-  entry.pendingAction = null;
+  entry.action.cleanup = null;
   steers.B.persistence.sessionId = "new-session";
-  entry.cleared = { mode: "clear", sessionId: "new-session" };
-  entry.actionVerified = true;
+  entry.action.facts = { ...entry.action.facts, cleared: { mode: "clear", sessionId: "new-session" }, actionVerified: true };
   entry.action.phase = "ready";
   assert.equal((await supervise.retryPendingWakeBrief(paseo, scope, deps)).delivered, true);
   assert.equal(sendsTo(world, steers.B.id).length, 2);

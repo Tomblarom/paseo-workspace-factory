@@ -9,7 +9,10 @@
 //   openTurnId, turnStartedAt,      // set on agent.turn.before, cleared (null) on turn.after
 //   contextTokens, note, noteAt,
 //   interrupted: { at, outcome, error, excerpt, git, reason } | null,
-//   cleared, pendingAction, lastActionFailed, previousSessions, actionVerified
+//   action: one live operation per target (steer-action.mjs) with facts
+//     (cleared, actionVerified, lastActionFailed, refreshed, freshHint) and
+//     an optional cleanup intent; legacy top-level fields migrate on write.
+//   previousSessions: bounded history of pre-clear sessions (kept: UI + import)
 //   settingsBaseline: { provider, model, thinking, speed, sessionId, turnId, at } | null
 //   settingsConfirmed: { provider, model, thinking, speed, fingerprint, at } | null
 // interrupted.reason is "daemon-restart" | "planned-restart" for restart
@@ -17,6 +20,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import { METADATA_KEY } from './paseo.mjs';
 import { withLock, workspaceLockName } from './lock.mjs';
+import { actionFact, mergeActionFacts } from './action-facts.mjs';
 
 export const AGENTS_KEY = `${METADATA_KEY}.agents`;
 export const CHECKPOINT_AGENTS_KEY = `${METADATA_KEY}.checkpoint`;
@@ -36,7 +40,7 @@ export function clipText(value, max) {
 
 /** The hint belongs to the current idle period and carries a bounded reason. */
 export function currentFreshHint(entry) {
-  const hint = entry?.freshHint;
+  const hint = actionFact(entry, 'freshHint');
   const reason = typeof hint?.reason === 'string' ? hint.reason.replace(/\s+/g, ' ').trim() : '';
   const hintedAt = typeof hint?.at === 'string' ? Date.parse(hint.at) : NaN;
   const lastEnd = typeof entry?.lastTurnEndedAt === 'string' ? Date.parse(entry.lastTurnEndedAt) : NaN;
@@ -106,10 +110,11 @@ export function isComparableBaseline(baseline, liveSessionId) {
  * is not in `liveIds` are dropped when `liveIds` is given. Verified by
  * re-reading afterwards. Returns the merged entry.
  */
-export async function updateAgentEntry({ client, workspaceId, agentId, patch, liveIds = null, lock = withLock }) {
+export async function updateAgentEntry({ client, workspaceId, agentId, patch, liveIds = null, lock = withLock, guard = null }) {
   const workspace = client.workspaces.ref(workspaceId);
   return lock(workspaceLockName(workspaceId), async (held) => {
     const metadata = (await workspace.refresh())?.metadata ?? {};
+    if (guard) await guard({ held, metadata });
     const state = { ...(metadata[AGENTS_KEY] ?? {}) };
     const entryPatch = typeof patch === 'function' ? patch(state[agentId] ?? null) : patch;
     if (entryPatch === null) return state[agentId] ?? null;
@@ -119,7 +124,8 @@ export async function updateAgentEntry({ client, workspaceId, agentId, patch, li
         if (!live.has(id)) delete state[id];
       }
     }
-    state[agentId] = clipEntry({ ...(state[agentId] ?? {}), ...entryPatch });
+    state[agentId] = clipEntry(mergeActionFacts(state[agentId], entryPatch));
+    for (const key of Object.keys(state[agentId])) if (state[agentId][key] === undefined) delete state[agentId][key];
     held.verify(); // the lock file must still be the locked inode right before the write
     await workspace.setMetadata({ [AGENTS_KEY]: state });
     const written = (await workspace.refresh())?.metadata?.[AGENTS_KEY]?.[agentId] ?? null;

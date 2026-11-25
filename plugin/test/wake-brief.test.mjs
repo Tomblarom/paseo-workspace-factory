@@ -132,7 +132,8 @@ function provisioned(world) {
 }
 
 function clearTurnTimeline(world, agentId, turnId = "t-clear") {
-  const messageId = world.workspaces[0].metadata[AGENTS_KEY]?.[agentId]?.pendingAction?.messageId;
+  const saved = world.workspaces[0].metadata[AGENTS_KEY]?.[agentId];
+  const messageId = (saved?.action?.cleanup ?? saved?.pendingAction)?.messageId;
   world.timelines[agentId] = [
     { turnId, item: { type: "user_message", text: "/clear", messageId } },
     { turnId, item: { type: "assistant_message", text: "cleared" } },
@@ -172,7 +173,7 @@ test("clear then brief succeeds via turn-after: delivered once", async () => {
   const agents = world.workspaces[0].metadata[AGENTS_KEY][steer.id];
   assert.equal(agents.needsResume, null);
   assert.equal(agents.action.phase, "done");
-  assert.equal(agents.pendingAction, null);
+  assert.equal(agents.pendingAction, undefined);
   const worker = world.workspaces[0].metadata[WORKERS_KEY][workerId];
   assert.ok(worker.lastWakeAt, "delivered stamps lastWakeAt");
   assert.equal(worker.pendingWake, null);
@@ -421,7 +422,7 @@ test("a cold Claude wake waits for a verified clear even when the hook runs duri
     const state = ws.metadata[AGENTS_KEY][steer.id];
     assert.ok(worker.pendingWake);
     assert.equal(worker.lastWakeAt, null);
-    assert.equal(state.pendingAction.kind, "clear");
+    assert.equal(state.action.cleanup.kind, "clear");
     assert.equal(state.action.phase, "renewing");
     assert.equal((await recheck()).delivered, false);
     assert.deepEqual(sendsTo(world, steer.id), ["/clear"]);
@@ -450,7 +451,7 @@ test("a native clear with a replaced timeline needs the matching live session ch
     { agent: { id: steer.id }, turnId: "clear-without-user-row", outcome: { kind: "completed" } },
     { paseo: client }, { getResumeBrief: buildBrief, lock: deps.lock },
   );
-  assert.equal(ws.metadata[AGENTS_KEY][steer.id].cleared.sessionId, "native-new-session");
+  assert.equal(ws.metadata[AGENTS_KEY][steer.id].action.facts.cleared.sessionId, "native-new-session");
   assert.match(sendsTo(world, steer.id)[1], /^\[Factory resume\]/);
 });
 
@@ -468,8 +469,8 @@ test("an unverified clear leaves the brief and worker event pending", async () =
   assert.equal((await recheck()).delivered, false);
   assert.deepEqual(sendsTo(world, steer.id), ["/clear"]);
   assert.equal(ws.metadata[AGENTS_KEY][steer.id].action.phase, "blocked");
-  assert.equal(ws.metadata[AGENTS_KEY][steer.id].cleared, null);
-  assert.match(ws.metadata[AGENTS_KEY][steer.id].lastActionFailed.error, /session unchanged/);
+  assert.equal(ws.metadata[AGENTS_KEY][steer.id].action.facts.cleared, null);
+  assert.match(ws.metadata[AGENTS_KEY][steer.id].action.facts.lastActionFailed.error, /session unchanged/);
   assert.equal(ws.metadata[WORKERS_KEY][workerId].lastWakeAt, null);
   assert.ok(ws.metadata[WORKERS_KEY][workerId].pendingWake);
 });
@@ -489,7 +490,7 @@ test("an ordinary turn with a stale /clear row does not verify or release a pend
     { paseo: client }, { getResumeBrief: buildBrief, lock: deps.lock },
   );
   const current = ws.metadata[AGENTS_KEY][steer.id];
-  assert.equal(current.pendingAction.messageId, state.pendingAction.messageId);
+  assert.equal(current.action.cleanup.messageId, state.action.cleanup.messageId);
   assert.equal(current.cleared, undefined);
   assert.equal((await recheck()).delivered, false);
   assert.deepEqual(sendsTo(world, steer.id), ["/clear"]);
@@ -531,7 +532,7 @@ test("a new turn between clear reservation and dispatch leaves the wake queued",
   const original = ws.metadata;
   let reserved = false;
   Object.defineProperty(ws, "metadata", { get() {
-    if (original[AGENTS_KEY][steer.id].pendingAction?.kind === "clear") {
+    if (original[AGENTS_KEY][steer.id].action?.cleanup?.kind === "clear") {
       reserved = true;
       steer.activeTurn = { turnId: "new-turn" };
     }
@@ -540,8 +541,8 @@ test("a new turn between clear reservation and dispatch leaves the wake queued",
   assert.equal((await wake()).sent, false);
   assert.equal(reserved, true);
   assert.deepEqual(sendsTo(world, steer.id), []);
-  assert.equal(original[AGENTS_KEY][steer.id].pendingAction, null);
-  assert.equal(original[AGENTS_KEY][steer.id].action, null);
+  assert.equal(original[AGENTS_KEY][steer.id].pendingAction, undefined);
+  assert.equal(original[AGENTS_KEY][steer.id].action.phase, "done");
   assert.ok(original[WORKERS_KEY][workerId].pendingWake);
 });
 
@@ -597,7 +598,7 @@ test("a stored stale-worker brief cannot wake a steer after its worker is archiv
     };
     assert.equal((await recheck()).delivered, false);
     assert.deepEqual(sendsTo(world, steer.id), []);
-    assert.equal(ws.metadata[AGENTS_KEY][steer.id].action, null);
+    assert.equal(ws.metadata[AGENTS_KEY][steer.id].action.phase, "done");
   }
 });
 
@@ -628,7 +629,7 @@ for (const [name, provider, minutesIdle, tokens, keepChatHistory] of [
     assert.deepEqual(rewind, ["rewind", steer.id, "brief-anchor", "conversation"]);
     assert.match(send[2], /\[Factory resume\]\nCompact checkpoint\n\n.*worker worker-1 done/s);
     assert.ok(send[3].messageId);
-    assert.equal(ws.metadata[AGENTS_KEY][steer.id].refreshed.briefMessageId, send[3].messageId);
+    assert.equal(ws.metadata[AGENTS_KEY][steer.id].action.facts.refreshed.briefMessageId, send[3].messageId);
     assert.equal(ws.metadata[WORKERS_KEY][workerId].pendingWake, null);
     assert.equal((await recheck()).attempted, false);
     assert.equal(sendsTo(world, steer.id).length, 1);
@@ -652,6 +653,27 @@ test("resume without a rewind point exposes the fallback in the result and the s
   assert.equal(row.state, "needs-resume");
   assert.equal(row.detail, result.detail);
   assert.deepEqual(sendsTo(world, steer.id), []);
+});
+
+test("a failed delivery rewind stays uncertain with its attempt marker, not a silent retry", async () => {
+  const { ws, client, steer, world, deps, buildBrief } = deliveryFixture({ provider: "codex", minutesIdle: 31, tokens: 110_000 });
+  const result = await applyResume(client, { workspaceId: ws.id, agentId: steer.id }, {
+    lock: deps.lock,
+    now: () => at(NOW),
+    buildBrief,
+    rewindClient: async () => ({
+      fetchAgentTimeline: async () => ({ entries: [{ item: { type: "user_message", messageId: "first" } }] }),
+      rewindAgent: async () => { throw new Error("provider forked, then failed"); },
+    }),
+  });
+  assert.equal(result.status, "blocked");
+  assert.match(result.detail, /uncertain.*Inspect/);
+  const entry = ws.metadata[AGENTS_KEY][steer.id];
+  assert.equal(entry.action.phase, "blocked");
+  assert.ok(entry.action.rewindAttempt, "the uncertain attempt is retained for inspection");
+  assert.deepEqual(sendsTo(world, steer.id), []);
+  const [row] = collectSteerStates(world, { settings: null, nowMs: NOW });
+  assert.equal(row.state, "needs-resume");
 });
 
 test("a cold switch delivery uses the compact brief and drops the outgoing transcript excerpt", async () => {

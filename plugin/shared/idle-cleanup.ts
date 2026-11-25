@@ -408,6 +408,11 @@ export function cleanupInputOf(args: {
  * over-compacted, or boundary agents get `fresh-recommended` (a recorded
  * hint, no send); agents without a valid package state cool untouched.
  */
+function cleanupFact(entry: Record<string, unknown> | null | undefined, key: string): unknown {
+  const facts = (entry?.action as { facts?: Record<string, unknown> } | undefined)?.facts;
+  return facts && Object.hasOwn(facts, key) ? facts[key] : entry?.[key];
+}
+
 export function decideCleanupAction(input: CleanupInput): CleanupDecision {
   const { settings } = input;
   const deny = (reason: string): CleanupDecision => ({ action: null, command: null, reason });
@@ -437,8 +442,10 @@ export function decideCleanupAction(input: CleanupInput): CleanupDecision {
   }
   if (input.status !== "idle") return deny(`agent is ${input.status}`);
   if (input.pendingPermissionCount > 0) return deny("a permission request is pending");
-  if (input.entry?.pendingAction || input.entry?.pendingWakeBrief) return deny("a cleanup action is already pending");
-  if (input.entry?.lastActionFailed) {
+  if (input.entry?.pendingAction || (input.entry?.action as any)?.cleanup || input.entry?.pendingWakeBrief) return deny("a cleanup action is already pending");
+  const activeAction = input.entry?.action as Record<string, unknown> | undefined;
+  if (activeAction?.kind === "rewind" && (activeAction.phase === "rewinding" || activeAction.phase === "uncertain")) return deny("rewind outcome is uncertain");
+  if (cleanupFact(input.entry, "lastActionFailed")) {
     return deny("the last cleanup action failed; a new real turn is required first");
   }
   const thresholdMinutes = compacting ? compactAtMinutes(profile, ttl) : settings.idleMinutes;
@@ -476,7 +483,7 @@ export function decideCleanupAction(input: CleanupInput): CleanupDecision {
     const noteAt = stampMs(input.entry?.noteAt);
     if (noteAt === null || noteAt < lastEnd) return deny("no note from the last turn");
   }
-  const clearedAt = stampMs((input.entry?.cleared as Record<string, unknown> | null)?.at);
+  const clearedAt = stampMs((cleanupFact(input.entry, "cleared") as Record<string, unknown> | null)?.at);
   if (clearedAt !== null && clearedAt >= lastEnd) {
     return deny("already cleaned after the last turn");
   }
@@ -508,7 +515,7 @@ export function decideCleanupAction(input: CleanupInput): CleanupDecision {
   if (compacting) {
     const fresh = freshHintReason();
     if (fresh) {
-      const hintedAt = stampMs((input.entry?.freshHint as Record<string, unknown> | null)?.at);
+      const hintedAt = stampMs((cleanupFact(input.entry, "freshHint") as Record<string, unknown> | null)?.at);
       if (hintedAt !== null && hintedAt >= lastEnd) {
         return deny("fresh already recommended after the last turn");
       }
@@ -585,7 +592,7 @@ export interface CleanupEvidence {
 }
 
 interface TimelineItemLike {
-  item?: { type?: unknown; text?: unknown; message?: unknown } | null;
+  item?: { type?: unknown; status?: unknown; text?: unknown; message?: unknown } | null;
 }
 
 function itemTexts(entry: unknown): string[] {
@@ -608,7 +615,7 @@ export function scanCleanupEvidence(entries: readonly unknown[]): CleanupEvidenc
   };
   for (const entry of entries) {
     const item = (entry as TimelineItemLike | null)?.item;
-    if (item?.type === "compaction") found.compactionSeen = true;
+    if (item?.type === "compaction" && item.status === "completed") found.compactionSeen = true;
     for (const text of itemTexts(entry)) {
       if (/\[Compacted\]/.test(text)) found.markerSeen = true;
     }

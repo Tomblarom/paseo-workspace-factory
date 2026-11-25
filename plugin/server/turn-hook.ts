@@ -3,6 +3,9 @@ import { finishSteerDelivery, pendingSteerDelivery, type SteerDeliveryDeps } fro
 import { LEGACY_PREFIX, METADATA_KEY, readPaseoState } from "./factory/paseo.js";
 import { listScopes } from "./factory/scope.js";
 import { guardScope } from "./factory/scope-guard.js";
+import { readCleanupAction, readSteerAction } from "./factory/steer-action.js";
+import { ACTION_FACTS, actionFact, mergeActionFacts } from "./factory/action-facts.js";
+import { pushPreviousSession } from "../shared/idle-cleanup.js";
 import { createGit } from "./factory/local.js";
 import { withLock, withWorkspaceLock, workspaceLockName } from "./factory/lock.js";
 import {
@@ -358,7 +361,7 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
   const usage: any = agentUsage(agent);
   const turnUsage = extractTurnUsage(payload, agent);
   const git = kind === "completed" ? null : readGitSnapshot(createGit(), scope.directory ?? null);
-  const pending = asRecord(previous?.pendingAction);
+  const pending = asRecord(readCleanupAction(previous));
   const sessionBefore = pending?.sessionId;
   const sessionNow = agent?.persistence?.sessionId;
   const sessionChanged = typeof sessionBefore === "string" && sessionBefore && typeof sessionNow === "string" && sessionNow
@@ -377,6 +380,10 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
     const replacedTimeline = sessionChanged === true && !prompt && (!payload.turnId || pending.previousTurnId !== payload.turnId) &&
       entries.some(({ item }) => item?.text === `Claude switched to a new session: ${sessionBefore} -> ${sessionNow}`);
     turnUserText = commandMatches || replacedTimeline ? "/clear" : null;
+  } else if (pending?.kind === "compact" && pending.messageId) {
+    const prompt = exactTurn.find(({ item }) => item?.type === "user_message" &&
+      (item.clientMessageId === pending.messageId || item.messageId === pending.messageId))?.item;
+    turnUserText = cleanupCommandKind(prompt?.text) === "compact" ? prompt.text : null;
   }
 
   // Effect evidence for our own cleanup turns: the session-id comparison is
@@ -384,7 +391,7 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
   let effect: CleanupEffect | null = null;
   const isCleanupTurn = Boolean(pending && pending.kind === cleanupCommandKind(turnUserText));
   if (isCleanupTurn) {
-    const scan = scanCleanupEvidence(entries);
+    const scan = scanCleanupEvidence(pending?.kind === "compact" ? exactTurn : entries);
     effect = {
       sessionChanged,
       compactionSeen: scan.compactionSeen,
@@ -409,7 +416,7 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
     contextTokens: usage?.usedTokens ?? null,
     epoch: wsf.epoch,
     checkpoint,
-    previous,
+    previous: previous ? { ...previous, ...Object.fromEntries(ACTION_FACTS.map((key: string) => [key, actionFact(previous, key)])), ...(pending ? { pendingAction: pending } : {}) } : previous,
     effect,
     now: new Date().toISOString(),
   });
@@ -489,8 +496,9 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
     // Merge onto the fresh entry so concurrent fields (e.g. a pendingAction
     // C5 set after our read) survive; resolving clears it explicitly.
     const prev: Record<string, any> = asRecord(freshAgents[agentId]) ?? {};
-    if (decision.resolvePending && (prev.pendingAction?.at !== pending?.at ||
-      prev.pendingAction?.messageId !== pending?.messageId || prev.pendingAction?.kind !== pending?.kind)) return;
+    const currentCleanup = readCleanupAction(prev);
+    if (decision.resolvePending && (currentCleanup?.at !== pending?.at ||
+      currentCleanup?.messageId !== pending?.messageId || currentCleanup?.kind !== pending?.kind)) return;
     const newerTurnOpen = prev.openTurnId && prev.openTurnId !== payload.turnId;
     const merged: Record<string, any> = {
       ...prev,
@@ -501,12 +509,19 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
       ...(settingsBaseline ? { settingsBaseline } : {}),
       ...(newerTurnOpen ? { openTurnId: prev.openTurnId, turnStartedAt: prev.turnStartedAt } : {}),
     };
-    if (decision.resolvePending) merged.pendingAction = null;
+    if (decision.resolvePending) {
+      delete merged.pendingAction;
+      const action = readSteerAction(prev, mainId);
+      if (action) merged.action = decision.cleanupUncertain
+        ? { ...action, phase: "blocked", cleanup: { ...currentCleanup, uncertain: true } }
+        : action.kind === "cleanup" ? { ...action, phase: "done", cleanup: null } : { ...action, cleanup: null };
+    }
     if (decision.resolvePending && pending?.kind === "clear" && decision.entryUpdate?.actionVerified === true) {
       merged.cleared = { ...asRecord(merged.cleared), sessionId: sessionNow };
+      merged.previousSessions = pushPreviousSession(Array.isArray(prev.previousSessions) ? prev.previousSessions : null, typeof sessionBefore === "string" ? sessionBefore : null);
     }
     if (decision.resolvePending && pending?.reason === RESUME_PENDING_REASON &&
-        prev.pendingAction?.at === pending.at && prev.pendingAction?.reason === pending.reason) {
+        currentCleanup?.at === pending.at && currentCleanup?.reason === pending.reason) {
       // A pre-existing manual clear may only have a pendingAction, with its
       // brief note stored there. Adopt it into the same delivery queue.
       const queued = pendingSteerDelivery(prev, mainId) ?? {
@@ -519,18 +534,20 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
       if (queued.renewal === "clear") {
         readyDelivery = decision.entryUpdate?.actionVerified === true;
         if (!readyDelivery) {
-          merged.cleared = prev.cleared ?? null;
+          merged.cleared = actionFact(prev, "cleared") ?? null;
           merged.actionVerified = null;
         }
         delete merged.pendingWakeBrief;
         delete merged.stagedBrief;
         delete merged.lastSteerDeliveryId;
         merged.action = readyDelivery
-          ? { ...queued, phase: "ready" }
-          : { ...queued, phase: "blocked", lastError: "Claude context clear could not be confirmed. Retry recovery or use Fresh." };
+          ? { ...queued, cleanup: null, phase: "ready" }
+          : { ...queued, cleanup: decision.cleanupUncertain ? { ...currentCleanup, uncertain: true } : null, phase: "blocked", lastError: "Claude context clear could not be confirmed. Inspect the agent before recovery." };
       }
     }
-    const patch: Record<string, unknown> = { [AGENTS_KEY]: { ...freshAgents, [agentId]: merged } };
+    const normalized = mergeActionFacts(prev, merged);
+    if (decision.resolvePending) delete normalized.pendingAction;
+    const patch: Record<string, unknown> = { [AGENTS_KEY]: { ...freshAgents, [agentId]: normalized } };
     const freshCheckpoint =
       asRecord(freshMeta[CHECKPOINT_KEY]) ?? asRecord(freshMeta[LEGACY_CHECKPOINT_KEY]);
     if (checkpointWrite) {

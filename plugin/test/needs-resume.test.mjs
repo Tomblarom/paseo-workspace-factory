@@ -322,6 +322,27 @@ test("boot rule: stale daemon-restart entries are removed at the next boot, othe
   assert.match(logged.join("\n"), /1 stale flag\(s\) removed/);
 });
 
+test("boot check parks stale renewal, cleanup and rewind actions instead of repeating them", async () => {
+  const old = at(NOW - 30 * MIN);
+  const { world, made } = bootWorld({
+    agents: {
+      delivery: { slot: "A", entry: { lastTurnEndedAt: at(NOW - 30 * HOUR), action: { kind: "delivery", wakeId: "w1", renewal: "clear", phase: "renewing", queuedAt: old, epoch: 1, note: "" } } },
+      cleanup: { slot: "B", entry: { lastTurnEndedAt: at(NOW - 30 * HOUR), action: { kind: "cleanup", wakeId: "w2", phase: "renewing", queuedAt: old, cleanup: { kind: "clear", at: old, messageId: "m2" } } } },
+      rewind: { slot: "B", entry: { lastTurnEndedAt: at(NOW - 30 * HOUR), action: { kind: "rewind", wakeId: "w3", phase: "rewinding", queuedAt: old } } },
+      fresh: { slot: "B", entry: { lastTurnEndedAt: at(NOW - 30 * HOUR), action: { kind: "cleanup", wakeId: "w4", phase: "renewing", queuedAt: at(NOW - MIN), cleanup: { kind: "compact", at: at(NOW - MIN), messageId: "m4" } } } },
+    },
+  });
+  const { entries } = await boot(world);
+  assert.equal(entries[made.delivery.id].action.phase, "blocked");
+  assert.match(entries[made.delivery.id].action.lastError, /restarted before context renewal/);
+  assert.equal(entries[made.cleanup.id].action.phase, "blocked");
+  assert.match(entries[made.cleanup.id].action.lastError, /restarted before cleanup was confirmed.*Inspect/);
+  assert.ok(entries[made.cleanup.id].action.cleanup, "the cleanup intent is kept for inspection");
+  assert.equal(entries[made.rewind.id].action.phase, "uncertain");
+  assert.match(entries[made.rewind.id].action.lastError, /restarted before the rewind outcome.*Inspect/);
+  assert.equal(entries[made.fresh.id].action.phase, "renewing", "an action queued after the restart is untouched");
+});
+
 test("bootResumeReason marks active and non-active recent steers, advisors only with an open turn", () => {
   const daemonStartedAt = at(NOW);
   const recent = at(NOW - 2 * HOUR);
@@ -876,7 +897,7 @@ test("sweepOnce records fresh-recommended once per idle period, without sending"
   assert.equal(first[0].sent, false);
   assert.match(first[0].reason, /package boundary/);
   assert.deepEqual(sendsTo(world, agent.id), []);
-  const hint = world.workspaces[0].metadata[AGENTS_KEY][agent.id].freshHint;
+  const hint = world.workspaces[0].metadata[AGENTS_KEY][agent.id].action.facts.freshHint;
   assert.ok(hint?.at);
   assert.match(hint.reason, /package boundary/);
   // The cooldown keeps the next sweep quiet.
@@ -943,10 +964,10 @@ test("sweepOnce rewinds a fresh-recommended Codex agent when rewindFresh is on",
   assert.deepEqual(calls, [agent.id]);
   assert.deepEqual(sendsTo(world, agent.id), [], "no SDK send: the rewind empties the context");
   const entry = world.workspaces[0].metadata[AGENTS_KEY][agent.id];
-  assert.equal(entry.cleared.mode, "rewind");
-  assert.equal(entry.refreshed.mode, "rewind");
-  assert.equal(entry.refreshed.messageId, "msg-1");
-  assert.equal(entry.refreshed.briefMessageId, "saved-brief");
+  assert.equal(entry.action.facts.cleared.mode, "rewind");
+  assert.equal(entry.action.facts.refreshed.mode, "rewind");
+  assert.equal(entry.action.facts.refreshed.messageId, "msg-1");
+  assert.equal(entry.action.facts.refreshed.briefMessageId, "saved-brief");
   assert.equal(entry.pendingAction, undefined);
   // The recorded cleaning keeps the next sweep quiet.
   const second = await sweep.sweepOnce({
@@ -996,7 +1017,7 @@ test("sweep daily cap counts only completed rewind RPCs, even if bookkeeping fai
   });
   assert.deepEqual(calls, ["no-point", "failed", "no-op", "rewound"]);
   assert.deepEqual(results.map(({ sent }) => sent), [false, false, false, true]);
-  assert.match(results.at(-1).reason, /could not record it/);
+  assert.match(results.at(-1).reason, /could not be recorded/);
 });
 
 test("sweepOnce keeps Claude on its native path even with rewindFresh on", async () => {
@@ -1018,7 +1039,7 @@ test("sweepOnce keeps Claude on its native path even with rewindFresh on", async
   assert.equal(results[0].action, "fresh-recommended");
   assert.equal(results[0].sent, false);
   assert.deepEqual(calls, [], "Claude is never rewound by the sweep");
-  assert.ok(world.workspaces[0].metadata[AGENTS_KEY][agent.id].freshHint);
+  assert.ok(world.workspaces[0].metadata[AGENTS_KEY][agent.id].action.facts.freshHint);
 });
 
 test("sweepOnce without rewindFresh only hints a fresh-recommended Codex agent", async () => {
@@ -1039,7 +1060,7 @@ test("sweepOnce without rewindFresh only hints a fresh-recommended Codex agent",
   assert.equal(results.length, 1);
   assert.equal(results[0].action, "fresh-recommended");
   assert.deepEqual(calls, [], "default off: the hint is recorded, nothing is rewound");
-  assert.ok(world.workspaces[0].metadata[AGENTS_KEY][agent.id].freshHint);
+  assert.ok(world.workspaces[0].metadata[AGENTS_KEY][agent.id].action.facts.freshHint);
 });
 
 test("sweepOnce falls back to the hint when the rewind has no point", async () => {
@@ -1057,7 +1078,7 @@ test("sweepOnce falls back to the hint when the rewind has no point", async () =
   assert.equal(results[0].action, "fresh-recommended");
   assert.equal(results[0].sent, false);
   const entry = world.workspaces[0].metadata[AGENTS_KEY][agent.id];
-  assert.ok(entry.freshHint, "hint recorded as without the setting");
+  assert.ok(entry.action.facts.freshHint, "hint recorded as without the setting");
   assert.equal(entry.cleared, undefined);
 });
 
@@ -1078,7 +1099,7 @@ test("sweepOnce records a failed rewind and retries only after a new real turn",
   assert.equal(results[0].sent, false);
   assert.match(results[0].reason, /rewind failed: boom/);
   const entry = world.workspaces[0].metadata[AGENTS_KEY][agent.id];
-  assert.equal(entry.lastActionFailed.error, "boom");
+  assert.equal(entry.action.facts.lastActionFailed.error, "boom");
   assert.equal(entry.cleared, undefined);
   const second = await sweep.sweepOnce({
     paseo: fakeClient(world),

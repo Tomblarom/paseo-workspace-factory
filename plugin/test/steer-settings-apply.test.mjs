@@ -528,7 +528,7 @@ test("a bound refresh rewinds, applies, verifies and stages the brief", async ()
   assert.ok(world.calls.some((c) => c[0] === "setAgentThinkingOption"));
   assert.deepEqual(sendsTo(world, steer.id), []);
   const entry = entryOf(world, ws.id, steer.id);
-  assert.equal(entry.cleared?.mode, "rewind");
+  assert.equal(entry.action?.facts?.cleared?.mode, "rewind");
   assert.equal(entry.action?.packet, "BRIEF");
   assert.equal(entry.settingsBaseline.thinking, "low");
 });
@@ -569,7 +569,7 @@ test("an unsupported rewind fails the same bound way", async () => {
       thinking: "low",
       deliver: "stage",
     }, depsOf({ configClient: configClientFor(world), rewindClient: rewindClientFor(world, { outcome: "unsupported" }) })),
-    /Bound rewind route failed \(unsupported/,
+    /Bound rewind route failed \(failed/,
   );
   assert.equal(entryOf(world, ws.id, steer.id).action?.packet, "BRIEF");
 });

@@ -28,7 +28,8 @@ import { SUPERVISION_DEFAULTS, WORKERS_KEY, failoverChain, openWorkers as openRe
 import { QUOTA_DEFAULTS, accountExhausted, accountForAgent, formatQuotaLine, freshMaxUsedPct, profilePool } from './quota.js';
 import { readRewindPoint, rewindAndBrief } from './rewind.js';
 import { findingsPassage } from './findings.js';
-import { readSteerAction, actionEntry, newSteerAction, reconcileSteerSend } from './steer-action.js';
+import { readSteerAction, readCleanupAction, actionEntry, newSteerAction, reconcileSteerSend } from './steer-action.js';
+import { actionFact } from './action-facts.js';
 
 export const CHECKPOINT_KEY = `${METADATA_KEY}.checkpoint`;
 export class SwitchRefused extends Error {}
@@ -511,6 +512,26 @@ async function confirmFreshReceipt(run, op, config, receipt) {
   return confirmed.agentId;
 }
 
+// A Fresh creation and its first prompt are separate durable operations. Pin
+// the exact prompt and native receipt key before the first send, and retain it
+// on recovery even if the newly built packet has changed meanwhile.
+async function deliverFreshPacket({ client, workspaceId, agentId, packet, epoch, lock, authority = null, messageId = null }) {
+  const reserved = await updateAgentEntry({ client, workspaceId, agentId, lock, patch: (entry) => {
+    const existing = readSteerAction(entry, workspaceId);
+    if (existing?.kind === 'fresh-delivery') return null;
+    if (existing && existing.phase !== 'done') return null;
+    const action = newSteerAction({ kind: 'fresh-delivery', id: messageId ?? crypto.randomUUID(), epoch, text: packet });
+    if (authority) action.authority = authority;
+    return { action };
+  } });
+  const action = readSteerAction(reserved, workspaceId);
+  if (action?.kind !== 'fresh-delivery') return { status: 'blocked', detail: 'Another agent action needs reconciliation.' };
+  const result = await reconcileSteerSend({ client, workspaceId, agentId, actionId: action.wakeId, lock });
+  if (result.status === 'sent') await updateAgentEntry({ client, workspaceId, agentId, lock, patch: (entry) =>
+    entry?.action?.wakeId === action.wakeId ? { action: { ...entry.action, phase: 'done' } } : null });
+  return result;
+}
+
 /**
  * Fresh parent guarantee, independent of the executor: a fresh steer must
  * be parent-free, a fresh worker must carry exactly its previous parent
@@ -543,8 +564,15 @@ async function verifyFreshAgentParent(client, agentId, expectedParent) {
  * proceed. Unparsable timestamps fail open (proceed).
  */
 export function freshRewindIdempotent(entry) {
-  if (entry?.pendingAction) return 'a cleanup action is already pending';
-  const cleared = entry?.cleared;
+  if (readCleanupAction(entry)) return 'a cleanup action is already pending';
+  if (entry?.action?.kind === 'rewind' && ['rewinding', 'uncertain'].includes(entry.action.phase)) return 'rewind outcome is uncertain; inspect the agent before recovery';
+  const doneAction = entry?.action?.kind === 'rewind' && entry.action.phase === 'done' ? entry.action : null;
+  if (doneAction && typeof doneAction.queuedAt === 'string') {
+    const doneMs = Date.parse(doneAction.queuedAt);
+    const lastEnd = typeof entry?.lastTurnEndedAt === 'string' ? Date.parse(entry.lastTurnEndedAt) : NaN;
+    if (Number.isFinite(doneMs) && Number.isFinite(lastEnd) && doneMs >= lastEnd) return 'already rewound after the last turn';
+  }
+  const cleared = actionFact(entry, 'cleared');
   if (cleared?.mode === 'rewind' && typeof cleared.at === 'string') {
     const clearedMs = Date.parse(cleared.at);
     if (!Number.isFinite(clearedMs)) return null;
@@ -1052,35 +1080,64 @@ function rewindFallbackWarning(fromId, outcomeStatus) {
 }
 
 /**
- * Runs the same-tab rewind and records it in `wsf.agents`. Returns the
- * rewind outcome; `failed` throws (nothing sent, nothing recorded, no new
- * agent), anything but `rewound` means the caller falls back to the new-agent
- * path. A landed rewind is recorded even when the brief send failed (the
- * rewind stands; resend the packet manually). With `send: false` the rewind
- * lands without a brief (stage-only: the caller stages the returned packet).
+ * Runs the same-tab rewind and records it in `wsf.agents`. Intent is stored
+ * before the first effect; a crash leaves phase `rewinding`, which blocks a
+ * repeat like `uncertain`. `failed` throws with the packet kept (uncertain
+ * outcome, no new agent); anything but `rewound` means the caller falls back
+ * to the new-agent path. A landed rewind is recorded even when the brief send
+ * failed (the rewind stands; resend the packet manually). With `send: false`
+ * the rewind lands without a brief (stage-only: the caller stages the packet).
  */
 async function runTabRewind({ client, workspaceId, agentId, packet, checkpoint, lock, now, rewindClient, previousBriefId, send = true, note = null, authority = null }) {
-  const rewind = () => rewindAndBrief(agentId, packet, { createClient: rewindClient, previousBriefId, ...(send ? {} : { skipBrief: true }) });
-  const outcome = authority ? await lock(workspaceLockName(workspaceId), async (held) => {
-    await guardSteerScope({ client, held, workspaceId, agentId, ...authority });
-    if (authority.callerId) {
+  const workspace = client.workspaces.ref(workspaceId);
+  const actionId = crypto.randomUUID();
+  const action = await lock(workspaceLockName(workspaceId), async (held) => {
+    if (authority) await guardSteerScope({ client, held, workspaceId, agentId, ...authority });
+    if (authority?.callerId) {
       if (authority.callerId !== agentId) throw new SwitchRefused('Only the active steer may request active Fresh');
     }
+    const metadata = (await workspace.refresh())?.metadata ?? {};
+    const agents = metadata[AGENTS_KEY] ?? {};
+    const entry = agents[agentId] ?? {};
+    const previous = readSteerAction(entry, workspaceId);
+    if (readCleanupAction(entry) || (previous && !['done', 'staged'].includes(previous.phase))) {
+      throw new SwitchRefused('An existing agent action needs reconciliation before rewind');
+    }
+    const reserved = { kind: 'rewind', wakeId: actionId, phase: 'rewinding', queuedAt: now().toISOString(), packet, previousBriefId, previousAction: previous };
     held.verify();
-    return rewind();
-  }) : await rewind();
+    await workspace.setMetadata({ [AGENTS_KEY]: { ...agents, [agentId]: actionEntry(entry, reserved) } });
+    return reserved;
+  });
+  const outcome = await rewindAndBrief(agentId, packet, { createClient: rewindClient, previousBriefId, ...(send ? {} : { skipBrief: true }) });
+  await lock(workspaceLockName(workspaceId), async (held) => {
+    const latest = (await workspace.refresh())?.metadata ?? {};
+    const entries = latest[AGENTS_KEY] ?? {};
+    const current = entries[agentId] ?? {};
+    if (current.action?.wakeId !== actionId) throw new SwitchRefused('Rewind action changed while running; outcome needs attention');
+    const preDispatch = ['no-point', 'no-op', 'unsupported', 'unavailable', 'deferred'].includes(outcome.status);
+    if (preDispatch) {
+      held.verify();
+      await workspace.setMetadata({ [AGENTS_KEY]: { ...entries, [agentId]: actionEntry(current, action.previousAction ?? null) } });
+      return;
+    }
+    const { previousAction: _dropped, ...attempt } = action;
+    const settled = outcome.status === 'rewound'
+      ? { ...attempt, phase: 'done', messageId: outcome.messageId, briefMessageId: outcome.briefMessageId, ...(outcome.sendError ? { sendError: outcome.sendError } : {}) }
+      : { ...attempt, phase: 'uncertain', lastError: outcome.error ?? 'Rewind outcome could not be confirmed' };
+    held.verify();
+    await workspace.setMetadata({ [AGENTS_KEY]: { ...entries, [agentId]: actionEntry(current, settled) } });
+  });
   if (outcome.status === 'failed') {
-    throw new SwitchRefused(`Rewind of ${agentId} failed (${outcome.error ?? 'unknown error'}); nothing sent, nothing recorded, no new agent created`);
+    const error = new SwitchRefused(`Rewind of ${agentId} has an uncertain outcome (${outcome.error ?? 'unknown error'}); inspect the agent before recovery`);
+    error.packet = packet;
+    error.refreshMode = 'rewind';
+    throw error;
   }
   if (outcome.status !== 'rewound') return { outcome };
   await updateAgentEntry({
     client, workspaceId, agentId, lock,
     patch: (entry) => ({
       ...buildRewindRecord({ checkpoint, messageId: outcome.messageId ?? null, briefMessageId: outcome.briefMessageId ?? null, now }),
-      pendingWakeBrief: null,
-      ...(entry?.action && !['done', 'staged'].includes(entry.action.phase) ? {
-        action: entry.action.attemptedAt ? { ...entry.action, phase: 'blocked', lastError: 'Context changed after an attempted delivery; its outcome needs attention.' } : null,
-      } : {}),
       ...(note ? { note, noteAt: checkpoint?.capturedAt ?? null } : {}),
     }),
     liveIds: null,
@@ -1099,7 +1156,7 @@ async function runTabRewind({ client, workspaceId, agentId, packet, checkpoint, 
 async function tryActiveRewind({ client, discovery, status, expected, slot, from, config = null, apply, send = true, language, git, lock, now, workerModel, rewindClient, requireRefreshMode = null, promptOptions, callerId = null }) {
   const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;
   const entry = agentState?.[from.id] ?? null;
-  const previousBriefId = entry?.refreshed?.briefMessageId;
+  const previousBriefId = actionFact(entry, 'refreshed')?.briefMessageId;
   const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory) : null;
   const checkpoint = Boolean(status.checkpoint?.task);
   if (!apply) {
@@ -1323,8 +1380,9 @@ export async function freshSteer({ client, discovery, config, apply = false, sen
   result.packetChars = result.packet.length;
   if (send) {
     try {
-      await client.agents.ref(freshId).send(result.packet);
-      result.delivered = true;
+      const delivery = await deliverFreshPacket({ client, workspaceId: status.workspace.id, agentId: freshId, packet: result.packet, epoch: expected.epoch + 1, lock, authority: { scopeId: expected.scope?.id ?? status.repo, agentId: freshId } });
+      result.delivered = delivery.status === 'sent';
+      if (!result.delivered) result.deliveryError = delivery.detail ?? `Fresh delivery ${delivery.status}`;
     } catch (error) {
       result.deliveryError = error.message; // the fresh steer stands; resend the packet manually
     }
@@ -1350,7 +1408,7 @@ export async function freshSteer({ client, discovery, config, apply = false, sen
 async function tryTabRewind({ client, discovery, status, expected, from, kind, packetArgs, apply, send = true, language, git, lock, now, workerModel, rewindClient, requireRefreshMode = null, resultBase, promptOptions }) {
   const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;
   const entry = agentState?.[from.id] ?? null;
-  const previousBriefId = entry?.refreshed?.briefMessageId;
+  const previousBriefId = actionFact(entry, 'refreshed')?.briefMessageId;
   const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory) : null;
   const taskCheckpoint = kind === 'worker' ? workerCheckpoint(status, from.id, entry ?? {}) : null;
   const checkpoint = Boolean(taskCheckpoint ? taskCheckpoint.task || taskCheckpoint.block : status.checkpoint?.task);
@@ -1518,8 +1576,9 @@ async function freshNonActiveSteer({ client, discovery, status, expected, slot, 
   result.packetChars = result.packet.length;
   if (send) {
     try {
-      await client.agents.ref(freshId).send(result.packet);
-      result.delivered = true;
+      const delivery = await deliverFreshPacket({ client, workspaceId: status.workspace.id, agentId: freshId, packet: result.packet, epoch: expected.epoch, lock });
+      result.delivered = delivery.status === 'sent';
+      if (!result.delivered) result.deliveryError = delivery.detail ?? `Fresh delivery ${delivery.status}`;
     } catch (error) {
       result.deliveryError = error.message; // the fresh steer stands; resend the packet manually
     }
@@ -1651,10 +1710,9 @@ async function freshWorkerAgent({ client, discovery, status, expected, workerId,
   }
   if (send) {
     try {
-      const ref = client.agents.ref(freshId);
-      if (resumeMessageId) await ref.send(result.packet, { messageId: resumeMessageId });
-      else await ref.send(result.packet);
-      result.delivered = true;
+      const delivery = await deliverFreshPacket({ client, workspaceId: status.workspace.id, agentId: freshId, packet: result.packet, epoch: expected.epoch, lock, messageId: resumeMessageId });
+      result.delivered = delivery.status === 'sent';
+      if (!result.delivered) result.deliveryError = delivery.detail ?? `Fresh delivery ${delivery.status}`;
     } catch (error) {
       result.deliveryError = error.message; // the fresh worker stands; resend the packet manually
     }

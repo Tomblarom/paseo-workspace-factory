@@ -7,15 +7,16 @@ import { AGENTS_KEY } from './agent-state.js';
 import { withLock, workspaceLockName } from './lock.js';
 import { METADATA_KEY, LEGACY_PREFIX } from './paseo.js';
 import { guardScope } from './scope-guard.js';
+import { actionFact, mergeActionFacts } from './action-facts.js';
 
 export function readSteerAction(entry, workspaceId) {
-  if (entry?.action) return entry.action;
+  if (entry?.action) return entry.pendingAction && !entry.action.cleanup ? { ...entry.action, cleanup: entry.pendingAction } : entry.action;
   const old = entry?.pendingWakeBrief;
   if (old?.wakeId) {
     let action = { ...old, kind: 'delivery' };
     if (!old.renewal && Array.isArray(old.events)) {
       const phase = old.briefSent ? 'sent' : entry.pendingAction ? 'renewing' :
-        entry.cleared?.mode === 'clear' && entry.actionVerified === true ? 'ready' : 'blocked';
+        actionFact(entry, 'cleared')?.mode === 'clear' && actionFact(entry, 'actionVerified') === true ? 'ready' : 'blocked';
       action = { ...action, renewal: 'clear', phase, queuedAt: old.queuedAt ?? '', epoch: old.epoch ?? null,
         batch: { workspaceId, epoch: old.epoch ?? null, events: old.events },
         ...(phase === 'blocked' ? { lastError: 'The previous context clear could not be confirmed.' } : {}) };
@@ -23,16 +24,23 @@ export function readSteerAction(entry, workspaceId) {
     // Old versions allowed an independent stage while renewal was pending.
     if (entry.stagedBrief?.packet) action = { ...action, legacyStage: entry.stagedBrief };
     if (entry.lastSteerDeliveryId) action.lastDeliveryId = entry.lastSteerDeliveryId;
+    if (entry.pendingAction) action.cleanup = entry.pendingAction;
     return action;
   }
+  if (entry?.pendingAction) return { kind: 'cleanup', wakeId: entry.pendingAction.messageId ?? `legacy-cleanup-${entry.pendingAction.at ?? 'unknown'}`, phase: 'renewing', cleanup: entry.pendingAction };
   if (entry?.stagedBrief?.packet?.trim()) return { kind: 'stage', wakeId: randomUUID(), phase: 'staged', ...entry.stagedBrief, ...(entry.lastSteerDeliveryId ? { lastDeliveryId: entry.lastSteerDeliveryId } : {}) };
   if (entry?.lastSteerDeliveryId) return { kind: 'delivery', wakeId: entry.lastSteerDeliveryId, phase: 'done' };
   return null;
 }
 
 export function actionEntry(entry, action) {
-  const { pendingWakeBrief, stagedBrief, lastSteerDeliveryId, ...rest } = entry ?? {};
-  return { ...rest, action };
+  const { pendingWakeBrief, stagedBrief, lastSteerDeliveryId, pendingAction, ...rest } = entry ?? {};
+  if (pendingAction && action && !action.cleanup) action = { ...action, cleanup: pendingAction };
+  return mergeActionFacts(rest, { action });
+}
+
+export function readCleanupAction(entry) {
+  return entry?.action?.cleanup ?? entry?.pendingAction ?? null;
 }
 
 /** @param {any} input @returns {any} */

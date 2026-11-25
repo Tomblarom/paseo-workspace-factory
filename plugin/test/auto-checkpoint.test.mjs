@@ -301,11 +301,12 @@ test("verifyCleanupEffect judges each signal", () => {
   assert.equal(verifyCleanupEffect("compact", null, { ...none, compactionSeen: true }), "verified");
   assert.equal(
     verifyCleanupEffect("compact", null, { ...none, markerSeen: true, turnReadable: true }),
-    "verified",
+    "unverifiable",
   );
+  assert.equal(verifyCleanupEffect("compact", { actionVerified: true }, { ...none, turnReadable: true }), "unverifiable");
   assert.equal(
     verifyCleanupEffect("compact", null, { ...none, turnReadable: true }),
-    "failed",
+    "unverifiable",
   );
   assert.equal(
     verifyCleanupEffect("clear", { actionVerified: true }, { ...none, sessionChanged: false }),

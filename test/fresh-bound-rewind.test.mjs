@@ -151,7 +151,7 @@ test('a bound rewind that finds no point throws and creates nothing', async () =
   assert.deepEqual(sends(world), [], 'nothing sent on a bound failure');
 });
 
-test('an unsupported rewind fails the same bound way', async () => {
+test('an unsupported error after dispatch is uncertain and retains the bound brief', async () => {
   const world = makeWorld();
   provisioned(world);
   const error = await freshSteer({
@@ -161,7 +161,7 @@ test('an unsupported rewind fails the same bound way', async () => {
     requireRefreshMode: 'rewind',
   }).then(() => null, (e) => e);
   assert.ok(error);
-  assert.match(error.message, /Bound rewind route failed \(unsupported/);
+  assert.match(error.message, /uncertain outcome/);
   assert.match(String(error.packet ?? ''), /Steer refresh for/);
   assert.deepEqual(creates(world), []);
 });

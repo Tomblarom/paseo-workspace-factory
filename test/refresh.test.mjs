@@ -181,12 +181,28 @@ test('fresh --slot apply creates an unmarked same-slot agent and leaves epoch an
 
   const state = world.workspaces[0].metadata[METADATA_KEY];
   assert.deepEqual(state, { main: true, activeSteer: 'A', epoch: 1 });
-  assert.ok(!world.calls.some((c) => c[0] === 'workspace.setMetadata'), 'no state write for a non-active refresh');
+  assert.ok(!world.calls.some((c) => c[0] === 'workspace.setMetadata' && c[2]?.[METADATA_KEY]), 'no scope ownership write for a non-active refresh');
 
   const sends = world.calls.filter((c) => c[0] === 'agent.send');
   assert.deepEqual(sends.map((c) => c[1]), [result.to, steers.B.id]);
   assert.match(sends[1][2], /continues Steer B/);
   assert.equal(ws.id, created.workspaceId);
+});
+
+test('fresh --slot delivery failure keeps the pinned brief for a manual resend', async () => {
+  const world = makeWorld();
+  const { steers } = provisioned(world);
+  world.hooks.sendFails = true;
+  const result = await freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, notifyPrevious: false, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en' });
+  assert.equal(result.applied, true);
+  assert.equal(result.delivered, false);
+  assert.match(result.deliveryError ?? '', /agent unreachable/);
+  assert.match(result.packet, /Steer refresh for/);
+  const entry = world.workspaces[0].metadata[AGENTS_KEY][result.to];
+  assert.equal(entry.action.kind, 'fresh-delivery');
+  assert.equal(entry.action.phase, 'uncertain');
+  assert.equal(entry.action.packet, result.packet);
+  assert.equal(world.agents.length, 3, 'the fresh steer stands');
 });
 
 test('fresh --slot refuses busy, missing and ambiguous targets, and slot+worker together', async () => {
@@ -252,6 +268,26 @@ test('fresh --worker previews and applies a same-role refresh without an epoch c
   const sends = world.calls.filter((c) => c[0] === 'agent.send');
   assert.deepEqual(sends.map((c) => c[1]), [result.to, worker.id]);
   assert.match(sends[1][2], /continues this worker/);
+});
+
+test('fresh --worker delivery retry replays the pinned action on the same agent', async () => {
+  const world = makeWorld();
+  const { worker } = provisionedWithWorker(world);
+  world.hooks.sendFails = true;
+  const run = () => freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, workerId: worker.id, apply: true, notifyPrevious: false, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en' });
+  const first = await run();
+  assert.equal(first.delivered, false);
+  const actionId = world.workspaces[0].metadata[AGENTS_KEY][first.to].action.wakeId;
+  world.hooks.sendFails = false;
+  const second = await run();
+  assert.equal(second.to, first.to, 'recovery reuses the created agent');
+  assert.equal(second.delivered, true);
+  assert.equal(world.workspaces[0].metadata[AGENTS_KEY][first.to].action.wakeId, actionId, 'recovery replays the pinned action, not a new one');
+  assert.equal(world.workspaces[0].metadata[AGENTS_KEY][first.to].action.phase, 'done');
+  const sends = world.calls.filter((c) => c[0] === 'agent.send' && c[1] === first.to);
+  assert.equal(sends.length, 1);
+  assert.equal(sends[0][2], first.packet, 'the pinned brief is sent, not a rebuilt one');
+  assert.equal(world.agents.length, 4, 'no second agent created');
 });
 
 test('fresh --worker accepts a unique prefix and refuses unknown, ambiguous and busy workers', async () => {

@@ -9,6 +9,7 @@ import { LEGACY_PREFIX, METADATA_KEY, paseoBinary, readPaseoState } from "./fact
 import { runtime } from "./factory/runtime.js";
 import { listScopes } from "./factory/scope.js";
 import { buildRewindRecord, freshRewindIdempotent } from "./factory/steer.js";
+import { actionFact } from "./factory/action-facts.js";
 import { defaultCreateRewindClient, rewindAndBrief, sendUserBrief } from "./factory/rewind.js";
 import { cleanupIdentity } from "../shared/idle-cleanup.js";
 import { settingsFingerprint } from "../shared/preview.js";
@@ -615,8 +616,8 @@ export async function applySteerSettings(
   // verify, then deliver or stage the brief. Any failure keeps the brief.
   if (!deps.buildBrief) throw new Error("Settings refresh needs a brief builder (server misconfiguration).");
   const brief = await deps.buildBrief(paseo, preview.workspaceId, agentId);
-  const previousBriefId = typeof asRecord(checked.entry?.refreshed)?.briefMessageId === "string"
-    ? (asRecord(checked.entry?.refreshed)?.briefMessageId as string)
+  const previousBriefId = typeof asRecord(actionFact(checked.entry, "refreshed"))?.briefMessageId === "string"
+    ? (asRecord(actionFact(checked.entry, "refreshed"))?.briefMessageId as string)
     : null;
   const outcome = await rewindBrief(agentId, brief, {
     createClient: deps.rewindClient ?? defaultClientFactory,

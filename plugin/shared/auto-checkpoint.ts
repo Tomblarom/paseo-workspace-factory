@@ -91,7 +91,7 @@ export interface TurnGit {
 export interface CleanupEffect {
   /** Current session id differs from the pre-send one; null when unknown. */
   sessionChanged: boolean | null;
-  /** A `compaction` timeline item was found in the turn. */
+  /** A completed `compaction` timeline item was found in the turn. */
   compactionSeen: boolean;
   /** A `[Compacted]` marker text was found in the turn. */
   markerSeen: boolean;
@@ -132,6 +132,8 @@ export interface TurnDecision {
   patchInterrupted?: { agentId: string; at: string };
   /** Clear pendingAction (a cleanup turn resolved it). */
   resolvePending?: boolean;
+  /** The command may have taken effect despite an incomplete observation. */
+  cleanupUncertain?: boolean;
   /** A cleanup command demonstrably had no effect; the caller disables C5. */
   effectFailed?: boolean;
   /** Drop the wsf.agents entry (archived agent). */
@@ -187,11 +189,12 @@ export function decideTurnUpdate(input: TurnDecisionInput): TurnDecision {
           },
         },
         resolvePending: true,
+        cleanupUncertain: true,
         log: `cleanup turn ${input.outcome}; pending ${kind} → lastActionFailed`,
       };
     }
     const verdict = verifyCleanupEffect(kind, input.previous, input.effect);
-    if (verdict === "failed" || (kind === "clear" && verdict !== "verified")) {
+    if (verdict !== "verified") {
       return {
         entryUpdate: {
           ...base,
@@ -199,11 +202,12 @@ export function decideTurnUpdate(input: TurnDecisionInput): TurnDecision {
             at,
             error:
               kind === "compact"
-                ? "compact had no effect (no compaction marker; the command arrived as text)"
+                ? verdict === "failed" ? "compact had no confirmed effect (no completed compaction)" : "compact could not be confirmed (turn unavailable)"
                 : verdict === "failed" ? "clear had no effect (session unchanged)" : "clear could not be confirmed (session unavailable)",
           },
         },
         resolvePending: true,
+        cleanupUncertain: verdict === "unverifiable",
         effectFailed: verdict === "failed",
         log: `cleanup effect ${verdict}; pending ${kind} → lastActionFailed`,
       };
@@ -309,7 +313,7 @@ export function decideTurnUpdate(input: TurnDecisionInput): TurnDecision {
 
 /**
  * Every clear needs independent evidence from the provider session. A
- * compaction may reuse the provider capability check from an earlier turn.
+ * compaction needs a completed provider event from the correlated turn.
  */
 export function verifyCleanupEffect(
   kind: string,
@@ -317,10 +321,9 @@ export function verifyCleanupEffect(
   effect: CleanupEffect | null,
 ): "verified" | "unverifiable" | "failed" {
   if (kind === "compact") {
-    if (previous?.actionVerified === true) return "verified";
     if (!effect) return "unverifiable";
-    if (effect.compactionSeen || effect.markerSeen) return "verified";
-    return effect.turnReadable ? "failed" : "unverifiable";
+    if (effect.compactionSeen) return "verified";
+    return "unverifiable";
   }
   if (effect?.sessionChanged === true) return "verified";
   return effect?.sessionChanged === false ? "failed" : "unverifiable";

@@ -1,5 +1,7 @@
 // Manual /factory resume validates the preview and captures a checkpoint before delivery.
 import { AGENTS_KEY } from "./factory/agent-state.js";
+import { readCleanupAction } from "./factory/steer-action.js";
+import { actionFact } from "./factory/action-facts.js";
 import { withLock, workspaceLockName } from "./factory/lock.js";
 import { LEGACY_PREFIX, METADATA_KEY, readPaseoState } from "./factory/paseo.js";
 import { listScopes, sameScopeId } from "./factory/scope.js";
@@ -59,14 +61,14 @@ async function applyWorkerResume(paseo: any, mainId: string, agentId: string, sc
     if (identity?.role !== "worker" || !sameScopeId(identity.scopeId, scopeId) || agent.archivedAt || agent.background === true || (!entry?.interrupted && worker?.state !== "interrupted")) {
       throw new Error("/factory resume is available for steers and interrupted workers.");
     }
-    if (entry?.pendingAction || agent.activeTurn || agent.pendingPermissions?.length || agent.status === "initializing" || agent.status === "running") {
+    if (readCleanupAction(entry) || agent.activeTurn || agent.pendingPermissions?.length || agent.status === "initializing" || agent.status === "running") {
       return { agentId, status: "blocked", cleared: false, detail: "The worker is busy. Try again after the current operation." };
     }
     const context = agentContextInputs(agent, entry, cleanup ?? CLEANUP_DEFAULTS, routes, deps.now ? Date.parse(deps.now()) : Date.now());
     const { warmth, large } = projectAgentContext(context);
     const replacementMessageId = !context.lastTurnEndedAt && typeof entry?.workerResumeMessageId === "string" ? entry.workerResumeMessageId : null;
     const alreadyRenewed = context.cleanedAfter || replacementMessageId !== null;
-    if (alreadyRenewed && asRecord(entry?.refreshed)?.briefMessageId) {
+    if (alreadyRenewed && asRecord(actionFact(entry, "refreshed"))?.briefMessageId) {
       return { agentId, status: "sent", cleared: false, renewed: true, detail: "The renewed worker already received its brief." };
     }
     const mode = decideSteerDelivery({ warmth: warmth.warmth, large, recovery: true, settings: null, keepChatHistory: true });
@@ -234,12 +236,21 @@ export async function applyResume(
     await (guardScope as any)({ client: paseo, held, workspaceId: mainId, scopeId: identity.scopeId, epoch: wsf.epoch, agentId: activeHolder.id, config });
   });
   if (identity.role === "worker") return applyWorkerResume(paseo, mainId, agentId, identity.scopeId, deps, lock);
-  if (entry?.pendingAction) {
-    const kind = asRecord(entry.pendingAction)?.kind;
+  const cleanup = readCleanupAction(entry);
+  if (cleanup) {
+    const record = asRecord(cleanup);
+    if (record?.uncertain === true) {
+      return {
+        agentId,
+        status: "blocked",
+        cleared: false,
+        detail: `The ${record.kind ?? "cleanup"} outcome for this steer is uncertain (${record.error ?? "unknown error"}). Inspect its tab before recovery.`,
+      };
+    }
     return {
       agentId,
       status: "pending",
-      cleared: kind === "clear",
+      cleared: record?.kind === "clear",
       detail: "Resume is already running for this steer; the brief arrives in the timeline after the clear.",
     };
   }

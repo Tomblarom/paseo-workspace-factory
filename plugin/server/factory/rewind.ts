@@ -5,8 +5,9 @@
 // creating a new agent: DaemonClient.rewindAgent(agentId, messageId,
 // 'conversation'), using bounded canonical timeline pages. Agents driven only via `send` have
 // no user_message with a messageId and therefore no rewind point: callers fall
-// back to a new parent-free agent. Providers without rewind support answer the
-// rewind call with an unsupported error: callers fall back as well.
+// back to a new parent-free agent. Only a missing rewind method proves the
+// provider lacks rewind before dispatch; any error after dispatch is an
+// uncertain outcome (the provider may have forked), never a fallback.
 // Only real user_message entries are rewind points: a brief sent via
 // `paseo send` from inside an agent (PASEO_AGENT_ID set) arrives as a tool_call
 // (paseo-agent-message) and rewinding to it fails ("could not find user
@@ -106,12 +107,6 @@ export async function defaultCreateRewindClient({ url, cliPath }) {
   return daemon;
 }
 
-/** True when a rewind error means "this provider has no rewind": fall back to a new agent. */
-export function isRewindUnsupportedError(error) {
-  const text = String(error?.message ?? error ?? '');
-  return /not supported|unsupported|unknown method|not implemented|no rewind/i.test(text);
-}
-
 /**
  * One rewind transport: connects a DaemonClient, runs `fn(client)`, always
  * closes. Throws on connect failure (callers map it to fail-soft statuses);
@@ -148,7 +143,9 @@ async function rewindOnClient(client, agentId, { previousBriefId = null, keepBri
     if (beforeRewind && !await beforeRewind()) return { status: 'deferred' };
     await client.rewindAgent(agentId, messageId, 'conversation');
   } catch (error) {
-    if (isRewindUnsupportedError(error)) return { status: 'unsupported', error: error?.message ?? String(error) };
+    // The provider can commit a fork before returning an error, including an
+    // error whose text says unsupported. Only the missing-method check above
+    // establishes unsupported before dispatch.
     return { status: 'failed', error: error?.message ?? String(error) };
   }
   return { status: 'rewound', messageId, ...(briefMessageId ? { briefMessageId } : {}) };

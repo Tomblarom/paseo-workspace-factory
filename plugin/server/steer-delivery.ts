@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { AGENTS_KEY } from "./factory/agent-state.js";
-import { readSteerAction, actionEntry, newSteerAction, reconcileSteerSend } from "./factory/steer-action.js";
+import { readSteerAction, readCleanupAction, actionEntry, newSteerAction, reconcileSteerSend } from "./factory/steer-action.js";
+import { actionFact, mergeActionFacts } from "./factory/action-facts.js";
 import { withLock, workspaceLockName } from "./factory/lock.js";
 import { METADATA_KEY, LEGACY_PREFIX, readPaseoState } from "./factory/paseo.js";
+import { guardScope } from "./factory/scope-guard.js";
 import { defaultCreateRewindClient, rewindAndBrief } from "./factory/rewind.js";
 import { listScopes, sameScopeId } from "./factory/scope.js";
 import { buildRewindRecord } from "./factory/steer.js";
@@ -113,7 +115,7 @@ function checkpointRevision(meta: any) {
 
 export function pendingSteerDelivery(entry: any, workspaceId: string): PendingSteerDelivery | null {
   const action = readSteerAction(entry, workspaceId);
-  return action && action.phase !== "staged" && action.phase !== "done" ? action : null;
+  return action && !["cleanup", "rewind", "fresh-delivery"].includes(action.kind) && action.phase !== "staged" && action.phase !== "done" ? action : null;
 }
 
 export function decideSteerDelivery({
@@ -143,7 +145,8 @@ async function changeEntry(
     const patch = change(entry, meta);
     if (!patch) return false;
     held.verify();
-    await workspace.setMetadata({ [AGENTS_KEY]: { ...entries, [input.agentId]: actionEntry({ ...entry, ...patch }, "action" in patch ? patch.action : readSteerAction(entry, input.workspaceId)) } });
+    const merged = mergeActionFacts(entry, patch);
+    await workspace.setMetadata({ [AGENTS_KEY]: { ...entries, [input.agentId]: actionEntry(merged, "action" in patch ? merged.action : readSteerAction(merged, input.workspaceId)) } });
     return true;
   });
 }
@@ -175,11 +178,12 @@ function deferred(detail: string = STEER_BUSY): DeliveryResult {
 }
 
 function clearConfirmed(entry: any, snapshot: any, pending: PendingSteerDelivery): boolean {
-  if (entry?.cleared?.mode !== "clear" || entry?.actionVerified !== true) return false;
-  if (Date.parse(entry.cleared.at) < Date.parse(pending.queuedAt)) return false;
+  const cleared = actionFact(entry, "cleared");
+  if (cleared?.mode !== "clear" || actionFact(entry, "actionVerified") !== true) return false;
+  if (Date.parse(cleared.at) < Date.parse(pending.queuedAt)) return false;
   const current = snapshot?.persistence?.sessionId;
   if (typeof current !== "string" || !current) return false;
-  if (entry.cleared.sessionId) return current === entry.cleared.sessionId;
+  if (cleared.sessionId) return current === cleared.sessionId;
   // Legacy entries can be corroborated with the session recorded before dispatch.
   const previous = Array.isArray(entry.previousSessions) ? entry.previousSessions.at(-1) : null;
   return typeof previous === "string" && previous.length > 0 && previous !== current;
@@ -228,7 +232,7 @@ export async function finishSteerDelivery(
       if (!snapshot || snapshot.archivedAt || snapshot.background === true) {
         return blocked("The delivery target is unavailable; its action remains recorded.", cleared);
       }
-      if (pending.phase === "renewing" || entry?.pendingAction) {
+      if (pending.phase === "renewing" || readCleanupAction(entry)) {
         return { status: "pending", cleared, detail: "Context renewal is in progress. The brief follows confirmation." };
       }
       const batch = pending.batch;
@@ -326,7 +330,7 @@ ${pending.note}` : brief;
         }
         sent = result.action;
         if (pending.renewal === "rewind") await replacePending(paseo, input, lock, pending, {
-          refreshed: { ...entry.refreshed, briefMessageId: pending.wakeId },
+          refreshed: { ...actionFact(entry, "refreshed"), briefMessageId: pending.wakeId },
         });
       }
       const batch = pending.batch;
@@ -398,7 +402,7 @@ export async function deliverSteer(
     }
     return { status: "pending", cleared: existing.renewal === "clear", detail: "A steer brief is already queued." };
   }
-  if (entry?.pendingAction) {
+  if (readCleanupAction(entry)) {
     return blocked("The steer is busy. Try again after the current operation.");
   }
   // Reuse the pill projection, with the freshly fetched agent and metadata.
@@ -437,7 +441,7 @@ export async function deliverSteer(
     pending.needsResumeAt = needsResumeAt;
     if (identity.slot === scope.activeSteer) pending.authority = { scopeId: identity.scopeId, agentId: input.agentId };
     const reserved = await changeEntry(paseo, input, lock, (current, currentMeta) => {
-      if (scopeState(currentMeta)?.epoch !== scope.epoch || current.pendingAction) return null;
+      if (scopeState(currentMeta)?.epoch !== scope.epoch || readCleanupAction(current)) return null;
       const prior = readSteerAction(current, input.workspaceId);
       if (prior && prior.phase !== "done" && prior.wakeId !== input.actionId) return null;
       return { action: { ...pending, ...(prior?.phase === "done" ? { lastDeliveryId: prior.wakeId } : prior?.lastDeliveryId ? { lastDeliveryId: prior.lastDeliveryId } : {}) } };
@@ -461,7 +465,7 @@ export async function deliverSteer(
     ...(readSteerAction(entry, input.workspaceId)?.phase === "done" ? { lastDeliveryId: readSteerAction(entry, input.workspaceId).wakeId } : {}),
   };
   const reserved = await changeEntry(paseo, input, lock, (current, currentMeta) => {
-    if (scopeState(currentMeta)?.epoch !== scope.epoch || current.pendingAction) return null;
+    if (scopeState(currentMeta)?.epoch !== scope.epoch || readCleanupAction(current)) return null;
     const priorAction = readSteerAction(current, input.workspaceId);
     if (priorAction && priorAction.phase !== "done" && priorAction.wakeId !== input.actionId) return null;
     return { action: pending };
@@ -502,18 +506,43 @@ export async function deliverSteer(
       });
       return { status: "pending", cleared: true, deliveryId: pending.wakeId, detail: "Clearing the context. The resume brief follows confirmation." };
     }
+    // Persist the attempt under the same scope fence before the provider can
+    // fork. A restart leaves renewal pending instead of repeating the RPC.
+    await lock(workspaceLockName(input.workspaceId), async (held) => {
+      if (pending.authority) await guardScope({ client: paseo, held, workspaceId: input.workspaceId, scopeId: pending.authority.scopeId, epoch: pending.epoch, agentId: pending.authority.agentId });
+      const workspace = paseo.workspaces.ref(input.workspaceId);
+      const meta = (await workspace.refresh())?.metadata ?? {};
+      const entries = meta[AGENTS_KEY] ?? {};
+      const current = readSteerAction(entries[input.agentId], input.workspaceId);
+      if (current?.wakeId !== pending.wakeId || current.rewindAttempt) throw new AgentBusyError(STEER_BUSY);
+      held.verify();
+      await workspace.setMetadata({ [AGENTS_KEY]: { ...entries, [input.agentId]: actionEntry(entries[input.agentId], { ...current, rewindAttempt: { at, phase: "uncertain" } }) } });
+    });
     const outcome = await runRewind(input.agentId, "", {
       createClient: deps.rewindClient ?? defaultCreateRewindClient,
-      previousBriefId: entry?.refreshed?.briefMessageId,
+      previousBriefId: actionFact(entry, "refreshed")?.briefMessageId,
       skipBrief: true,
       beforeRewind: stillIdle,
     });
     if (outcome.status === "deferred") throw new AgentBusyError(STEER_BUSY);
     if (outcome.status !== "rewound") {
-      const why = outcome.status === "no-point" ? "no usable rewind point" :
-        outcome.status === "unsupported" ? "the provider does not support rewind" :
-        outcome.error ?? outcome.status;
-      throw new Error(`Context rewind needs attention (${why}). Use Fresh to prepare a new tab or retry recovery.`);
+      const preDispatch = ["no-point", "no-op", "unsupported", "unavailable"].includes(outcome.status);
+      if (preDispatch) {
+        const why = outcome.status === "no-point" ? "no usable rewind point" :
+          outcome.status === "unsupported" ? "the provider does not support rewind" :
+          outcome.error ?? outcome.status;
+        const detail = `Context rewind cannot run (${why}). Use Fresh to prepare a new tab or retry recovery.`;
+        await replacePending(paseo, input, lock, pending, (current) => {
+          const { rewindAttempt: _dropped, ...action } = readSteerAction(current, input.workspaceId) ?? {};
+          return { action: { ...action, phase: "blocked", lastError: detail.slice(0, 300) } };
+        });
+        return blocked(detail);
+      }
+      const detail = `The rewind outcome for ${input.agentId} is uncertain (${outcome.error ?? outcome.status}). Inspect its tab before recovery.`;
+      await replacePending(paseo, input, lock, pending, (current) => ({
+        action: { ...readSteerAction(current, input.workspaceId), phase: "blocked", lastError: detail.slice(0, 300) },
+      }));
+      return blocked(detail);
     }
     await replacePending(paseo, input, lock, pending, {
       ...rewindRecord({ messageId: outcome.messageId, now: () => new Date(deps.now?.() ?? Date.now()) }),
@@ -531,10 +560,10 @@ export async function deliverSteer(
       return deferred();
     }
     const message = error instanceof Error ? error.message : String(error);
-    const detail = mode === "clear" ? `Resume could not clear ${input.agentId} (${message}). Open its tab, then try again.` : message;
-    await replacePending(paseo, input, lock, pending, {
-      action: { ...pending, phase: "blocked", lastError: detail.slice(0, 300) },
-    });
+    const detail = mode === "clear" ? `The clear outcome for ${input.agentId} is uncertain (${message}). Inspect its tab before recovery.` : message;
+    await replacePending(paseo, input, lock, pending, (current) => ({
+      action: { ...readSteerAction(current, input.workspaceId), phase: "blocked", lastError: detail.slice(0, 300) },
+    }));
     return blocked(detail);
   }
 }

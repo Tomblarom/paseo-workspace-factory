@@ -5,7 +5,7 @@
 // the daemon start becomes an interrupted record with reason "daemon-restart"
 // (C2 shape plus reason) and clears the open fields, so a second plugin start
 // finds nothing to mark. Never throws out of ensureBootChecked.
-import { actionEntry } from "./factory/steer-action.js";
+import { actionEntry, readSteerAction } from "./factory/steer-action.js";
 import { execFileSync } from "node:child_process";
 import { LEGACY_PREFIX, METADATA_KEY, paseoBinary, readPaseoState } from "./factory/paseo.js";
 import { listScopes } from "./factory/scope.js";
@@ -18,8 +18,7 @@ import {
 } from "./factory/agent-state.js";
 import { isAdvisorSlot } from "./factory/config.js";
 import { factoryIdentity } from "../shared/auto-checkpoint.js";
-import { pendingSteerDelivery } from "./steer-delivery.js";
-import { RESUME_PENDING_REASON, RESUME_CLEAR_DEFAULTS, bootResumeReason } from "../shared/idle-cleanup.js";
+import { RESUME_CLEAR_DEFAULTS, bootResumeReason } from "../shared/idle-cleanup.js";
 
 const CHECKPOINT_KEY = `${METADATA_KEY}.checkpoint`;
 const AGENTS_KEY = `${METADATA_KEY}.agents`;
@@ -251,8 +250,10 @@ export async function runBootCheck({
   for (const scope of scopes) {
     const entries = asRecord(scope.workspace?.metadata?.[AGENTS_KEY]) ?? {};
     for (const [agentId, raw] of Object.entries(entries)) {
-      const queued = pendingSteerDelivery(raw, scope.workspaceId);
-      if (queued?.phase === "renewing" && Date.parse(queued.queuedAt) < Date.parse(daemonStartedAt)) {
+      const action = readSteerAction(raw, scope.workspaceId);
+      const stale = action && Date.parse(action.queuedAt) < Date.parse(daemonStartedAt) &&
+        ((action.phase === "renewing" && action.kind !== "fresh-delivery") || action.phase === "rewinding");
+      if (stale) {
         groupOf(scope).renewals.push(agentId);
       }
       const reason = asRecord(asRecord(raw)?.needsResume)?.reason;
@@ -384,12 +385,17 @@ export async function runBootCheck({
       let renewalsInterrupted = 0;
       for (const agentId of group.renewals) {
         const entry = asRecord(nextAgents[agentId]);
-        const queued = pendingSteerDelivery(entry, mainId);
-        if (!queued || queued.phase !== "renewing" ||
-            !(Date.parse(queued.queuedAt) < Date.parse(daemonStartedAt))) continue;
-        const pendingAction = asRecord(entry?.pendingAction);
-        nextAgents[agentId] = actionEntry({ ...entry, ...(pendingAction?.reason === RESUME_PENDING_REASON ? { pendingAction: null } : {}) },
-          { ...queued, phase: "blocked", lastError: "Paseo restarted before context renewal was confirmed. Retry recovery or use Fresh." });
+        const action = readSteerAction(entry, mainId);
+        if (!action || !(Date.parse(action.queuedAt) < Date.parse(daemonStartedAt))) continue;
+        if (action.phase === "rewinding") {
+          nextAgents[agentId] = actionEntry(entry,
+            { ...action, phase: "uncertain", lastError: "Paseo restarted before the rewind outcome was confirmed. Inspect the agent before recovery." });
+        } else if (action.phase === "renewing" && action.kind !== "fresh-delivery") {
+          const detail = action.kind === "cleanup"
+            ? "Paseo restarted before cleanup was confirmed. Inspect the agent before recovery."
+            : "Paseo restarted before context renewal was confirmed. Retry recovery or use Fresh.";
+          nextAgents[agentId] = actionEntry(entry, { ...action, phase: "blocked", lastError: detail });
+        } else continue;
         renewalsInterrupted += 1;
       }
       staleTotal += staleRemoved;

@@ -1,4 +1,5 @@
-import { readSteerAction } from "./factory/steer-action.js";
+import { readSteerAction, readCleanupAction } from "./factory/steer-action.js";
+import { actionFact } from "./factory/action-facts.js";
 import { cacheTtlForAgent } from "../shared/cache-profiles.js";
 import { type CleanupSettings } from "../shared/idle-cleanup.js";
 import { normalizeModel, normalizeProvider, normalizeThinking, speedOfLiveOptions, tupleFromLive, tuplesEqual } from "../shared/steer-settings.js";
@@ -42,16 +43,20 @@ export function agentContextInputs(
 ) {
   const pendingDelivery = asRecord(readSteerAction(entry, ""));
   const deliveryPhase = pendingDelivery?.phase ??
-    (pendingDelivery ? entry?.pendingAction ? "renewing" : entry?.actionVerified === true ? "ready" : "blocked" : null);
-  const pendingOperation = entry?.pendingAction != null ||
-    deliveryPhase === "renewing" || deliveryPhase === "ready" || deliveryPhase === "sent" || deliveryPhase === "uncertain" || deliveryPhase === "reserved";
-  const resumeFallback = deliveryPhase === "blocked" || deliveryPhase === "uncertain"
-    ? typeof pendingDelivery?.lastError === "string" ? pendingDelivery.lastError : "Context renewal needs attention."
+    (pendingDelivery ? readCleanupAction(entry) ? "renewing" : actionFact(entry, "actionVerified") === true ? "ready" : "blocked" : null);
+  const cleanup = readCleanupAction(entry);
+  const pendingOperation = cleanup != null ||
+    deliveryPhase === "renewing" || deliveryPhase === "rewinding" || deliveryPhase === "ready" || deliveryPhase === "sent" || deliveryPhase === "uncertain" || deliveryPhase === "reserved";
+  const uncertainCleanup = deliveryPhase === "renewing" && asRecord(cleanup)?.uncertain === true;
+  const resumeFallback = deliveryPhase === "blocked" || deliveryPhase === "uncertain" || deliveryPhase === "rewinding" || uncertainCleanup
+    ? typeof pendingDelivery?.lastError === "string" ? pendingDelivery.lastError
+    : typeof asRecord(cleanup)?.error === "string" ? `Cleanup outcome is uncertain (${asRecord(cleanup)?.error}). Inspect the agent before recovery.`
+    : "Context renewal needs attention."
     : null;
   const lastTurnEndedAt =
     typeof entry?.lastTurnEndedAt === "string" ? (entry.lastTurnEndedAt as string) : null;
   const lastEnd = stampMs(lastTurnEndedAt);
-  const clearedAt = stampMs(asRecord(entry?.cleared)?.at);
+  const clearedAt = stampMs(asRecord(actionFact(entry, "cleared"))?.at);
   const cleanedAfter = clearedAt !== null && (lastEnd === null || clearedAt >= lastEnd);
   const baselineValid = lastEnd !== null && !cleanedAfter && !pendingOperation;
   const provider = typeof agent.provider === "string" && agent.provider ? agent.provider : null;

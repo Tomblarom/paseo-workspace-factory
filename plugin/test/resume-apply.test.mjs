@@ -436,6 +436,24 @@ test("applyResume is idempotent while a cleanup is pending", async () => {
   assert.equal(world.calls.filter((c) => c[0] === "agent.send").length, 0);
 });
 
+test("applyResume blocks on an uncertain cleanup instead of waiting for a brief", async () => {
+  const world = makeWorld();
+  const { ws, steer } = provisioned(world, {
+    checkpoint: { task: "t", tests: [], blockers: [], next: null },
+  });
+  world.workspaces[0].metadata[AGENTS_KEY] = {
+    [steer.id]: { action: { kind: "cleanup", wakeId: "w1", phase: "renewing", queuedAt: at(NOW), cleanup: { kind: "clear", at: at(NOW), messageId: "m1", uncertain: true, error: "agent is closed" } } },
+  };
+  const result = await resumeApply.applyResume(
+    fakeClient(world),
+    { workspaceId: ws.id, agentId: steer.id },
+    { lock: noLock },
+  );
+  assert.equal(result.status, "blocked");
+  assert.match(result.detail, /uncertain.*Inspect/);
+  assert.equal(world.calls.filter((c) => c[0] === "agent.send").length, 0);
+});
+
 test("applyResume verifies the preview fingerprint when given", async () => {
   const world = makeWorld();
   const { ws, steer } = provisioned(world, {
@@ -584,28 +602,28 @@ test("applyResume rewinds to the last brief before delivering for providers with
   const messages = world.calls.filter(([kind]) => kind === "rewind" || kind === "agent.send");
   assert.deepEqual(messages[0], ["rewind", steer.id, "latest-brief", "conversation"]);
   assert.equal(messages[1][0], "agent.send");
-  assert.ok(world.workspaces[0].metadata[AGENTS_KEY][steer.id].refreshed.briefMessageId);
+  assert.ok(world.workspaces[0].metadata[AGENTS_KEY][steer.id].action.facts.refreshed.briefMessageId);
   assert.deepEqual(briefs, [[ws.id, steer.id]]);
   assert.deepEqual(sendsTo(world, steer.id), ["[Factory resume]\nResume brief body"]);
   assert.equal(world.workspaces[0].metadata[AGENTS_KEY][steer.id].needsResume, null);
 });
 
-test("applyResume maps a failed clear to the open-the-tab hint", async () => {
+test("applyResume reports an uncertain clear and retains its intent", async () => {
   const world = makeWorld();
   const { ws, steer } = provisioned(world);
   const result = await resumeApply.applyResume(
     fakeClient(world, { sendFails: true }), { workspaceId: ws.id, agentId: steer.id }, { lock: noLock },
   );
   assert.equal(result.status, "blocked");
-  assert.match(result.detail, /Open its tab, then try again/);
-  assert.equal(world.workspaces[0].metadata[AGENTS_KEY][steer.id].lastActionFailed.error, "agent is closed");
+  assert.match(result.detail, /clear outcome .* uncertain/);
+  assert.equal(world.workspaces[0].metadata[AGENTS_KEY][steer.id].action.cleanup.error, "agent is closed");
 });
 
 // ---------------------------------------------------------------------------
 // runCleanup extraction (shared by sweep and resume).
 // ---------------------------------------------------------------------------
 
-test("runCleanup sends /clear and records pendingAction plus previous sessions", async () => {
+test("runCleanup sends /clear and records the cleanup intent, keeping previous sessions", async () => {
   assert.equal(SWEEP_PENDING_REASON, "idle");
   const world = makeWorld();
   const { ws, steer } = provisioned(world);
@@ -615,10 +633,24 @@ test("runCleanup sends /clear and records pendingAction plus previous sessions",
   assert.equal(out.sessionId, steer.persistence.sessionId);
   assert.deepEqual(sendsTo(world, steer.id), [CLEAR_COMMAND]);
   const entry = world.workspaces[0].metadata[AGENTS_KEY][steer.id];
-  assert.equal(entry.pendingAction.kind, "clear");
-  assert.equal(entry.pendingAction.reason, "resume");
-  assert.equal(entry.pendingAction.sessionId, steer.persistence.sessionId);
-  assert.deepEqual(entry.previousSessions, ["old", steer.persistence.sessionId]);
+  assert.equal(entry.action.cleanup.kind, "clear");
+  assert.equal(entry.action.cleanup.reason, "resume");
+  assert.equal(entry.action.cleanup.sessionId, steer.persistence.sessionId);
+  assert.deepEqual(entry.previousSessions, ["old"]);
+});
+
+test("runCleanup rolls back a pre-dispatch abort and allows a retry", async () => {
+  const world = makeWorld();
+  const { steer } = provisioned(world);
+  await assert.rejects(
+    sweep.runCleanup(fakeClient(world), steer.id, "clear", "resume", { lock: noLock, beforeSend: async () => false }),
+    /wake changed while preparing cleanup/,
+  );
+  const entry = world.workspaces[0].metadata[AGENTS_KEY][steer.id];
+  assert.equal(entry.action?.cleanup ?? null, null);
+  assert.deepEqual(sendsTo(world, steer.id), []);
+  await sweep.runCleanup(fakeClient(world), steer.id, "clear", "resume", { lock: noLock });
+  assert.deepEqual(sendsTo(world, steer.id), [CLEAR_COMMAND]);
 });
 
 test("runCleanup sends /compact without previous sessions and carries a note", async () => {
@@ -630,12 +662,12 @@ test("runCleanup sends /compact without previous sessions and carries a note", a
   });
   assert.deepEqual(sendsTo(world, steer.id), [COMPACT_COMMAND]);
   const entry = world.workspaces[0].metadata[AGENTS_KEY][steer.id];
-  assert.equal(entry.pendingAction.kind, "compact");
-  assert.equal(entry.pendingAction.note, "wake note");
+  assert.equal(entry.action.cleanup.kind, "compact");
+  assert.equal(entry.action.cleanup.note, "wake note");
   assert.equal(entry.previousSessions, undefined);
 });
 
-test("runCleanup on send failure writes lastActionFailed and rethrows", async () => {
+test("runCleanup retains an uncertain command after send failure and refuses another", async () => {
   const world = makeWorld();
   const { steer } = provisioned(world);
   await assert.rejects(
@@ -643,8 +675,9 @@ test("runCleanup on send failure writes lastActionFailed and rethrows", async ()
     /agent is closed/,
   );
   const entry = world.workspaces[0].metadata[AGENTS_KEY][steer.id];
-  assert.equal(entry.lastActionFailed.error, "agent is closed");
-  assert.equal(entry.pendingAction, null);
+  assert.equal(entry.action.cleanup.error, "agent is closed");
+  assert.equal(entry.action.cleanup.uncertain, true);
+  await assert.rejects(sweep.runCleanup(fakeClient(world), steer.id, "clear", "resume", { lock: noLock }), /operation was queued/);
   await assert.rejects(
     sweep.runCleanup(fakeClient(world), "agent-gone", "clear", "resume", { lock: noLock }),
     /Unknown agent/,
