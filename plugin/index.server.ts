@@ -40,6 +40,7 @@ import {
   serveColdSubscription,
   startCleanupTimer,
 } from "./server/cold-sweep.js";
+import { serveSteerSubscription } from "./server/steer-feed.js";
 import { applyResume, readResumeSettings } from "./server/resume-apply.js";
 import { handleTurnAfter, handleTurnBefore } from "./server/turn-hook.js";
 import { ensureBootChecked } from "./server/boot-check.js";
@@ -87,6 +88,7 @@ import {
   factoryStatus,
   factorySteerAdd,
   factorySteerAddPreview,
+  factorySteers,
   factorySwitch,
   factorySwitchPreview,
   factoryWorkerPick,
@@ -198,6 +200,15 @@ export default function contribute(server: PluginServerContext) {
   };
   server.handle(factoryCold, serveAttention);
   server.handle(factoryAttention, serveAttention);
+  server.handle(factorySteers, (input, ctx) => {
+    bootOnce(ctx.paseo);
+    serveSteerSubscription(input, ctx, {
+      readSettings,
+      getConfig: () => loader.loadEffectiveConfig(),
+      readSupervision,
+      getZerosub,
+    });
+  });
   const removeTurnBefore = server.addHook("agent.turn.before", (payload, context) => {
     bootOnce(context.paseo);
     return handleTurnBefore(payload, context);

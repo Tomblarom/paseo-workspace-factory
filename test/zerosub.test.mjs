@@ -96,6 +96,8 @@ test('normalizeZerosubState maps accounts, routes and pending moves', () => {
   assert.equal(full.exhausted, true);
   assert.deepEqual(state.agentAccount, { 'steer-d': 'acc-full', 'steer-e': 'acc-full', 'steer-f': 'acc-roomy' });
   assert.deepEqual(state.pending, { 'steer-e': 'acc-roomy' });
+  assert.deepEqual(state.waiting, {});
+  assert.equal(state.version, null);
 });
 
 test('normalizeZerosubState drops email/organization/home and tolerates missing fields', () => {
@@ -103,15 +105,33 @@ test('normalizeZerosubState drops email/organization/home and tolerates missing 
   assert.equal(JSON.stringify(state).includes('someone@example.test'), false);
   assert.equal(JSON.stringify(state).includes('Example'), false);
   assert.equal(JSON.stringify(state).includes('/home/someone'), false);
-  assert.deepEqual(normalizeZerosubState(null), { accounts: [], agentAccount: {}, pending: {} });
-  assert.deepEqual(normalizeZerosubState({}), { accounts: [], agentAccount: {}, pending: {} });
+  assert.deepEqual(normalizeZerosubState(null), { accounts: [], agentAccount: {}, pending: {}, waiting: {}, version: null });
+  assert.deepEqual(normalizeZerosubState({}), { accounts: [], agentAccount: {}, pending: {}, waiting: {}, version: null });
   assert.deepEqual(normalizeZerosubState({ accounts: [null, { label: 'no id' }, { id: 'a1' }] }, { now: NOW }), {
     accounts: [{ id: 'a1', family: '', label: '', status: '', limitedUntil: null, windows: [], maxUsedPct: null, exhausted: false }],
     agentAccount: {},
     pending: {},
+    waiting: {},
+    version: null,
   });
   const past = normalizeZerosubState({ accounts: [{ id: 'a2', status: 'active', limitedUntil: PAST }] }, { now: NOW });
   assert.equal(past.accounts[0].exhausted, false);
+});
+
+test('normalizeZerosubState keeps version, waiting and model windows', () => {
+  const raw = fakeRaw();
+  raw.version = '2';
+  raw.agents[1].waiting = 'restart';
+  raw.agents[2].waiting = 'bogus';
+  raw.accounts[0].usage.windows.push({ id: 'opus-only', usedPercent: 10, resetsAt: FUTURE_5H, models: ['opus', ''] });
+  raw.accounts[0].usage.windows.push({ id: 'sonnet-only', usedPercent: 10, resetsAt: FUTURE_5H, model: 'sonnet' });
+  const state = normalizeZerosubState(raw, { now: NOW });
+  assert.equal(state.version, '2');
+  assert.deepEqual(state.waiting, { 'steer-e': 'restart' });
+  const roomy = state.accounts.find((account) => account.id === 'acc-roomy');
+  assert.deepEqual(roomy.windows[2], { id: 'opus-only', usedPct: 10, resetsAt: FUTURE_5H, models: ['opus'] });
+  assert.deepEqual(roomy.windows[3], { id: 'sonnet-only', usedPct: 10, resetsAt: FUTURE_5H, models: ['sonnet'] });
+  assert.equal('models' in roomy.windows[0], false);
 });
 
 test('readZerosubState normalizes RPC output and returns null on any failure', async () => {

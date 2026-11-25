@@ -706,3 +706,62 @@ export const factorySteerAdd = defineRpc({
     text: z.string(),
   }),
 });
+
+const steerQuotaRow = z.looseObject({
+  id: z.string(),
+  scope: z.enum(["account", "model", "pool"]),
+  usedPct: z.number().nullable(),
+  resetsAt: z.string().nullable(),
+  stale: z.boolean(),
+});
+
+// One steer tab's projected face state (shared/steer-state.ts), pushed
+// host-wide for the persistent composer pill (design step 2 subscribes).
+const steerStateRow = z.looseObject({
+  scopeId: z.string(),
+  workspaceId: z.string(),
+  agentId: z.string(),
+  slot: z.string().nullable(),
+  title: z.unknown().optional(),
+  provider: z.unknown().optional(),
+  model: z.unknown().optional(),
+  liveStatus: z.unknown().optional(),
+  advisor: z.boolean().optional(),
+  active: z.boolean().optional(),
+  /** Live continuation or current slot holder for a superseded tab. */
+  successor: z.string().nullable().optional(),
+  state: z.enum([
+    "retired",
+    "running",
+    "limited",
+    "waiting",
+    "needs-resume",
+    "ready",
+    "cold",
+    "large",
+    "cooling",
+    "warm",
+    "unknown",
+  ]),
+  warmth: z.string(),
+  tokens: z.number().nullable(),
+  large: z.boolean(),
+  limited: z.boolean(),
+  resetAt: z.string().nullable(),
+  resetUnknown: z.boolean(),
+  awaitingUpdate: z.boolean(),
+  quotaRows: z.array(steerQuotaRow),
+  headerFacts: z.array(z.string()),
+  primaryAction: z.string(),
+  detail: z.string(),
+  nextBoundaryAt: z.string().nullable(),
+});
+
+export const factorySteers = defineSubscription({
+  name: "factory.steers",
+  input: z.object({}),
+  event: z.looseObject({
+    steers: z.array(steerStateRow),
+    updatedAt: z.string(),
+  }),
+});

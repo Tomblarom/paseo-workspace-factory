@@ -12,6 +12,9 @@ import { QUOTA_DEFAULTS, bestFamilyAccount } from './quota.mjs';
 /** Statuses that mark an account as limited without consulting any threshold. */
 const LIMITED_STATUSES = new Set(['limited', 'exhausted', 'suspended', 'blocked']);
 
+/** Move waiting states carried per agent route (anything else is dropped). */
+const WAITING_STATES = new Set(['idle', 'turn', 'background', 'restart']);
+
 function limitedByStatus(status) {
   return typeof status === 'string' && LIMITED_STATUSES.has(status.trim().toLowerCase());
 }
@@ -23,10 +26,15 @@ function asId(value) {
 /**
  * Pure, tolerant normaliser for the raw `zerosub.state` payload. Missing
  * fields become empty defaults; malformed entries are skipped. Returns
- * { accounts, agentAccount, pending } where each account carries
- * { id, family, label, status, limitedUntil, windows, maxUsedPct, exhausted }.
- * `exhausted` is the status-based limit flag only (status or a future
- * limitedUntil); percent thresholds live in quota.mjs (`accountExhausted`).
+ * { accounts, agentAccount, pending, waiting, version } where each account
+ * carries { id, family, label, status, limitedUntil, windows, maxUsedPct,
+ * exhausted }. `exhausted` is the status-based limit flag only (status or a
+ * future limitedUntil); percent thresholds live in quota.mjs
+ * (`accountExhausted`). `waiting` maps agent ids to their move waiting state
+ * (`idle`, `turn`, `background`, `restart`); unknown values are dropped.
+ * `version` is the raw payload version (null when missing, i.e. v1);
+ * consumers fall back to the usage snapshot on explicit unknown versions.
+ * Windows keep an optional model restriction (`models`) when present.
  */
 export function normalizeZerosubState(raw, { now = Date.now() } = {}) {
   const accounts = [];
@@ -44,10 +52,14 @@ export function normalizeZerosubState(raw, { now = Date.now() } = {}) {
       const wid = asId(window.id) ?? asId(window.label);
       if (!wid) continue;
       const used = Number(window.usedPercent);
+      const models = Array.isArray(window.models)
+        ? window.models.filter((name) => typeof name === 'string' && name.trim()).map((name) => name.trim())
+        : (typeof window.model === 'string' && window.model.trim() ? [window.model.trim()] : null);
       windows.push({
         id: wid,
         usedPct: Number.isFinite(used) ? used : null,
         resetsAt: asId(window.resetsAt),
+        ...(models && models.length ? { models } : {}),
       });
     }
     const pcts = windows.map((window) => window.usedPct).filter((pct) => Number.isFinite(pct));
@@ -65,6 +77,7 @@ export function normalizeZerosubState(raw, { now = Date.now() } = {}) {
   }
   const agentAccount = {};
   const pending = {};
+  const waiting = {};
   const agents = Array.isArray(raw?.agents) ? raw.agents : [];
   for (const route of agents) {
     if (!route || typeof route !== 'object') continue;
@@ -72,8 +85,11 @@ export function normalizeZerosubState(raw, { now = Date.now() } = {}) {
     if (!agentId) continue;
     if (asId(route.accountId)) agentAccount[agentId] = route.accountId;
     if (asId(route.pendingAccountId)) pending[agentId] = route.pendingAccountId;
+    const wait = typeof route.waiting === 'string' ? route.waiting.trim().toLowerCase() : '';
+    if (wait && WAITING_STATES.has(wait)) waiting[agentId] = wait;
   }
-  return { accounts, agentAccount, pending };
+  const version = typeof raw?.version === 'string' || typeof raw?.version === 'number' ? raw.version : null;
+  return { accounts, agentAccount, pending, waiting, version };
 }
 
 /**
