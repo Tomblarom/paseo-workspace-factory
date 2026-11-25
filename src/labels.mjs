@@ -1,4 +1,4 @@
-// Agent label audit (TODO §13): which factory agents (steers, workers) carry
+// Agent label audit: which factory agents (steers, workers) carry
 // missing or wrong labels, and what to set. Pure over a normalized Paseo
 // state snapshot ({ workspaces, agents }); the CLI prints the rows (dry-run)
 // or writes them through the `labels.set` apply op. Paseo cannot remove

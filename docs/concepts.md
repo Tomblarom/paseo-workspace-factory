@@ -25,7 +25,7 @@ Typical flow: `/factory plan <repo>` once, confirm `/factory apply <hash>`, then
 When a provider limit hits, the chat gets long, or another model fits better, the checkpoint moves — never the chat. A **handoff** is built from the checkpoint plus git state (branch, SHA, changes) and open workers; the previous steer's last answer travels only as a shortened, unverified hint.
 
 - `/factory switch --to B`: another steer takes over.
-- `/factory fresh`: a new agent in the same slot starts with an empty chat (`--slot`/`--worker` refresh a non-active steer or worker without takeover).
+- `/factory fresh` rewinds the agent in the same tab when supported and otherwise creates a new agent with the brief. `--slot` and `--worker` refresh a non-active steer or worker without takeover.
 - `/factory resume`: the way back after a break, restart, or cleared chat.
 
 Every switch raises the **epoch** counter, which invalidates older previews. Details: [provider limit](workflow-provider-limit.md), [saving context](saving-context.md).
@@ -48,7 +48,7 @@ A profile with `"sensitive": true` only gets sanitized technical tasks, and its 
 
 Workers belong to the scope, not to the steer that started them, so the active steer supervises every open worker even after a restart or replacement. The factory wakes the active steer for every actionable worker outcome (with only a tiny debounce) plus a watchdog when nothing happens. If the active steer does not answer, is advisor-flagged, or its quota pool is exhausted, the next ready steer from a different pool takes over on its own with an epoch-checked `switch`.
 
-During a TODO run, the steer stays active, handles worker results as they arrive, and works on independent items while it waits. Escalation runs from worker to steer, then to an advisor or the domain or hub steer. The user is asked when the remaining work needs their input. [Supervision design](design/supervision-design.md)
+While workers run, the steer handles results as they arrive and works on independent items. Escalation runs from worker to steer, then to an advisor or the domain or hub steer. The user is asked when the remaining work needs their input. [Supervision design](design/supervision-design.md)
 
 ## Quota pools and ZeroSub accounts
 

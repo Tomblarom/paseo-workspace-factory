@@ -27,7 +27,7 @@
 - Fenced CHECKPOINT standard: handoff, `switch`/`fresh`/`assign` deliveries and the answer template carry the checkpoint as a fenced code block; the parser reads fenced and bare blocks (optional `workers` line ignored).
 - Cold-resume rules: resume scope precedence (explicit > `wsf.scope` label > workspace), interrupt flag cleared only by agent/manual/assign checkpoints (auto never clears), shared workspace-lock helper in `src/lock.mjs`.
 - Instruction rule: steer/worker blocks and `AGENTS.md` require `resume` after a cleared context; optional Claude Code SessionStart hook (clear|compact) documented, host settings untouched.
-- Plugin idle cleanup (C5, default `off`; `clear`/`compact-warm`, re-check before sending, auto-off after a failed attempt), cold-context pill/panel (C6) and `/factory resume`.
+- Plugin idle cleanup (`clear` and `compact-warm` with rechecks before sending), cold-context pill and panel, and `/factory resume`.
 - Scope and hub docs: concepts (scope, hub, roles), configuration (kinds, addressing, alias) and the hub instruction block.
 - Scope domains: `plan <scope> --domain <id>` groups scopes under a coordinating domain scope (Hub → Domain → Child); `domain:` blockers escalate to the domain steer, `hub:` further to the hub.
 - Restart detection and `drain`: daemon restarts mark interrupted agents (`daemon-restart`, heuristic without the plugin); `drain` waits for a clean restart and marks leftovers `planned-restart` instead of killing turns.
@@ -41,7 +41,7 @@
 - The active steer can launch a worker through the native SDK with the account selected by ZeroSub.
 - `/factory steer add` previews and creates a steer for the current scope, with quota-aware profile selection and receipt-based recovery.
 - Domain follow-ups: `relocate` carries the scope's domain pointer (shown in the preview), and `plan` can create a domain scope and its child in the same run (domain first).
-- Plugin release snapshots: `npm run build-snapshot` verifies the factory mirror, typecheck and plugin tests, builds the content-hashed snapshot, and prints the install/rollback commands (install and prune deletion only with `--confirm`).
+- [Installation and updates](docs/getting-started.md#quickstart-in-paseo) for Git checkouts and built release directories. The optional findings reminder targets the Factory checkout and is available for checkout installs.
 
 ## 0.0.0 – initial import
 

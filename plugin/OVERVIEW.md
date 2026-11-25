@@ -8,15 +8,17 @@ The `/factory` slash command offers status, scopes, cleanup, plan, apply, checkp
 
 ## Cold context
 
-Every factory turn is recorded without model calls, including CHECKPOINT blocks and interruptions. A cold agent (idle past the threshold with a large context) gets a "Kontext kalt" composer pill and agent panel with three manual actions: resume (read-only brief), fresh (two-stage handover to a new agent; the old one keeps its tab), and opening the saved old history as a new tab. `/factory resume` shows the same brief in the Factory panel.
+The plugin tracks Factory turn outcomes, CHECKPOINT blocks, and interruptions without a model call. Long idle chats can get a cold-context indicator with actions to read the resume brief, preview a fresh context, or reopen saved history when available. Fresh uses a same-tab rewind where possible and falls back to a new agent. In a steer tab, `/factory resume` delivers the brief and clears the context where the provider supports it. `/factory resume --brief` shows the read-only report.
 
-The optional idle cleanup shrinks cold agents automatically: mode `compact-warm` compacts before the cache TTL expires, mode `clear` empties the session (only with the explicit acknowledge switch, since only the new session survives a reload). Automatic `fresh` is not offered. Cleanup sends through the plugin SDK only, verifies its effect on the first attempt per agent, and switches itself off with a hint when a command arrives as text.
+Idle cleanup mode `compact-warm` can compact eligible chats before the cache expires and suggest a fresh context for cold chats. An opt-in setting can rewind eligible Codex chats in place. Mode `clear` can start a new session on providers with native `/clear` after you acknowledge the effect on chat history. Cleanup verifies the provider command’s effect and pauses with a hint if the command arrives as text.
 
 ## Setup
 
-The plugin needs the factory config file on the daemon host, the same file the factory CLI reads. It also needs Paseo 0.16.2 or later on both the daemon and the app. The daemon host needs git, the gh CLI, the paseo CLI, flock, and Node 22 or later.
+The plugin needs Paseo 0.16.2 or later on both the daemon and the app. The daemon host needs git, the gh CLI, the paseo CLI, flock, and Node 22 or later. Enter the GitHub owner and checkout root in Factory settings. The plugin also reads the factory CLI configuration file when present.
 
-Settings live under Settings, Plugins, Factory. The host section edits steer slots, the prepare list, the start steer, the worker default profile, and the profiles they use, with provider, model, thinking, and mode taken from the live provider catalog. The idle cleanup section holds the automation mode (default off), thresholds, providers, roles, and the clear acknowledgement. The chat display section holds one host-wide switch for CHECKPOINT blocks in chat: on (default) shows the full block, off shortens it to one summary line (display only, no token savings).
+Install from a Git checkout or a built release directory on the Paseo host. A checkout updates with pull and reload, keeping settings. For a built release, note your settings before replacing the installation. Removing the plugin deletes its settings. The optional findings reminder is available for Git checkout installs. [Installation and updates](https://github.com/Tomblarom/paseo-workspace-factory/blob/main/docs/getting-started.md#quickstart-in-paseo)
+
+Open **Settings → Plugins → Factory** to configure steer slots, worker profile priority, the idle cleanup mode, and CHECKPOINT display. Profile options come from the live Paseo provider catalog. The chat display switch changes what you see in the app. The model still receives the full CHECKPOINT.
 
 ## Capabilities and limits
 

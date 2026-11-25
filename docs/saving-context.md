@@ -1,16 +1,19 @@
 # Saving context and quota
 
-Every tool step reprocesses the whole chat history, so long steer chats burn through provider quota fast: a small task in a very long chat cost about a third of a five-hour limit. Rules of thumb:
+Long steer chats increase input usage, especially after the provider’s prompt cache expires. Keep the context focused on the current work.
 
-- Keep steer chats short. Checkpoint completed work as you go and use `/factory switch` or `/factory fresh` when you need a handoff or a smaller context. Keep processing actionable work during an ongoing TODO run.
-- Delegate routine work (commit, push, status, doc runs) to a cheap worker instead of doing it in the steer chat.
-- Choose profiles by task type: frugal models for routine, strong ones for design and security; set the thinking level deliberately (`high`/`max` only for steers doing architecture work).
+- Save a `CHECKPOINT` after each piece of work. Use `/factory switch` to hand off or `/factory fresh` to refresh the current context. Both build a brief from saved state so the agent can resume without replaying the transcript. [Concepts](concepts.md#hand-over-without-losing-context)
+- Delegate routine tasks such as checking status or running documentation checks to a lower-cost worker. Order your worker profiles by preference. The picker checks catalog availability and known quota, and supervision can hand off to another eligible steer when a pool runs out. [Worker profile selection](configuration.md#managing-models-from-the-cli) · [Quota pools](concepts.md#quota-pools-and-zerosub-accounts)
 - Batch independent commands and filter large output. While workers are active, use short waits for the first result and work on independent items while they run.
 - Write big artifacts (logs, diffs, test output) to files; paste only a summary and the path into the chat.
 
 ## Seeing usage
 
 `status` shows per-agent context usage from the agent snapshot (`lastUsage`): `ctx <used>/<max>` per steer and worker, `ctx n/a` when Paseo reports none (nothing is estimated). Account-level quotas live in `paseo usage`, not per agent. The optional config `usage.warnContextTokens` (positive integer, default off) adds a warning with a switch/fresh recommendation once an agent exceeds it.
+
+## Idle chats
+
+The plugin can flag long idle chats as cold. Optional `compact-warm` cleanup uses a model-group cache estimate and the configured cost profile to compact eligible chats during an open task while the cache is still warm. Cold chats and chats at the end of a work package can get a fresh recommendation. A host can also opt into automatic same-tab rewinds for eligible Codex chats. [Cold-context design](design/cold-context-resume.md) · [Cache profiles](design/codex-research/spec-cache-profiles.md)
 
 ## Fresh steer
 

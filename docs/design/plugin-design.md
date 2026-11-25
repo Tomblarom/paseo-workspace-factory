@@ -2,7 +2,7 @@
 
 New to the factory? Start with [Getting started](../getting-started.md); this page is the detailed reference.
 
-Status: implemented in `plugin/` (built, typechecked, installed as a snapshot).
+The plugin lives in `plugin/`. Users can install it from a Git checkout or a built release directory. [Installation and updates](../getting-started.md#quickstart-in-paseo)
 
 Scope: how the workspace factory (`src/`, ESM, Node `>=22`) could be driven from inside Paseo through the public plugin API: slash commands, plugin RPC, Command Center items, a settings screen, and (not available) agent tab order.
 
@@ -24,7 +24,7 @@ Sources checked (Paseo 0.16.2: local `paseo plugin init` scaffold plus the deplo
 | (c) Command Center entries | Feasible via `addCommandCenterItem` (`global`/`workspace`/`agent`) |
 | (d) Settings screen for steer slots / worker default profile, catalog-backed, sidebar entry | Feasible via `addSettingsScreen` + `defineSettings` (`host` scope, including the chat-display toggle); provider catalog via `paseo.providers`. The sidebar entry is registered synchronously and shown/hidden in Paseo's own sidebar settings |
 | (e) Agent tab order (Steers A..Z, then workers by number) | No native interface; Paseo owns tabs. Convention + read-only panel only; never edit state files |
-| (f) `pluginsEnabled` prerequisite | Describe only (done below). Not enabled by this task; nothing installed |
+| (f) `pluginsEnabled` prerequisite | Enable plugins on the target Paseo daemon. See [installation](../getting-started.md#quickstart-in-paseo). |
 
 ## (a) Slash commands
 
@@ -83,7 +83,7 @@ Settings are a first-class contribution ([reference](https://paseo.sh/docs/plugi
 - `client.addSettingsScreen({ id, title, icon, Component })` in `index.client.tsx`. The plugin row under Settings → Plugins gains a cog opening the first screen; several screens become tabs in registration order. No sidebar item is required to reach them. `openSettings(id)` (also from Command Center callbacks) opens them programmatically.
 - UI kit from `@getpaseo/plugin/client/ui`: `SettingsSection`, `SettingsCard`, `SettingsRow`, `SettingsSwitch`, `SettingsSelect`, `SettingsInput`, `SettingsAction`.
 - Persistence: `defineSettings({ id, scope, version, schema, migrate? })` in `shared/`, registered via `server.registerSettings` in `index.server.ts`, read via `useSettings()` (client) or `read()` / `subscribe()` (server). Writes are atomic, host-validated, revision guarded (`save(values, revision)` returns `false` on conflict; `reset()` restores schema defaults; `reload()` re-reads).
-- Persistence location and lifetime: ordinary host-side JSON per installation. "Values survive daemon restart, plugin reload, disable, and updates. Removing an installation deletes its settings." Not a credential vault; settings RPCs use the `daemon.manage` permission.
+- Paseo stores settings as ordinary host-side JSON per installation. Restart, reload, disable, and update preserve settings. Removing the installation deletes its settings, and reinstalling that ID starts with defaults. Settings RPCs use the `daemon.manage` permission. [Paseo settings persistence](https://paseo.sh/docs/plugins/reference.md#persisted-values)
 - Scope: `"host"` documents are shared by authorized clients; `"device"` documents stay on one device and are explicitly "for layout preferences".
 
 Design:
@@ -134,22 +134,11 @@ plugin/
 
 RPC set (thin wrapper over the CLI operations in `src/cli.mjs`): read-only first (`factory.status`, `factory.plan`, `factory.switchPreview`), then writes behind stored artifacts (`factory.apply {hash}`, `factory.checkpoint`, `factory.switch {to, apply}`). `requirements.paseo` must track the daemon the RPCs are tested against (today that would be `>=0.16.2`, following the receipt-lookup pin).
 
-## Implementation steps
+## Development checks
 
-Small, each independently verifiable (`npm run typecheck`, install/reload on a test daemon, `paseo plugin ls` shows `running`, exercise the contribution including its error state):
+Run `npm run typecheck` and `npm test` in `plugin/`. On a test daemon, use `paseo plugin ls` to check that the plugin is running and exercise the contribution and its error state. The plugin’s `factory.ping` RPC reports the daemon subprocess’s Node version, which must be 22 or later.
 
-1. Scaffold + ping: `paseo plugin init`, one `factory.ping` RPC, no factory logic. Proves the boundary, toolchain, and daemon Node version.
-2. Read-only core: vendor planner/discovery/steer read paths under `server/factory/`; add `factory.status` + `factory.plan` RPCs, the `factory` slash command (status/plan), and the preview panel showing the plan hash.
-3. Command Center items for the same reads (workspace context).
-4. Settings screens: host-scope slots/profile document with catalog-backed selects; host-scope chat-display toggle defaulting to on; synchronous sidebar registration.
-5. Writes: `factory.apply {hash}`, `factory.checkpoint`, `factory.switch`, each requiring the stage-one artifact; confirm buttons in the panel plus `/factory apply <hash>` / `/factory switch --to B --apply`.
-6. Docs and packaging: `OVERVIEW.md`, manifest requirements, install instructions for a directory/Git source; re-verify the receipt pin on the target daemon.
-
-## Open questions
-
-- Daemon subprocess Node version on every target host (must satisfy `>= 22`); `factory.ping` reports it, verify before installing.
-- Pilot distribution: directory install vs Git source with `:plugin` suffix; registry submission is out of scope for the pilot.
-- Receipt pin re-verification on the target daemon (still `0.16.2`).
+Receipt lookup is pinned to the tested Paseo version (currently 0.16.2). Re-verify it before changing the pin.
 
 ## Decisions
 
@@ -161,7 +150,6 @@ Small, each independently verifiable (`npm run typecheck`, install/reload on a t
 - Tests: pure logic (`shared/factory-args.ts`, `shared/preview.ts`, `shared/settings-validate.ts`) runs under `node --test` with type stripping; the root script passes `--experimental-strip-types` so Node 22.6+ works too.
 - Optional scope address: every `/factory` subcommand resolves the scope of the current workspace when no address is given (server-side, same resolution as the CLI). A workspace without a scope gets a clear error plus the adopting `plan` call. `scopes`/`cleanup` report on the whole instance and take no address.
 - Worker guard: the slash command and the four Command Center entries use agent context and reject workers at runtime (parented or `wsf.role=worker`); Paseo shows the refusal as a toast. One extra workspace entry ("Factory: Panel öffnen") keeps the panel reachable from drafts. Tradeoff: the command stays in autocomplete everywhere (the API has no visibility predicate) and is unavailable in drafts. Upstream proposal: an `isAvailable(context)` predicate for `addSlashCommand` (and Command Center items).
-- Release snapshots are scripted (M5) but never auto-installed: `npm run build-snapshot` verifies the mirror, typecheck and plugin tests, builds the content-hashed snapshot, and prints the `remove`/`install`/rollback commands for explicit execution, so the settings-wiping `remove` step stays visible; installation and prune deletion only happen with `--confirm`.
 
 ## Notification suppression for workers: research
 
@@ -176,21 +164,21 @@ Question: can the plugin suppress Paseo finish notifications for factory workers
 
 Upstream proposal: a per-agent notification preference, e.g. a `notifyOnFinish`-like field on agent create/update plus SDK and `paseo agent update` support, or a waiting `agent.attention.before` plugin hook that may suppress the notification.
 
-## Cold cache research (C1)
+## Cold cache research
 
-Read-only. Command forwarding (`/clear` and `/compact` reach root sessions; a new Claude session id is accepted and persisted) is settled by code findings, see the Evidence table in [cold-context-resume.md](cold-context-resume.md). Remaining points:
+In Claude root sessions, Paseo forwards `/clear` and `/compact` as provider commands and persists the new session ID after a clear. [Command-forwarding evidence](cold-context-resume.md)
 
 (1) Cache TTL. Claude Code requests 1h for the main conversation on a Claude subscription within plan usage, 5min for usage credits, API keys, and cloud providers, and 5min for subagents; it drops to 5min once a subscription draws on usage credits. Overridable per bucket (`promptCacheTtl` / `CLAUDE_CODE_PROMPT_CACHE_TTL`, `subagentPromptCacheTtl`, v2.1.242+); confirm via `usage.cache_creation` (`ephemeral_1h` vs `ephemeral_5m` tokens) ([caching](https://code.claude.com/docs/en/prompt-caching)). Paseo Claude usage counts against the normal Claude plan ([provider](https://paseo.sh/docs/supported-providers/claude-code.md)), so factory steers normally run on the 1h TTL while inside plan usage. Local `claude` here is v2.1.330, above all cited gates.
 
-(2) Idle time and context size per agent. The agent snapshot carries `lastUsage` (`contextWindowUsed/MaxTokens`, cached tokens, cost), `lastUserMessageAt`, `updatedAt`, `status`, `activeTurn.startedAt`, and `attentionTimestamp` (`AgentSnapshotPayload`, `@getpaseo/protocol/messages`; `AgentUsage`, `@getpaseo/protocol/agent-types`). Idle time derives from status plus timestamps; there is no explicit last-turn-ended field, so C2 records `lastTurnEndedAt` from `agent.turn.after`.
+(2) Idle time and context size per agent. The agent snapshot carries `lastUsage` (`contextWindowUsed/MaxTokens`, cached tokens, cost), `lastUserMessageAt`, `updatedAt`, `status`, `activeTurn.startedAt`, and `attentionTimestamp`. Factory records `lastTurnEndedAt` from `agent.turn.after` to measure how long the agent has been idle.
 
-(3) Native counterparts, use first. Claude Code compacts automatically near the limit (on by default, `/autocompact` window in settings) and can compact long idle conversations on the 1h TTL (`idleCompaction` setting, v2.1.290+); a cold `/compact` reprocesses history uncached, so `compact-warm` must run before TTL expiry ([caching](https://code.claude.com/docs/en/prompt-caching), [commands](https://code.claude.com/docs/en/commands)). `SessionStart` hooks fire on startup, resume, and after `/clear` or compaction (`source: startup|resume|clear|compact|fork`), and their stdout becomes context Claude sees; `PreCompact` stdout steers the summary ([hooks](https://code.claude.com/docs/en/hooks-reference)). Prefer a `SessionStart` hook (source `clear`/`compact`) that injects the C3 briefing over instruction text alone. Paseo resumes provider sessions after daemon restart via `agent.open.before`, which can also set env such as the TTL variables ([hooks](https://paseo.sh/docs/plugins/hooks.md)).
+(3) Claude Code compacts near the context limit and supports idle compaction on the one-hour cache lifetime. Factory’s `compact-warm` mode targets the period before the cache expires, when the compaction request can reuse cached input. A Claude Code `SessionStart` hook can inject the resume brief after `/clear` or compaction. [Claude Code caching](https://code.claude.com/docs/en/prompt-caching) · [Claude Code hooks](https://code.claude.com/docs/en/hooks-reference) · [Factory resume setup](../configuration.md#resume-brief)
 
-Recommendation for C2-C6 stands as in [cold-context-resume.md](cold-context-resume.md): build C2/C3/C4/C6 without new measurements; gate C5 on one approved scratch-agent run (timeline marker vs deletion, attention outcome, context numbers); keep `mode` default `off` until C7 measures. No live checks were run for C1; C1/C7 live checks need user approval for scratch agents.
+For live validation of command effects, see the [provider live checks](../provider-live-check.md).
 
-## Worker supervision (S-B)
+## Worker supervision
 
-The plugin side of [supervision](supervision-design.md): `server/supervise.ts` (hooks, wakes, watchdog, failover) reuses the S-A core through the synced factory copy (`server/factory/supervision.js`, single source `src/supervision.mjs`), never duplicating its rules; plugin-only text and scans (worker metadata, ADVISOR-REQUEST detection, archive hint, takeover requests, answered/busy/unanswered) live in `shared/supervise.ts`, where plain `node:test` reaches them.
+The plugin’s hooks, wakes, watchdog, and failover in `server/supervise.ts` reuse `src/supervision.mjs` through the synced factory copy. Plugin-specific text and scans live in `shared/supervise.ts`. [Supervision design](supervision-design.md)
 
 - `agent.create.after` registers agents started by a labelled scope steer as `running` and writes the immutable worker metadata (`wsf.worker`: scope id, starting steer, epoch, task excerpt); background agents are skipped.
 - A second `agent.turn.after` hook transitions supervised workers (CHECKPOINT status, ADVISOR-REQUEST, missing CHECKPOINT, failed/canceled) and wakes the steer that is active at send time: immediately for every actionable outcome (debounced by `wakeDebounceSeconds`), queued during the quiet periods (drain flag, before the boot check). Archived workers lose their entry; steers, unassigned and background agents are ignored; `closed` agents stay supervised.
@@ -198,19 +186,24 @@ The plugin side of [supervision](supervision-design.md): `server/supervise.ts` (
 - `startSupervisionTimer` (10 s tick) flushes due wakes and runs the watchdog every `watchdogMinutes`: backfill adopted workers without an entry, drop archived entries, reconcile restart marks that never got a turn.after (CLI drain marks `planned-restart`, then the daemon restarts), mark idle `running` workers `stale` (wake debounced), and walk the failover chain on unanswered wakes (`answerMinutes`): next slot, then domain, then hub, each asked once with a takeover request (`switch --to <slot> --apply` for steers), logged as checkpoint source `failover`. A completed turn since the wake answers it; a still-running turn waits; anything else fails over.
 - No auto-archive: wakes carry an "archive accepted workers" hint listing done workers, and the steer archives per the standing rule. The plugin never calls `archive` and never wakes background agents. Open workers at `maxAutoResumes` continuations add an advisor hint (consult an advisor, then `domain:`/`hub:`).
 - Settings (`factory-supervision`, host scope): `enabled` (default on), `wakeDebounceSeconds` (20), `batchMinutes` (0, compatibility), `watchdogMinutes` (15), `staleMinutes` (60), `answerMinutes` (10), `maxAutoResumes` (2). Off silences registration, wakes, and watchdog.
-- C5 feeds the register state into the cleanup decision and skips `running`/`blocked`/`interrupted` workers (`isSupervisionProtectedState`).
+- Idle cleanup uses the register state and skips `running`, `blocked`, and `interrupted` workers (`isSupervisionProtectedState`).
 - Limits: the CLI drain does not signal the plugin yet, so drain-quiet currently only engages when set (failover and flush take an explicit `draining` flag; tests cover it) — a drain marker is the follow-up. Like all plugin sends, wakes probably raise the normal attention (see Limits in the supervision design).
 
-## Update flow
+## Build a release directory
 
-The live instance runs a snapshot install: a content-hashed copy of the plugin sources under `<releases-dir>/workspace-factory-<hash12>`, installed with id `workspace-factory`. To ship a new snapshot (decided by the user, never automatically), run from the repo root:
+The snapshot builder produces a content-hashed release directory for installation, distribution, or testing. From the repo root, install the development dependencies and run the builder.
 
-1. `npm run build-snapshot` (`scripts/build-snapshot.mjs`). It fails when `plugin/server/factory/` is stale (re-run `npm run plugin:sync` first), then runs `npm run typecheck` and the plugin tests in `plugin/`, then builds the snapshot: a copy of `plugin/` without `node_modules`, `package-lock.json` and `test/` under `<releases>/workspace-factory-<hash12>` (default releases dir `~/projects/paseo/releases`, `--out-dir` overrides it). hash12 is the first 12 hex chars of sha256 over the sorted file list with file hashes, so identical content gives an identical directory and rebuilding is a no-op.
-2. The script prints the exact install commands and the rollback command (previous snapshot from `paseo plugin ls --json`, text fallback) and never installs by default. Run the printed `paseo plugin remove workspace-factory` and `paseo plugin install <snapshot>` yourself (an already installed id is rejected, so remove first). Warning: removing deletes the installation's settings; note the slots/profiles first and re-enter them afterwards. Scripted installation exists only as `npm run build-snapshot -- --install --confirm <hash12>` naming the built hash.
-3. Verify with `paseo plugin ls` (status `running`) and `paseo plugin logs workspace-factory` (clean start, `Plugin ready`); `/factory ping` answers; reload the app. Old snapshots: `npm run build-snapshot -- --prune` previews the cleanup (keeps the installed and the previous snapshot); files are deleted only with `--prune --confirm`.
+```sh
+clear
+npm ci --prefix plugin && npm run build-snapshot
+```
+
+1. The builder (`scripts/build-snapshot.mjs`) verifies `plugin/server/factory/`, then typechecks and tests the plugin. If the mirror is stale, run `npm run plugin:sync` first. The builder copies the plugin sources into `<releases-dir>/workspace-factory-<hash12>` and omits `node_modules`, `package-lock.json`, and `test/`. The releases dir defaults to `~/projects/paseo/releases` and can be set with `--out-dir`. The sorted list of files and their hashes produces the same 12-character SHA-256 prefix for identical content.
+2. The script prints install and rollback commands. The release installs as a directory source. **Removing an existing `workspace-factory` installation deletes its settings.** Save the values you need before running the printed commands. Scripted installation requires `npm run build-snapshot -- --install --confirm <hash12>` with the built hash. [Install a built release](../getting-started.md#install-a-built-release)
+3. Use `paseo plugin ls` to check for `running`, `paseo plugin logs workspace-factory` to check startup, and `/factory ping` to check the app connection. `npm run build-snapshot -- --prune` previews cleanup of old snapshots while keeping the installed and previous snapshots. Deletion requires `--prune --confirm`.
 
 Never edit Paseo state files directly.
 
-## C7 measurement (manual procedure)
+## Measuring warm compaction
 
-Needs a scratch agent and more than one hour of idle time, so it is not automated: send the same small prompt after >1 h idle once without and once with cleanup (`/compact`), compare first-turn token usage from `paseo inspect`, record the result here, then decide the default for `idleCleanup.mode` (stays `off` until measured).
+On approved scratch sessions with similar chat lengths, leave one session idle until the cache expires and compact the other before expiry. Send the same small prompt after the same idle duration in both sessions and compare first-turn token usage with `paseo inspect`. Record the provider, model, idle interval, and cached and uncached input counts. [Provider live checks](../provider-live-check.md)

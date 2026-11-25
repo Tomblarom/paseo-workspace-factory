@@ -1,23 +1,11 @@
-# Nutzerwunsch: Kompaktierung nach Kosten, Profil wie Energiesparoptionen (2026-11-24)
+# Cache-Profile für die Kompaktierung (2026-11-24)
 
-Quelle: Nutzer direkt an Steer E, auf Basis der Codex-Recherche (/tmp/codexres/an.py, OpenAI prompt-caching docs).
+Die Profile legen fest, ab welcher Leerlaufdauer die Factory einen Agenten für eine Kompaktierung in Betracht zieht. Die Cache-Zeiten sind Richtwerte für die Entscheidung. [Codex-Messungen](findings-compact-vs-fresh.md) · [OpenAI Prompt Caching](https://developers.openai.com/api/docs/guides/prompt-caching) · [Cache-Referenz der Factory](../cold-context-resume.md#cache-reference-and-cost-profiles)
 
-1. Einstellbar machen, wann aus Kostengründen kompaktiert wird. Eine Plugin-Einstellung als Profil wie bei Laptop-Energieoptionen:
-   - "Maximale Effizienz": früh kompaktieren, auch bei kleinem Kontext.
-   - "Ausgewogen" (Standard): kurz bevor der Cache abkühlt.
-   - "Komfort": selten und spät kompaktieren, verbraucht mehr Usage. Nur ein Nebenprodukt, nicht aktiv ausbauen oder pflegen.
-2. Eine stark vereinfachte Cache-Referenz je Modell bzw. Gruppe in der Factory hinterlegen (Doku plus Tabelle/Konstanten im Code). Sie dient als Grundlage für die angebotenen Stufen:
-   | Gruppe | Cache-TTL | gecachter Input | Hinweis |
-   |---|---|---|---|
-   | Claude | 1 h (laut Abrechnungsweg ggf. 5 min) | ~0,1× | native /clear und /compact |
-   | OpenAI GPT-5.6+ (gpt-6.x Sol/Terra/Astra) | Doku min. 30 min; gemessen: <30 min ~96 %, 30–180 min ~82 %, >3 h ≤30 % | 0,05× (Sol) | auto-compact selbst bei ~360–420k; /clear nicht nativ |
-   | OpenAI ≤5.5 | 5–10 min (in_memory) bzw. ~30 min (24h) | modellabhängig | |
-   | Muse, Copilot, sonstige | unbekannt | – | konservativ wie OpenAI ≥5.6 behandeln |
-3. Automatisch kompaktieren, wenn alle drei Bedingungen gelten:
-   - Der Steer droht laut Profilschwelle und Gruppen-TTL kalt zu werden.
-   - Er wird gerade nicht benutzt: kein laufender Turn, keine offene Nutzereingabe/Aktion.
-   - Beim Anbieter ist Kontingent vorhanden: Provider-Limit oder Usage prüfen, sonst nichts tun.
-   Codex nur mit /compact, nie /clear. Kontext, der schon kalt ist, nicht mehr kompaktieren, sondern beim Resume fresh plus Brief nutzen.
-4. Worker ebenfalls betreuen, nicht nur Steers. Als TODO-Punkt vorsehen, falls nicht schon vorhanden.
+- **Maximale Effizienz** prüft früh und berücksichtigt kleinere Kontexte.
+- **Ausgewogen** prüft kurz vor der geschätzten Ablaufzeit und ist das Standardprofil.
+- **Komfort** prüft später, kurz vor Ende des Kompaktierungsfensters.
 
-Leitsatz: Kein Agent soll mit großem Kontext kalt werden. Ein kleiner, kompaktierter Kontext darf kalt werden, denn das ist billiger als ein Dauer-Warmhalten.
+In der Leerlaufprüfung gelten dieselben Voraussetzungen für die konfigurierten Steers und Worker. Ein laufender Turn oder eine offene Aktion blockiert die Bereinigung. Für eine Kompaktierung braucht es einen noch warmen Cache und verfügbares Kontingent. Bei kaltem Kontext empfiehlt die Factory `fresh` mit Wiederaufnahmebrief. Codex nutzt für Kompaktierung `/compact`. [Leerlaufprüfung](../cold-context-resume.md#c5-idle-cleanup-plugin-timer)
+
+Die Entscheidung berücksichtigt auch, ob ein Arbeitspaket abgeschlossen ist. Ein frischer Arbeitsstand aus dem Checkpoint kann dann günstiger sein als eine weitere Kompaktierung. Für kleine Kontexte kann es günstiger sein, den Cache auslaufen zu lassen.

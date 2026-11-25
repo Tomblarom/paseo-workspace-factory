@@ -24,15 +24,53 @@ Starting a new agent by hand means explaining the whole task again, or letting t
 
 You need Linux with Node.js 22 or later, git, the GitHub CLI `gh` (logged in), `flock`, and a running Paseo daemon with its `paseo` CLI.
 
-**1. Install the plugin on the Paseo host.** From the repository checkout, build a snapshot.
+Open **Settings → Plugins** on the target host and turn on **Enable plugins**. Choose an installation source on that host.
+
+| [Build from source](#build-from-source) | [Install a built release](#install-a-built-release) |
+|---|---|
+| Use the `plugin/` directory of a Git checkout. Pull and reload to update, keeping your settings. | Use a prepared release directory. Replace the active installation with the next release and re-enter your settings. |
+| The optional findings reminder asks agents to record observations in the Factory checkout. | The findings reminder is unavailable. |
+
+### Build from source
+
+Clone the repository on the Paseo host and install its `plugin/` directory.
 
 ```sh
 clear
-npm ci --prefix plugin
-npm run build-snapshot
+git clone https://github.com/Tomblarom/paseo-workspace-factory.git &&
+  cd paseo-workspace-factory &&
+  paseo plugin install "$PWD/plugin" &&
+  paseo plugin ls workspace-factory
 ```
 
-Use the install command printed for the snapshot. For updates and rollback, follow the [snapshot update procedure](design/plugin-design.md#update-flow). Open a regular agent tab and type `/factory help` in the composer to verify the plugin loaded.
+Paseo compiles the checked-in runtime sources when it loads the plugin. Installing from the checkout works without local `node_modules` or a separate build step. [Paseo plugin quickstart](https://paseo.sh/docs/plugins) · [Paseo CLI reference](https://paseo.sh/docs/cli#plugins)
+
+To update, run these commands from the same checkout. Reload preserves your plugin settings. [Paseo settings persistence](https://paseo.sh/docs/plugins/reference.md#persisted-values)
+
+```sh
+clear
+git pull && paseo plugin reload workspace-factory
+```
+
+Only installations from the Factory checkout can add a findings reminder to agent prompts. It asks agents to record their observations about the Factory in `<checkout>/FINDINGS.md`. **Ask agents to record factory findings** is on by default under **Settings → Plugins → Factory → Chat and prompts**.
+
+### Install a built release
+
+Use a prepared, self-contained `workspace-factory-<hash12>` directory on the Paseo host. For now, maintainers produce it with `npm run build-snapshot`. A future published release can provide the same directory. [Release build instructions](design/plugin-design.md#build-a-release-directory)
+
+Replace the example path with the absolute path to your release directory.
+
+```sh
+clear
+paseo plugin install /path/to/workspace-factory-0123456789ab &&
+  paseo plugin ls workspace-factory
+```
+
+To update, note your values in **Settings → Plugins → Factory**. Run `paseo plugin remove workspace-factory`, install the new directory with the command above, then re-enter your values. **Removing the plugin deletes its settings. Reinstalling the same ID starts from defaults.** Paseo’s `plugin update` skips directory installs. [Paseo CLI reference](https://paseo.sh/docs/plugins/reference.md#cli-reference) · [Paseo settings persistence](https://paseo.sh/docs/plugins/reference.md#persisted-values)
+
+### Configure and use the Factory
+
+**1. Verify the installation.** When the plugin status is `running`, open a regular agent tab and type `/factory help` in the composer.
 
 For first-time setup, open **Settings → Plugins → Factory** in Paseo. Under **Host**, enter your GitHub owner and an absolute checkout root on the Paseo host. Choose a profile for the first steer and save. Advanced host configuration is available in the [configuration reference](configuration.md#fields).
 
@@ -59,7 +97,7 @@ For first-time setup, open **Settings → Plugins → Factory** in Paseo. Under 
 | run a previewed plan | `/factory apply <hash>` |
 | hand over to Steer B | `/factory switch --to B`, then confirm in the panel |
 | save the checkpoint from the last answer | `/factory checkpoint --from-agent <id>`, then confirm in the panel |
-| restart your steer after a break | `/factory resume` (clears the chat, then shows task and next step) |
+| restart your steer after a break | `/factory resume` (saves the checkpoint and shows the brief, clearing the context where supported) |
 | only read the status report | `/factory resume --brief` |
 | refresh the active steer's context | `/factory fresh`, then confirm in the panel |
 | move a project to another checkout | `/factory relocate --to <path>`, then confirm in the panel |
@@ -89,7 +127,7 @@ Without a project name, commands use the workspace you are in. The Factory panel
 | Checkpoint | Four short lines: task, tests, blockers, next step. The memory that survives a handover. |
 | CHECKPOINT block | The checkpoint written at the end of an agent's answer, as a code block. The factory reads it from there. |
 | Switch / handover | Make another steer the active one and send it the checkpoint. |
-| Fresh | Replace the active steer with a brand-new agent of the same slot, to start with an empty chat. |
+| Fresh | Refresh a steer or worker in the same tab via rewind where supported, or start a new agent. |
 | Resume brief | A short status report (task, next step, git, helpers) for an agent that lost or cleared its chat. |
 | Plan / apply | Plan shows what would change and stores it under a hash; apply runs exactly that plan. |
 | Scope | One coordinated unit, usually one project: its home workspace, steers, checkpoint and helpers. |
@@ -107,7 +145,7 @@ Without a project name, commands use the workspace you are in. The Factory panel
 
 **Chat got too long.** Save the checkpoint and run `/factory fresh`. Review whether the preview will rewind the current tab or create a new agent, then confirm. [Saving context](saving-context.md)
 
-**Back after a break.** In the steer's own tab, `/factory resume` is the way back after a restart, crash, or limit: it saves the checkpoint, clears the chat, and then shows the task and next step without reading the old chat. A "Resume nötig" pill on the steer asks you to do this when needed. `resume` on the CLI (or `/factory resume --brief`) only reads the same report and never clears anything. The plugin can also tidy up idle agents automatically; see [cold context](design/cold-context-resume.md).
+**Back after a break.** In the steer's own tab, `/factory resume` saves the checkpoint and shows the task and next step in a brief after a restart, crash, or limit. For providers with `/clear` enabled and verified, it clears the session before delivering the brief. A “Resume nötig” pill appears when the steer needs to resume. Use CLI `resume` or `/factory resume --brief` for the read-only report. [Cold context and resume](design/cold-context-resume.md)
 
 **Many projects.** `/factory scopes` shows one line per project. A hub hands out work with `/factory assign <scope> --task "…"`. [Scopes and the hub](design/scopes-design.md)
 

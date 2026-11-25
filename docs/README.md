@@ -1,12 +1,12 @@
 # Documentation
 
-Start with **[Getting started](getting-started.md)**: what the factory does, a ten-minute quickstart, a glossary and the typical workflows.
+Start with **[Getting started](getting-started.md)** to choose between a Git checkout and a built release, set up your first project, and try common workflows.
 
 ## Use it
 
 | Page | Read it when you want to … |
 |---|---|
-| [Getting started](getting-started.md) | understand the idea and set up your first project |
+| [Getting started](getting-started.md) | install or update the plugin and set up your first project |
 | [Configuration](configuration.md) | look up a config field, a command option or local mode |
 | [Steer instructions](steer-instructions.md) | copy the text that tells your agents how to behave (incl. the CHECKPOINT format) |
 | [Using a TODO list with steers](todo-workflow.md) | keep an optional project backlog across agents and handoffs |
