@@ -579,10 +579,10 @@ test("sendScopeWake auto-resumes a flagged steer instead of the wake text", asyn
       log: () => {},
       nowMs: NOW,
       nowIso: at(NOW),
-      resumeSteer: async (_paseo, args) => {
-        resumed.push(args);
-        return { cleared: true };
-      },
+      delivery: { runCleanupFn: async (_paseo, agentId, kind, reason, options) => {
+        resumed.push({ agentId, ...options });
+        return { workspaceId: ws.id, sessionId: null, kind, reason };
+      } },
     },
   );
   assert.equal(sent.sent, false, "clear path stays pending until the brief is sent");
@@ -598,7 +598,7 @@ test("sendScopeWake auto-resumes a flagged steer instead of the wake text", asyn
   assert.deepEqual(entry.pendingWake, { state: "done", queuedAt: at(NOW) });
   const pending = world.workspaces[0].metadata[AGENTS_KEY][steerA.id].pendingWakeBrief;
   assert.ok(pending?.wakeId, "pending wake brief staged");
-  assert.equal(pending.events.length, 1);
+  assert.equal(pending.batch.events.length, 1);
   assert.match(pending.note, new RegExp(`worker ${workerId} done`));
 
   const immediate = await supervise.sendScopeWake(
@@ -610,14 +610,14 @@ test("sendScopeWake auto-resumes a flagged steer instead of the wake text", asyn
       log: () => {},
       nowMs: NOW,
       nowIso: at(NOW),
-      resumeSteer: async () => ({ cleared: false }),
+      delivery: { buildBrief: async () => "Resume body" },
     },
   );
-  assert.equal(immediate.sent, true, "immediate-brief path delivers at once");
-  assert.equal(immediate.resumed, true);
+  assert.equal(immediate.sent, false, "retry stays queued until the clear is confirmed");
+  assert.equal(sendsTo(world, steerA.id).length, 0);
 });
 
-test("sendScopeWake without a flag (or wiring) sends the plain wake text", async () => {
+test("sendScopeWake without health information and without a recovery flag sends the plain wake text", async () => {
   supervise.resetSupervisionForTests();
   const world = makeWorld();
   const ws = addWorkspace(world, {
@@ -655,25 +655,13 @@ test("sendScopeWake without a flag (or wiring) sends the plain wake text", async
   const plain = await supervise.sendScopeWake(
     fakeClient(world),
     { scope: { id: REPO, workspaceId: ws.id }, events: [{ workerId, state: "done" }] },
-    { ...deps, resumeSteer: async () => ({ cleared: true }) },
+    deps,
   );
   assert.equal(plain.sent, true);
   assert.equal(plain.resumed, undefined);
   assert.equal(sendsTo(world, steerA.id).length, 1);
 
-  // Flagged but unwired: falls back to the plain wake text.
-  world.workspaces[0].metadata[WORKERS_KEY] = register();
-  world.workspaces[0].metadata[AGENTS_KEY] = {
-    [steerA.id]: { needsResume: { reason: "failed", at: at(NOW - HOUR) } },
-  };
-  const fallback = await supervise.sendScopeWake(
-    fakeClient(world),
-    { scope: { id: REPO, workspaceId: ws.id }, events: [{ workerId, state: "done" }] },
-    deps,
-  );
-  assert.equal(fallback.sent, true);
-  assert.equal(fallback.resumed, undefined);
-  assert.equal(sendsTo(world, steerA.id).length, 2);
+
 });
 
 // ---------------------------------------------------------------------------
@@ -684,10 +672,9 @@ test("turn hook sends the resume brief after a verified resume clear", () => {
   const turnHook = readFileSync(new URL("../server/turn-hook.ts", import.meta.url), "utf8");
   assert.ok(turnHook.includes("RESUME_PENDING_REASON"), "distinguishes resume clears");
   assert.ok(turnHook.includes("getResumeBrief"), "brief builder is a hook dep");
-  assert.ok(turnHook.includes("formatResumeMessage"), "brief goes out headed");
+  assert.ok(turnHook.includes("finishSteerDelivery"), "confirmed clear releases the queued brief");
   assert.ok(turnHook.includes("needsResumeForFailedTurn"), "failed steer turns flag");
   assert.ok(turnHook.includes("needsResume: null"), "flag clears on success");
-  assert.ok(turnHook.includes("needsResume kept"), "a failed brief send keeps the pill");
 });
 
 test("server entry registers resume RPC, attention feed, and F4 wiring", () => {
@@ -695,7 +682,7 @@ test("server entry registers resume RPC, attention feed, and F4 wiring", () => {
   assert.ok(serverEntry.includes("factoryResumeApply"), "resume RPC registered");
   assert.ok(serverEntry.includes("factoryAttention"), "attention feed registered");
   assert.ok(serverEntry.includes("factoryResumeSettings"), "resume settings registered");
-  assert.ok(serverEntry.includes("resumeSteer"), "F4 auto-resume wired");
+  assert.ok(serverEntry.includes("delivery, getZerosub"), "supervision uses the shared delivery policy");
   assert.ok(serverEntry.includes("getResumeBrief"), "turn hook gets the brief builder");
   const settingsModule = readFileSync(new URL("../shared/settings.ts", import.meta.url), "utf8");
   assert.ok(settingsModule.includes('id: "factory-resume"'), "resume settings document exists");

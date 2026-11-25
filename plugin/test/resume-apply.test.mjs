@@ -420,12 +420,12 @@ test("applyResume clears claude through runCleanup and passes the F4 note", asyn
   assert.equal(calls[0][4].note, "wake: worker w-1 done");
 });
 
-test("applyResume sends the brief immediately for providers without clear", async () => {
+test("applyResume rewinds to the last brief before delivering for providers without clear", async () => {
   const world = makeWorld();
   const { ws, steer } = provisioned(world);
   steer.provider = "codex";
   world.workspaces[0].metadata[AGENTS_KEY] = {
-    [steer.id]: { needsResume: { reason: "limit", at: at(NOW - HOUR) } },
+    [steer.id]: { needsResume: { reason: "limit", at: at(NOW - HOUR) }, refreshed: { briefMessageId: "latest-brief" } },
   };
   const briefs = [];
   const result = await resumeApply.applyResume(
@@ -433,6 +433,12 @@ test("applyResume sends the brief immediately for providers without clear", asyn
     { workspaceId: ws.id, agentId: steer.id },
     {
       lock: noLock,
+      rewindClient: async () => ({
+        fetchAgentTimeline: async () => ({
+          entries: ["first", "latest-brief"].map((messageId) => ({ item: { type: "user_message", messageId } })),
+        }),
+        rewindAgent: async (...args) => { world.calls.push(["rewind", ...args]); },
+      }),
       buildBrief: async (_paseo, workspaceId, agentId) => {
         briefs.push([workspaceId, agentId]);
         return "Resume brief body";
@@ -440,8 +446,12 @@ test("applyResume sends the brief immediately for providers without clear", asyn
     },
   );
   assert.equal(result.cleared, false);
-  assert.match(result.detail, /without clearing/);
-  assert.match(result.detail, /codex/);
+  assert.equal(result.status, "sent");
+  assert.match(result.detail, /rewound/);
+  const messages = world.calls.filter(([kind]) => kind === "rewind" || kind === "agent.send");
+  assert.deepEqual(messages[0], ["rewind", steer.id, "latest-brief", "conversation"]);
+  assert.equal(messages[1][0], "agent.send");
+  assert.ok(world.workspaces[0].metadata[AGENTS_KEY][steer.id].refreshed.briefMessageId);
   assert.deepEqual(briefs, [[ws.id, steer.id]]);
   assert.deepEqual(sendsTo(world, steer.id), ["[Factory resume]\nResume brief body"]);
   assert.equal(world.workspaces[0].metadata[AGENTS_KEY][steer.id].needsResume, null);
@@ -450,11 +460,11 @@ test("applyResume sends the brief immediately for providers without clear", asyn
 test("applyResume maps a failed clear to the open-the-tab hint", async () => {
   const world = makeWorld();
   const { ws, steer } = provisioned(world);
-  await assert.rejects(
-    resumeApply.applyResume(fakeClient(world, { sendFails: true }), { workspaceId: ws.id, agentId: steer.id }, { lock: noLock }),
-    /Open its tab, then try again/,
-    "real runCleanup send failure surfaces with the hint",
+  const result = await resumeApply.applyResume(
+    fakeClient(world, { sendFails: true }), { workspaceId: ws.id, agentId: steer.id }, { lock: noLock },
   );
+  assert.equal(result.status, "blocked");
+  assert.match(result.detail, /Open its tab, then try again/);
   assert.equal(world.workspaces[0].metadata[AGENTS_KEY][steer.id].lastActionFailed.error, "agent is closed");
 });
 
@@ -501,7 +511,7 @@ test("runCleanup on send failure writes lastActionFailed and rethrows", async ()
   );
   const entry = world.workspaces[0].metadata[AGENTS_KEY][steer.id];
   assert.equal(entry.lastActionFailed.error, "agent is closed");
-  assert.equal(entry.pendingAction, undefined);
+  assert.equal(entry.pendingAction, null);
   await assert.rejects(
     sweep.runCleanup(fakeClient(world), "agent-gone", "clear", "resume", { lock: noLock }),
     /Unknown agent/,

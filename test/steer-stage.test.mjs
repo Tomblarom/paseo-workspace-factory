@@ -79,6 +79,7 @@ function fakeClient(world) {
       world.calls.push(['agent.send', id, text]);
       if (world.sendFails) throw new Error('agent unreachable');
     },
+    waitForFinish: async () => { world.calls.push(['agent.waitForFinish', id]); },
     timeline: { refetch: async () => ({ entries: [{ item: { type: 'assistant_message', text: 'Done.' } }] }) },
   });
   const workspaceHandle = (id) => ({
@@ -142,6 +143,29 @@ const testLock = (name, fn) => withLock(name, fn, { dir: LOCK_TMP });
 const sendsTo = (world, id) => world.calls.filter((c) => c[0] === 'agent.send' && c[1] === id).map((c) => c[2]);
 
 // ---------------------------------------------------------------- switch
+
+test('switch delegates delivery after the epoch changes and waits for the delivered brief', async () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  const applied = await switchSteer({
+    client: fakeClient(world), discovery: discoveryOf(world), toSlot: 'B', apply: true,
+    wait: true, waitTimeoutMs: 1000, lock: testLock, callerId: null, language: 'en', config: CONFIG,
+    deliverSteer: async (input) => {
+      assert.equal(input.epoch, 2);
+      assert.equal(input.agentId, steers.B.id);
+      assert.equal(ws.metadata[METADATA_KEY].activeSteer, 'B');
+      assert.match(input.renewalNote, /Handoff from Steer A to Steer B/);
+      // The clear hook can confirm delivery before the RPC result comes back.
+      ws.metadata['wsf.agents'] = { [steers.B.id]: { lastSteerDeliveryId: 'handoff-id' } };
+      return { status: 'pending', deliveryId: 'handoff-id' };
+    },
+  });
+  assert.equal(applied.delivered, true);
+  assert.equal(applied.deliveryPending, false);
+  assert.equal(applied.reply, 'Done.');
+  assert.deepEqual(sendsTo(world, steers.B.id), []);
+  assert.ok(world.calls.some(([kind, id]) => kind === 'agent.waitForFinish' && id === steers.B.id));
+});
 
 test('switch sends one brief to the destination and none to the outgoing steer', async () => {
   const world = makeWorld();

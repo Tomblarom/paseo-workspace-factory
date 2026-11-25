@@ -9,5 +9,5 @@ import { z } from "zod";
 export const factoryPromptSettings = defineRpc({
   name: "factory.prompt-settings",
   input: z.object({}),
-  output: z.object({ findingsInPrompts: z.boolean(), factoryRoot: z.string().nullable() }),
+  output: z.object({ findingsInPrompts: z.boolean(), factoryRoot: z.string().nullable(), steerDelivery: z.literal(true) }),
 });

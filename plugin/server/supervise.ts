@@ -11,6 +11,7 @@
 // and are never duplicated here; plugin-only text and scans live in
 // ../shared/supervise.ts. Only erasable TypeScript: node --test imports this
 // file with type stripping (see plugin/test/ts-resolve-hooks.mjs).
+import { deliverSteer, finishSteerDelivery, pendingSteerDelivery, type EventBatch, type SteerDeliveryDeps } from "./steer-delivery.js";
 import * as paseoCore from "./factory/paseo.js";
 import { setTimeout as delay } from "node:timers/promises";
 import * as scopeCore from "./factory/scope.js";
@@ -57,11 +58,10 @@ const {
   zerosubMoveDecision,
   zerosubPendingTarget,
 } = S;
-const { AGENTS_KEY, updateAgentEntry } = AS;
+const { AGENTS_KEY } = AS;
 const { lastAssistantText, parseCheckpointBlock, proactiveSwitchDecision } = ST;
 const { accountForAgent, formatQuotaLine, profilePool, quotaExhausted } = Q;
 import { factoryIdentity } from "../shared/auto-checkpoint.js";
-import { formatResumeMessage } from "../shared/idle-cleanup.js";
 import { getQuotaSnapshot } from "./quota.js";
 import {
   findZerosubSwitch,
@@ -112,15 +112,7 @@ export interface SuperviseDeps extends SettingsSource, ZerosubSource {
   bootCheckDone?: boolean;
   lock?: (name: string, fn: (held: { verify: () => void }) => Promise<any>) => Promise<any>;
   log?: (message: string) => void;
-  /**
-   * F4 auto-resume: used instead of the plain wake text when the woken steer
-   * carries needsResume. The wake text travels as the brief's note. Absent in
-   * tests without resume wiring (plain wake text then).
-   */
-  resumeSteer?: (
-    paseo: any,
-    args: { workspaceId: string; agentId: string; note: string },
-  ) => Promise<{ cleared: boolean }>;
+  delivery?: SteerDeliveryDeps;
   /**
    * Rebuilds the resume brief for a pending wake-brief retry (flush/boot).
    * Same builder the turn hook uses; absent means retries stay pending.
@@ -247,103 +239,6 @@ function lockOf(deps: SuperviseDeps): (
   return async (name, fn) => retryOnLockBusy(() => lock(name, fn));
 }
 
-/** Explicit pending state for a wake whose brief is staged behind a clear. */
-export interface PendingWakeBrief {
-  wakeId: string;
-  note: string;
-  events: WakeEvent[];
-  queuedAt: string;
-  attempts: number;
-  lastAttemptAt: string | null;
-  lastError: string | null;
-  scopeId: string;
-  epoch: number | null;
-  /** True when the brief was sent but the delivered marking still needs a retry. */
-  briefSent?: boolean;
-}
-
-function pendingWakeBriefOf(entry: Record<string, unknown> | null): PendingWakeBrief | null {
-  const raw = asRecord(entry?.pendingWakeBrief);
-  if (!raw || typeof raw.wakeId !== "string" || !raw.wakeId) return null;
-  if (typeof raw.note !== "string" || !Array.isArray(raw.events)) return null;
-  const events = (raw.events as unknown[]).filter(
-    (e): e is WakeEvent =>
-      !!e && typeof (e as WakeEvent).workerId === "string" && typeof (e as WakeEvent).state === "string",
-  );
-  if (!events.length) return null;
-  return {
-    wakeId: raw.wakeId,
-    note: raw.note,
-    events,
-    queuedAt: typeof raw.queuedAt === "string" ? raw.queuedAt : "",
-    attempts: Number.isInteger(raw.attempts) ? (raw.attempts as number) : 0,
-    lastAttemptAt: typeof raw.lastAttemptAt === "string" ? (raw.lastAttemptAt as string) : null,
-    lastError: typeof raw.lastError === "string" ? (raw.lastError as string) : null,
-    scopeId: typeof raw.scopeId === "string" ? raw.scopeId : "",
-    epoch: typeof raw.epoch === "number" ? (raw.epoch as number) : null,
-    ...(raw.briefSent === true ? { briefSent: true as const } : {}),
-  };
-}
-
-function wakeIdFor(scopeId: string, queuedAt: string): string {
-  const rand = Math.random().toString(16).slice(2, 10);
-  return `wake-${scopeId}-${Date.parse(queuedAt) || queuedAt}-${rand}`;
-}
-
-function mergeWakeBriefEvents(current: WakeEvent[], next: WakeEvent[]): WakeEvent[] {
-  const merged = new Map<string, string>();
-  for (const e of current) merged.set(e.workerId, e.state);
-  for (const e of next) merged.set(e.workerId, e.state);
-  return [...merged.entries()]
-    .map(([workerId, state]) => ({ workerId, state }))
-    .sort((a, b) => a.workerId.localeCompare(b.workerId));
-}
-
-/**
- * Takes (clears) the pending wake brief under the workspace lock. Returns
- * null when nothing is pending; the caller sends outside the lock.
- */
-export async function takePendingWakeBrief(
-  paseo: any,
-  workspaceId: string,
-  agentId: string,
-  lock: (name: string, fn: (held: { verify: () => void }) => Promise<any>) => Promise<any>,
-): Promise<PendingWakeBrief | null> {
-  const workspace = paseo.workspaces.ref(workspaceId);
-  return lock(workspaceLockName(workspaceId), async (held: { verify: () => void }) => {
-    const metadata = (await workspace.refresh())?.metadata ?? {};
-    const state = { ...(asRecord(metadata[AGENTS_KEY]) ?? {}) };
-    const taken = pendingWakeBriefOf(asRecord(state[agentId]));
-    if (!taken) return null;
-    state[agentId] = { ...(asRecord(state[agentId]) ?? {}), pendingWakeBrief: null };
-    held.verify();
-    await workspace.setMetadata({ [AGENTS_KEY]: state });
-    return taken;
-  });
-}
-
-/**
- * Restores a taken wake brief after a failed send, but only when nothing
- * newer was staged meanwhile (a concurrent stage wins over the restore).
- */
-export async function restorePendingWakeBrief(
-  paseo: any,
-  workspaceId: string,
-  agentId: string,
-  taken: PendingWakeBrief,
-  lock: (name: string, fn: (held: { verify: () => void }) => Promise<any>) => Promise<any>,
-): Promise<void> {
-  const workspace = paseo.workspaces.ref(workspaceId);
-  await lock(workspaceLockName(workspaceId), async (held: { verify: () => void }) => {
-    const metadata = (await workspace.refresh())?.metadata ?? {};
-    const state = { ...(asRecord(metadata[AGENTS_KEY]) ?? {}) };
-    if (pendingWakeBriefOf(asRecord(state[agentId]))) return;
-    state[agentId] = { ...(asRecord(state[agentId]) ?? {}), pendingWakeBrief: taken };
-    held.verify();
-    await workspace.setMetadata({ [AGENTS_KEY]: state });
-  });
-}
-
 function logOf(deps: SuperviseDeps): (message: string) => void {
   return deps.log ?? console.log;
 }
@@ -403,8 +298,14 @@ async function readTurnTail(paseo: any, agentId: string, turnId: string | null):
 }
 
 /** Sends through the plugin SDK with no source agent. */
-async function sendText(paseo: any, agentId: string, text: string): Promise<void> {
-  await paseo.agents.ref(agentId).send(text, { activeTurnBehavior: "steer" });
+function deliveryDeps(deps: SuperviseDeps): SteerDeliveryDeps {
+  return {
+    ...deps.delivery,
+    lock: lockOf(deps),
+    now: () => stampsOf(deps).nowIso,
+    buildBrief: deps.delivery?.buildBrief ?? deps.buildBrief,
+    onTakeoverDelivered: (paseo, batch, agentId) => recordTakeoverDelivery(paseo, batch, agentId, deps).then(() => {}),
+  };
 }
 
 /**
@@ -752,77 +653,20 @@ export async function sendScopeWake(
       });
     }
   };
-  // F4: a woken steer with needsResume gets an automatic resume instead of
-  // the plain wake text (a cold context after a restart is wasted tokens).
-  // Without resume wiring (or when the resume is refused, e.g. running), the
-  // caller queues the events and retries on the next flush. On the clear
-  // path the brief only follows in the turn-after hook, so the wake stays
-  // pending (pendingWakeBrief) until the brief send succeeded; only the
-  // immediate-brief path (providers without clear) marks delivered here.
-  const needsResume = asRecord(asRecord(agentState[target])?.needsResume);
-  if (needsResume && typeof needsResume.reason === "string" && deps.resumeSteer) {
-    let cleared = true;
-    try {
-      const resumed = await deps.resumeSteer(paseo, { workspaceId: mainId, agentId: target, note: text });
-      cleared = resumed?.cleared !== false;
-    } catch (error) {
-      log(
-        `[factory] supervise: auto-resume of ${target} refused (${error instanceof Error ? error.message : String(error)}); wake queued`,
-      );
-      return { sent: false, reason: "resume-refused", target };
-    }
-    if (!cleared) {
-      await markSent();
-      log(`[factory] supervise: auto-resumed ${target} for ${scope.id} (needsResume ${needsResume.reason})`);
-      return { sent: true, target, events: events.length, resumed: true };
-    }
-    const stagedAt = stampsOf(deps).nowIso;
-    const stagedMeta = await refreshWorkspaceMeta(paseo, mainId);
-    const stagedAgents = asRecord(stagedMeta[AGENTS_KEY]) ?? {};
-    const existing = pendingWakeBriefOf(asRecord(stagedAgents[target]));
-    const mergedEvents = existing ? mergeWakeBriefEvents(existing.events, events) : [...events].sort((a, b) => a.workerId.localeCompare(b.workerId));
-    const pending: PendingWakeBrief = {
-      wakeId: existing?.wakeId ?? wakeIdFor(scope.id, stagedAt),
-      note: text.slice(0, 1500),
-      events: mergedEvents,
-      queuedAt: existing?.queuedAt ?? stagedAt,
-      attempts: existing?.attempts ?? 0,
-      lastAttemptAt: existing?.lastAttemptAt ?? null,
-      lastError: existing?.lastError ?? null,
-      scopeId: scope.id,
-      epoch: typeof freshWsf.epoch === "number" ? freshWsf.epoch : null,
-    };
-    try {
-      await (updateAgentEntry as unknown as (args: any) => Promise<any>)({
-        client: paseo,
-        workspaceId: mainId,
-        agentId: target,
-        patch: { pendingWakeBrief: pending },
-        liveIds: null,
-        lock: lockOf(deps),
-      });
-    } catch (error) {
-      log(
-        `[factory] supervise: wake for ${scope.id} cleared ${target} but the brief stage failed (${error instanceof Error ? error.message : String(error)}); wake queued`,
-      );
-      return { sent: false, reason: "brief-stage-failed", target };
-    }
-    for (const event of events) {
-      const current = register[event.workerId];
-      if (!current || typeof current !== "object") continue;
-      const queued = queuePendingWake(current, { state: event.state, queuedAt: stagedAt });
-      await updateWorkerEntry({
-        client: paseo,
-        workspaceId: mainId,
-        workerId: event.workerId,
-        patch: { pendingWake: queued.pendingWake },
-        lock: lockOf(deps),
-      });
-    }
-    log(`[factory] supervise: wake for ${scope.id} staged behind clear of ${target}, brief pending (${events.length} worker(s))`);
-    return { sent: false, reason: "brief-pending", target };
+  const delivery = await deliverSteer(paseo, {
+    workspaceId: mainId,
+    agentId: target,
+    epoch: freshWsf.epoch,
+    text,
+    state: paseoState,
+    sendOptions: { activeTurnBehavior: "steer" },
+    batch: { workspaceId: mainId, epoch: freshWsf.epoch ?? null, events },
+  }, deliveryDeps(deps));
+  if (delivery.status !== "sent") {
+    return { sent: false, reason: delivery.status === "blocked" ? "resume-refused" : "brief-pending", target };
   }
-  await sendText(paseo, target, text);
+  // Renewed deliveries mark their own batch after the brief is accepted.
+  if (delivery.renewed) return { sent: true, target, events: events.length, resumed: true };
   await markSent();
   log(`[factory] supervise: woke ${target} for ${scope.id} (${events.length} worker(s))`);
   return { sent: true, target, events: events.length };
@@ -1078,12 +922,7 @@ export async function handleWorkerTurnAfter(
 }
 
 // ---------------------------------------------------------------------------
-// Pending wake-brief retry: a wake staged behind a clear is delivered only
-// when the brief send succeeded. Retried on the next supervise tick and the
-// boot check, at most once per tick per scope, without duplicate briefs
-// (take-before-send under the workspace lock, wakeId, briefSent flag).
-// ---------------------------------------------------------------------------
-
+// Pending deliveries are retried one brief per scope per tick.
 export interface RetryWakeBriefResult {
   attempted: boolean;
   delivered: boolean;
@@ -1092,170 +931,34 @@ export interface RetryWakeBriefResult {
   events?: number;
 }
 
-function stagedBriefKindOf(entry: Record<string, unknown> | null): string | null {
-  const staged = asRecord(entry?.stagedBrief);
-  if (!staged || typeof staged.packet !== "string" || !staged.packet.trim()) return null;
-  return typeof staged.kind === "string" ? staged.kind : "brief";
-}
-
-async function markWakeBriefDelivered(
-  paseo: any,
-  mainId: string,
-  events: WakeEvent[],
-  at: string,
-  deps: SuperviseDeps,
-): Promise<void> {
-  const meta = await refreshWorkspaceMeta(paseo, mainId);
-  const register = readWorkers(meta);
-  for (const event of events) {
-    const current = register[event.workerId];
-    if (!current || typeof current !== "object") continue;
-    const marked = markWakeSent(current, { at });
-    await updateWorkerEntry({
-      client: paseo,
-      workspaceId: mainId,
-      workerId: event.workerId,
-      patch: { lastWakeAt: marked.lastWakeAt, pendingWake: marked.pendingWake },
-      lock: lockOf(deps),
-    });
-  }
-}
-
 export async function retryPendingWakeBrief(
   paseo: any,
   scope: any,
-  deps: SuperviseDeps & { state?: any },
+  deps: SuperviseDeps & { state?: any; allowBatches?: boolean },
 ): Promise<RetryWakeBriefResult> {
-  const log = logOf(deps);
   const mainId: string = scope.workspaceId;
   const meta = await refreshWorkspaceMeta(paseo, mainId);
-  const wsf = wsfOf(meta);
-  if (!wsf) return { attempted: false, delivered: false, reason: "no-wsf" };
-  const agents = asRecord(meta[AGENTS_KEY]) ?? {};
-  const candidates: { agentId: string; pending: PendingWakeBrief }[] = [];
-  for (const [agentId, raw] of Object.entries(agents)) {
-    const pending = pendingWakeBriefOf(asRecord(raw));
-    if (!pending) continue;
-    if (pending.scopeId && pending.scopeId !== scope.id) continue;
-    candidates.push({ agentId, pending });
-  }
-  if (!candidates.length) return { attempted: false, delivered: false, reason: "none" };
-  candidates.sort((a, b) => String(a.pending.queuedAt).localeCompare(String(b.pending.queuedAt)));
-  const { agentId: target, pending } = candidates[0] as { agentId: string; pending: PendingWakeBrief };
-  const { nowIso } = stampsOf(deps);
-  const targetAgent = await refreshAgent(paseo, target);
-  if (!targetAgent || targetAgent.archivedAt || targetAgent.background === true) {
-    try {
-      await takePendingWakeBrief(paseo, mainId, target, lockOf(deps));
-    } catch {
-      // Keep pending for the next tick when the take itself failed.
-      return { attempted: false, delivered: false, reason: "take-failed", target };
-    }
-    log(`[factory] supervise: dropped pending wake brief ${pending.wakeId} (target gone); workers stay queued`);
-    return { attempted: true, delivered: false, reason: "target-gone", target, events: pending.events.length };
-  }
-  if (isBusyStatus(targetAgent.status) || targetAgent.activeTurn) {
-    return { attempted: false, delivered: false, reason: "target-busy", target };
-  }
-  const freshEntry = asRecord((asRecord((await refreshWorkspaceMeta(paseo, mainId))[AGENTS_KEY]) ?? {})[target]);
-  const stagedKind = stagedBriefKindOf(freshEntry);
-  if (stagedKind === "wake" || stagedKind === "resume" || stagedKind === "resume-wake") {
-    return { attempted: false, delivered: false, reason: "staged-awaiting-delivery", target };
-  }
-  if (typeof wsf.epoch === "number" && typeof pending.epoch === "number" && wsf.epoch !== pending.epoch) {
-    try {
-      await takePendingWakeBrief(paseo, mainId, target, lockOf(deps));
-    } catch {
-      return { attempted: false, delivered: false, reason: "take-failed", target };
-    }
-    log(`[factory] supervise: dropped pending wake brief ${pending.wakeId} (epoch moved); workers stay queued`);
-    return { attempted: true, delivered: false, reason: "epoch-moved", target, events: pending.events.length };
-  }
-  let taken: PendingWakeBrief | null;
-  try {
-    taken = await takePendingWakeBrief(paseo, mainId, target, lockOf(deps));
-  } catch (error) {
-    log(`[factory] supervise: wake brief retry take failed (${error instanceof Error ? error.message : String(error)})`);
-    return { attempted: false, delivered: false, reason: "take-failed", target };
-  }
-  if (!taken) return { attempted: false, delivered: false, reason: "taken", target };
-  const restoreFailed = async (message: string): Promise<RetryWakeBriefResult> => {
-    const back: PendingWakeBrief = {
-      ...taken,
-      attempts: taken.attempts + 1,
-      lastAttemptAt: nowIso,
-      lastError: message.slice(0, 300),
+  if (!wsfOf(meta)) return { attempted: false, delivered: false, reason: "no-wsf" };
+  const entries = asRecord(meta[AGENTS_KEY]) ?? {};
+  const candidates = Object.entries(entries)
+    .flatMap(([agentId, entry]) => {
+      const pending = pendingSteerDelivery(entry, mainId);
+      return pending && (deps.allowBatches !== false || !pending.batch) ? [{ agentId, pending }] : [];
+    })
+    .sort((a, b) => a.pending.queuedAt.localeCompare(b.pending.queuedAt));
+  let waiting: RetryWakeBriefResult | null = null;
+  for (const { agentId, pending } of candidates) {
+    const result = await finishSteerDelivery(paseo, { workspaceId: mainId, agentId }, deliveryDeps(deps));
+    if (!result) continue;
+    const batch = pending.batch;
+    const events = batch?.workspaceId === mainId && !batch.takeover ? batch.events.length : 0;
+    if (result.status === "sent") return { attempted: true, delivered: true, target: agentId, events };
+    if (events) waiting = {
+      attempted: false, delivered: false, reason: result.status === "blocked" ? "resume-refused" : "brief-pending",
+      target: agentId, events,
     };
-    try {
-      await restorePendingWakeBrief(paseo, mainId, target, back, lockOf(deps));
-    } catch (error) {
-      log(`[factory] supervise: wake brief ${taken.wakeId} restore failed (${error instanceof Error ? error.message : String(error)})`);
-    }
-    return { attempted: true, delivered: false, reason: "send-failed", target, events: taken.events.length };
-  };
-  if (taken.briefSent === true) {
-    try {
-      await (updateAgentEntry as unknown as (args: any) => Promise<any>)({
-        client: paseo,
-        workspaceId: mainId,
-        agentId: target,
-        patch: { needsResume: null, pendingAction: null },
-        liveIds: null,
-        lock: lockOf(deps),
-      });
-      await markWakeBriefDelivered(paseo, mainId, taken.events, nowIso, deps);
-    } catch (error) {
-      const back: PendingWakeBrief = { ...taken, lastAttemptAt: nowIso, lastError: (error instanceof Error ? error.message : String(error)).slice(0, 300) };
-      try {
-        await restorePendingWakeBrief(paseo, mainId, target, back, lockOf(deps));
-      } catch {}
-      return { attempted: true, delivered: false, reason: "mark-failed", target, events: taken.events.length };
-    }
-    log(`[factory] supervise: wake brief ${taken.wakeId} marking retried for ${scope.id} (${taken.events.length} worker(s))`);
-    return { attempted: true, delivered: true, target, events: taken.events.length };
   }
-  if (!deps.buildBrief) {
-    await restorePendingWakeBrief(paseo, mainId, target, taken, lockOf(deps)).catch(() => null);
-    return { attempted: false, delivered: false, reason: "no-brief-builder", target };
-  }
-  let brief: string;
-  try {
-    brief = await deps.buildBrief(paseo, mainId, target);
-  } catch (error) {
-    return restoreFailed(error instanceof Error ? error.message : String(error));
-  }
-  const full = taken.note ? `${brief}\n\n${taken.note}` : brief;
-  const pendingAction = asRecord(freshEntry?.pendingAction);
-  const cleared = !pendingAction;
-  try {
-    await paseo.agents.ref(target).send(formatResumeMessage(full, { cleared }));
-  } catch (error) {
-    return restoreFailed(error instanceof Error ? error.message : String(error));
-  }
-  try {
-    await (updateAgentEntry as unknown as (args: any) => Promise<any>)({
-      client: paseo,
-      workspaceId: mainId,
-      agentId: target,
-      patch: { needsResume: null, pendingAction: null },
-      liveIds: null,
-      lock: lockOf(deps),
-    });
-    await markWakeBriefDelivered(paseo, mainId, taken.events, nowIso, deps);
-  } catch (error) {
-    const back: PendingWakeBrief = {
-      ...taken,
-      briefSent: true,
-      lastAttemptAt: nowIso,
-      lastError: (error instanceof Error ? error.message : String(error)).slice(0, 300),
-    };
-    try {
-      await restorePendingWakeBrief(paseo, mainId, target, back, lockOf(deps));
-    } catch {}
-    return { attempted: true, delivered: false, reason: "mark-failed", target, events: taken.events.length };
-  }
-  log(`[factory] supervise: wake brief ${taken.wakeId} delivered to ${target} for ${scope.id} (${taken.events.length} worker(s))`);
-  return { attempted: true, delivered: true, target, events: taken.events.length };
+  return waiting ?? { attempted: false, delivered: false, reason: "none" };
 }
 
 // ---------------------------------------------------------------------------
@@ -1275,20 +978,21 @@ export async function flushScope(
   deps: SuperviseDeps & { state?: any },
 ): Promise<FlushResult> {
   const settings = await resolveSettings(deps);
-  if (!settings || !settings.enabled) return { flushed: false, reason: "disabled" };
+  if (!settings?.enabled && !deps.delivery) return { flushed: false, reason: "disabled" };
   const { nowMs } = stampsOf(deps);
   const flushedMeta = await refreshWorkspaceMeta(paseo, scope.workspaceId);
   if ((deps.draining ?? isDraining()) || isDrainMarkerActive(flushedMeta[DRAIN_METADATA_KEY], nowMs)) {
     return { flushed: false, reason: "drain" };
   }
   if (!(deps.bootCheckDone ?? isBootCheckDone())) return { flushed: false, reason: "boot" };
-  const retry = await retryPendingWakeBrief(paseo, scope, deps);
+  const retry = await retryPendingWakeBrief(paseo, scope, { ...deps, allowBatches: settings?.enabled === true });
   if (retry.delivered) {
     return { flushed: true, target: retry.target ?? null, events: retry.events };
   }
   if (retry.reason !== "none" && retry.reason !== "no-wsf" && retry.reason !== "target-gone" && retry.reason !== "epoch-moved") {
     return { flushed: false, reason: retry.reason ?? "brief-pending", target: retry.target ?? null, events: retry.events };
   }
+  if (!settings?.enabled) return { flushed: false, reason: "disabled" };
   const register = readWorkers(await refreshWorkspaceMeta(paseo, scope.workspaceId));
   const pending = collectPendingWakes(register);
   if (!pending.length) return { flushed: false, reason: "none" };
@@ -1310,10 +1014,17 @@ export async function flushScope(
 
 export async function flushAllScopes(paseo: any, deps: SuperviseDeps & { state?: any }): Promise<FlushResult[]> {
   const settings = await resolveSettings(deps);
-  if (!settings || !settings.enabled) return [];
+  if (!settings?.enabled && !deps.delivery) return [];
   const paseoState = deps.state ?? ((await readPaseoState(paseo)) as any);
   const out: FlushResult[] = [];
   for (const scope of listScopes(paseoState)) {
+    if (!settings?.enabled) {
+      const entries = Object.values(scope.workspace?.metadata?.[AGENTS_KEY] ?? {});
+      if (!entries.some((entry) => {
+        const pending = pendingSteerDelivery(entry, scope.workspaceId);
+        return pending && !pending.batch;
+      })) continue;
+    }
     try {
       out.push(await flushScope(paseo, scope, { ...deps, settings, state: paseoState }));
     } catch (error) {
@@ -1513,6 +1224,26 @@ export async function logFailoverCheckpoint(
   }) as Promise<boolean>;
 }
 
+export async function recordTakeoverDelivery(
+  paseo: any, batch: EventBatch, agentId: string, deps: SuperviseDeps = {},
+): Promise<boolean> {
+  const request = batch.takeover;
+  if (!request) return false;
+  const logged = await logFailoverCheckpoint(paseo, {
+    mainId: batch.workspaceId, expectedEpoch: batch.epoch,
+    previousSteer: request.activeSlot, reason: request.reason,
+  }, deps);
+  const previous = failoverAsked.get(request.scopeId);
+  const asked = previous?.activeSlot === request.activeSlot ? previous.asked : [];
+  failoverAsked.set(request.scopeId, {
+    activeSlot: request.activeSlot,
+    asked: [...new Set([...asked, agentId])],
+    updatedAt: stampsOf(deps).nowIso,
+  });
+  logOf(deps)(`[factory] supervise: failover for ${request.scopeId} → ${agentId} (${request.reason})`);
+  return logged;
+}
+
 /**
  * One failover step for a scope: when the last wake is older than
  * answerMinutes and the active steer neither completed a turn since (answered)
@@ -1621,6 +1352,9 @@ export async function runFailoverCheck(
     return wakeAt ? { action: "wait", reason: "wait-reset", wakeAt } : null;
   };
   const stored = failoverAsked.get(scope.id);
+  if (stored?.activeSlot === activeSlot && nowMs - Date.parse(stored.updatedAt) < settings.answerMinutes * 60_000) {
+    return { action: "wait", reason: "takeover-answer-window" };
+  }
   let asked = stored && stored.activeSlot === activeSlot ? [...stored.asked] : [];
   let next = chain.find((c: any) => c && !asked.includes(c.steerId)) ?? null;
   if (!next) {
@@ -1637,7 +1371,7 @@ export async function runFailoverCheck(
   }
   if (!next) return waitReset() ?? { action: "none", reason: "candidates-ineligible" };
   const factoryCmd = deps.factoryCmd ?? FACTORY_CMD;
-  const summary = open.map((entry: any) => ({ id: entry.id, state: entry.state as string }));
+  const summary: { id: string; state: string }[] = open.map((entry: any) => ({ id: entry.id, state: entry.state }));
   let text = next.kind === "steer"
     ? formatSteerTakeover({
         scopeId: scope.id,
@@ -1658,12 +1392,28 @@ export async function runFailoverCheck(
       });
   const forkNote = zerosubForkWarning(holderRow);
   if (forkNote) text = `${text}\n${forkNote}`;
-  await sendText(paseo, next.steerId, text);
-  const logged = await logFailoverCheckpoint(
-    paseo,
-    { mainId, expectedEpoch: wsf.epoch, previousSteer: activeSlot, reason },
-    deps,
-  );
+  const targetScope = next.kind === "steer"
+    ? scope
+    : findScope(scopes, factoryIdentity(byId.get(next.steerId)?.labels)?.scopeId ?? "");
+  if (!targetScope) return { action: "none", reason: "no-target-scope" };
+  const batch: EventBatch = {
+    workspaceId: mainId, epoch: wsf.epoch ?? null,
+    events: summary.map(({ id, state }) => ({ workerId: id, state })),
+    takeover: { scopeId: scope.id, activeSlot, reason },
+  };
+  const outcome = await deliverSteer(paseo, {
+    workspaceId: targetScope.workspaceId,
+    agentId: next.steerId,
+    ...(next.kind === "steer" ? { epoch: wsf.epoch } : {}),
+    state: paseoState,
+    text,
+    sendOptions: { activeTurnBehavior: "steer" },
+    batch,
+  }, deliveryDeps(deps));
+  if (outcome.status !== "sent") {
+    return { action: "wait", reason: outcome.status === "blocked" ? "resume-refused" : "brief-pending" };
+  }
+  if (outcome.renewed) return { action: "failover", to: next };
   for (const entry of open) {
     await updateWorkerEntry({
       client: paseo,
@@ -1673,8 +1423,9 @@ export async function runFailoverCheck(
       lock: lockOf(deps),
     });
   }
-  failoverAsked.set(scope.id, { activeSlot, asked: [...asked, next.steerId], updatedAt: nowIso });
-  log(`[factory] supervise: failover for ${scope.id} → ${next.kind} ${next.steerId} (${reason})`);
+  // Respect a completed rotation when all candidates have been asked.
+  failoverAsked.set(scope.id, { activeSlot, asked, updatedAt: nowIso });
+  const logged = await recordTakeoverDelivery(paseo, batch, next.steerId, deps);
   return { action: "failover", to: next, logged };
 }
 
@@ -1914,7 +1665,7 @@ export interface SupervisionTimerDeps {
   intervalMs?: number;
   lock?: SuperviseDeps["lock"];
   log?: (message: string) => void;
-  resumeSteer?: SuperviseDeps["resumeSteer"];
+  delivery?: SteerDeliveryDeps;
   buildBrief?: SuperviseDeps["buildBrief"];
 }
 
@@ -1928,7 +1679,7 @@ export function startSupervisionTimer({
   intervalMs = 10_000,
   lock,
   log = console.log,
-  resumeSteer,
+  delivery,
   getConfig,
   getZerosub,
   buildBrief,
@@ -1940,7 +1691,7 @@ export function startSupervisionTimer({
     void (async () => {
       try {
         const settings = await getSettings();
-        if (!settings || !settings.enabled) return;
+        if (!settings?.enabled && !delivery) return;
         const nowMs = Date.now();
         const deps: SuperviseDeps = {
           settings,
@@ -1948,13 +1699,13 @@ export function startSupervisionTimer({
           nowIso: new Date(nowMs).toISOString(),
           lock,
           log,
-          ...(resumeSteer ? { resumeSteer } : {}),
+          delivery,
           ...(getConfig ? { getConfig } : {}),
           ...(getZerosub ? { getZerosub } : {}),
           ...(buildBrief ? { buildBrief } : {}),
         };
         await flushAllScopes(paseo, deps);
-        if (nowMs - lastWatchdogScanMs >= settings.watchdogMinutes * 60_000) {
+        if (settings?.enabled && nowMs - lastWatchdogScanMs >= settings.watchdogMinutes * 60_000) {
           lastWatchdogScanMs = nowMs;
           await watchdogScan(paseo, deps);
         }

@@ -239,7 +239,14 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
     const lastEnd = stampMs(lastTurnEndedAt);
     const clearedAt = stampMs(asRecord(entry?.cleared)?.at);
     const cleanedAfter = clearedAt !== null && (lastEnd === null || clearedAt >= lastEnd);
-    const pendingOperation = entry?.pendingAction !== null && entry?.pendingAction !== undefined;
+    const pendingDelivery = asRecord(entry?.pendingWakeBrief);
+    const deliveryPhase = pendingDelivery?.phase ??
+      (pendingDelivery ? entry?.pendingAction ? "renewing" : entry?.actionVerified === true ? "ready" : "blocked" : null);
+    const resumeFallback = deliveryPhase === "blocked"
+      ? typeof pendingDelivery?.lastError === "string" ? pendingDelivery.lastError : "Context renewal needs attention."
+      : null;
+    const pendingOperation = entry?.pendingAction != null ||
+      deliveryPhase === "renewing" || deliveryPhase === "ready" || deliveryPhase === "sent";
     const openTurn = entry?.openTurnId !== null && entry?.openTurnId !== undefined;
     const baselineValid = lastEnd !== null && !cleanedAfter && !pendingOperation;
     const provider = typeof agent.provider === "string" && agent.provider ? agent.provider : null;
@@ -312,13 +319,14 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
       lastTurnEndedAt,
       baselineValid,
       prefixBreakRetained,
-      liveUsedTokens: usedTokensOf(agent),
+      liveUsedTokens: cleanedAfter ? null : usedTokensOf(agent),
       storedTokens,
       storedSameSession: baselineValid,
       cleanupProfile: settings.profile,
       minContextTokens: settings.minContextTokens,
       freshHint: status === "idle" ? currentFreshHint(entry) : null,
       pendingOperation,
+      resumeFallback,
       queuedWake: queuedWakeFor(agent.id),
       historyFree: lastEnd === null && !openTurn && status === "idle",
       resetAwaitingBrief: cleanedAfter && !pendingOperation && !openTurn && status === "idle",

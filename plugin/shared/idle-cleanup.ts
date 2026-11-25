@@ -424,7 +424,7 @@ export function decideCleanupAction(input: CleanupInput): CleanupDecision {
   }
   if (input.status !== "idle") return deny(`agent is ${input.status}`);
   if (input.pendingPermissionCount > 0) return deny("a permission request is pending");
-  if (input.entry?.pendingAction) return deny("a cleanup action is already pending");
+  if (input.entry?.pendingAction || input.entry?.pendingWakeBrief) return deny("a cleanup action is already pending");
   if (input.entry?.lastActionFailed) {
     return deny("the last cleanup action failed; a new real turn is required first");
   }

@@ -9,6 +9,9 @@ register("./ts-resolve-hooks.mjs", import.meta.url);
 
 const supervise = await import("../server/supervise.ts");
 const turnHook = await import("../server/turn-hook.ts");
+const { collectSteerStates } = await import("../server/steer-feed.ts");
+const { applyResume } = await import("../server/resume-apply.ts");
+const { deliverSteer } = await import("../server/steer-delivery.ts");
 const { LockBusy } = await import("../server/factory/lock.ts");
 import { LABEL, METADATA_KEY } from "../../src/paseo.mjs";
 import { AGENTS_KEY } from "../../src/agent-state.mjs";
@@ -86,9 +89,10 @@ function fakeClient(world) {
           const agent = findAgent(id);
           return agent ? { agent: structuredClone(agent) } : null;
         },
-        send: async (text) => {
+        send: async (text, options) => {
           if (world.sendFails) throw new Error("agent unreachable");
-          world.calls.push(["agent.send", id, text]);
+          world.calls.push(["agent.send", id, text, options]);
+          await world.onSend?.(id, text, options);
         },
         setMetadata: async (patch) => {
           Object.assign(findAgent(id).metadata, structuredClone(patch));
@@ -139,7 +143,7 @@ test("clear then brief succeeds via turn-after: delivered once", async () => {
   const { ws, steer } = provisioned(world);
   const workerId = "worker-1";
   world.workspaces[0].metadata[WORKERS_KEY] = {
-    [workerId]: entry("done", "t", { pendingWake: { state: "done", queuedAt: at(NOW) } }),
+    [workerId]: entry("done", "t", { pendingWake: { state: "done", queuedAt: at(NOW - 3 * MIN) } }),
   };
   const note = `[factory] Scope ${REPO}, epoch 3: worker ${workerId} done.`;
   world.workspaces[0].metadata[AGENTS_KEY] = {
@@ -178,7 +182,7 @@ test("brief send fails via turn-after: pending, retried next tick, delivered onc
   const { ws, steer } = provisioned(world);
   const workerId = "worker-1";
   world.workspaces[0].metadata[WORKERS_KEY] = {
-    [workerId]: entry("done", "t", { pendingWake: { state: "done", queuedAt: at(NOW) } }),
+    [workerId]: entry("done", "t", { pendingWake: { state: "done", queuedAt: at(NOW - 3 * MIN) } }),
   };
   const note = `[factory] Scope ${REPO}, epoch 3: worker ${workerId} done.`;
   world.workspaces[0].metadata[AGENTS_KEY] = {
@@ -203,7 +207,7 @@ test("brief send fails via turn-after: pending, retried next tick, delivered onc
   const kept = world.workspaces[0].metadata[AGENTS_KEY][steer.id];
   assert.ok(kept.needsResume, "needsResume kept");
   assert.equal(kept.pendingWakeBrief.wakeId, "wake-1");
-  assert.equal(kept.pendingWakeBrief.attempts, 1);
+  assert.equal(kept.pendingWakeBrief.phase, "ready");
   assert.ok(kept.pendingWakeBrief.lastError);
   assert.ok(world.workspaces[0].metadata[WORKERS_KEY][workerId].pendingWake, "workers stay queued");
   world.sendFails = false;
@@ -232,7 +236,7 @@ test("lock busy on the turn-after follow-up is retried", async () => {
   const { ws, steer } = provisioned(world);
   const workerId = "worker-1";
   world.workspaces[0].metadata[WORKERS_KEY] = {
-    [workerId]: entry("done", "t", { pendingWake: { state: "done", queuedAt: at(NOW) } }),
+    [workerId]: entry("done", "t", { pendingWake: { state: "done", queuedAt: at(NOW - 3 * MIN) } }),
   };
   const note = `[factory] Scope ${REPO}, epoch 3: worker ${workerId} done.`;
   world.workspaces[0].metadata[AGENTS_KEY] = {
@@ -269,12 +273,14 @@ test("restart between clear and brief: boot check re-sends once", async () => {
   const { ws, steer } = provisioned(world);
   const workerId = "worker-1";
   world.workspaces[0].metadata[WORKERS_KEY] = {
-    [workerId]: entry("done", "t", { pendingWake: { state: "done", queuedAt: at(NOW) } }),
+    [workerId]: entry("done", "t", { pendingWake: { state: "done", queuedAt: at(NOW - 3 * MIN) } }),
   };
   const note = `[factory] Scope ${REPO}, epoch 3: worker ${workerId} done.`;
   world.workspaces[0].metadata[AGENTS_KEY] = {
     [steer.id]: {
       needsResume: { reason: "daemon-restart", at: at(NOW - MIN) },
+      cleared: { at: at(NOW - MIN), mode: "clear" },
+      actionVerified: true,
       pendingWakeBrief: {
         wakeId: "wake-1", note, events: [{ workerId, state: "done" }],
         queuedAt: at(NOW - MIN), attempts: 0, lastAttemptAt: null, lastError: null, scopeId: REPO, epoch: 3,
@@ -318,12 +324,14 @@ test("flush retries at most once per tick without duplicate briefs", async () =>
     labels: { [LABEL.repo]: REPO, [LABEL.role]: "steer", [LABEL.slot]: "B", [LABEL.scope]: REPO },
   });
   world.workspaces[0].metadata[WORKERS_KEY] = {
-    "worker-1": entry("done", "t", { pendingWake: { state: "done", queuedAt: at(NOW) } }),
-    "worker-2": entry("blocked", "t", { pendingWake: { state: "blocked", queuedAt: at(NOW) } }),
+    "worker-1": entry("done", "t", { pendingWake: { state: "done", queuedAt: at(NOW - 3 * MIN) } }),
+    "worker-2": entry("blocked", "t", { pendingWake: { state: "blocked", queuedAt: at(NOW - 2 * MIN) } }),
   };
   world.workspaces[0].metadata[AGENTS_KEY] = {
     [steerA.id]: {
       needsResume: { reason: "daemon-restart", at: at(NOW - MIN) },
+      cleared: { at: at(NOW - MIN), mode: "clear" },
+      actionVerified: true,
       pendingWakeBrief: {
         wakeId: "wake-a", note: "note a", events: [{ workerId: "worker-1", state: "done" }],
         queuedAt: at(NOW - 2 * MIN), attempts: 0, lastAttemptAt: null, lastError: null, scopeId: REPO, epoch: 3,
@@ -331,6 +339,8 @@ test("flush retries at most once per tick without duplicate briefs", async () =>
     },
     [steerB.id]: {
       needsResume: { reason: "daemon-restart", at: at(NOW - MIN) },
+      cleared: { at: at(NOW - MIN), mode: "clear" },
+      actionVerified: true,
       pendingWakeBrief: {
         wakeId: "wake-b", note: "note b", events: [{ workerId: "worker-2", state: "blocked" }],
         queuedAt: at(NOW - MIN), attempts: 0, lastAttemptAt: null, lastError: null, scopeId: REPO, epoch: 3,
@@ -359,4 +369,194 @@ test("flush retries at most once per tick without duplicate briefs", async () =>
   );
   assert.equal(third.flushed, false);
   assert.equal(world.calls.filter((c) => c[0] === "agent.send").length, 2, "no double delivery");
+});
+
+function deliveryFixture({ provider = "claude", minutesIdle = 0, tokens = 1000 } = {}) {
+  const world = makeWorld();
+  const { ws, steer } = provisioned(world);
+  steer.provider = provider;
+  steer.model = provider === "codex" ? "gpt-6.2-sol" : "claude-sonnet";
+  steer.lastUsage = { contextWindowUsedTokens: tokens };
+  ws.metadata[AGENTS_KEY] = {
+    [steer.id]: minutesIdle === null ? {} : { lastTurnEndedAt: at(NOW - minutesIdle * MIN) },
+  };
+  const workerId = "worker-1";
+  ws.metadata[WORKERS_KEY] = { [workerId]: entry("done", "task") };
+  const client = fakeClient(world);
+  const scope = { id: REPO, workspaceId: ws.id };
+  const buildBrief = async () => "Compact checkpoint";
+  const deps = { nowMs: NOW, lock: noLock, log: () => {}, buildBrief };
+  const wake = (delivery) => supervise.sendScopeWake(client, {
+    scope, events: [{ workerId, state: "done" }],
+  }, { ...deps, delivery });
+  const recheck = () => supervise.retryPendingWakeBrief(client, scope, deps);
+  return { ws, steer, workerId, world, client, wake, recheck, deps, buildBrief };
+}
+
+for (const [label, minutesIdle] of [["warm", 1], ["cooling", 4.5], ["unknown", null]]) {
+  test(`a ${label} steer receives the original wake`, async () => {
+    const { wake, world, steer } = deliveryFixture({ minutesIdle });
+    assert.equal((await wake()).sent, true);
+    const sends = sendsTo(world, steer.id);
+    assert.equal(sends.length, 1);
+    assert.match(sends[0], /^\[factory\]/);
+    assert.match(sends[0], /worker worker-1 done/);
+  });
+}
+
+test("a cold Claude wake waits for a verified clear even when the hook runs during send", async () => {
+  const { wake, recheck, ws, steer, workerId, world, client, deps, buildBrief } = deliveryFixture({ minutesIdle: 6 });
+  const hook = () => turnHook.handleTurnAfter(
+    { agent: { id: steer.id }, turnId: "t-clear", outcome: { kind: "completed" } },
+    { paseo: client },
+    { getResumeBrief: buildBrief, lock: deps.lock },
+  );
+  world.onSend = async (_id, text) => {
+    if (text !== "/clear") return;
+    const worker = ws.metadata[WORKERS_KEY][workerId];
+    const state = ws.metadata[AGENTS_KEY][steer.id];
+    assert.ok(worker.pendingWake);
+    assert.equal(worker.lastWakeAt, null);
+    assert.equal(state.pendingAction.kind, "clear");
+    assert.equal(state.pendingWakeBrief.phase, "renewing");
+    assert.equal((await recheck()).delivered, false);
+    assert.deepEqual(sendsTo(world, steer.id), ["/clear"]);
+    steer.persistence.sessionId = "new-session";
+    clearTurnTimeline(world, steer.id);
+    await hook();
+  };
+  await wake();
+  await hook();
+  await recheck();
+  assert.equal(sendsTo(world, steer.id).length, 2);
+  assert.match(sendsTo(world, steer.id)[1], /\[Factory resume\]\nCompact checkpoint\n\n.*worker worker-1 done/s);
+  assert.ok(ws.metadata[WORKERS_KEY][workerId].lastWakeAt);
+  assert.equal(ws.metadata[WORKERS_KEY][workerId].pendingWake, null);
+});
+
+test("an unverified clear leaves the brief and worker event pending", async () => {
+  const { wake, recheck, ws, steer, workerId, world, client, deps, buildBrief } = deliveryFixture({ minutesIdle: 6 });
+  assert.equal((await wake()).sent, false);
+  clearTurnTimeline(world, steer.id);
+  await turnHook.handleTurnAfter(
+    { agent: { id: steer.id }, turnId: "t-clear", outcome: { kind: "completed" } },
+    { paseo: client },
+    { getResumeBrief: buildBrief, lock: deps.lock },
+  );
+  assert.equal((await recheck()).delivered, false);
+  assert.deepEqual(sendsTo(world, steer.id), ["/clear"]);
+  assert.equal(ws.metadata[AGENTS_KEY][steer.id].pendingWakeBrief.phase, "blocked");
+  assert.equal(ws.metadata[WORKERS_KEY][workerId].lastWakeAt, null);
+  assert.ok(ws.metadata[WORKERS_KEY][workerId].pendingWake);
+});
+
+for (const [name, provider, minutesIdle, tokens, keepChatHistory] of [
+  ["cold Claude with Keep chat history", "claude", 6, 1000, true],
+  ["cold Codex", "codex", 31, 1000, false],
+  ["warm Codex with a large context", "codex", 1, 60_000, false],
+  ["an oversized context with unknown warmth", "codex", null, 60_000, false],
+]) {
+  test(`${name} rewinds before delivering a wake and assigns the next brief anchor`, async () => {
+    const { wake, recheck, ws, steer, workerId, world } = deliveryFixture({ provider, minutesIdle, tokens });
+    ws.metadata[AGENTS_KEY][steer.id].refreshed = { briefMessageId: "brief-anchor" };
+    const rewindClient = async () => ({
+      fetchAgentTimeline: async () => ({
+        entries: ["first", "brief-anchor"].map((messageId) => ({ item: { type: "user_message", messageId } })),
+      }),
+      rewindAgent: async (...args) => {
+        assert.equal((await recheck()).delivered, false);
+        assert.equal(ws.metadata[WORKERS_KEY][workerId].lastWakeAt, null);
+        assert.deepEqual(sendsTo(world, steer.id), []);
+        world.calls.push(["rewind", ...args]);
+      },
+    });
+    const result = await wake({ keepChatHistory: async () => keepChatHistory, rewindClient });
+    assert.equal(result.sent, true);
+    assert.equal(result.resumed, true);
+    const [rewind, send] = world.calls.filter(([kind]) => kind === "rewind" || kind === "agent.send");
+    assert.deepEqual(rewind, ["rewind", steer.id, "brief-anchor", "conversation"]);
+    assert.match(send[2], /\[Factory resume\]\nCompact checkpoint\n\n.*worker worker-1 done/s);
+    assert.ok(send[3].messageId);
+    assert.equal(ws.metadata[AGENTS_KEY][steer.id].refreshed.briefMessageId, send[3].messageId);
+    assert.equal(ws.metadata[WORKERS_KEY][workerId].pendingWake, null);
+    assert.equal((await recheck()).attempted, false);
+    assert.equal(sendsTo(world, steer.id).length, 1);
+  });
+}
+
+test("resume without a rewind point exposes the fallback in the result and the steer pill", async () => {
+  const { ws, client, steer, world, deps, buildBrief } = deliveryFixture({ provider: "codex", minutesIdle: 31, tokens: 110_000 });
+  const result = await applyResume(client, { workspaceId: ws.id, agentId: steer.id }, {
+    lock: deps.lock,
+    now: () => at(NOW),
+    buildBrief,
+    rewindClient: async () => ({
+      fetchAgentTimeline: async () => ({ entries: [{ item: { type: "tool_call", messageId: "not-a-user-message" } }] }),
+      rewindAgent: async () => assert.fail("a send-only timeline has no rewind point"),
+    }),
+  });
+  assert.equal(result.status, "blocked");
+  assert.match(result.detail, /no usable rewind point.*Use Fresh/);
+  const [row] = collectSteerStates(world, { settings: null, nowMs: NOW });
+  assert.equal(row.state, "needs-resume");
+  assert.equal(row.detail, result.detail);
+  assert.deepEqual(sendsTo(world, steer.id), []);
+});
+
+test("a cold switch delivery uses the compact brief and drops the outgoing transcript excerpt", async () => {
+  const { ws, client, steer, world, deps, buildBrief } = deliveryFixture({ provider: "codex", minutesIdle: 31 });
+  const result = await deliverSteer(client, {
+    workspaceId: ws.id, agentId: steer.id, epoch: 3,
+    text: "Full handoff: outgoing transcript excerpt", renewalNote: "Switch to this steer",
+  }, {
+    lock: deps.lock,
+    now: () => at(NOW),
+    buildBrief,
+    rewindClient: async () => ({
+      fetchAgentTimeline: async () => ({ entries: [{ item: { type: "user_message", messageId: "first" } }] }),
+      rewindAgent: async () => {},
+    }),
+  });
+  assert.equal(result.status, "sent");
+  assert.deepEqual(sendsTo(world, steer.id), ["[Factory resume]\nCompact checkpoint\n\nSwitch to this steer"]);
+});
+
+test("a newer worker event stays queued when the renewed brief is accepted", async () => {
+  const { wake, ws, steer, workerId, world, client, deps, buildBrief } = deliveryFixture({ minutesIdle: 6 });
+  assert.equal((await wake()).sent, false);
+  const worker = ws.metadata[WORKERS_KEY][workerId];
+  worker.pendingWake = { state: "blocked", queuedAt: at(NOW + MIN) };
+  steer.persistence.sessionId = "new-session";
+  clearTurnTimeline(world, steer.id);
+  await turnHook.handleTurnAfter(
+    { agent: { id: steer.id }, turnId: "t-clear", outcome: { kind: "completed" } },
+    { paseo: client },
+    { getResumeBrief: buildBrief, lock: deps.lock },
+  );
+  assert.equal(sendsTo(world, steer.id).length, 2);
+  assert.deepEqual(ws.metadata[WORKERS_KEY][workerId].pendingWake, { state: "blocked", queuedAt: at(NOW + MIN) });
+});
+
+test("an ambiguous send acknowledgement retries the same brief and message ID", async () => {
+  const { wake, recheck, ws, steer, world } = deliveryFixture({ provider: "codex", minutesIdle: 31 });
+  const receipts = new Map();
+  world.onSend = async (_id, text, options) => {
+    const { messageId } = options;
+    if (receipts.has(messageId)) {
+      assert.equal(receipts.get(messageId), text);
+      return;
+    }
+    receipts.set(messageId, text);
+    throw new Error("acknowledgement lost");
+  };
+  const rewindClient = async () => ({
+    fetchAgentTimeline: async () => ({ entries: [{ item: { type: "user_message", messageId: "first" } }] }),
+    rewindAgent: async () => {},
+  });
+  assert.equal((await wake({ rewindClient })).sent, false);
+  assert.equal(ws.metadata[AGENTS_KEY][steer.id].pendingWakeBrief.phase, "ready");
+  assert.equal((await recheck()).delivered, true);
+  assert.equal(receipts.size, 1);
+  assert.equal(sendsTo(world, steer.id).length, 2, "both requests use the same receipt");
+  assert.equal((await recheck()).attempted, false);
 });

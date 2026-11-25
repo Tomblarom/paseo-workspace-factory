@@ -27,16 +27,16 @@ test("the prompt settings RPC reports the git-checkout install and the display p
   } } };
 
   // Snapshot/registry install (no git checkout around the plugin): no passage.
-  assert.deepEqual(await handler({}, { paseo }), { findingsInPrompts: false, factoryRoot: null });
+  assert.deepEqual(await handler({}, { paseo }), { steerDelivery: true, findingsInPrompts: false, factoryRoot: null });
   assert.deepEqual(await loadPromptOptions(paseo), { findingsInPrompts: false, factoryRoot: null });
   writeFileSync(join(root, ".git"), "gitdir: /example/worktrees/factory\n");
   writeFileSync(join(root, "FINDINGS.md"), "# Findings\n");
   // Git-checkout install: the passage follows the setting.
-  assert.deepEqual(await handler({}, { paseo }), { findingsInPrompts: true, factoryRoot: realpathSync(root) });
+  assert.deepEqual(await handler({}, { paseo }), { steerDelivery: true, findingsInPrompts: true, factoryRoot: realpathSync(root) });
   assert.deepEqual(await loadPromptOptions(paseo), { findingsInPrompts: true, factoryRoot: realpathSync(root) });
 
   values = { findingsInPrompts: false };
-  assert.deepEqual(await handler({}, { paseo }), { findingsInPrompts: false, factoryRoot: realpathSync(root) });
+  assert.deepEqual(await handler({}, { paseo }), { steerDelivery: true, findingsInPrompts: false, factoryRoot: realpathSync(root) });
   assert.deepEqual(await loadPromptOptions(paseo), { findingsInPrompts: false, factoryRoot: realpathSync(root) });
   assert.equal(configReads, 6);
 });

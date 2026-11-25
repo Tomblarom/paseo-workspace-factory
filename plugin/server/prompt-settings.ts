@@ -42,7 +42,7 @@ export function registerPromptSettings(server: PluginServerContext, displaySetti
     return { findingsInPrompts: settings.findingsInPrompts && factoryRoot !== null, factoryRoot };
   }
 
-  server.handle(factoryPromptSettings, (_input, { paseo }) => readPromptOptions(paseo));
+  server.handle(factoryPromptSettings, async (_input, { paseo }) => ({ ...await readPromptOptions(paseo), steerDelivery: true as const }));
 
   return readPromptOptions;
 }

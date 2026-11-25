@@ -150,6 +150,24 @@ export const factorySwitchPreview = defineRpc({
   }),
 });
 
+/** CLI switch delivery uses the daemon's steer projection and host settings. */
+export const factorySteerDelivery = defineRpc({
+  name: "factory.steer.delivery",
+  input: z.object({
+    workspaceId: z.string().min(1),
+    agentId: z.string().min(1),
+    epoch: z.number().int(),
+    text: z.string().min(1),
+    renewalNote: z.string().optional(),
+  }),
+  output: z.object({
+    status: z.enum(["sent", "pending", "blocked"]),
+    cleared: z.boolean(),
+    detail: z.string(),
+    deliveryId: z.string().optional(),
+  }),
+});
+
 export const factorySwitch = defineRpc({
   name: "factory.switch",
   input: z.object({
@@ -169,6 +187,8 @@ export const factorySwitch = defineRpc({
     epoch: z.number(),
     applied: z.boolean(),
     delivered: z.boolean(),
+    deliveryPending: z.boolean().optional(),
+    deliveryBlocked: z.boolean().optional(),
     /** True when the packet was staged (deliver=stage or a failed send). */
     staged: z.boolean().optional(),
     stagedTo: z.string().nullable().optional(),
@@ -303,6 +323,7 @@ export const factoryResumeApply = defineRpc({
   output: z.looseObject({
     agentId: z.string(),
     cleared: z.boolean(),
+    status: z.enum(["sent", "pending", "blocked"]).optional(),
     detail: z.string(),
     tookOver: z.looseObject({ from: z.string(), to: z.string(), epoch: z.number() }).nullable().optional(),
     takeoverSkipped: z.string().nullable().optional(),

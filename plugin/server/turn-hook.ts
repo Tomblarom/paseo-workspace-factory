@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { finishSteerDelivery, pendingSteerDelivery, type SteerDeliveryDeps } from "./steer-delivery.js";
 import { LEGACY_PREFIX, METADATA_KEY, readPaseoState } from "./factory/paseo.js";
 import { listScopes } from "./factory/scope.js";
 import { createGit } from "./factory/local.js";
@@ -14,7 +16,6 @@ import { captureSweepPaseo, noteEffectFailure } from "./cold-sweep.js";
 import {
   RESUME_PENDING_REASON,
   SEED_AFTER_CLEAR,
-  formatResumeMessage,
   needsResumeForFailedTurn,
   scanCleanupEvidence,
 } from "../shared/idle-cleanup.js";
@@ -24,13 +25,9 @@ import { ASSIGNMENT_KEY } from "./factory/assign.js";
 import { extractTurnUsage, mergeTurnUsage } from "./quota.js";
 import {
   proactiveHintDecision,
-  restorePendingWakeBrief,
   retryOnLockBusy,
   runFailoverCheck,
-  takePendingWakeBrief,
-  type PendingWakeBrief,
 } from "./supervise.js";
-import { markWakeSent, readWorkers, updateWorkerEntry } from "./factory/supervision.js";
 import {
   findZerosubSwitch,
   resolveZerosub,
@@ -67,6 +64,7 @@ interface TurnBeforePayload {
 }
 
 export interface TurnHookDeps extends ZerosubSource {
+  delivery?: SteerDeliveryDeps;
   /** Reads the C5 settings for the seed-after-clear step; absent means no seed. */
   getCleanupSettings?: () => Promise<{ seedAfterClear: boolean } | null>;
   /** Builds the resume brief after a verified resume clear; absent means none. */
@@ -359,21 +357,22 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
   const usage: any = agentUsage(agent);
   const turnUsage = extractTurnUsage(payload, agent);
   const git = kind === "completed" ? null : readGitSnapshot(createGit(), scope.directory ?? null);
-  const turnUserText = firstUserText(entries);
+  const pending = asRecord(previous?.pendingAction);
+  const sessionBefore = pending?.sessionId;
+  const sessionNow = agent?.persistence?.sessionId;
+  const sessionChanged = typeof sessionBefore === "string" && typeof sessionNow === "string"
+    ? sessionBefore !== sessionNow : null;
+  // A native clear may remove its user row as part of replacing the timeline.
+  const turnUserText = firstUserText(entries) ??
+    (pending?.kind === "clear" && pending.reason === RESUME_PENDING_REASON && sessionChanged ? "/clear" : null);
 
   // Effect evidence for our own cleanup turns: the session-id comparison is
   // authoritative for /clear, the timeline scan for /compact.
   let effect: CleanupEffect | null = null;
-  const pending = asRecord(previous?.pendingAction);
   if (pending && cleanupCommandKind(turnUserText)) {
-    const sessionBefore = pending.sessionId;
-    const sessionNow = agent?.persistence?.sessionId;
     const scan = scanCleanupEvidence(entries);
     effect = {
-      sessionChanged:
-        typeof sessionBefore === "string" && typeof sessionNow === "string"
-          ? sessionBefore !== sessionNow
-          : null,
+      sessionChanged,
       compactionSeen: scan.compactionSeen,
       markerSeen: scan.markerSeen,
       sessionNoteSeen: scan.sessionNoteSeen,
@@ -448,6 +447,7 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
       ? await proactiveHintForTurn({ paseoState, scope, wsf, agents, agentId, entries, previous, deps, nowMs })
       : null;
 
+  let readyDelivery = false;
   // One core lock helper names and takes workspace locks (never duplicated here).
   await withWorkspaceLockRetry(mainId, async (held: any) => {
     // refresh() is raw: legacy fallback for pre-migration records.
@@ -486,6 +486,28 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
       ...(settingsBaseline ? { settingsBaseline } : {}),
     };
     if (decision.resolvePending) merged.pendingAction = null;
+    if (decision.resolvePending && pending?.reason === RESUME_PENDING_REASON &&
+        prev.pendingAction?.at === pending.at && prev.pendingAction?.reason === pending.reason) {
+      // A pre-existing manual clear may only have a pendingAction, with its
+      // brief note stored there. Adopt it into the same delivery queue.
+      const queued = pendingSteerDelivery(prev, mainId) ?? {
+        wakeId: randomUUID(),
+        renewal: "clear",
+        queuedAt: pending.at,
+        epoch: wsf.epoch,
+        note: typeof pending.note === "string" ? pending.note : "",
+      };
+      if (queued.renewal === "clear") {
+        readyDelivery = kind === "completed" && effect?.sessionChanged === true;
+        if (!readyDelivery) {
+          merged.cleared = prev.cleared ?? null;
+          merged.actionVerified = null;
+        }
+        merged.pendingWakeBrief = readyDelivery
+          ? { ...queued, phase: "ready" }
+          : { ...queued, phase: "blocked", lastError: "Claude context clear could not be confirmed. Retry recovery or use Fresh." };
+      }
+    }
     const patch: Record<string, unknown> = { [AGENTS_KEY]: { ...freshAgents, [agentId]: merged } };
     const freshCheckpoint =
       asRecord(freshMeta[CHECKPOINT_KEY]) ?? asRecord(freshMeta[LEGACY_CHECKPOINT_KEY]);
@@ -530,6 +552,7 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
         settings,
         force: true,
         getConfig: deps.getConfig,
+        delivery: deps.delivery,
         failingPool: typeof agent.provider === "string" ? agent.provider : null,
       });
     } catch (error) {
@@ -539,152 +562,20 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
     }
   }
 
-  // A resume clear replaces the seed with the full brief: after a verified
-  // (or unverifiable but completed) clear the brief goes into the fresh
-  // timeline; after effectFailed it arrives with the not-cleared notice. The
-  // flag clears only once the brief is sent, so a failed send keeps the pill.
-  const pendingReason = asRecord(previous?.pendingAction)?.reason;
-  const cleared = asRecord(decision.entryUpdate?.cleared);
-  const resumeDone =
-    pendingReason === RESUME_PENDING_REASON &&
-    kind === "completed" &&
-    !decision.dropSelf &&
-    (cleared !== null || decision.effectFailed === true);
   if (decision.effectFailed) {
     noteEffectFailure(
       `a cleanup command to ${agentId} arrived as text without effect (see wsf.agents.${agentId}.lastActionFailed)`,
     );
-    if (!resumeDone) return;
   }
-  if (resumeDone) {
-    if (!deps.getResumeBrief) {
-      console.error(`[factory] turn hook: resume brief for ${agentId} not sent (no brief builder wired)`);
-      return;
-    }
-    const lock = lockOf(deps);
-    const update = updateAgentEntry as unknown as (args: any) => Promise<any>;
-    const updateWorker = updateWorkerEntry as unknown as (args: any) => Promise<any>;
-    let taken: PendingWakeBrief | null = null;
-    try {
-      taken = await takePendingWakeBrief(paseo, mainId, agentId, lock);
-    } catch (error) {
-      console.error(
-        `[factory] turn hook: wake brief take for ${agentId} failed (${error instanceof Error ? error.message : String(error)}); needsResume kept`,
-      );
-      return;
-    }
-    const hadPending = !!(previous as Record<string, unknown> | null)?.pendingWakeBrief;
-    if (!taken && hadPending) {
-      console.log(`[factory] turn hook: wake brief for ${agentId} already taken elsewhere; skip`);
-      return;
-    }
-    const nowIso = new Date().toISOString();
-    if (taken?.briefSent === true) {
-      try {
-        await update({ client: paseo, workspaceId: mainId, agentId, patch: { needsResume: null }, liveIds: null, lock });
-        const freshMeta = ((await paseo.workspaces.ref(mainId).refresh().catch(() => null))?.metadata ?? {}) as Record<string, unknown>;
-        const freshWsf = asRecord(freshMeta[METADATA_KEY]) ?? asRecord(freshMeta[LEGACY_PREFIX]);
-        const moved =
-          typeof freshWsf?.epoch === "number" && typeof taken.epoch === "number" && freshWsf.epoch !== taken.epoch;
-        if (!moved) {
-          const register = (readWorkers as unknown as (m: unknown) => Record<string, any>)(freshMeta);
-          for (const event of taken.events) {
-            const current = register[event.workerId];
-            if (!current || typeof current !== "object") continue;
-            const marked = (markWakeSent as unknown as (e: any, o: any) => any)(current, { at: nowIso });
-            await updateWorker({
-              client: paseo,
-              workspaceId: mainId,
-              workerId: event.workerId,
-              patch: { lastWakeAt: marked.lastWakeAt, pendingWake: marked.pendingWake },
-              lock,
-            });
-          }
-        }
-        console.log(`[factory] turn hook: wake brief ${taken.wakeId} marking retried for ${agentId}`);
-      } catch (error) {
-        const back = { ...taken, lastAttemptAt: nowIso, lastError: (error instanceof Error ? error.message : String(error)).slice(0, 300) };
-        try {
-          await restorePendingWakeBrief(paseo, mainId, agentId, back as never, lock);
-        } catch {}
-        console.error(
-          `[factory] turn hook: wake brief ${taken.wakeId} marking failed (${error instanceof Error ? error.message : String(error)}); retry next tick`,
-        );
-      }
-      return;
-    }
-    const pendingNote = taken?.note ?? null;
-    const actionNote = asRecord(previous?.pendingAction)?.note;
-    const note = typeof pendingNote === "string" && pendingNote ? pendingNote : typeof actionNote === "string" ? actionNote : null;
-    try {
-      const brief = await deps.getResumeBrief(paseo, mainId, agentId);
-      const full = note ? `${brief}\n\n${note}` : brief;
-      await paseo.agents.ref(agentId).send(
-        formatResumeMessage(full, { cleared: decision.effectFailed !== true }),
-      );
-    } catch (error) {
-      if (taken) {
-        const back = {
-          ...taken,
-          attempts: taken.attempts + 1,
-          lastAttemptAt: nowIso,
-          lastError: (error instanceof Error ? error.message : String(error)).slice(0, 300),
-        };
-        try {
-          await restorePendingWakeBrief(paseo, mainId, agentId, back as never, lock);
-        } catch {}
-      }
-      console.error(
-        `[factory] turn hook: resume brief to ${agentId} failed (${error instanceof Error ? error.message : String(error)}); needsResume kept`,
-      );
-      return;
-    }
-    try {
-      await update({ client: paseo, workspaceId: mainId, agentId, patch: { needsResume: null }, liveIds: null, lock });
-      if (taken) {
-        const freshMeta = ((await paseo.workspaces.ref(mainId).refresh().catch(() => null))?.metadata ?? {}) as Record<string, unknown>;
-        const freshWsf = asRecord(freshMeta[METADATA_KEY]) ?? asRecord(freshMeta[LEGACY_PREFIX]);
-        const moved =
-          typeof freshWsf?.epoch === "number" && typeof taken.epoch === "number" && freshWsf.epoch !== taken.epoch;
-        if (moved) {
-          console.log(`[factory] turn hook: wake brief ${taken.wakeId} sent to ${agentId} but the epoch moved; workers stay queued`);
-        } else {
-          const register = (readWorkers as unknown as (m: unknown) => Record<string, any>)(freshMeta);
-          for (const event of taken.events) {
-            const current = register[event.workerId];
-            if (!current || typeof current !== "object") continue;
-            const marked = (markWakeSent as unknown as (e: any, o: any) => any)(current, { at: nowIso });
-            await updateWorker({
-              client: paseo,
-              workspaceId: mainId,
-              workerId: event.workerId,
-              patch: { lastWakeAt: marked.lastWakeAt, pendingWake: marked.pendingWake },
-              lock,
-            });
-          }
-          console.log(`[factory] turn hook: sent resume brief to ${agentId} (wake ${taken.wakeId} delivered)`);
-        }
-      } else {
-        console.log(`[factory] turn hook: sent resume brief to ${agentId}`);
-      }
-    } catch (error) {
-      if (taken) {
-        const back = {
-          ...taken,
-          briefSent: true as const,
-          lastAttemptAt: nowIso,
-          lastError: (error instanceof Error ? error.message : String(error)).slice(0, 300),
-        };
-        try {
-          await restorePendingWakeBrief(paseo, mainId, agentId, back as never, lock);
-        } catch {}
-      }
-      console.error(
-        `[factory] turn hook: resume brief to ${agentId} sent but the marking failed (${error instanceof Error ? error.message : String(error)}); retry marking next tick`,
-      );
+  if (pending?.reason === RESUME_PENDING_REASON && decision.resolvePending) {
+    if (readyDelivery) {
+      await finishSteerDelivery(paseo, { workspaceId: mainId, agentId }, {
+        ...deps.delivery, lock: lockOf(deps), buildBrief: deps.getResumeBrief ?? deps.delivery?.buildBrief,
+      });
     }
     return;
   }
+  const cleared = asRecord(decision.entryUpdate?.cleared);
   // Optional one-line seed after a verified clear: it costs one small turn and
   // tells the resumed agent to load the resume brief first.
   if (cleared?.mode === "clear" && deps.getCleanupSettings) {

@@ -1,30 +1,16 @@
-// Manual `/factory resume` (R-A): checkpoint the steer, clear its context in
-// place (same tab, same id), and send the resume brief into the fresh
-// timeline. The clear reuses runCleanup from the C5 sweep; the turn hook sends
-// the brief after a verified clear, or the RPC sends it immediately for
-// providers without clear support. Only erasable TypeScript: node --test
-// imports this file with type stripping (see plugin/test/ts-resolve-hooks.mjs).
-import { AGENTS_KEY, updateAgentEntry } from "./factory/agent-state.js";
+// Manual /factory resume validates the preview and captures a checkpoint before delivery.
+import { AGENTS_KEY } from "./factory/agent-state.js";
 import { withLock, workspaceLockName } from "./factory/lock.js";
 import { LEGACY_PREFIX, METADATA_KEY, readPaseoState } from "./factory/paseo.js";
 import { listScopes } from "./factory/scope.js";
 import { lastAssistantText, parseCheckpointBlock } from "./factory/steer.js";
-import { runCleanup } from "./cold-sweep.js";
-import {
-  RESUME_PENDING_REASON,
-  cleanupIdentity,
-  formatResumeMessage,
-  mayResumeClear,
-  type ResumeClearSettings,
-} from "../shared/idle-cleanup.js";
+import { cleanupIdentity, type ResumeClearSettings } from "../shared/idle-cleanup.js";
+import { deliverSteer, type DeliveryResult, type SteerDeliveryDeps } from "./steer-delivery.js";
 import { resumeFingerprint } from "../shared/preview.js";
 
 const CHECKPOINT_KEY = `${METADATA_KEY}.checkpoint`;
 const LEGACY_CHECKPOINT_KEY = `${LEGACY_PREFIX}.checkpoint`;
 
-// The synced core is unchecked (@ts-nocheck): its inferred parameter types are
-// too narrow for real calls, so resume talks to it as any (as the sweep does).
-const updateEntry = updateAgentEntry as unknown as (args: any) => Promise<any>;
 const asLastAnswer = lastAssistantText as unknown as (payload: unknown) => string | null;
 const asParseBlock = parseCheckpointBlock as unknown as (text: string | null) => {
   task: string;
@@ -39,25 +25,13 @@ export interface ResumeApplyInput {
   fingerprint?: string;
 }
 
-export interface ResumeApplyDeps {
-  /** Reads the resume settings document; null falls back to the defaults. */
-  getResumeSettings?: () => Promise<ResumeClearSettings | null>;
-  /** Builds the resume brief; required on the immediate-brief path. */
-  buildBrief?: (paseo: any, workspaceId: string, agentId: string) => Promise<string>;
-  /** Cleanup sender; production uses runCleanup, tests inject a fake. */
-  runCleanupFn?: typeof runCleanup;
-  /** Lock for the checkpoint and entry writes; tests only. */
-  lock?: (name: string, fn: (held: { verify: () => void }) => Promise<any>) => Promise<any>;
-  /** F4 wake note, appended to the brief (clear path: via pendingAction). */
+export interface ResumeApplyDeps extends SteerDeliveryDeps {
   note?: string;
-  now?: () => string;
-  log?: (message: string) => void;
+  beforeDelivery?: () => Promise<void>;
 }
 
-export interface ResumeApplyResult {
+export interface ResumeApplyResult extends DeliveryResult {
   agentId: string;
-  cleared: boolean;
-  detail: string;
 }
 
 /** Reads the resume settings document; null fails open to the defaults. */
@@ -145,19 +119,11 @@ async function saveResumeCheckpoint(
   });
 }
 
-/**
- * Applies a manual resume to one steer (E2): guard, refuse running, save the
- * CHECKPOINT from the last answer when it is newer, then clear (providers in
- * resumeClear.providers; the turn hook sends the brief after the verified
- * clear) or send the brief immediately. One open pendingAction per agent makes
- * double clicks idempotent; the C5 daily cap does not apply here.
- */
 export async function applyResume(
   paseo: any,
   input: ResumeApplyInput,
   deps: ResumeApplyDeps = {},
 ): Promise<ResumeApplyResult> {
-  const log = deps.log ?? console.log;
   const lock = deps.lock ?? (withLock as unknown as ResumeApplyDeps["lock"] as NonNullable<ResumeApplyDeps["lock"]>);
   const agentId = input.agentId.trim();
   const state: any = await readPaseoState(paseo);
@@ -203,6 +169,7 @@ export async function applyResume(
     const kind = asRecord(entry.pendingAction)?.kind;
     return {
       agentId,
+      status: "pending",
       cleared: kind === "clear",
       detail: "Resume is already running for this steer; the brief arrives in the timeline after the clear.",
     };
@@ -223,58 +190,17 @@ export async function applyResume(
     await saveResumeCheckpoint(paseo, mainId, agentId, wsf.epoch, block, lock);
     checkpointSaved = true;
   }
-  const settings = deps.getResumeSettings ? await deps.getResumeSettings() : null;
-  const provider = typeof agent.provider === "string" ? agent.provider : "";
-  if (mayResumeClear(provider, settings)) {
-    const run = deps.runCleanupFn ?? runCleanup;
-    try {
-      await run(paseo, agentId, "clear", RESUME_PENDING_REASON, {
-        ...(typeof deps.note === "string" && deps.note ? { note: deps.note } : {}),
-        ...(deps.lock ? { lock: deps.lock } : {}),
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(
-        `Resume could not clear ${agentId} (${message}). Open its tab, then try again.`,
-      );
-    }
-    log(`[factory] resume: sent /clear to ${agentId}`);
-    return {
-      agentId,
-      cleared: true,
-      detail: checkpointSaved
-        ? "Checkpoint saved; clearing the context, then the resume brief arrives in the timeline."
-        : "Clearing the context; the resume brief arrives in the timeline after.",
-    };
-  }
-  if (!deps.buildBrief) {
-    throw new Error("Resume brief builder is not wired (server misconfiguration)");
-  }
-  const brief = await deps.buildBrief(paseo, mainId, agentId);
-  const full =
-    typeof deps.note === "string" && deps.note ? `${brief}\n\n${deps.note}` : brief;
-  try {
-    await paseo.agents.ref(agentId).send(formatResumeMessage(full));
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(
-      `Resume could not reach ${agentId} (${message}). Open its tab, then try again.`,
-    );
-  }
-  await updateEntry({
-    client: paseo,
+  await deps.beforeDelivery?.();
+  const applied = await deliverSteer(paseo, {
     workspaceId: mainId,
     agentId,
-    patch: { needsResume: null },
-    liveIds: null,
-    lock,
-  });
-  const providers = settings?.providers ?? ["claude"];
+    text: deps.note,
+    manual: true,
+    state,
+  }, deps);
   return {
+    ...applied,
     agentId,
-    cleared: false,
-    detail:
-      `Resume brief sent without clearing (provider ${provider || "?"} is not in ` +
-      `resumeClear.providers: ${providers.join(", ")}).`,
+    detail: checkpointSaved ? `Checkpoint saved. ${applied.detail}` : applied.detail,
   };
 }

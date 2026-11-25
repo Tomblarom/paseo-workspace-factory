@@ -100,7 +100,7 @@ import {
 } from "./factory/paseo.js";
 import { daemonHost, runtime } from "./factory/runtime.js";
 import { applyResume } from "./resume-apply.js";
-import type { ResumeClearSettings } from "../shared/idle-cleanup.js";
+import { deliverSteer, type SteerDeliveryDeps } from "./steer-delivery.js";
 import { domainFirstPlanOrder, listScopes } from "./factory/scope.js";
 import { scopeCandidates, scopeRows } from "./factory/scopes-view.js";
 import { AGENTS_KEY } from "./factory/agent-state.js";
@@ -308,12 +308,11 @@ export async function applyResumeRpc(
   input: RpcInput<typeof factoryResumeApply>,
   { paseo }: PluginHandlerContext,
   loader: ConfigLoader,
-  extra?: {
-    getResumeSettings?: () => Promise<ResumeClearSettings | null>;
-    buildBrief?: (paseo: any, workspaceId: string, agentId: string) => Promise<string>;
-  },
+  extra?: SteerDeliveryDeps,
 ): Promise<any> {
-  const applied: any = await applyResume(
+  let tookOver: { from: string; to: string; epoch: number } | null = null;
+  let takeoverSkipped: string | null = null;
+  const applied = await applyResume(
     paseo,
     {
       workspaceId: input.workspaceId,
@@ -321,31 +320,25 @@ export async function applyResumeRpc(
       ...(input.fingerprint ? { fingerprint: input.fingerprint } : {}),
     },
     {
-      ...(extra?.getResumeSettings ? { getResumeSettings: extra.getResumeSettings } : {}),
+      ...extra,
       buildBrief: extra?.buildBrief ?? createResumeBriefBuilder(loader),
+      beforeDelivery: input.takeover === true ? async () => {
+        try {
+          tookOver = await takeoverIfNonActive(paseo, loader, input.agentId);
+        } catch (error) {
+          takeoverSkipped = error instanceof Error ? error.message : String(error);
+        }
+      } : undefined,
     },
   );
-  // Resume AND takeover for a non-active steer: after the resume the steer
-  // becomes the controlling one (self-takeover: no handoff to itself, no
-  // wait). Advisors and already-active steers skip; a failed takeover never
-  // undoes the resume, it is only reported.
-  let tookOver: { from: string; to: string; epoch: number } | null = null;
-  let takeoverSkipped: string | null = null;
-  if (input.takeover === true) {
-    try {
-      const taken = await takeoverIfNonActive(paseo, loader, input.agentId);
-      if (taken) tookOver = taken;
-    } catch (error) {
-      takeoverSkipped = error instanceof Error ? error.message : String(error);
-    }
-  }
+  const switched = tookOver as { from: string; to: string; epoch: number } | null;
   return {
     ...applied,
     tookOver,
     takeoverSkipped,
     detail:
       `${applied.detail}` +
-      (tookOver ? ` Steer ${tookOver.to} is now in charge (was ${tookOver.from}, round ${tookOver.epoch}).` : "") +
+      (switched ? ` Steer ${switched.to} is now in charge (was ${switched.from}, round ${switched.epoch}).` : "") +
       (takeoverSkipped ? ` Takeover skipped: ${takeoverSkipped}` : ""),
   };
 }
@@ -550,12 +543,13 @@ export async function applyFresh(
 export async function deliverSteerBriefRpc(
   input: RpcInput<typeof factorySteerBrief>,
   { paseo }: PluginHandlerContext,
+  delivery?: SteerDeliveryDeps,
 ): Promise<any> {
   return deliverSteerBrief(paseo, {
     workspaceId: input.workspaceId,
     agentId: input.agentId,
     action: input.action,
-  });
+  }, delivery);
 }
 
 export interface SteerSettingsHandlerExtra {
@@ -871,6 +865,7 @@ export async function applySwitch(
   input: RpcInput<typeof factorySwitch>,
   { paseo }: PluginHandlerContext,
   loader: ConfigLoader,
+  delivery?: SteerDeliveryDeps,
 ): Promise<any> {
   const { config, discovery } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
   const to = checkedSlot(input.to, "--to");
@@ -895,9 +890,12 @@ export async function applySwitch(
     notifyPrevious: input.notifyPrevious === true,
     git,
     paseoCli: createPaseoCli(),
+    deliverSteer: (args: Parameters<typeof deliverSteer>[1]) => deliverSteer(paseo, args, {
+      ...delivery, buildBrief: delivery?.buildBrief ?? createResumeBriefBuilder(loader),
+    }),
   };
   const applied: any = await switchSteer(applyOptions);
-  if (!applied.applied) return applied;
+  if (!applied.applied || applied.deliveryPending || applied.deliveryBlocked) return applied;
   return {
     ...applied,
     ...(await stageAppliedPacket(paseo, {

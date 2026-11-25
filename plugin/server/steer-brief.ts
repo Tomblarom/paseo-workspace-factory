@@ -12,6 +12,7 @@ import { AGENTS_KEY } from "./factory/agent-state.js";
 import { updateAgentEntry } from "./factory/agent-state.js";
 import { withLock, workspaceLockName } from "./factory/lock.js";
 import { readPaseoState } from "./factory/paseo.js";
+import { deliverSteer, type SteerDeliveryDeps } from "./steer-delivery.js";
 import { cleanupIdentity } from "../shared/idle-cleanup.js";
 
 // The synced core is unchecked (@ts-nocheck): resume-apply talks to it as any.
@@ -28,11 +29,7 @@ export interface StagedBrief {
   kind: string;
 }
 
-export interface SteerBriefDeps {
-  /** Lock for the entry writes; tests only. */
-  lock?: (name: string, fn: (held: { verify: () => void }) => Promise<any>) => Promise<any>;
-  now?: () => string;
-}
+export type SteerBriefDeps = SteerDeliveryDeps;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -162,11 +159,18 @@ export async function deliverSteerBrief(
     return { agentId, delivered: false, dismissed: true, detail: "Staged brief dismissed." };
   }
   try {
-    await paseo.agents.ref(agentId).send(taken.packet);
+    const result = await deliverSteer(paseo, {
+      workspaceId: input.workspaceId, agentId, text: taken.packet,
+      ...(taken.kind === "switch" ? { renewalNote: "" } : {}),
+    }, deps);
+    if (result.status !== "blocked") {
+      return { agentId, delivered: result.status === "sent", dismissed: false, detail: result.status === "sent" && !result.renewed ? "Staged brief sent." : result.detail };
+    }
+    await restoreWhenEmpty(paseo, input.workspaceId, agentId, taken, lock);
+    return { agentId, delivered: false, dismissed: false, detail: result.detail };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await restoreWhenEmpty(paseo, input.workspaceId, agentId, taken, lock);
     throw new Error(`Could not send the staged brief to ${agentId} (${message}). It is still staged.`);
   }
-  return { agentId, delivered: true, dismissed: false, detail: "Staged brief sent." };
 }

@@ -52,6 +52,19 @@ export async function readCliPromptOptions({ createClient = connectPluginRpc } =
   return { factoryRoot: findFactoryCheckout(fileURLToPath(new URL('..', import.meta.url))), findingsInPrompts: true };
 }
 
+async function connectSteerDelivery() {
+  let client;
+  try {
+    client = await connectPluginRpc();
+    const settings = await client.invokePluginRpc(FACTORY_PLUGIN_ID, PROMPT_SETTINGS_RPC, {});
+    if (settings?.steerDelivery === true) return client;
+  } catch {
+    // A standalone CLI or an older plugin has no steer projection to query.
+  }
+  await client?.close?.().catch(() => {});
+  return null;
+}
+
 const USAGE = `Usage: paseo-factory <command> [options]
   plan   <repo...> [--repos-file f.json] [--local <path>]... [--name <id>] [--subject <text>] [--checkout <path>] [--main workspace:<id>] [--domain <id>] [--hub <path|workspace:id>] [--allow-fork] [--adopt <scope-id>:A=<agent-id>] [--adopt-worker <agent-id>[@A]] [--detach] [--slots A,B] [--retitle] [--rename-project <name>] [--json] [--out f.json]
   apply  --confirm <hash>             run the stored dry-run plan; resumes after a failure
@@ -585,13 +598,23 @@ async function main() {
       if (command === 'switch') {
         if (!values.to) throw new Error('switch needs --to <slot>');
         if (values.language && !['en', 'de'].includes(values.language)) throw new Error('--language must be en or de');
-        const result = await switchSteer({
-          client, discovery, toSlot: values.to, apply: Boolean(values.apply), send: !values['no-send'], git,
-          wait: Boolean(values.wait), notifyPrevious: Boolean(values['notify-previous']), language: values.language ?? runtime().handoffLanguage,
-          config, workerModel: workerModelLine(config, discovery), paseoCli: createPaseoCli(),
-          promptOptions: await readCliPromptOptions(),
-        });
-        console.log(`${result.applied ? 'Switched' : 'Dry-run'}: Steer ${result.from} → ${result.to} (epoch ${result.epoch}) · handoff ${result.packetChars} characters, built without a model call${result.checkpoint ? '' : ' · NO task checkpoint'}${result.delivered ? ' · delivered' : ''}${result.previousNotified ? ' · previous steer notified' : ''}${result.deliveryError ? ` · delivery failed: ${result.deliveryError}` : ''}${result.renameError ? ` · title rename failed: ${result.renameError}` : ''}\n---\n${result.packet}`);
+        const deliveryClient = values.apply && (!values['no-send'] || values['notify-previous'])
+          ? await connectSteerDelivery() : null;
+        let result;
+        try {
+          result = await switchSteer({
+            client, discovery, toSlot: values.to, apply: Boolean(values.apply), send: !values['no-send'], git,
+            wait: Boolean(values.wait), notifyPrevious: Boolean(values['notify-previous']), language: values.language ?? runtime().handoffLanguage,
+            config, workerModel: workerModelLine(config, discovery), paseoCli: createPaseoCli(),
+            promptOptions: await readCliPromptOptions(),
+            deliverSteer: deliveryClient
+              ? (input) => deliveryClient.invokePluginRpc(FACTORY_PLUGIN_ID, 'factory.steer.delivery', input)
+              : null,
+          });
+        } finally {
+          await deliveryClient?.close?.().catch(() => {});
+        }
+        console.log(`${result.applied ? 'Switched' : 'Dry-run'}: Steer ${result.from} → ${result.to} (epoch ${result.epoch}) · handoff ${result.packetChars} characters, built without a model call${result.checkpoint ? '' : ' · NO task checkpoint'}${result.delivered ? ' · delivered' : ''}${result.deliveryPending ? ' · brief queued pending context renewal' : ''}${result.previousNotified ? ' · previous steer notified' : ''}${result.previousNoticeDetail ? ` · previous steer: ${result.previousNoticeDetail}` : ''}${result.deliveryError ? ` · delivery failed: ${result.deliveryError}` : ''}${result.renameError ? ` · title rename failed: ${result.renameError}` : ''}\n---\n${result.packet}`);
         if (result.reply !== null) console.log(`--- reply of Steer ${result.to}\n${result.reply ?? '(no answer text)'}`);
         return;
       }

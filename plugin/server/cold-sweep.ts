@@ -579,23 +579,9 @@ export async function runCleanup(
     previous = asRecord(asRecord(freshMeta[AGENTS_KEY])?.[agentId])?.previousSessions;
   }
   const at = new Date().toISOString();
-  try {
-    await sendCleanupCommand(paseo, agentId, kind === "clear" ? CLEAR_COMMAND : COMPACT_COMMAND);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    await updateEntry({
-      client: paseo,
-      workspaceId,
-      agentId,
-      patch: { lastActionFailed: { at, error: message.slice(0, 300) } },
-      liveIds,
-      ...(opts.lock ? { lock: opts.lock } : {}),
-    }).catch(() => null);
-    throw error;
-  }
   const pendingAction: Record<string, unknown> = { kind, at, sessionId, reason };
   if (typeof opts.note === "string" && opts.note) pendingAction.note = opts.note.slice(0, 1500);
-  const patch: Record<string, unknown> = { pendingAction };
+  const patch: Record<string, unknown> = { pendingAction, actionVerified: null };
   if (kind === "clear") {
     patch.previousSessions = pushPreviousSession(
       Array.isArray(previous) ? (previous as string[]) : null,
@@ -610,6 +596,20 @@ export async function runCleanup(
     liveIds,
     ...(opts.lock ? { lock: opts.lock } : {}),
   });
+  try {
+    await sendCleanupCommand(paseo, agentId, kind === "clear" ? CLEAR_COMMAND : COMPACT_COMMAND);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await updateEntry({
+      client: paseo,
+      workspaceId,
+      agentId,
+      patch: { pendingAction: null, lastActionFailed: { at, error: message.slice(0, 300) } },
+      liveIds,
+      ...(opts.lock ? { lock: opts.lock } : {}),
+    }).catch(() => null);
+    throw error;
+  }
   return { workspaceId, sessionId, kind, reason };
 }
 

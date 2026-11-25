@@ -10,6 +10,7 @@
 // serialized by a per-workspace flock on this host; agents, the UI and other hosts
 // are not blocked. Between held.verify() and the daemon write remains a short
 // window in which a replaced lock file is not noticed.
+import { setTimeout as delay } from 'node:timers/promises';
 import { LABEL, METADATA_KEY, parentOf, agentUsage, isRestartReason, restartMessage } from './paseo.mjs';
 import { withLock, workspaceLockName } from './lock.mjs';
 import { runtime } from './runtime.mjs';
@@ -817,12 +818,26 @@ function refuseIfRetired(status) {
   }
 }
 
+async function waitForSwitchDelivery(workspace, agentId, deliveryId, epoch, deadline) {
+  while (Date.now() < deadline) {
+    const meta = (await workspace.refresh())?.metadata ?? {};
+    if (meta[METADATA_KEY]?.epoch !== epoch) return 'The scope moved before the handoff brief arrived.';
+    const entry = meta[AGENTS_KEY]?.[agentId];
+    if (entry?.lastSteerDeliveryId === deliveryId) return null;
+    const pending = entry?.pendingWakeBrief;
+    if (pending?.wakeId !== deliveryId) return 'The queued handoff brief could no longer be found.';
+    if (pending.phase === 'blocked') return pending.lastError ?? 'Handoff context renewal needs attention.';
+    await delay(Math.min(250, Math.max(0, deadline - Date.now())));
+  }
+  return 'Timed out waiting for the queued handoff brief.';
+}
+
 /**
  * Dry-run returns the handoff and the target state. Apply, under the workspace lock:
  * re-read, check the expected epoch and active steer, write, read back, release;
  * the handoff is delivered after the lock is released.
  */
-export async function switchSteer({ client, discovery, toSlot, apply = false, send = true, wait = false, waitTimeoutMs = 600_000, notifyPrevious = false, language = runtime().handoffLanguage, git, lock = withLock, now = () => new Date(), config = null, workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, zerosub = null, callerId = process.env.PASEO_AGENT_ID, paseoCli = null, promptOptions }) {
+export async function switchSteer({ client, discovery, toSlot, apply = false, send = true, wait = false, waitTimeoutMs = 600_000, notifyPrevious = false, language = runtime().handoffLanguage, git, lock = withLock, now = () => new Date(), config = null, workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, zerosub = null, callerId = process.env.PASEO_AGENT_ID, paseoCli = null, promptOptions, deliverSteer = null }) {
   const status = steerStatus(discovery);
   if (!status.workspace || !status.state) throw new SwitchRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
@@ -861,7 +876,7 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
     repo: status.repo, workspaceId: status.workspace.id, from: fromInfo.slot, to: toSlot,
     fromId: from?.id ?? null, toId: to.id, epoch: expected.epoch + 1, packet,
     packetChars: packet.length, checkpoint: Boolean(status.checkpoint?.task), checkpointAt: checkpointStamp(status.checkpoint),
-    applied: false, delivered: false, deliveryError: null, reply: null, previousNotified: false, selfTakeover, renameError: null,
+    applied: false, delivered: false, deliveryError: null, deliveryPending: false, deliveryBlocked: false, reply: null, previousNotified: false, selfTakeover, renameError: null,
   };
   if (!apply) return result;
 
@@ -883,26 +898,54 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
     mark: { id: to.id, title: to.title ?? null, slot: toSlot },
     unmark: from ? { id: from.id, title: from.title ?? null, slot: from.slot } : null,
   });
+  let deliveryId = null;
   if (send && !selfTakeover) { // never message oneself; the brief is only returned
     try {
-      await client.agents.ref(to.id).send(packet);
-      result.delivered = true;
+      if (deliverSteer) {
+        const outcome = await deliverSteer({
+          workspaceId: status.workspace.id, agentId: to.id, epoch: result.epoch, text: packet,
+          renewalNote: `Handoff from Steer ${fromInfo.slot} to Steer ${toSlot} in round ${result.epoch}.`,
+        });
+        result.delivered = outcome.status === 'sent';
+        deliveryId = outcome.deliveryId ?? null;
+        result.deliveryPending = outcome.status === 'pending';
+        result.deliveryBlocked = outcome.status === 'blocked';
+        if (result.deliveryBlocked) result.deliveryError = outcome.detail;
+      } else {
+        await client.agents.ref(to.id).send(packet);
+        result.delivered = true;
+      }
     } catch (error) {
       result.deliveryError = error.message; // switch stands; resend the packet manually
     }
   }
   if (notifyPrevious && from) {
     try {
-      await client.agents.ref(from.id).send(previousSteerNotice(to, expected.epoch + 1, language)); // costs one turn of the previous steer
-      result.previousNotified = true;
+      const text = previousSteerNotice(to, result.epoch, language);
+      if (deliverSteer) {
+        const outcome = await deliverSteer({ workspaceId: status.workspace.id, agentId: from.id, epoch: result.epoch, text });
+        result.previousNotified = outcome.status === 'sent';
+        if (outcome.status !== 'sent') result.previousNoticeDetail = outcome.detail;
+      } else {
+        await client.agents.ref(from.id).send(text);
+        result.previousNotified = true;
+      }
     } catch {
       result.previousNotified = false;
     }
   }
-  if (wait && result.delivered && !selfTakeover) {
-    const handle = client.agents.ref(to.id);
-    await handle.waitForFinish(waitTimeoutMs);
-    result.reply = lastAssistantText(await handle.timeline.refetch({ direction: 'tail', limit: 20 }));
+  if (wait && !selfTakeover) {
+    const deadline = Date.now() + waitTimeoutMs;
+    if (result.deliveryPending && deliveryId) {
+      result.deliveryError = await waitForSwitchDelivery(workspace, to.id, deliveryId, result.epoch, deadline);
+      result.delivered = result.deliveryError === null;
+      result.deliveryPending = !result.delivered && result.deliveryError.startsWith('Timed out');
+    }
+    if (result.delivered) {
+      const handle = client.agents.ref(to.id);
+      await handle.waitForFinish(Math.max(1, deadline - Date.now()));
+      result.reply = lastAssistantText(await handle.timeline.refetch({ direction: 'tail', limit: 20 }));
+    }
   }
   return result;
 }
@@ -943,7 +986,10 @@ async function runTabRewind({ client, workspaceId, agentId, packet, checkpoint, 
   if (outcome.status !== 'rewound') return { outcome };
   await updateAgentEntry({
     client, workspaceId, agentId, lock,
-    patch: buildRewindRecord({ checkpoint, messageId: outcome.messageId ?? null, briefMessageId: outcome.briefMessageId ?? null, now }),
+    patch: {
+      ...buildRewindRecord({ checkpoint, messageId: outcome.messageId ?? null, briefMessageId: outcome.briefMessageId ?? null, now }),
+      pendingWakeBrief: null,
+    },
     liveIds: null,
   });
   return { outcome };

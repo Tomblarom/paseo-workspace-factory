@@ -4,7 +4,7 @@ For the provider-by-provider manual validation matrix, see [Provider live checks
 
 New to the factory? Start with [Getting started](../getting-started.md); this page is the detailed reference.
 
-Status: C2–C6 and R are implemented. The remaining [C1 and C7 live checks](#c1--c7-checks-live-scratch-agent-only) use approved scratch agents. The factory resume brief is available from `paseo-factory resume` and `/factory resume --brief`. Section R covers `/factory resume`, which can clear a Claude steer's context before delivering the brief. `fresh` refreshes in the same tab via Paseo rewind when possible ([Same-tab refresh via rewind](#same-tab-refresh-via-rewind)); C5 can execute `fresh-recommended` as a rewind for Codex when `rewindFresh` allows it.
+Status: C2–C6 and R are implemented. The remaining [C1 and C7 live checks](#c1--c7-checks-live-scratch-agent-only) use approved scratch agents. The factory resume brief is available from `paseo-factory resume` and `/factory resume --brief`. Section R covers the shared delivery policy for wakes, switches, takeovers, and `/factory resume`. `fresh` refreshes in the same tab via Paseo rewind when possible ([Same-tab refresh via rewind](#same-tab-refresh-via-rewind)); C5 can execute `fresh-recommended` as a rewind for Codex when `rewindFresh` allows it.
 
 ## Goal
 
@@ -142,14 +142,14 @@ The composer pill and **Factory: context** panel show the reason the chat needs 
 
 ## R — `/factory resume` as the restart path
 
-`/factory resume`, typed in the steer's own tab, saves the state and sends a work brief from the main workspace. On providers configured for native clearing, it first clears the context of the same agent (same id, same tab, same name). For the recommended action after an interruption, open the composer pill or **Factory: context** panel.
+`/factory resume`, typed in the steer's own tab, saves the state and sends a work brief from the main workspace. It can renew the context in the same tab before delivering the brief. For the recommended action after an interruption, open the composer pill or **Factory: context** panel.
 
 ### Scope (E3)
 
 | Way | Agent | Context | When |
 |---|---|---|---|
 | `resume` (CLI / `/factory resume --brief`) | same | kept | only read, e.g. worker or user |
-| **`/factory resume` (new)** | same | cleared (claude) | steer after restart, crash, limit, or cold |
+| **`/factory resume`** | same | warm reuse, verified clear, or rewind | steer after restart, crash, limit, or cold |
 | `fresh` | same tab (rewind) or new tab (fallback) | empty | agent broken or model change |
 | `switch` | other slot | — | handover |
 | C5 compact/clear | same | auto | idle, without user |
@@ -159,23 +159,34 @@ The composer pill and **Factory: context** panel show the reason the chat needs 
 1. Guard: steers only. Workers get an error toast.
 2. Preview fingerprint as in switch/fresh (agent status, sessionId, checkpoint time). `/factory resume` in the steer's own tab counts as confirmation, because the target is the caller itself. For a foreign agent (`--agent <id>`): preview in the panel, confirm by button.
 3. **Running → no clearing.** The RPC answers "running; retry after the turn ends" as an error toast. No auto-stop; the user can `stop` first.
-4. Save the checkpoint: the agent's last answer is read with the `auto-checkpoint` parser (as `checkpoint --from-agent`). A valid CHECKPOINT block newer than the scope checkpoint is written; otherwise the scope checkpoint stays and the brief carries `interrupted` if needed. Only then is the context cleared.
+4. Save the checkpoint: the agent's last answer is read with the `auto-checkpoint` parser (as `checkpoint --from-agent`). A valid CHECKPOINT block newer than the scope checkpoint is written; otherwise the scope checkpoint stays and the brief carries `interrupted` if needed. The delivery decision follows checkpoint capture.
 5. `previousSessions` is recorded before the clear (already exists). The old history stays reachable as an extra tab via `factory.history.open` / `paseo agent import`.
 6. Closed agent (after restart): `send` is expected to reopen it. Still unverified live; if it fails, an error toast says "open the tab, then retry".
-7. No rate/day cap for manual resume (the C5 cap does not apply). One open `pendingAction` per agent, so a double-click is idempotent.
+7. No rate/day cap for manual resume (the C5 cap does not apply). One pending delivery per agent holds the brief and any worker events through renewal.
 
-Technically the RPC reuses the C5 cleanup (`sendCleanupCommand` without sourceAgentId, same `pendingAction`/`previousSessions` bookkeeping; the single-agent logic of `sweepAgent` is extracted as `runCleanup` and shared). The brief is sent by the turn-hook only after a verified clear (new sessionId), as `[Factory resume]` plus the full `buildResumeBrief` — never directly behind the RPC, so the brief does not land in the old context and no turn is spent on the `resume` call. A text without effect yields `effectFailed` and locks the provider capability. `/compact` is not needed in resume (the history may be lost; compact stays with C5 for warm idle), and `fresh` is no fallback (the tab must survive; it stays a manual panel action).
+### Delivery policy
 
-### Provider matrix (E1)
+Wakes, takeover requests, switch sends, and resume use the steer pill's cache
+projection and configured context-size floor. A warm or cooling steer can
+receive the original message. A cold or large steer gets a compact checkpoint
+brief after renewal. With unknown cache data the existing recovery flag still
+applies. CLI switch uses the same policy when the installed plugin exposes it.
+Composer staging puts a draft under the user's control.
 
-Setting `resumeClear.providers`, default `["claude"]` (native `/clear` is verified for claude only):
+Claude uses native `/clear` when enabled in `resumeClear.providers` and **Keep
+chat history** is off. The turn hook confirms a new provider session before
+releasing the brief. Otherwise Factory uses conversation-only rewind to the
+last brief anchor, or to the first usable user message when there is no saved
+anchor. Explicit resume on providers without native clear always takes the
+rewind route.
 
-| Provider | Action | Fallback |
-|---|---|---|
-| claude | `/clear`, verify effect, brief | on `effectFailed`: brief without clearing, note "context not cleared" |
-| codex, copilot, muse | no clearing by default, brief only | opt-in per setting once a live check proves `/clear` or `/compact` for the provider; same effect verification protects |
+`pendingWakeBrief` holds events until renewal is confirmed and the compact
+brief is accepted. Retries use the same content and message ID. If a clear
+cannot be verified or there is no usable rewind point, the result and steer
+pill show the recovery problem. The queued events stay available for a retry
+or a manually confirmed Fresh operation.
 
-**Live check Codex (2026-11-24, scratch agent gpt-6.2-sol, Paseo 0.16.2):** `/clear` is not a native command for Codex. The model answered in prose ("treating your next message as a new task") and pretended to forget; the context was **not** cleared (input tokens rose from 20101 to 23050, the history stayed in the same thread). `/compact` is native: the timeline shows `[Compacted]` and the same agent and tab survive. Consequence: keep `resumeClear.providers` at `["claude"]`; for Codex steers use `/compact` (cache-warm) or `fresh` (same-tab rewind with the CHECKPOINT brief, new agent only as fallback), never `/clear`.
+**Live check Codex (2026-11-24, scratch agent gpt-6.2-sol, Paseo 0.16.2):** `/clear` is not a native command for Codex. The model answered in prose ("treating your next message as a new task") and pretended to forget; the context was **not** cleared (input tokens rose from 20101 to 23050, the history stayed in the same thread). `/compact` is native: the timeline shows `[Compacted]` and the same agent and tab survive. Consequence: keep `resumeClear.providers` at `["claude"]`; Codex uses `/compact` for warm cleanup and same-tab rewind for context renewal on delivery.
 
 ### Attention pill (E5)
 

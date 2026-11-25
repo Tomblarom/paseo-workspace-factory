@@ -829,6 +829,33 @@ test("unanswered wake fails over to the next slot and logs the takeover", async 
   assert.deepEqual(supervise.failoverStateForTests()[REPO].asked, [steers.B.id]);
 });
 
+test("a cold takeover starts its answer window only after the renewed brief is sent", async () => {
+  const { world, ws, steers, worker } = unansweredWorld();
+  steers.B.provider = "claude";
+  steers.B.persistence = { sessionId: "old-session" };
+  ws.metadata[AGENTS_KEY][steers.B.id] = { lastTurnEndedAt: at(NOW - 6 * MIN) };
+  const paseo = fakeClient(world);
+  const scope = { id: REPO, workspaceId: ws.id };
+  const deps = depsOf({ buildBrief: async () => "Takeover checkpoint" });
+  const outcome = await supervise.runFailoverCheck(paseo, scope, deps);
+  assert.deepEqual(outcome, { action: "wait", reason: "brief-pending" });
+  assert.deepEqual(sendsTo(world, steers.B.id), ["/clear"]);
+  assert.equal(ws.metadata[WORKERS_KEY][worker.id].lastWakeAt, at(NOW - 11 * MIN));
+  assert.equal(supervise.failoverStateForTests()[REPO], undefined);
+  assert.equal((await supervise.retryPendingWakeBrief(paseo, scope, deps)).delivered, false);
+
+  // The verified clear is recorded by the turn hook, covered in wake-brief.test.
+  const entry = ws.metadata[AGENTS_KEY][steers.B.id];
+  entry.pendingAction = null;
+  entry.pendingWakeBrief.phase = "ready";
+  assert.equal((await supervise.retryPendingWakeBrief(paseo, scope, deps)).delivered, true);
+  assert.equal(sendsTo(world, steers.B.id).length, 2);
+  assert.match(sendsTo(world, steers.B.id)[1], /\[Factory resume\]\nTakeover checkpoint/);
+  assert.equal(ws.metadata[CHECKPOINT_KEY].source, "failover");
+  assert.equal(ws.metadata[WORKERS_KEY][worker.id].lastWakeAt, at(NOW));
+  assert.deepEqual(supervise.failoverStateForTests()[REPO].asked, [steers.B.id]);
+});
+
 test("answered and busy steers stop failover; fresh wakes wait", async () => {
   const { world, ws, steers } = unansweredWorld();
   const paseo = fakeClient(world);
@@ -1115,7 +1142,7 @@ test("supervise.ts reuses the core and never archives or wakes blindly", () => {
   ]) {
     assert.ok(superviseServer.includes(name), `supervise.ts uses ${name}`);
   }
-  assert.ok(superviseServer.includes(".send("), "wakes send through the SDK");
+  assert.ok(superviseServer.includes("deliverSteer("), "wakes and takeovers use the cache-aware delivery path");
   assert.ok(!superviseServer.includes(".archive("), "the plugin never archives (the steer does)");
   assert.ok(superviseServer.includes("background"), "background agents guarded");
   assert.ok(superviseServer.includes("formatSteerTakeover"), "takeover request sent on failover");

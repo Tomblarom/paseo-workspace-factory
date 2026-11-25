@@ -1267,7 +1267,7 @@ function SwitchedView({
       </Text>
       <Text style={styles.label}>{at}</Text>
       <Text style={styles.body}>
-        {result.delivered ? "Handoff delivered." : "Handoff not delivered."}
+        {result.delivered ? "Handoff delivered." : result.deliveryPending ? "Handoff queued pending context renewal." : "Handoff not delivered."}
         {field(result, "deliveryError") ? ` ${text(field(result, "deliveryError"))}` : ""}
       </Text>
     </View>

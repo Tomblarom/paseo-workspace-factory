@@ -454,12 +454,14 @@ export async function updateWorkerEntry({ client, workspaceId, workerId, patch =
   return lock(workspaceLockName(workspaceId), async (held) => {
     const metadata = (await workspace.refresh())?.metadata ?? {};
     let state = { ...(metadata[WORKERS_KEY] ?? {}) };
+    const entryPatch = typeof patch === 'function' ? patch(state[workerId] ?? null, metadata) : patch;
+    if (event === null && entryPatch === null) return state[workerId] ?? null;
     if (event !== null) {
       state = applyWorkerEvent(state, workerId, event, eventDetails);
-    } else if (patch.remove === true) {
+    } else if (entryPatch.remove === true) {
       delete state[workerId];
     } else {
-      const { remove: _remove, ...rest } = patch;
+      const { remove: _remove, ...rest } = entryPatch;
       const base = state[workerId] ?? createWorkerEntry({});
       state[workerId] = clipWorkerEntry({ ...base, ...rest });
       state = pruneWorkers(state);

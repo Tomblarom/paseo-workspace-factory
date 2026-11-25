@@ -235,7 +235,7 @@ export async function submitFactoryCommand(
       takeover: true,
     });
     setFactoryResult({ kind: "resumeApplied", workspaceId: ctx.workspaceId, agentId: target, at, applied });
-    // No pill: the arriving brief in the timeline is the visible success.
+    if (applied.status === "blocked") return pill(applied.detail);
     return { openPanel: false, pill: null };
   }
   if (parsed.command === "plan") {

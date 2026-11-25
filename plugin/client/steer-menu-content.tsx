@@ -38,7 +38,6 @@ type SwitchFlow = {
   to: string;
   toAgentId: string;
   preview: RpcOutput<typeof factorySwitchPreview>;
-  resumedTarget: boolean;
 };
 type ResumeFlow = { kind: "resume"; brief: RpcOutput<typeof factoryResume> };
 type FreshFlow = { kind: "fresh"; preview: RpcOutput<typeof factoryFreshPreview>; note: string | null };
@@ -376,27 +375,13 @@ export function SteerMenu({
   const startHandover = (toSlot: string, toAgentId: string): void => {
     void run(async () => {
       const preview = await callSwitchPreview({ workspaceId, to: toSlot });
-      setFlow({ kind: "switch", to: toSlot, toAgentId, preview, resumedTarget: false });
+      setFlow({ kind: "switch", to: toSlot, toAgentId, preview });
     });
   };
 
-  const onResumeAndHandover = (toSlot: string, toAgentId: string): void => {
+  const onConfirmSwitch = (current: SwitchFlow, sendNow = false): void => {
     void run(async () => {
-      const row = rows?.find((entry) => entry.agentId === toAgentId) ?? null;
-      const route = row ? resumeRouteFor(row, { keepChatHistory }) : null;
-      if (!route || route.kind !== "resume-apply") {
-        throw new Error("No verified recovery route for this destination.");
-      }
-      await callResumeApply({ workspaceId, agentId: toAgentId });
-      const preview = await callSwitchPreview({ workspaceId, to: toSlot });
-      setFlow({ kind: "switch", to: toSlot, toAgentId, preview, resumedTarget: true });
-      setNotice(`Steer ${toSlot} resumed. Review the handover.`);
-    });
-  };
-
-  const onConfirmSwitch = (current: SwitchFlow): void => {
-    void run(async () => {
-      const deliver = initializeNewSteer === "send" ? "send" : "stage";
+      const deliver = sendNow || initializeNewSteer === "send" ? "send" : "stage";
       let applied: RpcOutput<typeof factorySwitch>;
       try {
         applied = await callSwitch({
@@ -416,6 +401,10 @@ export function SteerMenu({
         throw thrown;
       }
       setFlow(null);
+      if (applied.deliveryPending) {
+        setNotice(`Steer ${applied.to} is now active. The brief is queued pending context renewal.`);
+        return;
+      }
       afterDelivery({
         head: `Steer ${applied.to} is now active (epoch ${applied.epoch}).`,
         tail: "The previous tab keeps its chat; it no longer coordinates.",
@@ -754,22 +743,22 @@ export function SteerMenu({
       const preview = flow.preview;
       const targetRow = rows?.find((entry) => entry.agentId === flow.toAgentId) ?? null;
       const recoveryRoute = targetRow ? resumeRouteFor(targetRow, { keepChatHistory }) : null;
-      const canRecover = targetRow?.state === "needs-resume" && recoveryRoute?.kind === "resume-apply";
+      const canRecover = targetRow?.state === "needs-resume" &&
+        (recoveryRoute?.kind === "resume-apply" || recoveryRoute?.kind === "fresh");
       return (
         <View style={{ gap: 4 }}>
           <Text style={styles.section}>
             Hand over to Steer {flow.to} (epoch {text(preview.epoch)} → {text(preview.epoch + 1)})
           </Text>
-          {flow.resumedTarget ? <Text style={styles.ok}>Destination resumed.</Text> : null}
           <Text style={styles.body}>
             {text(preview.packetChars)} characters, {preview.checkpoint ? "with" : "without"} task checkpoint.
           </Text>
           <Text style={styles.label}>
             One brief goes to the destination. The previous tab is updated through Factory state.
           </Text>
-          {canRecover && !flow.resumedTarget
+          {canRecover
             ? actionButton("resume-handover", STEER_MENU_LABELS.resumeAndHandover, `Resume Steer ${flow.to} and hand over`, () =>
-              onResumeAndHandover(flow.to, flow.toAgentId),
+              onConfirmSwitch(flow, true),
             )
             : null}
           {actionButton("confirm-switch", STEER_MENU_LABELS.confirmHandover, "Confirm handover", () =>
@@ -786,7 +775,9 @@ export function SteerMenu({
         <View style={{ gap: 4 }}>
           <Text style={styles.section}>{self ? resumeActionLabel(self.state) : "Resume"}</Text>
           <Text style={styles.warn}>
-            This clears the chat in this tab. Earlier messages leave this tab.
+            {self && !self.large && (self.warmth === "warm" || self.warmth === "cooling")
+              ? "The resume brief goes into this chat."
+              : "Resuming may clear the context in this tab."}
           </Text>
           <Text style={styles.label}>{flow.brief.brief.slice(0, 400)}</Text>
           {actionButton("confirm-resume", STEER_MENU_LABELS.confirmResume, "Confirm resume", () =>

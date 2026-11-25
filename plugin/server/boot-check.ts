@@ -17,7 +17,8 @@ import {
 } from "./factory/agent-state.js";
 import { isAdvisorSlot } from "./factory/config.js";
 import { factoryIdentity } from "../shared/auto-checkpoint.js";
-import { RESUME_CLEAR_DEFAULTS, bootResumeReason } from "../shared/idle-cleanup.js";
+import { pendingSteerDelivery } from "./steer-delivery.js";
+import { RESUME_PENDING_REASON, RESUME_CLEAR_DEFAULTS, bootResumeReason } from "../shared/idle-cleanup.js";
 
 const CHECKPOINT_KEY = `${METADATA_KEY}.checkpoint`;
 const AGENTS_KEY = `${METADATA_KEY}.agents`;
@@ -200,10 +201,10 @@ export async function runBootCheck({
     open: boolean;
     reason: string | null;
   };
-  const grouped = new Map<string, { scope: any; agents: Candidate[]; stale: string[] }>();
+  const grouped = new Map<string, { scope: any; agents: Candidate[]; stale: string[]; renewals: string[] }>();
   const groupOf = (scope: any) => {
     const mainId: string = scope.workspaceId;
-    const group = grouped.get(mainId) ?? { scope, agents: [], stale: [] };
+    const group = grouped.get(mainId) ?? { scope, agents: [], stale: [], renewals: [] };
     grouped.set(mainId, group);
     return group;
   };
@@ -249,6 +250,10 @@ export async function runBootCheck({
   for (const scope of scopes) {
     const entries = asRecord(scope.workspace?.metadata?.[AGENTS_KEY]) ?? {};
     for (const [agentId, raw] of Object.entries(entries)) {
+      const queued = pendingSteerDelivery(raw, scope.workspaceId);
+      if (queued?.phase === "renewing" && Date.parse(queued.queuedAt) < Date.parse(daemonStartedAt)) {
+        groupOf(scope).renewals.push(agentId);
+      }
       const reason = asRecord(asRecord(raw)?.needsResume)?.reason;
       if (reason === "daemon-restart" && !qualified.has(agentId)) groupOf(scope).stale.push(agentId);
     }
@@ -375,8 +380,22 @@ export async function runBootCheck({
         nextAgents[agentId] = rest;
         staleRemoved += 1;
       }
+      let renewalsInterrupted = 0;
+      for (const agentId of group.renewals) {
+        const entry = asRecord(nextAgents[agentId]);
+        const queued = pendingSteerDelivery(entry, mainId);
+        if (!queued || queued.phase !== "renewing" ||
+            !(Date.parse(queued.queuedAt) < Date.parse(daemonStartedAt))) continue;
+        const pendingAction = asRecord(entry?.pendingAction);
+        nextAgents[agentId] = {
+          ...entry,
+          ...(pendingAction?.reason === RESUME_PENDING_REASON ? { pendingAction: null } : {}),
+          pendingWakeBrief: { ...queued, phase: "blocked", lastError: "Paseo restarted before context renewal was confirmed. Retry recovery or use Fresh." },
+        };
+        renewalsInterrupted += 1;
+      }
       staleTotal += staleRemoved;
-      if (!firstMarked && !resumeMarked && !staleRemoved) return;
+      if (!firstMarked && !resumeMarked && !staleRemoved && !renewalsInterrupted) return;
       const patch: Record<string, unknown> = { [AGENTS_KEY]: nextAgents };
       if (
         firstMarked &&

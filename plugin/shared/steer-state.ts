@@ -694,6 +694,7 @@ export interface SteerProjectionInput {
   /** Stored recommendation valid for the current idle period, else null. */
   freshHint?: string | null;
   /** Unresolved Factory operation on this holder. */
+  resumeFallback?: string | null;
   pendingOperation?: boolean;
   /** Queued wake addressed to this holder. */
   queuedWake?: boolean;
@@ -900,6 +901,7 @@ export function projectSteer(input: SteerProjectionInput): SteerProjection {
   if (quota.limited) {
     return finish("limited", quota.limitedReasons.join("; ") || "Quota limited", "handoff-or-reset");
   }
+  if (input.resumeFallback) return finish("needs-resume", input.resumeFallback, "preview-recovery");
   if (
     status === "initializing" ||
     input.pendingOperation === true ||
