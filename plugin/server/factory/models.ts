@@ -206,7 +206,7 @@ export function resolveProfile(config, providerEntries, list, { role = 'worker',
  * Pure model/account selection for a future `steer add`: validates or
  * suggests the slot, then picks the profile and ZeroSub account. `slot`
  * null/empty suggests the next free letter (slot priority, A first); an
- * occupied slot throws pointing at `steer set`/`fresh`, a gappy one throws
+ * occupied slot throws pointing at `steer set`/`fresh`, a gappy one throws (unless `allowGap`: the caller has already checked live occupancy)
  * with the next free letter. `profile` null tries all profiles in
  * slot-priority order (existing slots' profiles first, then unreferenced
  * ones); an explicit profile is tried alone and decides the advisor flag,
@@ -222,7 +222,7 @@ export function resolveProfile(config, providerEntries, list, { role = 'worker',
  * earliestReset }`. Throws on a bad slot/profile, an occupied slot, a gap,
  * or a full A-Z.
  */
-export function resolveSteerAdd(config, providerEntries, { slot = null, profile = null, advisorSlot = null, usedProfiles = [], quotaSnapshot = null, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 90, quotaWarnPct = config?.quota?.warnPct ?? 75, profileHealth = null, now = Date.now(), zerosub = null } = {}) {
+export function resolveSteerAdd(config, providerEntries, { slot = null, profile = null, advisorSlot = null, usedProfiles = [], quotaSnapshot = null, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 90, quotaWarnPct = config?.quota?.warnPct ?? 75, profileHealth = null, now = Date.now(), zerosub = null, allowGap = false } = {}) {
   const order = slotOrder(config);
   const slots = config?.steers?.slots ?? {};
   let target;
@@ -234,7 +234,7 @@ export function resolveSteerAdd(config, providerEntries, { slot = null, profile 
     if (!/^[A-Z]$/.test(raw)) throw new Error(`Steer slot must be a single capital letter A-Z, got ${JSON.stringify(slot)}`);
     if (slots[raw]) throw new Error(`Slot ${raw} is already defined (profile "${slots[raw]}"); use steer set ${raw} <profile|provider/model> to replace it or fresh to refresh its steer`);
     const max = order.length ? order[order.length - 1] : '@';
-    if (raw > String.fromCharCode(max.charCodeAt(0) + 1)) {
+    if (!allowGap && raw > String.fromCharCode(max.charCodeAt(0) + 1)) {
       throw new Error(`Slot ${raw} would leave a gap (slots are ${order.join(', ') || 'none'}); use the next free letter ${nextFreeSlot(config)}`);
     }
     target = raw;

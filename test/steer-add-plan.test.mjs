@@ -140,6 +140,13 @@ test('planSteerAdd validates slots: normalization, gaps, invalid and full', () =
     () => planSteerAdd(CONFIG, PROVIDERS, [], { slot: 'D', scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW }),
     /would leave a gap.*next free letter C/,
   );
+  // Live unconfigured steers occupy their letters: the suggested next free letter is accepted.
+  const live = [liveSteer('C')];
+  assert.equal(planSteerAdd(CONFIG, PROVIDERS, live, { slot: 'D', scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW }).slot, 'D');
+  assert.throws(
+    () => planSteerAdd(CONFIG, PROVIDERS, live, { slot: 'E', scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW }),
+    /would leave a gap.*next free letter D/,
+  );
   for (const bad of ['AA', '1']) {
     assert.throws(() => planSteerAdd(CONFIG, PROVIDERS, [], { slot: bad, scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW }), /single capital letter A-Z/, String(bad));
   }

@@ -92,10 +92,17 @@ function checkedTargetSlot(config, liveSteers, scopeId, slotInput) {
     throw new Error(`Slot ${raw} is already occupied by live steer ${agent.id} (${agent.provider}/${agent.model}) without a configured slot; archive it in Paseo or define slot ${raw} via steer set ${raw} <profile|provider/model> first`);
   }
   if (classification.state === 'free') {
-    const order = slotOrder(config);
-    const max = order.length ? order[order.length - 1] : '@';
-    if (raw > String.fromCharCode(max.charCodeAt(0) + 1)) {
-      throw new Error(`Slot ${raw} would leave a gap (slots are ${order.join(', ') || 'none'}); use the next free letter ${nextFreeSlotForAdd(config, liveSteers, scopeId)}`);
+    // A gap means a still-free letter before the target. Live steers that are
+    // not configured yet (adopted B, D, E) occupy their letters, so the next
+    // free letter suggested by nextFreeSlotForAdd is always accepted.
+    const gap = [];
+    for (let code = 65; code < raw.charCodeAt(0); code++) {
+      const letter = String.fromCharCode(code);
+      if (classifySteerSlot(config, liveSteers, letter, scopeId).state === 'free') gap.push(letter);
+    }
+    if (gap.length) {
+      const order = slotOrder(config);
+      throw new Error(`Slot ${raw} would leave a gap (slots are ${order.join(', ') || 'none'}; free: ${gap.join(', ')}); use the next free letter ${nextFreeSlotForAdd(config, liveSteers, scopeId)}`);
     }
   }
   return { target: raw, classification };
@@ -220,7 +227,7 @@ export function planSteerAdd(config, providerEntries, liveSteers, {
       notes.push(`Slot ${target} is configured but has no live steer; provisioning profile "${name}"`);
     } else {
       const resolved = resolveSteerAdd(config, providerEntries, {
-        slot: target, usedProfiles, quotaSnapshot, quotaExhaustedPct, quotaWarnPct, profileHealth, now, zerosub,
+        slot: target, usedProfiles, quotaSnapshot, quotaExhaustedPct, quotaWarnPct, profileHealth, now, zerosub, allowGap: true,
       });
       picked = resolved.profile;
       skipped = resolved.skipped;
