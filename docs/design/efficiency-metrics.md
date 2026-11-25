@@ -50,6 +50,12 @@ Publish those bounds in diagnostics and require a complete, reconciled ledger
 for the README point estimate. Require positive savings and all packages
 accepted in both arms for the initial claim.
 
+**Package size.** A package has no general size: the headline number is only defined for the
+fixed suite below (packages A, B, C with scripted phases and deterministic acceptance), so both
+arms always do identical work. Comparing real projects needs a size measure first, for example
+one assigned task from release to `done` CHECKPOINT, classified by changed files, phases and
+acceptance checks. That classification is an open design point; no live runs are planned yet.
+
 ## Supporting metrics
 
 - **Cold-turn rate.** Count task and continuation turns, including worker and
