@@ -3,37 +3,28 @@ import type {
   PluginHostProps,
 } from "@getpaseo/plugin/client";
 import type { PluginButtonContentProps } from "@getpaseo/plugin/client";
-import { useSubscription } from "@getpaseo/plugin/client";
+import { useAgent, useSettings, useSubscription } from "@getpaseo/plugin/client";
 import { useCallback, useMemo, useState } from "react";
 import { ScrollView, Text, View } from "react-native";
+import { CACHE_GROUPS, groupForProviderModel } from "../shared/cache-profiles.js";
+import { attentionStatus, contextActionFor, type AttentionReason } from "../shared/context-continuation.js";
 import { factoryCold } from "../shared/factory.js";
-import { coldHintText, freshHintText, resumeReminderText } from "../shared/idle-cleanup.js";
+import { CLEANUP_DEFAULTS } from "../shared/idle-cleanup.js";
+import { factoryCleanupSettings } from "../shared/settings.js";
 import { ColdActions } from "./cold-actions.js";
 
 const NO_INPUT = {};
 
-/** Why an agent needs attention. "cold" keeps the C6 pill; the rest need resume. */
-export type AttentionReason = "daemon-restart" | "limit" | "failed" | "cold";
-
-export type NeedsResumeReason = "daemon-restart" | "limit" | "failed";
-
-interface ColdRow {
+interface AttentionRow {
   workspaceId: string;
   agentId: string;
-  title: unknown;
   contextTokens: number;
   idleMinutes: number;
   hasHistory: boolean;
-  canFresh: boolean;
   reason?: AttentionReason;
-  /** Valid stored fresh recommendation; shown instead of the cold hint (never above resume). */
   freshHint: string | null;
   slot: string | null;
-  activeSteer: string | null;
-  advisor: boolean;
 }
-
-export type AttentionRow = ColdRow;
 
 function isAttentionReason(value: unknown): value is AttentionReason {
   return value === "daemon-restart" || value === "limit" || value === "failed" || value === "cold";
@@ -57,82 +48,34 @@ export function attentionRowsOf(event: unknown): AttentionRow[] {
     rows.push({
       workspaceId: row.workspaceId,
       agentId: row.agentId,
-      title: row.title,
       contextTokens: typeof row.contextTokens === "number" ? row.contextTokens : 0,
       idleMinutes: typeof row.idleMinutes === "number" ? row.idleMinutes : 0,
       hasHistory: row.hasHistory === true,
-      canFresh: row.canFresh === true,
       ...(isAttentionReason(row.reason) ? { reason: row.reason } : {}),
       freshHint:
         typeof row.freshHint === "string" && row.freshHint.trim() !== "" ? row.freshHint : null,
-      slot: typeof row.slot === "string" ? row.slot : null,
-      activeSteer: typeof row.activeSteer === "string" ? row.activeSteer : null,
-      advisor: row.advisor === true,
+      slot: typeof row.slot === "string" && /^[A-Z]$/i.test(row.slot) ? row.slot : null,
     });
   }
   return rows;
 }
 
-/** The resume reason of a row, or null for plain cold rows. */
-export function resumeReasonOf(row: AttentionRow): NeedsResumeReason | null {
-  return row.reason === "daemon-restart" || row.reason === "limit" || row.reason === "failed"
-    ? row.reason
-    : null;
-}
-
-/** Short German reason label for pill titles ("Resume nötig · Neustart"). */
-export function resumeReasonLabel(reason: NeedsResumeReason): string {
-  if (reason === "daemon-restart") return "Neustart";
-  if (reason === "limit") return "Limit";
-  return "Fehler";
-}
-
-function resumeReasonSentence(reason: NeedsResumeReason): string {
-  if (reason === "daemon-restart") {
-    return "Paseo restarted; fetch the state back with Resume instead of continuing in a cold context.";
-  }
-  if (reason === "limit") {
-    return "An API limit stopped this steer; once it resets, Resume brings it back cleanly.";
-  }
-  return "The last turn failed; Resume saves the state and restarts the context.";
-}
-
-interface ColdSelf {
-  rows: ColdRow[] | null;
-  self: ColdRow | null;
-  autoDisabled: boolean;
-  autoDisabledReason: string | null;
-}
-
 /** Follows the server's cold list and picks the row for one agent. */
-function useColdSelf(agentId: string): ColdSelf {
-  const [rows, setRows] = useState<ColdRow[] | null>(null);
-  const [autoDisabled, setAutoDisabled] = useState(false);
-  const [autoDisabledReason, setAutoDisabledReason] = useState<string | null>(null);
-  const onEvent = useCallback((event: any) => {
-    setRows(attentionRowsOf(event));
-    setAutoDisabled(event?.autoDisabled === true);
-    setAutoDisabledReason(
-      typeof event?.autoDisabledReason === "string" ? event.autoDisabledReason : null,
-    );
-  }, []);
+function useColdSelf(agentId: string): AttentionRow | null | undefined {
+  const [self, setSelf] = useState<AttentionRow | null>();
+  const onEvent = useCallback((event: unknown) => {
+    setSelf(attentionRowsOf(event).find((row) => row.agentId === agentId) ?? null);
+  }, [agentId]);
   useSubscription(factoryCold, NO_INPUT, onEvent);
-  const self = useMemo(
-    () => (rows ?? []).find((row) => row.agentId === agentId) ?? null,
-    [rows, agentId],
-  );
-  return { rows, self, autoDisabled, autoDisabledReason };
+  return self;
 }
 
 function useColdStyles(theme: PluginHostProps["theme"], compact: boolean) {
   return useMemo(
     () => ({
       screen: { padding: 8, gap: 6 },
-      inner: { gap: 6 },
       title: { color: theme.colors.foreground, fontSize: compact ? 15 : 16 },
-      body: { color: theme.colors.foreground, fontSize: 14 },
       muted: { color: theme.colors.foregroundMuted, fontSize: 13 },
-      warn: { color: theme.colors.statusWarning, fontSize: 13 },
     }),
     [theme, compact],
   );
@@ -143,74 +86,48 @@ function ColdBody({
   workspaceId,
   theme,
   compact,
+  close,
 }: {
   agentId: string;
   workspaceId: string;
   theme: PluginHostProps["theme"];
   compact: boolean;
+  close?: () => void;
 }) {
   const styles = useColdStyles(theme, compact);
-  const { rows, self, autoDisabled, autoDisabledReason } = useColdSelf(agentId);
-  if (!rows) {
+  const self = useColdSelf(agentId);
+  const agent = useAgent(agentId, ({ provider, model, status }) => ({ provider, model, status }));
+  const cleanup = useSettings(factoryCleanupSettings);
+  if (self === undefined) {
     return (
       <View style={styles.screen}>
-        <Text style={styles.muted}>Checking context…</Text>
+        <Text style={styles.muted}>Kontext wird geprüft…</Text>
       </View>
     );
   }
-  const needsResume = self ? resumeReasonOf(self) : null;
-  const fresh = self && !needsResume ? self.freshHint : null;
-  const reminder =
-    self && needsResume
-      ? resumeReminderText({
-          reasonLabel: resumeReasonLabel(needsResume),
-          canFresh: self.canFresh,
-          advisor: self.advisor,
-          activeSteer: self.activeSteer,
-        })
-      : null;
+  const ttlMinutes = CACHE_GROUPS[groupForProviderModel(agent?.provider, agent?.model)].ttlMinutes;
+  const minTokens = cleanup.status === "ready"
+    ? cleanup.values.minContextTokens
+    : CLEANUP_DEFAULTS.minContextTokens;
+  const action = contextActionFor(self, { ttlMinutes, minContextTokens: minTokens });
   return (
     <View style={styles.screen}>
-      {self ? (
-        <View style={styles.inner}>
-          <Text style={styles.title}>
-            {reminder
-              ? reminder.title
-              : fresh
-                ? freshHintText(self.contextTokens, self.idleMinutes * 60_000)
-                : coldHintText(self.contextTokens, self.idleMinutes * 60_000)}
-          </Text>
-          <Text style={styles.muted}>
-            {needsResume && reminder
-              ? reminder.body
-                ? `${reminder.body} ${resumeReasonSentence(needsResume)}`
-                : resumeReasonSentence(needsResume)
-              : fresh
-                ? `Fresh recommended (${fresh}). Read the brief, hand over to a fresh agent, or reopen the saved history.`
-                : `Idle ${self.idleMinutes}m with a large context. Read the brief, hand over to a fresh agent, or reopen the saved history.`}
-          </Text>
-          <ColdActions
-            agentId={agentId}
-            workspaceId={workspaceId}
-            canFresh={self.canFresh}
-            slot={self.advisor ? null : self.slot}
-            hasHistory={self.hasHistory}
-            needsResume={needsResume}
-            takeover={needsResume !== null && !self.canFresh && !self.advisor}
-            theme={theme}
-            compact={compact}
-          />
-        </View>
-      ) : (
-        <Text style={styles.muted}>Context warm. Nothing to clean.</Text>
-      )}
-      {autoDisabled ? (
-        <Text style={styles.warn}>
-          Automatic cleanup is off
-          {autoDisabledReason ? `: ${autoDisabledReason}` : ""}. Change the cleanup mode setting to
-          probe again.
+      {self ? <Text style={styles.title}>{attentionStatus(self)}</Text> : null}
+      {self?.reason === "limit" ? (
+        <Text style={styles.muted}>
+          Warte, bis wieder Kontingent verfügbar ist.
         </Text>
       ) : null}
+      <ColdActions
+        agentId={agentId}
+        workspaceId={self?.workspaceId ?? workspaceId}
+        action={action}
+        slot={self?.slot}
+        hasHistory={self?.hasHistory}
+        running={agent?.status === "running" || agent?.status === "initializing"}
+        theme={theme}
+        close={close}
+      />
     </View>
   );
 }
@@ -219,21 +136,22 @@ function ColdBody({
 export function FactoryColdPanel({ agentId, workspaceId, theme, layout }: PluginAgentPanelProps) {
   return (
     <ScrollView>
-      <ColdBody agentId={agentId} workspaceId={workspaceId} theme={theme} compact={layout.compact} />
+      <ColdBody key={agentId} agentId={agentId} workspaceId={workspaceId} theme={theme} compact={layout.compact} />
     </ScrollView>
   );
 }
 
 /** Composer pill popover content; the pill itself is managed by the entry. */
 export function FactoryColdPillContent(props: PluginButtonContentProps) {
-  // Pills always carry the agent context; anything else renders the warm line.
-  const agentId = props.context === "agent" ? props.agentId : "";
+  if (props.context !== "agent") return null;
   return (
     <ColdBody
-      agentId={agentId}
+      key={props.agentId}
+      agentId={props.agentId}
       workspaceId={props.workspaceId}
       theme={props.theme}
       compact={props.layout.compact}
+      close={props.close}
     />
   );
 }

@@ -684,11 +684,14 @@ test("server entry registers resume RPC, attention feed, and F4 wiring", () => {
 
 test("client stub is replaced by the shared contracts", () => {
   assert.equal(existsSync(new URL("../client/resume-contract.ts", import.meta.url)), false);
-  for (const file of ["factory-submit.ts", "factory-store.ts", "cold-actions.tsx", "factory-panel.tsx"]) {
+  for (const file of ["factory-submit.ts", "factory-store.ts", "factory-panel.tsx"]) {
     const source = readFileSync(new URL(`../client/${file}`, import.meta.url), "utf8");
     assert.ok(!source.includes("resume-contract"), `${file} no longer imports the stub`);
     assert.ok(source.includes("factoryResumeApply"), `${file} uses the shared contract`);
   }
+  const actions = readFileSync(new URL("../client/cold-actions.tsx", import.meta.url), "utf8");
+  assert.ok(!actions.includes("factoryResumeApply"), "attention does not send a brief to an uncleared session");
+  assert.ok(actions.includes("factoryFreshPreview"), "attention prepares the same-tab refresh");
 });
 
 // ---------------------------------------------------------------------------

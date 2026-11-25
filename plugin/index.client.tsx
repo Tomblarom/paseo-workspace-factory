@@ -8,8 +8,6 @@ import {
   FactoryColdPanel,
   FactoryColdPillContent,
   attentionRowsOf,
-  resumeReasonLabel,
-  resumeReasonOf,
 } from "./client/cold-panel.js";
 import { CheckpointShort, checkpointShortSchema } from "./client/checkpoint-short.js";
 import {
@@ -22,8 +20,8 @@ import { submitFactoryCommand } from "./client/factory-submit.js";
 import { dismissFactoryResultPill, showFactoryResultPill } from "./client/result-pill.js";
 import { FactorySettings } from "./client/settings-factory.js";
 import { assertSteerContext } from "./shared/agent-guard.js";
+import { attentionStatus } from "./shared/context-continuation.js";
 import { factoryCold } from "./shared/factory.js";
-import { coldHintText, freshHintText, resumeReminderText } from "./shared/idle-cleanup.js";
 
 const SETTINGS_SCREEN_ID = "factory-settings";
 
@@ -76,37 +74,22 @@ export default function contribute(client: PluginClientContext) {
       }
     },
   });
-  // Attention composer pills: one pill per flagged factory agent, driven by
-  // the server's attention feed (factory.cold until R-A renames it). A steer
-  // that needs resume takes over the C6 cold pill instead of adding a second;
-  // a stored fresh recommendation relabels it (never above resume).
+  // One pill per agent, with the same reason shown inside the popover.
   const attentionPills = new Map<string, PluginButtonRegistration>();
   const attentionFeed = client.subscribe(
     factoryCold,
     {},
     (event) => {
-      const rows = attentionRowsOf(event as any);
+      const rows = attentionRowsOf(event);
       const seen = new Set<string>();
       for (const row of rows) {
         seen.add(row.agentId);
-        const reason = resumeReasonOf(row);
-        const fresh = !reason ? row.freshHint : null;
-        const title = reason ? "Resume nötig" : fresh ? "Fresh empfohlen" : "Kontext kalt";
-        const label = reason
-          ? resumeReminderText({
-              reasonLabel: resumeReasonLabel(reason),
-              canFresh: row.canFresh,
-              advisor: row.advisor,
-              activeSteer: row.activeSteer,
-            }).pill
-          : fresh
-            ? freshHintText(row.contextTokens ?? 0, (row.idleMinutes ?? 0) * 60_000)
-            : coldHintText(row.contextTokens ?? 0, (row.idleMinutes ?? 0) * 60_000);
-        const icon = reason ? "RotateCcw" : "Snowflake";
+        const title = attentionStatus(row);
+        const icon = row.reason && row.reason !== "cold" ? "RotateCcw" : "Snowflake";
         const known = attentionPills.get(row.agentId);
         if (known) {
           try {
-            known.update({ title, label, icon });
+            known.update({ title, icon });
           } catch {
             // The composer went away; the next event re-adds the pill.
             attentionPills.delete(row.agentId);
@@ -122,7 +105,6 @@ export default function contribute(client: PluginClientContext) {
               agentId: row.agentId,
               button: {
                 title,
-                label,
                 icon,
                 behavior: { kind: "popover", Content: FactoryColdPillContent },
               },

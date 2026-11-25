@@ -134,11 +134,15 @@ Rewind execution (opt-in): with the `rewindFresh` cleanup setting on (default of
 
 ## C6 Cold hint (manual)
 
-Composer pill on factory agents that are cold (idle ≥ `idleMinutes`, context ≥ `minContextTokens`) and not handled by C5: "Cold · 350k" with actions "Clear + resume" (sends `/clear`), "Fresh" (opens the `fresh` preview), "Dismiss".
+The composer pill and **Factory: Kontext** panel show the reason the chat needs attention, for example **Kontext kalt · seit 2 h inaktiv**, **Paseo wurde neu gestartet**, or **Nutzungslimit erreicht**. Both surfaces offer the same action.
+
+- **Weiterschreiben** puts the cursor in the existing chat without sending a message. It is offered when there is no refresh signal or when a failed turn or limit leaves a recent, small context.
+- **Kontext auffrischen** prepares a shorter conversation from the saved work brief. The confirmation explains which visible history will disappear before the agent starts a turn. The same-tab action is offered for steers. If the tab cannot be refreshed safely, the panel explains that the action is unavailable.
+- **Gespeicherten Verlauf in neuem Tab öffnen** appears when an earlier session was saved. It opens that conversation for reference without starting a turn.
 
 ## R — `/factory resume` as the restart path
 
-A steer that hangs after a daemon restart, a crash, a provider limit, or a cold context must not re-read its old chat and must not lose its tab. `/factory resume`, typed in the steer's own tab, saves the state, clears the context of the same agent (same id, same tab, same name), and then sends it the resume brief from the main workspace. A visible pill asks the user to do this as soon as a steer needs it.
+`/factory resume`, typed in the steer's own tab, saves the state and sends a work brief from the main workspace. On providers configured for native clearing, it first clears the context of the same agent (same id, same tab, same name). For the recommended action after an interruption, open the composer pill or **Factory: Kontext** panel.
 
 ### Scope (E3)
 
@@ -177,11 +181,11 @@ Setting `resumeClear.providers`, default `["claude"]` (native `/clear` is verifi
 
 New field `wsf.agents[id].needsResume = {reason, at}`, reasons `daemon-restart | limit | failed | cold` (`cold` comes from the existing C6 feed and gets no pill of its own). It is set by the boot check (steers that were `closed` or had an interrupted turn) and by the turn-hook on `failed` (limit/quota pattern in the failure text → `limit`, else `failed`), and cleared on verified resume or a successful normal turn.
 
-- Composer pill on the affected steer, driven by the existing `factoryCold` feed, extended to `factoryAttention` (rows with `reason`; one pill map, never two pills). Labels: "Resume nötig · Neustart", "… · Limit", "… · Fehler"; icon `RotateCcw`; popover with one sentence and a "Resume jetzt" button (same RPC as `/factory resume`). When the C6 pill is active, the stronger reason replaces the label.
+- The affected steer gets one composer pill driven by the attention feed. A restart, usage limit, or failed turn takes precedence in the label. The action also considers context age, size, and any saved refresh recommendation.
 - After a daemon restart or a limit, every steer of a labelled scope whose last turn ended within `recentHours` (default 24) shows the pill, not only the last active one. Advisors only with an open turn, as before.
-- Pill matrix: the active steer keeps "Resume nötig · Neustart/Limit/Fehler". Any other recently active steer shows "Zuletzt steuerte Steer X. Du kannst hier weitermachen; dieser Steer wird dann zum steuernden." Its button (and `/factory resume` in that tab) performs resume AND takeover (self-takeover `switch --to <own slot> --apply`), so afterwards this steer is the controlling one. Advisor steers keep the active text and never take over.
+- The pill applies the same continuation choice to active, inactive and advisor steers. A non-active steer can take over through the explicit `/factory resume` command in its own tab. Advisor steers cannot take over.
 - Factory sidebar item with a counter "n steers need resume" (existing sidebar element; no panel badge). The counter counts only the active steer; non-active reminders do not count as urgent.
-- A toast alone is not enough (no toast API in the onSubmit context except thrown errors, and toasts disappear). The pill stays until the resume. Normal chatting is not blocked (no API, and not wanted).
+- The pill is visible while the attention feed reports a reason. The regular composer remains available.
 
 ## Same-tab refresh via rewind
 
