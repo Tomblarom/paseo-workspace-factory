@@ -1,3 +1,4 @@
+import { readSteerAction } from "./factory/steer-action.js";
 // Host-wide steer-state feed (docs/design/steer-menu.md, step 1): one small
 // projection per known steer tab for the persistent composer pill (the pill
 // itself subscribes in step 2). Read-only: local metadata reads plus the
@@ -289,8 +290,7 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
       active: slot !== null && slot === reads.activeSteer,
       permissionNeeded,
       stagedBrief:
-        typeof asRecord(entry?.stagedBrief)?.packet === "string" &&
-        ((asRecord(entry?.stagedBrief)?.packet as string).trim() !== ""),
+        readSteerAction(entry, reads.mainId)?.phase === "staged",
       successor: contLive ?? (superseded ? uniqueHolder : null),
       state: projection.state,
       warmth: projection.warmth,

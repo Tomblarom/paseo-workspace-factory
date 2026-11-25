@@ -598,7 +598,7 @@ test("sendScopeWake auto-resumes a flagged steer instead of the wake text", asyn
   const entry = world.workspaces[0].metadata[WORKERS_KEY][workerId];
   assert.equal(entry.lastWakeAt, null, "not delivered until the brief succeeds");
   assert.deepEqual(entry.pendingWake, { state: "done", queuedAt: at(NOW) });
-  const pending = world.workspaces[0].metadata[AGENTS_KEY][steerA.id].pendingWakeBrief;
+  const pending = world.workspaces[0].metadata[AGENTS_KEY][steerA.id].action;
   assert.ok(pending?.wakeId, "pending wake brief staged");
   assert.equal(pending.batch.events.length, 1);
   assert.match(pending.note, new RegExp(`worker ${workerId} done`));

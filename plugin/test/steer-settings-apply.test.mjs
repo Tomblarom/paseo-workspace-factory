@@ -529,7 +529,7 @@ test("a bound refresh rewinds, applies, verifies and stages the brief", async ()
   assert.deepEqual(sendsTo(world, steer.id), []);
   const entry = entryOf(world, ws.id, steer.id);
   assert.equal(entry.cleared?.mode, "rewind");
-  assert.equal(entry.stagedBrief?.packet, "BRIEF");
+  assert.equal(entry.action?.packet, "BRIEF");
   assert.equal(entry.settingsBaseline.thinking, "low");
 });
 
@@ -552,7 +552,7 @@ test("a bound refresh that cannot rewind fails without a new agent and keeps the
   // No config write, no send, no new agent: the brief is staged for retry.
   assert.ok(!world.calls.some((c) => String(c[0]).startsWith("setAgent")));
   assert.deepEqual(sendsTo(world, steer.id), []);
-  assert.equal(entryOf(world, ws.id, steer.id).stagedBrief?.packet, "BRIEF");
+  assert.equal(entryOf(world, ws.id, steer.id).action?.packet, "BRIEF");
 });
 
 test("an unsupported rewind fails the same bound way", async () => {
@@ -571,7 +571,7 @@ test("an unsupported rewind fails the same bound way", async () => {
     }, depsOf({ configClient: configClientFor(world), rewindClient: rewindClientFor(world, { outcome: "unsupported" }) })),
     /Bound rewind route failed \(unsupported/,
   );
-  assert.equal(entryOf(world, ws.id, steer.id).stagedBrief?.packet, "BRIEF");
+  assert.equal(entryOf(world, ws.id, steer.id).action?.packet, "BRIEF");
 });
 
 // ---------------------------------------------------------------------------

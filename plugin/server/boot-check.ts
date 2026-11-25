@@ -5,6 +5,7 @@
 // the daemon start becomes an interrupted record with reason "daemon-restart"
 // (C2 shape plus reason) and clears the open fields, so a second plugin start
 // finds nothing to mark. Never throws out of ensureBootChecked.
+import { actionEntry } from "./factory/steer-action.js";
 import { execFileSync } from "node:child_process";
 import { LEGACY_PREFIX, METADATA_KEY, paseoBinary, readPaseoState } from "./factory/paseo.js";
 import { listScopes } from "./factory/scope.js";
@@ -387,11 +388,8 @@ export async function runBootCheck({
         if (!queued || queued.phase !== "renewing" ||
             !(Date.parse(queued.queuedAt) < Date.parse(daemonStartedAt))) continue;
         const pendingAction = asRecord(entry?.pendingAction);
-        nextAgents[agentId] = {
-          ...entry,
-          ...(pendingAction?.reason === RESUME_PENDING_REASON ? { pendingAction: null } : {}),
-          pendingWakeBrief: { ...queued, phase: "blocked", lastError: "Paseo restarted before context renewal was confirmed. Retry recovery or use Fresh." },
-        };
+        nextAgents[agentId] = actionEntry({ ...entry, ...(pendingAction?.reason === RESUME_PENDING_REASON ? { pendingAction: null } : {}) },
+          { ...queued, phase: "blocked", lastError: "Paseo restarted before context renewal was confirmed. Retry recovery or use Fresh." });
         renewalsInterrupted += 1;
       }
       staleTotal += staleRemoved;

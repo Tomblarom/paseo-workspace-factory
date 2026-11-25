@@ -1,3 +1,4 @@
+import { readSteerAction } from "./factory/steer-action.js";
 import { cacheTtlForAgent } from "../shared/cache-profiles.js";
 import { type CleanupSettings } from "../shared/idle-cleanup.js";
 import { normalizeModel, normalizeProvider, normalizeThinking, speedOfLiveOptions, tupleFromLive, tuplesEqual } from "../shared/steer-settings.js";
@@ -39,12 +40,12 @@ export function agentContextInputs(
   nowMs: number,
   providers: any[] = [],
 ) {
-  const pendingDelivery = asRecord(entry?.pendingWakeBrief);
+  const pendingDelivery = asRecord(readSteerAction(entry, ""));
   const deliveryPhase = pendingDelivery?.phase ??
     (pendingDelivery ? entry?.pendingAction ? "renewing" : entry?.actionVerified === true ? "ready" : "blocked" : null);
   const pendingOperation = entry?.pendingAction != null ||
-    deliveryPhase === "renewing" || deliveryPhase === "ready" || deliveryPhase === "sent";
-  const resumeFallback = deliveryPhase === "blocked"
+    deliveryPhase === "renewing" || deliveryPhase === "ready" || deliveryPhase === "sent" || deliveryPhase === "uncertain" || deliveryPhase === "reserved";
+  const resumeFallback = deliveryPhase === "blocked" || deliveryPhase === "uncertain"
     ? typeof pendingDelivery?.lastError === "string" ? pendingDelivery.lastError : "Context renewal needs attention."
     : null;
   const lastTurnEndedAt =

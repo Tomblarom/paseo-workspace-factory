@@ -82,8 +82,10 @@ function fakeClient(world) {
 const noLock = (_name, fn) => fn({ verify() {} });
 const sendsTo = (world, id) =>
   world.calls.filter((c) => c[0] === "agent.send" && c[1] === id).map((c) => c[2]);
-const stagedOf = (world, wsId, agentId) =>
-  world.workspaces.find((w) => w.id === wsId).metadata[AGENTS_KEY]?.[agentId]?.stagedBrief ?? null;
+const stagedOf = (world, wsId, agentId) => {
+  const action = world.workspaces.find((w) => w.id === wsId).metadata[AGENTS_KEY]?.[agentId]?.action;
+  return action?.phase === "staged" ? { packet: action.packet, at: action.at, kind: action.stageKind } : null;
+};
 
 function provisioned(world) {
   const ws = addWorkspace(world, {
@@ -245,75 +247,39 @@ test("dismiss drops the packet without sending", async () => {
   assert.equal(after.delivered, false);
 });
 
-test("a failed send restores the packet, so the retry stays available", async () => {
+test("a lost acknowledgement keeps the attempted packet and message ID", async () => {
   const world = makeWorld();
   const { ws, steer } = provisioned(world);
   const paseo = fakeClient(world);
-  await briefs.stageSteerBrief(
-    paseo,
-    { workspaceId: ws.id, agentId: steer.id, packet: "PACKET", kind: "fresh" },
-    { lock: noLock },
-  );
-  world.sendFails = true;
-  await assert.rejects(
-    briefs.deliverSteerBrief(paseo, { workspaceId: ws.id, agentId: steer.id, action: "send" }, { lock: noLock }),
-    /still staged/,
-  );
-  assert.equal(stagedOf(world, ws.id, steer.id)?.packet, "PACKET");
-  world.sendFails = false;
-  const retry = await briefs.deliverSteerBrief(
-    paseo,
-    { workspaceId: ws.id, agentId: steer.id, action: "send" },
-    { lock: noLock },
-  );
-  assert.equal(retry.delivered, true);
-  assert.deepEqual(sendsTo(world, steer.id), ["PACKET", "PACKET"]);
+  const original = paseo.agents.ref;
+  const receipts = new Map();
+  const requests = [];
+  paseo.agents.ref = (id) => ({ ...original(id), send: async (text, options) => {
+    requests.push({ text, options });
+    if (receipts.has(options.messageId)) return;
+    receipts.set(options.messageId, text);
+    throw new Error("acknowledgement lost");
+  } });
+  await briefs.stageSteerBrief(paseo, { workspaceId: ws.id, agentId: steer.id, packet: "PACKET", kind: "fresh" }, { lock: noLock });
+  const result = await briefs.deliverSteerBrief(paseo, { workspaceId: ws.id, agentId: steer.id, action: "send" }, { lock: noLock });
+  assert.equal(result.delivered, false);
+  assert.match(result.detail, /uncertain/i);
+  assert.equal(ws.metadata[AGENTS_KEY][steer.id].action.phase, "uncertain");
+  const { finishSteerDelivery } = await import("../server/steer-delivery.ts");
+  assert.equal((await finishSteerDelivery(paseo, { workspaceId: ws.id, agentId: steer.id }, { lock: noLock })).status, "sent");
+  assert.deepEqual(requests[0], requests[1]);
+  assert.equal(receipts.size, 1);
 });
 
-test("the restore keeps a newer concurrent stage", async () => {
+test("a pending delivery prevents a different staged packet from replacing it", async () => {
   const world = makeWorld();
   const { ws, steer } = provisioned(world);
-  const inner = fakeClient(world);
-  let staged = false;
-  const paseo = {
-    ...inner,
-    agents: {
-      ...inner.agents,
-      ref: (id) => ({
-        ...inner.agents.ref(id),
-        send: async (text) => {
-          // A concurrent stage lands while the first send is in flight.
-          if (!staged) {
-            staged = true;
-            await briefs.stageSteerBrief(
-              inner,
-              { workspaceId: ws.id, agentId: steer.id, packet: "NEWER", kind: "switch" },
-              { lock: noLock },
-            );
-          }
-          world.calls.push(["agent.send", id, text]);
-          throw new Error("agent unreachable");
-        },
-      }),
-    },
-  };
-  await briefs.stageSteerBrief(
-    inner,
-    { workspaceId: ws.id, agentId: steer.id, packet: "OLDER", kind: "switch" },
-    { lock: noLock },
-  );
-  await assert.rejects(
-    briefs.deliverSteerBrief(paseo, { workspaceId: ws.id, agentId: steer.id, action: "send" }, { lock: noLock }),
-    /still staged/,
-  );
-  assert.equal(stagedOf(world, ws.id, steer.id)?.packet, "NEWER");
-  const retry = await briefs.deliverSteerBrief(
-    inner,
-    { workspaceId: ws.id, agentId: steer.id, action: "send" },
-    { lock: noLock },
-  );
-  assert.equal(retry.delivered, true);
-  assert.deepEqual(sendsTo(world, steer.id), ["OLDER", "NEWER"]);
+  const paseo = fakeClient(world);
+  await briefs.stageSteerBrief(paseo, { workspaceId: ws.id, agentId: steer.id, packet: "OLDER", kind: "switch" }, { lock: noLock });
+  world.sendFails = true;
+  await briefs.deliverSteerBrief(paseo, { workspaceId: ws.id, agentId: steer.id, action: "send" }, { lock: noLock });
+  await assert.rejects(briefs.stageSteerBrief(paseo, { workspaceId: ws.id, agentId: steer.id, packet: "NEWER", kind: "switch" }, { lock: noLock }), /pending/);
+  assert.equal(ws.metadata[AGENTS_KEY][steer.id].action.packet, "OLDER");
 });
 
 test("deliver refuses unknown agents and non-steers", async () => {
@@ -333,4 +299,20 @@ test("deliver refuses unknown agents and non-steers", async () => {
     briefs.deliverSteerBrief(paseo, { workspaceId: ws.id, agentId: worker.id, action: "send" }, { lock: noLock }),
     /only for steers/,
   );
+});
+
+test("a busy steer retains the requested staged action for recovery", async () => {
+  const world = makeWorld();
+  const { ws, steer } = provisioned(world);
+  const paseo = fakeClient(world);
+  await briefs.stageSteerBrief(paseo, { workspaceId: ws.id, agentId: steer.id, packet: "STAGED", kind: "fresh" }, { lock: noLock });
+  steer.status = "running";
+  const result = await briefs.deliverSteerBrief(paseo, { workspaceId: ws.id, agentId: steer.id, action: "send" }, { lock: noLock });
+  assert.equal(result.delivered, false);
+  assert.equal(ws.metadata[AGENTS_KEY][steer.id].action.phase, "reserved");
+  assert.equal(ws.metadata[AGENTS_KEY][steer.id].action.packet, "STAGED");
+  steer.status = "idle";
+  const { finishSteerDelivery } = await import("../server/steer-delivery.ts");
+  assert.equal((await finishSteerDelivery(paseo, { workspaceId: ws.id, agentId: steer.id }, { lock: noLock })).status, "sent");
+  assert.deepEqual(sendsTo(world, steer.id), ["STAGED"]);
 });

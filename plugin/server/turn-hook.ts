@@ -522,7 +522,10 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
           merged.cleared = prev.cleared ?? null;
           merged.actionVerified = null;
         }
-        merged.pendingWakeBrief = readyDelivery
+        delete merged.pendingWakeBrief;
+        delete merged.stagedBrief;
+        delete merged.lastSteerDeliveryId;
+        merged.action = readyDelivery
           ? { ...queued, phase: "ready" }
           : { ...queued, phase: "blocked", lastError: "Claude context clear could not be confirmed. Retry recovery or use Fresh." };
       }

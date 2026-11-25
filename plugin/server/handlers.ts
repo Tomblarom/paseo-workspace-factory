@@ -907,6 +907,7 @@ export async function applySwitch(
     toSlot: to,
     apply: true,
     send: input.deliver !== "stage",
+    stage: input.deliver === "stage",
     notifyPrevious: input.notifyPrevious === true,
     git,
     paseoCli: createPaseoCli(),
@@ -915,6 +916,7 @@ export async function applySwitch(
     }),
   };
   const applied: any = await switchSteer(applyOptions);
+  if (applied.applied && input.deliver === "stage") return { ...applied, staged: true, stagedTo: applied.toId, stagingError: null };
   if (!applied.applied || applied.deliveryPending || applied.deliveryBlocked) return applied;
   return {
     ...applied,

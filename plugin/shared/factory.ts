@@ -153,6 +153,7 @@ export const factorySteerDelivery = defineRpc({
     epoch: z.number().int(),
     text: z.string().min(1),
     renewalNote: z.string().optional(),
+    actionId: z.string().optional(),
   }),
   output: z.object({
     status: z.enum(["sent", "pending", "blocked"]),

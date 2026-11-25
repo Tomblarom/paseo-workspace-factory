@@ -356,3 +356,19 @@ test('dry runs carry the confirmation binding fields', async () => {
   assert.equal(fresh.model, 'gpt-6.2-sol');
   assert.equal(fresh.checkpointAt, '2026-11-25T10:00:00.000Z');
 });
+
+test('switch commits the target handoff intent in the epoch write before delivery', async () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  const result = await switchSteer({
+    client: fakeClient(world), discovery: discoveryOf(world), toSlot: 'B', apply: true,
+    lock: testLock, config: CONFIG, language: 'en',
+    deliverSteer: async () => { throw new Error('connection lost after epoch commit'); },
+  });
+  const write = world.calls.find(([op, , patch]) => op === 'workspace.setMetadata' && patch[METADATA_KEY]?.epoch === 2);
+  assert.equal(write[2]['wsf.agents'][steers.B.id].action.phase, 'reserved');
+  assert.equal(write[2]['wsf.agents'][steers.B.id].action.packet, result.packet);
+  assert.equal(ws.metadata['wsf.agents'][steers.B.id].action.phase, 'reserved');
+  assert.match(result.deliveryError, /connection lost/);
+  assert.equal(sendsTo(world, steers.B.id).length, 0);
+});

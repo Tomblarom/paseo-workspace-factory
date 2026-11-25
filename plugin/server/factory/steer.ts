@@ -28,6 +28,7 @@ import { SUPERVISION_DEFAULTS, WORKERS_KEY, failoverChain, openWorkers as openRe
 import { QUOTA_DEFAULTS, accountExhausted, accountForAgent, formatQuotaLine, freshMaxUsedPct, profilePool } from './quota.js';
 import { readRewindPoint, rewindAndBrief } from './rewind.js';
 import { findingsPassage } from './findings.js';
+import { readSteerAction, actionEntry, newSteerAction, reconcileSteerSend } from './steer-action.js';
 
 export const CHECKPOINT_KEY = `${METADATA_KEY}.checkpoint`;
 export class SwitchRefused extends Error {}
@@ -883,8 +884,8 @@ async function waitForSwitchDelivery(workspace, agentId, deliveryId, epoch, dead
     const meta = (await workspace.refresh())?.metadata ?? {};
     if (meta[METADATA_KEY]?.epoch !== epoch) return 'The scope moved before the handoff brief arrived.';
     const entry = meta[AGENTS_KEY]?.[agentId];
-    if (entry?.lastSteerDeliveryId === deliveryId) return null;
-    const pending = entry?.pendingWakeBrief;
+    const pending = readSteerAction(entry, workspace.id);
+    if ((pending?.wakeId === deliveryId && (pending.phase === 'sent' || pending.phase === 'done')) || pending?.lastDeliveryId === deliveryId) return null;
     if (pending?.wakeId !== deliveryId) return 'The queued handoff brief could no longer be found.';
     if (pending.phase === 'blocked') return pending.lastError ?? 'Handoff context renewal needs attention.';
     await delay(Math.min(250, Math.max(0, deadline - Date.now())));
@@ -897,7 +898,7 @@ async function waitForSwitchDelivery(workspace, agentId, deliveryId, epoch, dead
  * re-read, check the expected epoch and active steer, write, read back, release;
  * the handoff is delivered after the lock is released.
  */
-export async function switchSteer({ client, discovery, toSlot, apply = false, send = true, wait = false, waitTimeoutMs = 600_000, notifyPrevious = false, language = runtime().handoffLanguage, git, lock = withLock, now = () => new Date(), config = null, workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, zerosub = null, callerId = null, paseoCli = null, promptOptions, deliverSteer = null }) {
+export async function switchSteer({ client, discovery, toSlot, apply = false, send = true, wait = false, waitTimeoutMs = 600_000, notifyPrevious = false, language = runtime().handoffLanguage, git, lock = withLock, now = () => new Date(), config = null, workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, zerosub = null, callerId = null, paseoCli = null, promptOptions, deliverSteer = null, stage = false }) {
   const status = steerStatus(discovery);
   if (!status.workspace || !status.state) throw new SwitchRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
@@ -941,8 +942,9 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
   if (!apply) return result;
 
   const workspace = client.workspaces.ref(status.workspace.id);
+  let switchAction = null;
   await lock(workspaceLockName(status.workspace.id), async (held) => {
-    const { state: fresh, holder, agents } = await guardSteerScope({ client, held, workspaceId: status.workspace.id, scopeId: expected.scope?.id ?? status.repo, epoch: expected.epoch, agentId: from?.id, aliases: discoveryScopeAliases(discovery), config });
+    const { metadata, state: fresh, holder, agents } = await guardSteerScope({ client, held, workspaceId: status.workspace.id, scopeId: expected.scope?.id ?? status.repo, epoch: expected.epoch, agentId: from?.id, aliases: discoveryScopeAliases(discovery), config });
     if (BUSY.has(holder.status) || holder.activeTurn) throw new SwitchRefused(`Active Steer ${from.slot} is running; stop it or wait for its turn to end first`);
     const liveTarget = scopeHolder({ agents, workspaceId: status.workspace.id, scopeId: expected.scope?.id ?? status.repo, slot: toSlot, aliases: discoveryScopeAliases(discovery) });
     if (liveTarget.id !== to.id || (!selfTakeover && (BUSY.has(liveTarget.status) || liveTarget.activeTurn))) throw new SwitchRefused(`Steer ${toSlot} changed or is running; rerun the switch`);
@@ -950,8 +952,20 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
       if (callerId !== from?.id) throw new SwitchRefused('Only the active steer or the takeover target may request this switch');
     }
     const next = { ...fresh, activeSteer: toSlot, activeAgentId: to.id, epoch: fresh.epoch + 1, previousSteer: fresh.activeSteer, switchedAt: now().toISOString() };
-    held.verify(); // the lock file must still be the locked inode right before the write
-    await workspace.setMetadata({ [METADATA_KEY]: next });
+    const entries = metadata[AGENTS_KEY] ?? {};
+    if (!selfTakeover && (send || stage)) {
+      const prior = readSteerAction(entries[to.id], status.workspace.id);
+      if (prior && prior.phase !== 'done') throw new SwitchRefused('Target has a pending steer delivery; finish it before switching');
+      switchAction = newSteerAction({ kind: stage ? 'stage' : 'switch', epoch: next.epoch, at: next.switchedAt,
+        text: packet, note: `Handoff from Steer ${fromInfo.slot} to Steer ${toSlot} in round ${next.epoch}.`, phase: stage ? 'staged' : 'reserved' });
+      switchAction.needsResumeAt = entries[to.id]?.needsResume?.at ?? null;
+      if (!stage) switchAction.authority = { scopeId: expected.scope?.id ?? status.repo, agentId: to.id };
+      if (prior?.phase === 'done') switchAction.lastDeliveryId = prior.wakeId;
+      else if (prior?.lastDeliveryId) switchAction.lastDeliveryId = prior.lastDeliveryId;
+      if (stage) switchAction.stageKind = 'switch';
+    }
+    held.verify(); // commit authority and delivery intent together
+    await workspace.setMetadata({ [METADATA_KEY]: next, ...(switchAction ? { [AGENTS_KEY]: { ...entries, [to.id]: actionEntry(entries[to.id], switchAction) } } : {}) });
     const written = (await workspace.refresh())?.metadata?.[METADATA_KEY];
     if (written?.epoch !== next.epoch || written?.activeSteer !== toSlot) throw new Error('Steer switch not verifiable after write');
   });
@@ -966,7 +980,7 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
     try {
       if (deliverSteer) {
         const outcome = await deliverSteer({
-          workspaceId: status.workspace.id, agentId: to.id, epoch: result.epoch, text: packet,
+          workspaceId: status.workspace.id, agentId: to.id, epoch: result.epoch, text: packet, actionId: switchAction.wakeId,
           renewalNote: `Handoff from Steer ${fromInfo.slot} to Steer ${toSlot} in round ${result.epoch}.`,
         });
         result.delivered = outcome.status === 'sent';
@@ -975,8 +989,12 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
         result.deliveryBlocked = outcome.status === 'blocked';
         if (result.deliveryBlocked) result.deliveryError = outcome.detail;
       } else {
-        await client.agents.ref(to.id).send(packet);
-        result.delivered = true;
+        await updateAgentEntry({ client, workspaceId: status.workspace.id, agentId: to.id, lock,
+          patch: (entry) => entry?.action?.wakeId === switchAction.wakeId ? { action: { ...entry.action, phase: 'ready' } } : null });
+        const outcome = await reconcileSteerSend({ client, workspaceId: status.workspace.id, agentId: to.id, actionId: switchAction.wakeId, lock });
+        result.delivered = outcome.status === 'sent';
+        result.deliveryPending = !result.delivered;
+        if (!result.delivered) result.deliveryError = outcome.detail ?? 'Handoff delivery is pending.';
       }
     } catch (error) {
       result.deliveryError = error.message; // switch stands; resend the packet manually
@@ -1057,11 +1075,14 @@ async function runTabRewind({ client, workspaceId, agentId, packet, checkpoint, 
   if (outcome.status !== 'rewound') return { outcome };
   await updateAgentEntry({
     client, workspaceId, agentId, lock,
-    patch: {
+    patch: (entry) => ({
       ...buildRewindRecord({ checkpoint, messageId: outcome.messageId ?? null, briefMessageId: outcome.briefMessageId ?? null, now }),
       pendingWakeBrief: null,
+      ...(entry?.action && !['done', 'staged'].includes(entry.action.phase) ? {
+        action: entry.action.attemptedAt ? { ...entry.action, phase: 'blocked', lastError: 'Context changed after an attempted delivery; its outcome needs attention.' } : null,
+      } : {}),
       ...(note ? { note, noteAt: checkpoint?.capturedAt ?? null } : {}),
-    },
+    }),
     liveIds: null,
   });
   return { outcome };

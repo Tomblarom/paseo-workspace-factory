@@ -44,7 +44,6 @@ const {
   failoverChain,
   formatWakeMessage,
   isBatchDue,
-  markWakeSent,
   openWorkers,
   planWake,
   queuePendingWake,
@@ -637,29 +636,6 @@ async function deliverScopeWake(paseo: any, args: ScopeWakeInput, deps: Supervis
   const escalation = escalationHintLine(overContinued);
   if (escalation) text = `${text}\n${escalation}`;
   if (!text) return { sent: false, reason: "no-text", target };
-  const markSent = async (): Promise<void> => {
-    const at = stampsOf(deps).nowIso;
-    for (const event of events) {
-      const current = register[event.workerId];
-      if (!current || typeof current !== "object") continue;
-      await updateWorkerEntry({
-        client: paseo,
-        workspaceId: mainId,
-        workerId: event.workerId,
-        patch: (entry: any, metadata: Record<string, unknown>) => {
-          if (!entry || wsfOf(metadata)?.epoch !== freshWsf.epoch) return null;
-          const queued = entry.pendingWake;
-          const original = current.pendingWake;
-          const marked = markWakeSent(entry, {
-            at,
-            clearPending: queued?.queuedAt === original?.queuedAt && queued?.state === original?.state,
-          });
-          return { lastWakeAt: marked.lastWakeAt, pendingWake: marked.pendingWake };
-        },
-        lock: lockOf(deps),
-      });
-    }
-  };
   const delivery = await deliverSteer(paseo, {
     workspaceId: mainId,
     agentId: target,
@@ -672,11 +648,7 @@ async function deliverScopeWake(paseo: any, args: ScopeWakeInput, deps: Supervis
   if (delivery.status !== "sent") {
     return { sent: false, reason: delivery.status === "blocked" ? "resume-refused" : "brief-pending", target };
   }
-  // Renewed deliveries mark their own batch after the brief is accepted.
-  if (delivery.renewed) return { sent: true, target, events: events.length, resumed: true };
-  await markSent();
-  log(`[factory] supervise: woke ${target} for ${scope.id} (${events.length} worker(s))`);
-  return { sent: true, target, events: events.length };
+  return { sent: true, target, events: events.length, ...(delivery.renewed ? { resumed: true } : {}) };
 }
 
 /**
@@ -1189,7 +1161,7 @@ export interface FailoverResult {
  */
 export async function logFailoverCheckpoint(
   paseo: any,
-  args: { mainId: string; expectedEpoch: unknown; previousSteer: string | null; reason: string },
+  args: { mainId: string; expectedEpoch: unknown; previousSteer: string | null; reason: string; observedAt?: string },
   deps: SuperviseDeps,
 ): Promise<boolean> {
   const log = logOf(deps);
@@ -1212,7 +1184,7 @@ export async function logFailoverCheckpoint(
         ...checkpoint,
         source: "failover",
         failover: { previousSteer: args.previousSteer, reason: args.reason },
-        updatedAt: stampsOf(deps).nowIso,
+        updatedAt: args.observedAt ?? stampsOf(deps).nowIso,
         epoch: wsf.epoch,
       },
     });
@@ -1227,14 +1199,14 @@ export async function recordTakeoverDelivery(
   if (!request) return false;
   const logged = await logFailoverCheckpoint(paseo, {
     mainId: batch.workspaceId, expectedEpoch: batch.epoch,
-    previousSteer: request.activeSlot, reason: request.reason,
+    previousSteer: request.activeSlot, reason: request.reason, observedAt: request.observedAt,
   }, deps);
   const previous = failoverAsked.get(request.scopeId);
   const asked = previous?.activeSlot === request.activeSlot ? previous.asked : [];
   failoverAsked.set(request.scopeId, {
     activeSlot: request.activeSlot,
     asked: [...new Set([...asked, agentId])],
-    updatedAt: stampsOf(deps).nowIso,
+    updatedAt: request.observedAt ?? stampsOf(deps).nowIso,
   });
   logOf(deps)(`[factory] supervise: failover for ${request.scopeId} → ${agentId} (${request.reason})`);
   return logged;
@@ -1415,21 +1387,7 @@ export async function runFailoverCheck(
   if (outcome.status !== "sent") {
     return { action: "wait", reason: outcome.status === "blocked" ? "resume-refused" : "brief-pending" };
   }
-  if (outcome.renewed) return { action: "failover", to: next };
-  for (const entry of open) {
-    await updateWorkerEntry({
-      client: paseo,
-      workspaceId: mainId,
-      workerId: entry.workerId,
-      patch: (current: any, source: Record<string, unknown>) => current && wsfOf(source)?.epoch === wsf.epoch
-        ? { lastWakeAt: nowIso } : null,
-      lock: lockOf(deps),
-    });
-  }
-  // Respect a completed rotation when all candidates have been asked.
-  failoverAsked.set(scope.id, { activeSlot, asked, updatedAt: nowIso });
-  const logged = await recordTakeoverDelivery(paseo, batch, next.steerId, deps);
-  return { action: "failover", to: next, logged };
+  return { action: "failover", to: next };
 }
 
 // ---------------------------------------------------------------------------

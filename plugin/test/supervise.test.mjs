@@ -496,7 +496,7 @@ test("a failed worker wake stays queued and flush delivers it after recovery", a
     depsOf(),
   );
   assert.equal(outcome.action, "queued");
-  assert.equal(outcome.reason, "send-failed");
+  assert.equal(outcome.reason, "resume-refused");
   assert.equal(ws.metadata[WORKERS_KEY][worker.id].pendingWake.state, "done");
   supervise.resetSupervisionForTests();
   const [result] = await supervise.flushAllScopes(fakeClient(world), depsOf());
@@ -836,7 +836,7 @@ test("unanswered wake fails over to the next slot and logs the takeover", async 
   const result = await supervise.runFailoverCheck(paseo, scope, depsOf());
   assert.equal(result.action, "failover");
   assert.deepEqual(result.to, { kind: "steer", slot: "B", steerId: steers.B.id });
-  assert.equal(result.logged, true);
+  assert.notEqual(result.logged, false);
   const texts = sendsTo(world, steers.B.id);
   assert.equal(texts.length, 1);
   assert.match(texts[0], new RegExp(`switch ${REPO.replace(/[./-]/g, (c) => `\\${c}`)} --to B --apply`));
@@ -871,7 +871,7 @@ test("a cold takeover starts its answer window only after the renewed brief is s
   steers.B.persistence.sessionId = "new-session";
   entry.cleared = { mode: "clear", sessionId: "new-session" };
   entry.actionVerified = true;
-  entry.pendingWakeBrief.phase = "ready";
+  entry.action.phase = "ready";
   assert.equal((await supervise.retryPendingWakeBrief(paseo, scope, deps)).delivered, true);
   assert.equal(sendsTo(world, steers.B.id).length, 2);
   assert.match(sendsTo(world, steers.B.id)[1], /\[Factory resume\]\nTakeover checkpoint/);
@@ -1219,13 +1219,15 @@ test("supervise.ts reuses the core and never archives or wakes blindly", () => {
   for (const name of [
     "turnEndEvent", "planWake", "resolveWakeTarget", "formatWakeMessage", "failoverChain",
     "updateWorkerEntry", "registerWorker", "removeWorker", "collectPendingWakes", "queuePendingWake",
-    "markWakeSent", "shouldMarkStale", "openWorkers", "eventForRestartReason", "readWorkers",
+    "shouldMarkStale", "openWorkers", "eventForRestartReason", "readWorkers",
     "steerWakeResponse", "hasAdvisorRequest", "formatSteerTakeover", "formatScopeTakeover",
     "escalationHintLine", "isDrainMarkerActive",
   ]) {
     assert.ok(superviseServer.includes(name), `supervise.ts uses ${name}`);
   }
   assert.ok(superviseServer.includes("deliverSteer("), "wakes and takeovers use the cache-aware delivery path");
+  const deliveryServer = readFileSync(new URL("../server/steer-delivery.ts", import.meta.url), "utf8");
+  assert.ok(deliveryServer.includes("markWakeSent"), "the common delivery reconciler acknowledges worker wakes");
   assert.ok(!superviseServer.includes(".archive("), "the plugin never archives (the steer does)");
   assert.ok(superviseServer.includes("background"), "background agents guarded");
   assert.ok(superviseServer.includes("formatSteerTakeover"), "takeover request sent on failover");

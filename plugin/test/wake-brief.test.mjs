@@ -171,7 +171,7 @@ test("clear then brief succeeds via turn-after: delivered once", async () => {
   assert.match(texts[0], new RegExp(`worker ${workerId} done`));
   const agents = world.workspaces[0].metadata[AGENTS_KEY][steer.id];
   assert.equal(agents.needsResume, null);
-  assert.equal(agents.pendingWakeBrief, null);
+  assert.equal(agents.action.phase, "done");
   assert.equal(agents.pendingAction, null);
   const worker = world.workspaces[0].metadata[WORKERS_KEY][workerId];
   assert.ok(worker.lastWakeAt, "delivered stamps lastWakeAt");
@@ -207,9 +207,9 @@ test("brief send fails via turn-after: pending, retried next tick, delivered onc
   assert.equal(sendsTo(world, steer.id).length, 0, "failed send records nothing");
   const kept = world.workspaces[0].metadata[AGENTS_KEY][steer.id];
   assert.ok(kept.needsResume, "needsResume kept");
-  assert.equal(kept.pendingWakeBrief.wakeId, "wake-1");
-  assert.equal(kept.pendingWakeBrief.phase, "ready");
-  assert.ok(kept.pendingWakeBrief.lastError);
+  assert.equal(kept.action.wakeId, "wake-1");
+  assert.equal(kept.action.phase, "uncertain");
+  assert.ok(kept.action.lastError);
   assert.ok(world.workspaces[0].metadata[WORKERS_KEY][workerId].pendingWake, "workers stay queued");
   world.sendFails = false;
   const retry = await supervise.retryPendingWakeBrief(
@@ -221,7 +221,7 @@ test("brief send fails via turn-after: pending, retried next tick, delivered onc
   assert.equal(retry.target, steer.id);
   assert.equal(sendsTo(world, steer.id).length, 1, "retried once");
   assert.match(sendsTo(world, steer.id)[0], new RegExp(`worker ${workerId} done`));
-  assert.equal(world.workspaces[0].metadata[AGENTS_KEY][steer.id].pendingWakeBrief, null);
+  assert.equal(world.workspaces[0].metadata[AGENTS_KEY][steer.id].action.phase, "done");
   assert.equal(world.workspaces[0].metadata[WORKERS_KEY][workerId].pendingWake, null);
   const again = await supervise.retryPendingWakeBrief(
     fakeClient(world),
@@ -265,7 +265,7 @@ test("lock busy on the turn-after follow-up is retried", async () => {
   );
   assert.ok(calls >= 2, "busy lock retried");
   assert.equal(sendsTo(world, steer.id).length, 1);
-  assert.equal(world.workspaces[0].metadata[AGENTS_KEY][steer.id].pendingWakeBrief, null);
+  assert.equal(world.workspaces[0].metadata[AGENTS_KEY][steer.id].action.phase, "done");
   assert.equal(world.workspaces[0].metadata[WORKERS_KEY][workerId].pendingWake, null);
 });
 
@@ -301,7 +301,7 @@ test("restart between clear and brief: boot check re-sends once", async () => {
   assert.equal(result.wakes[0].sent, true);
   assert.equal(sendsTo(world, steer.id).length, 1);
   assert.match(sendsTo(world, steer.id)[0], new RegExp(`worker ${workerId} done`));
-  assert.equal(world.workspaces[0].metadata[AGENTS_KEY][steer.id].pendingWakeBrief, null);
+  assert.equal(world.workspaces[0].metadata[AGENTS_KEY][steer.id].action.phase, "done");
   assert.equal(world.workspaces[0].metadata[WORKERS_KEY][workerId].pendingWake, null);
   const flush = await supervise.flushAllScopes(
     fakeClient(world),
@@ -422,7 +422,7 @@ test("a cold Claude wake waits for a verified clear even when the hook runs duri
     assert.ok(worker.pendingWake);
     assert.equal(worker.lastWakeAt, null);
     assert.equal(state.pendingAction.kind, "clear");
-    assert.equal(state.pendingWakeBrief.phase, "renewing");
+    assert.equal(state.action.phase, "renewing");
     assert.equal((await recheck()).delivered, false);
     assert.deepEqual(sendsTo(world, steer.id), ["/clear"]);
     steer.persistence.sessionId = "new-session";
@@ -467,7 +467,7 @@ test("an unverified clear leaves the brief and worker event pending", async () =
   );
   assert.equal((await recheck()).delivered, false);
   assert.deepEqual(sendsTo(world, steer.id), ["/clear"]);
-  assert.equal(ws.metadata[AGENTS_KEY][steer.id].pendingWakeBrief.phase, "blocked");
+  assert.equal(ws.metadata[AGENTS_KEY][steer.id].action.phase, "blocked");
   assert.equal(ws.metadata[AGENTS_KEY][steer.id].cleared, null);
   assert.match(ws.metadata[AGENTS_KEY][steer.id].lastActionFailed.error, /session unchanged/);
   assert.equal(ws.metadata[WORKERS_KEY][workerId].lastWakeAt, null);
@@ -504,7 +504,7 @@ test("a legacy ready brief with the original provider session is held visibly", 
   };
   assert.equal((await recheck()).delivered, false);
   assert.deepEqual(sendsTo(world, steer.id), []);
-  assert.equal(ws.metadata[AGENTS_KEY][steer.id].pendingWakeBrief.phase, "blocked");
+  assert.equal(ws.metadata[AGENTS_KEY][steer.id].action.phase, "blocked");
 });
 
 test("a warm steer using 210k of 1M gets the queued wake after its turn without renewal", async () => {
@@ -541,7 +541,7 @@ test("a new turn between clear reservation and dispatch leaves the wake queued",
   assert.equal(reserved, true);
   assert.deepEqual(sendsTo(world, steer.id), []);
   assert.equal(original[AGENTS_KEY][steer.id].pendingAction, null);
-  assert.equal(original[AGENTS_KEY][steer.id].pendingWakeBrief, null);
+  assert.equal(original[AGENTS_KEY][steer.id].action, null);
   assert.ok(original[WORKERS_KEY][workerId].pendingWake);
 });
 
@@ -557,7 +557,7 @@ test("a steer that starts working during the rewind lookup keeps its queued wake
   }) })).sent, false);
   assert.equal(rewinds, 0);
   assert.deepEqual(sendsTo(world, steer.id), []);
-  assert.equal(ws.metadata[AGENTS_KEY][steer.id].pendingWakeBrief, null);
+  assert.equal(ws.metadata[AGENTS_KEY][steer.id].action, null);
   assert.ok(ws.metadata[WORKERS_KEY][workerId].pendingWake);
 });
 
@@ -573,7 +573,7 @@ test("a turn that starts while building a resume brief defers delivery and refre
     return "Old checkpoint";
   } });
   assert.equal(held.status, "pending");
-  assert.equal(ws.metadata[AGENTS_KEY][steer.id].pendingWakeBrief.packet, undefined);
+  assert.equal((ws.metadata[AGENTS_KEY][steer.id].action ?? ws.metadata[AGENTS_KEY][steer.id].pendingWakeBrief).packet, undefined);
   assert.deepEqual(sendsTo(world, steer.id), []);
   steer.activeTurn = null;
   assert.equal((await finishSteerDelivery(client, input, { ...deps, buildBrief: async () => "Current checkpoint" })).status, "sent");
@@ -597,7 +597,7 @@ test("a stored stale-worker brief cannot wake a steer after its worker is archiv
     };
     assert.equal((await recheck()).delivered, false);
     assert.deepEqual(sendsTo(world, steer.id), []);
-    assert.equal(ws.metadata[AGENTS_KEY][steer.id].pendingWakeBrief, null);
+    assert.equal(ws.metadata[AGENTS_KEY][steer.id].action, null);
   }
 });
 
@@ -705,9 +705,55 @@ test("an ambiguous send acknowledgement retries the same brief and message ID", 
     rewindAgent: async () => {},
   });
   assert.equal((await wake({ rewindClient })).sent, false);
-  assert.equal(ws.metadata[AGENTS_KEY][steer.id].pendingWakeBrief.phase, "ready");
+  assert.equal(ws.metadata[AGENTS_KEY][steer.id].action.phase, "uncertain");
   assert.equal((await recheck()).delivered, true);
   assert.equal(receipts.size, 1);
   assert.equal(sendsTo(world, steer.id).length, 2, "both requests use the same receipt");
   assert.equal((await recheck()).attempted, false);
+});
+
+test("a later resume marker survives acknowledgement of an earlier warm wake", async () => {
+  const { wake, ws, steer, world } = deliveryFixture({ minutesIdle: 1 });
+  const later = { reason: "limit", at: at(NOW + MIN) };
+  world.onSend = async () => {
+    ws.metadata[AGENTS_KEY][steer.id].needsResume = later;
+  };
+  assert.equal((await wake()).sent, true);
+  assert.deepEqual(ws.metadata[AGENTS_KEY][steer.id].needsResume, later);
+});
+
+test("a lost worker acknowledgement resumes after the recorded admission without another prompt", async () => {
+  const { wake, recheck, ws, steer, workerId, world, client } = deliveryFixture({ minutesIdle: 1 });
+  ws.metadata[WORKERS_KEY][workerId].pendingWake = { state: "done", queuedAt: at(NOW - MIN) };
+  const ref = client.workspaces.ref;
+  let failAck = true;
+  client.workspaces.ref = (id) => {
+    const handle = ref(id);
+    return { ...handle, setMetadata: async (patch) => {
+      if (patch[WORKERS_KEY] && failAck && ws.metadata[AGENTS_KEY][steer.id].action?.phase === "sent") {
+        failAck = false;
+        throw Error("worker acknowledgement disconnected");
+      }
+      return handle.setMetadata(patch);
+    } };
+  };
+  assert.equal((await wake()).sent, false);
+  assert.equal(ws.metadata[AGENTS_KEY][steer.id].action.phase, "sent");
+  assert.equal(ws.metadata[WORKERS_KEY][workerId].pendingWake.state, "done");
+  assert.equal((await recheck()).delivered, true);
+  assert.equal(ws.metadata[WORKERS_KEY][workerId].pendingWake, null);
+  assert.equal(sendsTo(world, steer.id).length, 1);
+});
+
+test("a reserved switch retains the cold-context decision after recovery", async () => {
+  const { ws, steer, world, client, deps, buildBrief } = deliveryFixture({ minutesIdle: 6 });
+  const { newSteerAction } = await import("../../src/steer-action.mjs");
+  ws.metadata[AGENTS_KEY][steer.id].action = newSteerAction({
+    id: "switch-id", kind: "switch", epoch: 3, at: at(NOW), text: "Original handoff", note: "Handoff note", phase: "reserved",
+  });
+  const result = await finishSteerDelivery(client, { workspaceId: ws.id, agentId: steer.id }, { lock: deps.lock, now: () => at(NOW), buildBrief });
+  assert.equal(result.status, "pending");
+  assert.deepEqual(sendsTo(world, steer.id), ["/clear"]);
+  assert.equal(ws.metadata[AGENTS_KEY][steer.id].action.wakeId, "switch-id");
+  assert.equal(ws.metadata[AGENTS_KEY][steer.id].action.phase, "renewing");
 });

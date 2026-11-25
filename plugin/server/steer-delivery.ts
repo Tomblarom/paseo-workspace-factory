@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { AGENTS_KEY } from "./factory/agent-state.js";
+import { readSteerAction, actionEntry, newSteerAction, reconcileSteerSend } from "./factory/steer-action.js";
 import { withLock, workspaceLockName } from "./factory/lock.js";
 import { METADATA_KEY, LEGACY_PREFIX, readPaseoState } from "./factory/paseo.js";
 import { defaultCreateRewindClient, rewindAndBrief } from "./factory/rewind.js";
 import { listScopes, sameScopeId } from "./factory/scope.js";
 import { buildRewindRecord } from "./factory/steer.js";
-import { formatWakeMessage, markWakeSent, updateWorkerEntry } from "./factory/supervision.js";
+import { WORKERS_KEY, formatWakeMessage, markWakeSent, updateWorkerEntry } from "./factory/supervision.js";
 import { runCleanup } from "./cold-sweep.js";
 import { collectSteerStates } from "./steer-feed.js";
 import { AgentBusyError, hasActiveAgentWork } from "./agent-context.js";
@@ -17,9 +18,9 @@ import {
 } from "../shared/idle-cleanup.js";
 
 type Lock = (name: string, fn: (held: { verify: () => void }) => Promise<any>) => Promise<any>;
-type Renewal = "clear" | "rewind";
-type Phase = "renewing" | "ready" | "blocked" | "sent";
-type WakeEvent = { workerId: string; state: string };
+type Renewal = "clear" | "rewind" | "send";
+type Phase = "renewing" | "ready" | "blocked" | "sent" | "uncertain" | "reserved";
+type WakeEvent = { workerId: string; state: string; queuedAt?: string | null };
 
 export interface SteerDeliveryDeps extends ZerosubSource {
   getCleanupSettings?: () => Promise<CleanupSettings | null>;
@@ -46,7 +47,7 @@ export interface EventBatch {
   epoch: number | null;
   events: WakeEvent[];
   /** A takeover request only starts the answer timer in the source scope. */
-  takeover?: { scopeId: string; activeSlot: string | null; reason: string };
+  takeover?: { scopeId: string; activeSlot: string | null; reason: string; observedAt?: string };
 }
 
 interface DeliveryInput {
@@ -59,6 +60,7 @@ interface DeliveryInput {
   batch?: EventBatch;
   state?: any;
   sendOptions?: { activeTurnBehavior: "steer" };
+  actionId?: string;
 }
 
 export interface PendingSteerDelivery {
@@ -71,6 +73,14 @@ export interface PendingSteerDelivery {
   packet?: string;
   batch?: EventBatch;
   lastError?: string;
+  kind?: string;
+  sendOptions?: { activeTurnBehavior: "steer" };
+  attemptedAt?: string;
+  legacyStage?: any;
+  lastDeliveryId?: string;
+  observedAt?: string;
+  authority?: { scopeId: string; agentId: string };
+  needsResumeAt?: string | null;
 }
 
 const productionLock = withLock as unknown as Lock;
@@ -102,24 +112,8 @@ function checkpointRevision(meta: any) {
 }
 
 export function pendingSteerDelivery(entry: any, workspaceId: string): PendingSteerDelivery | null {
-  const pending = entry?.pendingWakeBrief;
-  if (!pending || typeof pending.wakeId !== "string") return null;
-  if (pending.renewal === "clear" || pending.renewal === "rewind") return pending;
-  // The earlier format represented clears only. A legacy record can be
-  // released once the clear has independently verifiable evidence.
-  if (!Array.isArray(pending.events) || typeof pending.note !== "string") return null;
-  const phase = pending.briefSent ? "sent" : entry.pendingAction ? "renewing" :
-    entry.cleared?.mode === "clear" && entry.actionVerified === true ? "ready" : "blocked";
-  return {
-    wakeId: pending.wakeId,
-    renewal: "clear",
-    phase,
-    queuedAt: typeof pending.queuedAt === "string" ? pending.queuedAt : "",
-    epoch: pending.epoch ?? null,
-    note: pending.note,
-    batch: { workspaceId, epoch: pending.epoch ?? null, events: pending.events },
-    ...(phase === "blocked" ? { lastError: "The previous context clear could not be confirmed. Retry recovery or use Fresh." } : {}),
-  };
+  const action = readSteerAction(entry, workspaceId);
+  return action && action.phase !== "staged" && action.phase !== "done" ? action : null;
 }
 
 export function decideSteerDelivery({
@@ -149,7 +143,7 @@ async function changeEntry(
     const patch = change(entry, meta);
     if (!patch) return false;
     held.verify();
-    await workspace.setMetadata({ [AGENTS_KEY]: { ...entries, [input.agentId]: { ...entry, ...patch } } });
+    await workspace.setMetadata({ [AGENTS_KEY]: { ...entries, [input.agentId]: actionEntry({ ...entry, ...patch }, "action" in patch ? patch.action : readSteerAction(entry, input.workspaceId)) } });
     return true;
   });
 }
@@ -159,9 +153,14 @@ function replacePending(
   patch: Record<string, unknown> | ((entry: any) => Record<string, unknown>),
 ) {
   return changeEntry(paseo, input, lock, (entry) => {
-    if (entry?.pendingWakeBrief?.wakeId !== pending.wakeId) return null;
+    if (readSteerAction(entry, input.workspaceId)?.wakeId !== pending.wakeId) return null;
     return typeof patch === "function" ? patch(entry) : patch;
   });
+}
+
+function afterDelivery(pending: PendingSteerDelivery, complete: boolean) {
+  if (pending.legacyStage) return { ...newSteerAction({ kind: "stage", text: pending.legacyStage.packet }), phase: "staged", at: pending.legacyStage.at, stageKind: pending.legacyStage.kind, lastDeliveryId: complete ? pending.wakeId : pending.lastDeliveryId };
+  return complete ? { ...pending, phase: "done" } : pending.lastDeliveryId ? { wakeId: pending.lastDeliveryId, phase: "done" } : null;
 }
 
 function blocked(detail: string, cleared = false): DeliveryResult {
@@ -219,33 +218,33 @@ export async function finishSteerDelivery(
     const targetScope = scopeState(meta);
     if (!targetScope || targetScope.retired || targetScope.previousSteer === input.agentId ||
         (pending.epoch !== null && pending.epoch !== targetScope.epoch)) {
-      await replacePending(paseo, input, lock, pending, { pendingWakeBrief: null });
-      return null;
+      await replacePending(paseo, input, lock, pending, { action: { ...pending, phase: "blocked", lastError: "Scope authority changed while a delivery remains unresolved." } });
+      return blocked("Scope authority changed while a delivery remains unresolved.", cleared);
     }
     const agent = paseo.agents.ref(input.agentId);
+    if (pending.phase === "reserved") { finishing.delete(key); return deliverSteer(paseo, { ...input, actionId: pending.wakeId, text: pending.packet, renewalNote: pending.note, epoch: pending.epoch ?? undefined }, deps); }
     if (pending.phase !== "sent") {
       const snapshot = (await agent.refresh())?.agent;
       if (!snapshot || snapshot.archivedAt || snapshot.background === true) {
-        await replacePending(paseo, input, lock, pending, { pendingWakeBrief: null });
-        return null;
+        return blocked("The delivery target is unavailable; its action remains recorded.", cleared);
       }
       if (pending.phase === "renewing" || entry?.pendingAction) {
         return { status: "pending", cleared, detail: "Context renewal is in progress. The brief follows confirmation." };
       }
       const batch = pending.batch;
-      if (!batch) {
+      if (!batch && !pending.attemptedAt) {
         const legacy = legacyStaleEvents(pending);
         if (legacy.length && (await filterStaleWorkerEvents(paseo, meta, legacy)).length !== legacy.length) {
-          await replacePending(paseo, input, lock, pending, { pendingWakeBrief: null });
+          await replacePending(paseo, input, lock, pending, { action: afterDelivery(pending, false) });
           return null;
         }
       }
-      if (batch?.events.some(({ state }) => state === "stale")) {
+      if (!pending.attemptedAt && batch?.events.some(({ state }) => state === "stale")) {
         const source = (await paseo.workspaces.ref(batch.workspaceId).refresh())?.metadata ?? {};
         const events = await filterStaleWorkerEvents(paseo, source, batch.events);
         if (events.length !== batch.events.length) {
           if (!events.length || batch.takeover) {
-            await replacePending(paseo, input, lock, pending, { pendingWakeBrief: null });
+            await replacePending(paseo, input, lock, pending, { action: afterDelivery(pending, false) });
             return null;
           }
           const { packet: _packet, ...unpinned } = pending;
@@ -255,17 +254,17 @@ export async function finishSteerDelivery(
               scopeId: cleanupIdentity(snapshot.labels)?.scopeId ?? batch.workspaceId, epoch: batch.epoch, events,
             }) ?? "",
           };
-          if (!await replacePending(paseo, input, lock, pending, { pendingWakeBrief: next })) {
+          if (!await replacePending(paseo, input, lock, pending, { action: next })) {
             return deferred("Steer state changed while checking deferred worker events.");
           }
           pending = next;
         }
       }
       if (pending.phase === "blocked") return blocked(pending.lastError ?? "Context renewal needs attention.");
-      if (hasActiveAgentWork(snapshot, entry)) return deferred();
+      if (hasActiveAgentWork(snapshot, entry)) return pending.phase === "uncertain" ? blocked("Delivery outcome is uncertain; waiting for receipt reconciliation.", cleared) : deferred();
       if (cleared && !clearConfirmed(entry, snapshot, pending)) {
         await replacePending(paseo, input, lock, pending, {
-          pendingWakeBrief: { ...pending, phase: "blocked", lastError: CLEAR_UNCONFIRMED },
+          action: { ...pending, phase: "blocked", lastError: CLEAR_UNCONFIRMED },
         });
         return blocked(CLEAR_UNCONFIRMED);
       }
@@ -284,7 +283,7 @@ ${pending.note}` : brief;
         }
         const current = (await paseo.workspaces.ref(input.workspaceId).refresh())?.metadata ?? {};
         const currentEntry = current[AGENTS_KEY]?.[input.agentId];
-        if (currentEntry?.pendingWakeBrief?.wakeId !== pending.wakeId ||
+        if (readSteerAction(currentEntry, input.workspaceId)?.wakeId !== pending.wakeId ||
             (pending.epoch !== null && pending.epoch !== scopeState(current)?.epoch)) {
           return { status: "pending", cleared, detail: "Steer state changed while preparing the brief." };
         }
@@ -294,33 +293,40 @@ ${pending.note}` : brief;
         if (pending.batch?.takeover && pending.batch.workspaceId !== input.workspaceId) {
           const source = (await paseo.workspaces.ref(pending.batch.workspaceId).refresh())?.metadata ?? {};
           if (scopeState(source)?.epoch !== pending.batch.epoch) {
-            await replacePending(paseo, input, lock, pending, { pendingWakeBrief: null });
+            await replacePending(paseo, input, lock, pending, { action: afterDelivery(pending, false) });
             return null;
           }
         }
-        if (!await staleBatchStillValid(paseo, pending.batch)) return deferred("Worker events changed while preparing the brief.");
+        if (!pending.attemptedAt && !await staleBatchStillValid(paseo, pending.batch)) return deferred("Worker events changed while preparing the brief.");
         if (hasActiveAgentWork((await agent.refresh())?.agent, currentEntry)) return deferred();
-        if (buildPacket && !await replacePending(paseo, input, lock, pending, { pendingWakeBrief: sent })) {
+        if (buildPacket && !await replacePending(paseo, input, lock, pending, { action: sent })) {
           return deferred("Steer state changed while preparing the brief.");
         }
         const latest = (await agent.refresh())?.agent;
         if (!latest || latest.archivedAt || hasActiveAgentWork(latest)) {
-          if (buildPacket) await replacePending(paseo, input, lock, pending, { pendingWakeBrief: pending });
+          if (buildPacket) await replacePending(paseo, input, lock, pending, { action: pending });
           return deferred();
         }
         if (cleared && !clearConfirmed(currentEntry, latest, pending)) {
           await replacePending(paseo, input, lock, pending, {
-            pendingWakeBrief: { ...pending, phase: "blocked", lastError: CLEAR_UNCONFIRMED },
+            action: { ...pending, phase: "blocked", lastError: CLEAR_UNCONFIRMED },
           });
           return blocked(CLEAR_UNCONFIRMED);
         }
-        // A stable user-message ID anchors the next rewind and deduplicates
-        // retries if Paseo accepted the send before the metadata write failed.
-        await agent.send(sent.packet, { messageId: pending.wakeId });
-        sent = { ...sent, phase: "sent" };
-        await replacePending(paseo, input, lock, pending, {
-          pendingWakeBrief: sent,
-          ...(pending.renewal === "rewind" ? { refreshed: { ...entry.refreshed, briefMessageId: pending.wakeId } } : {}),
+        const result = await reconcileSteerSend({ client: paseo, workspaceId: input.workspaceId,
+          agentId: input.agentId, actionId: pending.wakeId, lock, now: deps.now });
+        if (result.status !== "sent") {
+          if (result.status === "blocked") await replacePending(paseo, input, lock, pending, (current) => {
+            const action = readSteerAction(current, input.workspaceId);
+            return action?.phase === "sent" || action?.phase === "done" ? {} :
+              { action: { ...action, phase: "blocked", lastError: result.detail ?? "Delivery authority changed." } };
+          });
+          return { status: result.status === "pending" ? "pending" : "blocked", cleared,
+            deliveryId: pending.wakeId, detail: result.status === "uncertain" ? `Delivery outcome is uncertain (${result.detail}).` : result.detail ?? "Delivery is pending." };
+        }
+        sent = result.action;
+        if (pending.renewal === "rewind") await replacePending(paseo, input, lock, pending, {
+          refreshed: { ...entry.refreshed, briefMessageId: pending.wakeId },
         });
       }
       const batch = pending.batch;
@@ -333,28 +339,25 @@ ${pending.note}` : brief;
               if (!worker || (batch.epoch !== null && batch.epoch !== scopeState(source)?.epoch)) return null;
               const queued = worker.pendingWake;
               const superseded = queued && (queued.state !== event.state ||
-                Date.parse(queued.queuedAt) > Date.parse(pending.queuedAt));
+                (event.queuedAt !== undefined ? queued.queuedAt !== event.queuedAt : Date.parse(queued.queuedAt) > Date.parse(pending.queuedAt)));
               const marked = markSent(worker, { at, clearPending: !batch.takeover && !superseded });
               return { lastWakeAt: marked.lastWakeAt, pendingWake: marked.pendingWake };
             },
           });
         }
-        if (batch.takeover) await deps.onTakeoverDelivered?.(paseo, batch, input.agentId);
+        if (batch.takeover) await deps.onTakeoverDelivered?.(paseo, { ...batch, takeover: { ...batch.takeover, observedAt: sent.observedAt } }, input.agentId);
       }
       await replacePending(paseo, input, lock, pending, (current) => ({
-        pendingWakeBrief: null,
-        lastSteerDeliveryId: pending.wakeId,
-        ...(current.needsResume?.at === entry?.needsResume?.at ? { needsResume: null } : {}),
+        action: afterDelivery(pending, true),
+        ...((pending.needsResumeAt === undefined ? entry?.needsResume?.at : pending.needsResumeAt) && current.needsResume?.at === (pending.needsResumeAt === undefined ? entry?.needsResume?.at : pending.needsResumeAt) ? { needsResume: null } : {}),
       }));
       return {
-        status: "sent", cleared, renewed: true,
-        detail: cleared ? "Context cleared and resume brief sent." : "Context rewound and resume brief sent.",
+        status: "sent", cleared, renewed: pending.renewal !== "send",
+        detail: cleared ? "Context cleared and resume brief sent." : pending.renewal === "send" ? "Message sent." : "Context rewound and resume brief sent.",
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      await replacePending(paseo, input, lock, pending, {
-        pendingWakeBrief: { ...sent, lastError: message.slice(0, 300) },
-      }).catch(() => {});
+
       return { status: "pending", cleared, detail: `Brief delivery is queued (${message}).` };
     }
   } finally {
@@ -387,7 +390,7 @@ export async function deliverSteer(
   const entry = meta[AGENTS_KEY]?.[input.agentId];
   if (hasActiveAgentWork(agent, entry)) return deferred();
   const existing = pendingSteerDelivery(entry, input.workspaceId);
-  if (existing && existing.epoch === scope.epoch && !(input.manual && existing.phase === "blocked")) {
+  if (existing && existing.epoch === scope.epoch && existing.wakeId !== input.actionId) {
     if (existing.phase === "blocked") return blocked(existing.lastError ?? "Context renewal needs attention.");
     if (input.manual && existing.phase !== "renewing") {
       return (await finishSteerDelivery(paseo, input, deps)) ??
@@ -399,10 +402,12 @@ export async function deliverSteer(
     return blocked("The steer is busy. Try again after the current operation.");
   }
   // Reuse the pill projection, with the freshly fetched agent and metadata.
+  const projectionMeta = existing && existing.wakeId === input.actionId && existing.phase === "reserved"
+    ? { ...meta, [AGENTS_KEY]: { ...meta[AGENTS_KEY], [input.agentId]: actionEntry(entry, null) } } : meta;
   const projectionState = {
     ...state,
     agents: [...state.agents.filter((a: any) => a.id !== input.agentId), agent],
-    workspaces: state.workspaces.map((ws: any) => ws.id === input.workspaceId ? { ...ws, metadata: meta } : ws),
+    workspaces: state.workspaces.map((ws: any) => ws.id === input.workspaceId ? { ...ws, metadata: projectionMeta } : ws),
   };
   const targetScope = listScopes(projectionState).find((candidate: any) =>
     candidate.workspaceId === input.workspaceId && sameScopeId(candidate.id, identity.scopeId));
@@ -410,6 +415,8 @@ export async function deliverSteer(
   const projected = collectSteerStates(projectionState, { settings: cleanup, zerosub, nowMs: deps.now ? Date.parse(deps.now()) : undefined })
     .find((row) => row.agentId === input.agentId && row.workspaceId === input.workspaceId);
   const at = deps.now?.() ?? new Date().toISOString();
+  const needsResumeAt = existing?.wakeId === input.actionId && existing?.phase === "reserved" && existing.needsResumeAt !== undefined
+    ? existing.needsResumeAt : entry?.needsResume?.at ?? null;
   const mode = decideSteerDelivery({
     warmth: projected?.warmth, large: projected?.large,
     provider: typeof agent.provider === "string" ? agent.provider.trim().toLowerCase() : undefined,
@@ -421,29 +428,43 @@ export async function deliverSteer(
     const text = input.manual ? (brief && formatResumeMessage(brief)) : input.text;
     if (!text) return blocked("The steer delivery has no message.");
     if (!await staleBatchStillValid(paseo, input.batch)) return deferred("Worker events changed while preparing delivery.");
-    const ref = paseo.agents.ref(input.agentId);
-    const latest = (await ref.refresh())?.agent;
-    if (!latest || latest.archivedAt || hasActiveAgentWork(latest)) return deferred();
-    if (input.sendOptions) await ref.send(text, input.sendOptions);
-    else await ref.send(text);
-    return { status: "sent", cleared: false, detail: input.manual ? "Resume brief sent into the warm context." : "Message sent." };
+    let batch = input.batch;
+    if (batch) {
+      const source = (await paseo.workspaces.ref(batch.workspaceId).refresh())?.metadata ?? {};
+      batch = { ...batch, events: batch.events.map((event) => ({ ...event, queuedAt: source[WORKERS_KEY]?.[event.workerId]?.pendingWake?.queuedAt ?? null })) };
+    }
+    const pending: any = newSteerAction({ id: input.actionId, epoch: scope.epoch, at, text, options: input.sendOptions, batch });
+    pending.needsResumeAt = needsResumeAt;
+    if (identity.slot === scope.activeSteer) pending.authority = { scopeId: identity.scopeId, agentId: input.agentId };
+    const reserved = await changeEntry(paseo, input, lock, (current, currentMeta) => {
+      if (scopeState(currentMeta)?.epoch !== scope.epoch || current.pendingAction) return null;
+      const prior = readSteerAction(current, input.workspaceId);
+      if (prior && prior.phase !== "done" && prior.wakeId !== input.actionId) return null;
+      return { action: { ...pending, ...(prior?.phase === "done" ? { lastDeliveryId: prior.wakeId } : prior?.lastDeliveryId ? { lastDeliveryId: prior.lastDeliveryId } : {}) } };
+    });
+    if (!reserved) return deferred("A steer operation is already queued.");
+    return (await finishSteerDelivery(paseo, input, deps)) ?? deferred();
   }
   const original = existing?.epoch === (scope.epoch ?? null) ? existing : null;
   const eventBatch = input.batch ?? original?.batch;
   const pending: PendingSteerDelivery = {
-    wakeId: randomUUID(),
+    wakeId: input.actionId ?? randomUUID(),
     renewal: mode,
     phase: "renewing",
     queuedAt: at,
     epoch: typeof scope.epoch === "number" ? scope.epoch : null,
     note: (input.renewalNote ?? input.text ?? original?.note ?? "").slice(0, 1500),
     ...(eventBatch ? { batch: eventBatch } : {}),
+    needsResumeAt,
+    ...(input.sendOptions ? { sendOptions: input.sendOptions } : {}),
+    ...(identity.slot === scope.activeSteer ? { authority: { scopeId: identity.scopeId, agentId: input.agentId } } : {}),
+    ...(readSteerAction(entry, input.workspaceId)?.phase === "done" ? { lastDeliveryId: readSteerAction(entry, input.workspaceId).wakeId } : {}),
   };
   const reserved = await changeEntry(paseo, input, lock, (current, currentMeta) => {
     if (scopeState(currentMeta)?.epoch !== scope.epoch || current.pendingAction) return null;
-    const prior = pendingSteerDelivery(current, input.workspaceId);
-    if (prior && prior.epoch === pending.epoch && !(input.manual && prior.phase === "blocked")) return null;
-    return { pendingWakeBrief: pending };
+    const priorAction = readSteerAction(current, input.workspaceId);
+    if (priorAction && priorAction.phase !== "done" && priorAction.wakeId !== input.actionId) return null;
+    return { action: pending };
   });
   if (!reserved) return { status: "pending", cleared: false, detail: "A steer operation is already queued." };
 
@@ -461,13 +482,18 @@ export async function deliverSteer(
         });
       }
     }
+    if (batch) {
+      const source = (await paseo.workspaces.ref(batch.workspaceId).refresh())?.metadata ?? {};
+      pending.batch = { ...batch, events: batch.events.map((event) => ({ ...event, queuedAt: source[WORKERS_KEY]?.[event.workerId]?.pendingWake?.queuedAt ?? null })) };
+      if (!await replacePending(paseo, input, lock, pending, { action: pending })) return deferred("Steer state changed while recording worker events.");
+    }
     const stillIdle = async () => {
       if (!await staleBatchStillValid(paseo, batch)) return false;
       const current = (await paseo.workspaces.ref(input.workspaceId).refresh())?.metadata ?? {};
       const latest = (await paseo.agents.ref(input.agentId).refresh())?.agent;
       const agentEntry = current[AGENTS_KEY]?.[input.agentId];
       return latest && !latest.archivedAt && !hasActiveAgentWork(latest, agentEntry) &&
-        scopeState(current)?.epoch === scope.epoch && agentEntry?.pendingWakeBrief?.wakeId === pending.wakeId;
+        scopeState(current)?.epoch === scope.epoch && readSteerAction(agentEntry, input.workspaceId)?.wakeId === pending.wakeId;
     };
     if (!await stillIdle()) throw new AgentBusyError(STEER_BUSY);
     if (mode === "clear") {
@@ -491,7 +517,7 @@ export async function deliverSteer(
     }
     await replacePending(paseo, input, lock, pending, {
       ...rewindRecord({ messageId: outcome.messageId, now: () => new Date(deps.now?.() ?? Date.now()) }),
-      pendingWakeBrief: { ...pending, phase: "ready" },
+      action: { ...pending, phase: "ready" },
     });
     const delivery = await finishSteerDelivery(paseo, input, deps);
     if (delivery && delivery.status !== "pending") return delivery;
@@ -501,13 +527,13 @@ export async function deliverSteer(
     };
   } catch (error) {
     if (error instanceof AgentBusyError) {
-      await replacePending(paseo, input, lock, pending, { pendingWakeBrief: original });
+      await replacePending(paseo, input, lock, pending, { action: original });
       return deferred();
     }
     const message = error instanceof Error ? error.message : String(error);
     const detail = mode === "clear" ? `Resume could not clear ${input.agentId} (${message}). Open its tab, then try again.` : message;
     await replacePending(paseo, input, lock, pending, {
-      pendingWakeBrief: { ...pending, phase: "blocked", lastError: detail.slice(0, 300) },
+      action: { ...pending, phase: "blocked", lastError: detail.slice(0, 300) },
     });
     return blocked(detail);
   }
