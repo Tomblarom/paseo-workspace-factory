@@ -24,7 +24,7 @@ import { flagValue, formatCatalog, formatWorkerModel, parseProviderModel, paseoR
 import { scopeRows, scopeCandidates, formatScopeRows, formatScopeCandidates, formatStatus } from './scopes-view.mjs';
 import { applyContinuations } from './discovery.mjs';
 import { validateProfilesAgainstCatalog } from './config.mjs';
-import { recordProfileFailure } from './quota.mjs';
+import { readProfileHealth, storeProfileFailure } from './quota.mjs';
 import { readZerosubState } from './zerosub.mjs';
 import { defaultCreateRewindClient } from './rewind.mjs';
 import { attachProjectArchivedAgents, collectCleanupCandidates, formatCandidate, formatLoss, planCleanupOps, selectApplyRunPlans } from './cleanup.mjs';
@@ -160,7 +160,7 @@ export function defaultPickAddress(paseoState, { agentId = process.env.PASEO_AGE
  */
 function workerModelLine(config, discovery) {
   const repoPublic = discovery?.github?.fork?.repo?.private === false;
-  const profileHealth = discovery?.mainWorkspace?.metadata?.[METADATA_KEY]?.profileHealth ?? null;
+  const profileHealth = readProfileHealth(discovery?.mainWorkspace?.metadata);
   const { profile, skipped } = resolveProfile(config, discovery?.providers ?? [], workerPriority(config), { role: 'worker', repoPublic, profileHealth });
   if (!profile) {
     const tried = skipped.length ? skipped.map((s) => `"${s.name}" (${s.reason})`).join('; ') : 'no worker profiles configured';
@@ -870,14 +870,13 @@ async function runModelCommand({ command, args, values, config, configPath, clie
         if (values.failed !== undefined) throw new Error('worker pick --failed needs a scope so the failure can be recorded');
         entries = await catalog();
       }
-      let profileHealth = discovery?.mainWorkspace?.metadata?.[METADATA_KEY]?.profileHealth ?? null;
+      let profileHealth = readProfileHealth(discovery?.mainWorkspace?.metadata);
       if (values.failed !== undefined) {
         const failed = config.profiles?.[values.failed];
         if (!failed) throw new Error(`Unknown profile "${values.failed}"`);
-        const record = recordProfileFailure({ ...failed, name: values.failed }, values.reason);
-        const metadata = discovery.mainWorkspace?.metadata?.[METADATA_KEY] ?? {};
-        profileHealth = { ...(metadata.profileHealth ?? {}), [values.failed]: record };
-        await client.workspaces.ref(discovery.mainWorkspace.id).setMetadata({ [METADATA_KEY]: { ...metadata, profileHealth } });
+        if (!discovery.mainWorkspace) throw new Error('worker pick --failed needs a factory main workspace with worker state');
+        const record = await storeProfileFailure({ client, workspaceId: discovery.mainWorkspace.id, profile: { ...failed, name: values.failed }, text: values.reason });
+        profileHealth = { ...(profileHealth ?? {}), [record.profile]: record };
       }
       const zerosub = await readZerosubState().catch(() => null);
       // Single snapshot/selection for pick and start: start reuses this

@@ -1,9 +1,15 @@
 // @ts-nocheck
 // GENERATED from src/quota.mjs by npm run plugin:sync. Do not edit.
 /** Quota pools and the deliberately lenient `paseo usage --json` adapter. */
+import { isDeepStrictEqual } from 'node:util';
+import { withLock, workspaceLockName } from './lock.js';
+import { METADATA_KEY } from './paseo.js';
 
 export const QUOTA_DEFAULTS = { warnPct: 75, exhaustedPct: 95 };
 export const PROFILE_UNHEALTHY_MINUTES = 10;
+
+/** Own top-level workspace metadata key for profile failure marks (native patches are top-level). */
+export const PROFILE_HEALTH_KEY = `${METADATA_KEY}.profileHealth`;
 
 /** Classify a provider failure for short-lived profile failover. */
 export function classifyProfileFailure(text) {
@@ -33,6 +39,42 @@ export function recordProfileFailure(profile, text, { now = Date.now(), unhealth
 export function profileIsUnhealthy(profileHealth, name, now = Date.now()) {
   const record = profileHealth?.[name];
   return Boolean(record && Number.isFinite(Date.parse(record.unhealthyUntil)) && Date.parse(record.unhealthyUntil) > now);
+}
+
+/**
+ * Profile failure marks from workspace metadata: the current top-level
+ * `wsf.profileHealth` map merged over the legacy nested `profileHealth` field
+ * inside the `wsf` scope state (the top-level entry wins per profile). Null
+ * when neither exists. A copy; mutating it changes nothing stored.
+ */
+export function readProfileHealth(metadata) {
+  const usable = (value) => (value && typeof value === 'object' && !Array.isArray(value) ? value : null);
+  const legacy = usable(metadata?.[METADATA_KEY]?.profileHealth);
+  const current = usable(metadata?.[PROFILE_HEALTH_KEY]);
+  if (!legacy && !current) return null;
+  return { ...(legacy ?? {}), ...(current ?? {}) };
+}
+
+/**
+ * Locked read-modify-write of one profile failure mark: builds the record
+ * with recordProfileFailure, merges it into the top-level `wsf.profileHealth`
+ * map from a fresh read under the workspace lock, and verifies by re-reading.
+ * Like the other locked writers (agent entries, worker register) it patches
+ * only its own top-level key, so it can never roll back a concurrent
+ * switch/epoch in the `wsf` scope state. Returns the stored record.
+ */
+export async function storeProfileFailure({ client, workspaceId, profile, text, lock = withLock, now = Date.now(), unhealthyMinutes = PROFILE_UNHEALTHY_MINUTES }) {
+  const record = recordProfileFailure(profile, text, { now, unhealthyMinutes });
+  const workspace = client.workspaces.ref(workspaceId);
+  return lock(workspaceLockName(workspaceId), async (held) => {
+    const metadata = (await workspace.refresh())?.metadata ?? {};
+    const state = { ...(readProfileHealth(metadata) ?? {}), [record.profile]: record };
+    held.verify(); // the lock file must still be the locked inode right before the write
+    await workspace.setMetadata({ [PROFILE_HEALTH_KEY]: state });
+    const written = (await workspace.refresh())?.metadata?.[PROFILE_HEALTH_KEY] ?? null;
+    if (!isDeepStrictEqual(written, state)) throw new Error(`Profile health not verifiable after write in workspace ${workspaceId}`);
+    return written[record.profile];
+  });
 }
 
 export function profilePool(profile) {

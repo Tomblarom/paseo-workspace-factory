@@ -28,7 +28,7 @@ The config is looked up in this order: `--config <path>`, `$PASEO_FACTORY_CONFIG
 | `usage.warnContextTokens` | Optional positive integer (default off): `status` warns for agents above it, with a switch/fresh recommendation. |
 | `quota.warnPct` / `quota.exhaustedPct` | Session quota warning/exhaustion thresholds (defaults `75` and `95`). |
 | `profiles.<name>.pool` | Optional quota-pool name. Defaults to the profile's provider; profiles in one pool share availability and failover preference. |
-| `profileHealth` (workspace metadata) | Runtime-only profile failure marks. `worker pick --failed <profile> --reason <text>` records the failure; the profile is skipped for 10 minutes with its classified reason, without changing config or the provider catalog. |
+| `wsf.profileHealth` (workspace metadata) | Runtime-only profile failure marks, written under the workspace lock from a fresh read as their own top-level key (never inside the `wsf` scope state, so a concurrent switch/epoch is kept). `worker pick --failed <profile> --reason <text>` records the failure; the profile is skipped for 10 minutes with its classified reason, without changing config or the provider catalog. A legacy nested `profileHealth` field inside the `wsf` scope state is still read. |
 | `runtime.stateDir` | Plans, progress, journals and locks (default `$XDG_STATE_HOME/paseo-workspace-factory`). |
 | `runtime.scratchDir` | Scratch repositories of live tests (default `<stateDir>/scratch`). |
 | `runtime.paseo.url` | Daemon WebSocket URL (default `ws://127.0.0.1:6767/ws`). |
@@ -247,12 +247,12 @@ Extend the built-in list with optional `knownLimits` (validated on load; an entr
 
 ## Version binding
 
-The receipt lookup (`lookupCreationReceipt` in `src/paseo.mjs`) speaks the internal `creation.subscribe` protocol message, which Paseo exposes only through the internal `DaemonClient` (the public SDK uses it itself to reattach to running creations). Its shape is not covered by the public SDK contract, so the lookup is pinned to tested releases and fails closed:
+The receipt lookup (`lookupCreationReceipt` in `src/paseo.mjs`) speaks the internal `creation.subscribe` protocol message, which Paseo exposes only through the internal `DaemonClient` (the public SDK uses it itself to reattach to running creations). Its shape is not covered by the public SDK contract, so the lookup verifies the capability instead of pinning a version, and fails closed:
 
-- Before use it verifies the installed `@getpaseo/client` version (the SDK shipping with `runtime.paseo.bin`) and, after connecting, the daemon version plus the `creationLifecycle` feature flag.
-- Any version outside `RECEIPT_LOOKUP_TESTED_VERSIONS` (currently `0.16.2`), a missing feature flag, or a failed import, connect or exchange aborts with an error — the lookup never reports "no receipt" on failure, so `apply` never re-creates without a receipt.
+- Before use it verifies that the internal `DaemonClient` module shipping with `runtime.paseo.bin` loads and offers the methods the exchange needs, and after connecting that the daemon advertises the `creationLifecycle` feature flag.
+- Every response is shape-checked (snapshot kind, idempotency key, known phase, revision). A missing capability, a failed import, connect or exchange, or an unrecognized shape aborts with an error — the lookup never reports "no receipt" on failure, so `apply` never re-creates without a receipt.
 
-After a Paseo upgrade, re-run the crash test below; only extend `RECEIPT_LOOKUP_TESTED_VERSIONS` once it passes.
+After a Paseo upgrade, re-run the crash test below; if the daemon changed the subscribe shape, the lookup fails closed until the validation (known phases in `CREATION_SNAPSHOT_PHASES`) is updated and the crash test passes.
 
 Idempotency keys use the `wsf:` namespace (`wsf-it:` and `wsf-crash:` in the live tests). An apply interrupted before the rename from `ari-wsf:` must be replanned: stored authorizations hash their keys, so the old plan no longer matches and `apply` refuses it.
 

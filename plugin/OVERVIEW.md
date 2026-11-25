@@ -28,4 +28,4 @@ Profile and slot changes never touch running steers. The panel marks a steer tha
 
 The plugin reads daemon state, local git checkouts, and GitHub through gh. It writes workspaces, agents, workspace metadata, and plan files on the daemon host. Plugin code is trusted code: server code runs unsandboxed with the daemon user's access, and client code runs inside the Paseo app.
 
-Limits: one daemon host per install, no waiting for a new steer's reply, no notification to the replaced steer, and no tab reordering. The panel only recommends a tab order of steers A to Z followed by workers, since Paseo owns tab layout. Creation receipts are verified only on tested Paseo releases, currently 0.16.2.
+Limits: one daemon host per install, no waiting for a new steer's reply, no notification to the replaced steer, and no tab reordering. The panel only recommends a tab order of steers A to Z followed by workers, since Paseo owns tab layout. Creation receipts are verified through a capability-checked, fail-closed lookup of the daemon's `creation.subscribe` protocol.

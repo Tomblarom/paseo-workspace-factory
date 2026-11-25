@@ -81,6 +81,7 @@ import { createGh } from "./factory/github.js";
 import { formatLabelFixes, planLabelFixes } from "./factory/labels.js";
 import { createGit } from "./factory/local.js";
 import { formatCatalog, paseoRunFlags, resolveProfile, usedProfilesByLiveSteers } from "./factory/models.js";
+import { readProfileHealth } from "./factory/quota.js";
 import { applySteerAdd, formatSteerAddPreview, planSteerAdd } from "./factory/steer-add.js";
 import { planHash } from "./factory/planner.js";
 import { defaultCreateRewindClient } from "./factory/rewind.js";
@@ -1176,7 +1177,7 @@ export async function pickWorker(
   if (input.repo || input.workspaceId) {
     const { discovery, scope, runner } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
     entries = discovery.providers ?? [];
-    profileHealth = discovery.mainWorkspace?.metadata?.[METADATA_KEY]?.profileHealth ?? null;
+    profileHealth = readProfileHealth(discovery.mainWorkspace?.metadata);
     let priv = discovery.github?.fork?.repo?.private;
     const parent = scope?.parent ?? discovery.scope?.parent;
     const parentRepo = parent?.kind === "github" ? parent.id : typeof parent === "string" ? parent : null;
@@ -1559,7 +1560,7 @@ export async function previewSteerAdd(
   const workspaceId = status.workspace.id;
   const used = (usedProfilesByLiveSteers as any)(config, liveSteers);
   const quotaSnapshot = getQuotaSnapshot();
-  const profileHealth = discovery.mainWorkspace?.metadata?.[METADATA_KEY]?.profileHealth ?? null;
+  const profileHealth = readProfileHealth(discovery.mainWorkspace?.metadata);
   const zerosub = await readZerosubStateSafe().catch(() => null);
   const plan: any = (planSteerAdd as any)(config, discovery.providers ?? [], liveSteers, {
     slot: input.slot ?? null,
@@ -1639,7 +1640,7 @@ export async function applySteerAddRpc(
     fingerprintOf: steerAddFingerprint,
     usedProfiles: (usedProfilesByLiveSteers as any)(config, liveSteers),
     quotaSnapshot: getQuotaSnapshot(),
-    profileHealth: discovery.mainWorkspace?.metadata?.[METADATA_KEY]?.profileHealth ?? null,
+    profileHealth: readProfileHealth(discovery.mainWorkspace?.metadata),
     zerosub: await readZerosubStateSafe().catch(() => null),
     lookupReceipt: lookupCreationReceipt,
     execute: (createExecutors as any)(executeOptions),

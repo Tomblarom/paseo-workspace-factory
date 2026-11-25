@@ -132,13 +132,13 @@ plugin/
   client/settings-*.tsx      # host + device settings screens
 ```
 
-RPC set (thin wrapper over the CLI operations in `src/cli.mjs`): read-only first (`factory.status`, `factory.plan`, `factory.switchPreview`), then writes behind stored artifacts (`factory.apply {hash}`, `factory.checkpoint`, `factory.switch {to, apply}`). `requirements.paseo` must track the daemon the RPCs are tested against (today that would be `>=0.16.2`, following the receipt-lookup pin).
+RPC set (thin wrapper over the CLI operations in `src/cli.mjs`): read-only first (`factory.status`, `factory.plan`, `factory.switchPreview`), then writes behind stored artifacts (`factory.apply {hash}`, `factory.checkpoint`, `factory.switch {to, apply}`). `requirements.paseo` must track the daemon the RPCs are tested against (today that would be `>=0.16.2`).
 
 ## Development checks
 
 Run `npm run typecheck` and `npm test` in `plugin/`. On a test daemon, use `paseo plugin ls` to check that the plugin is running and exercise the contribution and its error state. The plugin’s `factory.ping` RPC reports the daemon subprocess’s Node version, which must be 22 or later.
 
-Receipt lookup is pinned to the tested Paseo version (currently 0.16.2). Re-verify it before changing the pin.
+Receipt lookup verifies the `creation.subscribe` capability (internal `DaemonClient`, `creationLifecycle` feature, response shape) and fails closed. Re-verify it after a Paseo upgrade with the crash test in `docs/configuration.md`.
 
 ## Decisions
 

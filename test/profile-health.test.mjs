@@ -1,7 +1,36 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { classifyProfileFailure, profileIsUnhealthy, recordProfileFailure } from '../src/quota.mjs';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { PROFILE_HEALTH_KEY, classifyProfileFailure, profileIsUnhealthy, readProfileHealth, recordProfileFailure, storeProfileFailure } from '../src/quota.mjs';
+import { withLock } from '../src/lock.mjs';
 import { resolveProfile } from '../src/models.mjs';
+
+const LOCK_TMP = mkdtempSync(join(tmpdir(), 'wsf-profile-health-'));
+const testLock = (name, fn) => withLock(name, fn, { dir: LOCK_TMP });
+const NOW = Date.parse('2026-11-24T10:00:00.000Z');
+
+/** Fake workspace ref with live metadata and daemon-like shallow top-level patches. */
+function fakeClient(metadata) {
+  const live = { metadata: structuredClone(metadata) };
+  const calls = [];
+  return {
+    live,
+    calls,
+    client: {
+      workspaces: {
+        ref: () => ({
+          refresh: async () => ({ metadata: live.metadata }),
+          setMetadata: async (patch) => {
+            calls.push(Object.keys(patch));
+            Object.assign(live.metadata, structuredClone(patch));
+          },
+        }),
+      },
+    },
+  };
+}
 
 const config = {
   profiles: {
@@ -44,4 +73,40 @@ test('resolveProfile skips recently failed profiles and returns the next entry',
   });
   assert.equal(result.profile.name, 'next');
   assert.deepEqual(result.skipped, [{ name: 'first', reason: 'recently failed: capacity' }]);
+});
+
+test('failure write keeps a concurrent switch: the epoch survives', async () => {
+  const { live, calls, client } = fakeClient({ wsf: { main: true, activeSteer: 'A', epoch: 1 } });
+  const stale = structuredClone(live.metadata); // discovery read before the switch
+  assert.equal(stale.wsf.epoch, 1);
+  live.metadata.wsf = { ...live.metadata.wsf, activeSteer: 'B', epoch: 2 }; // the switch lands first
+  const record = await storeProfileFailure({ client, workspaceId: 'wks_test', profile: 'first', text: '503 MODEL_CAPACITY_EXHAUSTED', lock: testLock, now: NOW });
+  assert.equal(record.class, 'capacity');
+  assert.equal(live.metadata.wsf.epoch, 2);
+  assert.equal(live.metadata.wsf.activeSteer, 'B');
+  assert.deepEqual(Object.keys(live.metadata[PROFILE_HEALTH_KEY]), ['first']);
+  assert.ok(calls.length > 0, 'health was written');
+  assert.ok(calls.every((keys) => keys.length === 1 && keys[0] === PROFILE_HEALTH_KEY), `only the health key is patched, got ${JSON.stringify(calls)}`);
+});
+
+test('health reads legacy nested marks and migrates them on write', async () => {
+  const legacy = recordProfileFailure('first', 'quota exceeded', { now: NOW });
+  const { live, client } = fakeClient({ wsf: { main: true, activeSteer: 'A', epoch: 1, profileHealth: { first: legacy } } });
+  assert.deepEqual(readProfileHealth(live.metadata), { first: legacy });
+  const record = await storeProfileFailure({ client, workspaceId: 'wks_test', profile: 'next', text: '429 rate limit', lock: testLock, now: NOW });
+  assert.equal(record.profile, 'next');
+  assert.deepEqual(readProfileHealth(live.metadata), { first: legacy, next: record });
+  assert.equal(live.metadata.wsf.epoch, 1);
+  assert.deepEqual(live.metadata.wsf.profileHealth, { first: legacy });
+});
+
+test('readProfileHealth prefers the top-level key per profile', () => {
+  const old = recordProfileFailure('first', 'quota exceeded', { now: NOW });
+  const fresh = recordProfileFailure('first', '503 capacity', { now: NOW + 60_000 });
+  assert.deepEqual(
+    readProfileHealth({ wsf: { profileHealth: { first: old } }, [PROFILE_HEALTH_KEY]: { first: fresh } }),
+    { first: fresh },
+  );
+  assert.equal(readProfileHealth({ wsf: {} }), null);
+  assert.equal(readProfileHealth(null), null);
 });

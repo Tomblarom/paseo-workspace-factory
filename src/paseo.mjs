@@ -3,7 +3,7 @@
 import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { delimiter, dirname, join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { daemonHost, runtime } from './runtime.mjs';
 import { pathToFileURL } from 'node:url';
 
@@ -201,66 +201,69 @@ export function daemonStartedAt(paseoCli) {
 }
 
 /**
- * Paseo releases the receipt lookup was tested against. The lookup speaks the
- * internal `creation.subscribe` protocol message (which the SDK itself uses to
- * reattach to running creations); its shape is not part of the public SDK
- * contract, so any other daemon or `@getpaseo/client` version fails closed
- * instead of risking a create without a receipt. See "Version binding" in
- * docs/configuration.md. Extend only after the live crash test passes there.
+ * Known `creation.subscribe` snapshot phases (CreationSnapshotSchema in
+ * `@getpaseo/protocol`). The receipt lookup validates the phase against this
+ * list and fails closed on anything else, so a protocol change can never be
+ * mistaken for "no receipt" or for a completed creation. Extend only after
+ * the live crash test in docs/configuration.md passes against the new shape.
  */
-export const RECEIPT_LOOKUP_TESTED_VERSIONS = ['0.16.2'];
+export const CREATION_SNAPSHOT_PHASES = ['accepted', 'workspace_ready', 'agent_ready', 'prompt_started', 'completed', 'failed'];
 
 /**
- * Version of the `@getpaseo/client` shipping with the installed CLI. The
- * package does not export its package.json, so it is read from the filesystem
- * next to the resolved client entry. Returns null when it cannot be verified.
+ * Validates one `creation.subscribe.response` payload. Returns the receipt
+ * snapshot, or null when the daemon explicitly reports no receipt
+ * (`snapshot: null`). Anything else — a missing snapshot key, a non-object
+ * snapshot, a kind/key mismatch, an unknown phase or a bad revision — throws,
+ * so a protocol change can never read as "no receipt". Callers interpret the
+ * returned snapshot (completed vs. in-flight vs. failed vs. outcomeUnknown).
  */
-export function installedClientVersion(cliPath = paseoBinary()) {
-  const require = createRequire(realpathSync(cliPath));
-  let dir = dirname(require.resolve('@getpaseo/client'));
-  for (let guard = 0; guard < 6; guard += 1) {
-    const candidate = join(dir, 'package.json');
-    if (existsSync(candidate)) {
-      const pkg = JSON.parse(readFileSync(candidate, 'utf8'));
-      if (pkg?.name === '@getpaseo/client') return pkg.version ?? null;
-    }
-    const parent = dirname(dir);
-    if (parent === dir) return null;
-    dir = parent;
-  }
-  return null;
+function checkedReceiptSnapshot(response, kind, idempotencyKey) {
+  const fail = (detail) => {
+    throw new Error(`receipt lookup failed: the daemon answered with an unrecognized receipt shape (${detail}); refusing to create without a receipt`);
+  };
+  if (!response || typeof response !== 'object' || !('snapshot' in response)) fail('missing snapshot');
+  const snapshot = response.snapshot;
+  if (snapshot === null || snapshot === undefined) return null;
+  if (!snapshot || typeof snapshot !== 'object') fail('snapshot is not an object');
+  if (snapshot.kind !== kind || snapshot.idempotencyKey !== idempotencyKey) fail('kind/key mismatch');
+  if (!CREATION_SNAPSHOT_PHASES.includes(snapshot.phase)) fail(`unknown phase ${JSON.stringify(snapshot.phase)}`);
+  if (!Number.isInteger(snapshot.revision) || snapshot.revision < 0) fail('bad revision');
+  return snapshot;
 }
 
 /**
  * Read-only lookup of a daemon creation receipt by idempotency key. Paseo
  * exposes this only through the internal `creation.subscribe.request` (used by
- * the SDK itself to reattach to running creations), so it is isolated here,
- * pinned to the tested versions and fails closed: an untested SDK or daemon
- * version, a missing `creationLifecycle` feature, or a failed import, connect
- * or exchange throws — it never reports "no receipt" on failure, so callers
- * never re-create without a receipt. Returns the receipt snapshot or null when
- * the daemon has no receipt. Side effect owned by the daemon: a receipt left
- * in-flight by a dead daemon run is marked outcomeUnknown when looked up.
+ * the SDK itself to reattach to running creations), so it is isolated here
+ * and fails closed through a capability check instead of a version pin: the
+ * internal DaemonClient module and the methods the exchange needs must exist,
+ * the daemon must advertise the `creationLifecycle` feature, and the response
+ * shape is validated. Any unverifiable case throws — it never reports "no
+ * receipt" on failure, so callers never re-create without a receipt. Returns
+ * the receipt snapshot or null when the daemon has no receipt. Side effect
+ * owned by the daemon: a receipt left in-flight by a dead daemon run is
+ * marked outcomeUnknown when looked up. Verified against the installed
+ * `@getpaseo/client` 0.17.4 internals (internal DaemonClient, the
+ * `creation.subscribe` request/response schemas and the daemon creation
+ * service); see "Version binding" in docs/configuration.md.
  */
-export async function lookupCreationReceipt(kind, idempotencyKey, { url = runtime().paseo.url, cliPath = paseoBinary(), expectedVersion = RECEIPT_LOOKUP_TESTED_VERSIONS[0] } = {}) {
-  const tested = [expectedVersion];
-  let clientVersion;
-  try {
-    clientVersion = installedClientVersion(cliPath);
-  } catch (error) {
-    throw new Error(`receipt lookup failed: cannot verify the installed @getpaseo/client version (${error.message}); refusing to create without a receipt`);
-  }
-  if (!tested.includes(clientVersion)) {
-    throw new Error(`receipt lookup refused: installed @getpaseo/client ${clientVersion ?? 'unknown'} is outside the tested versions (${tested.join(', ')}); refusing to create without a receipt`);
-  }
-  const require = createRequire(realpathSync(cliPath));
+export async function lookupCreationReceipt(kind, idempotencyKey, { url = runtime().paseo.url, cliPath = paseoBinary() } = {}) {
   let DaemonClient;
   try {
+    const require = createRequire(realpathSync(cliPath));
     ({ DaemonClient } = await import(pathToFileURL(require.resolve('@getpaseo/client/internal/daemon-client')).href));
   } catch (error) {
-    throw new Error(`receipt lookup failed: cannot load the internal DaemonClient from @getpaseo/client ${clientVersion} (${error.message}); refusing to create without a receipt`);
+    throw new Error(`receipt lookup failed: cannot load the internal DaemonClient (${error.message}); refusing to create without a receipt`);
+  }
+  if (typeof DaemonClient !== 'function') {
+    throw new Error('receipt lookup failed: the installed @getpaseo/client exports no DaemonClient constructor; refusing to create without a receipt');
   }
   const daemon = new DaemonClient({ url, password: daemonPassword(), clientId: 'paseo-workspace-factory-receipt', logger: SILENT, reconnect: { enabled: false } });
+  for (const method of ['connect', 'sendCorrelatedSessionRequest', 'getLastServerInfoMessage', 'close']) {
+    if (typeof daemon[method] !== 'function') {
+      throw new Error(`receipt lookup failed: the installed DaemonClient lacks ${method}(), which the receipt lookup needs; refusing to create without a receipt`);
+    }
+  }
   try {
     try {
       await daemon.connect();
@@ -268,11 +271,8 @@ export async function lookupCreationReceipt(kind, idempotencyKey, { url = runtim
       throw new Error(`receipt lookup failed: cannot reach the daemon at ${url} (${error.message}); refusing to create without a receipt`);
     }
     const info = daemon.getLastServerInfoMessage();
-    const version = info?.version ?? info?.daemonVersion;
-    if (!tested.includes(version)) {
-      throw new Error(`receipt lookup refused: daemon ${version ?? 'unknown'} is outside the tested versions (${tested.join(', ')}); refusing to create without a receipt`);
-    }
     if (info?.features?.creationLifecycle !== true) {
+      const version = info?.version ?? info?.daemonVersion ?? 'unknown';
       throw new Error(`receipt lookup refused: daemon ${version} does not advertise creationLifecycle; refusing to create without a receipt`);
     }
     const requestId = `wsf-receipt-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -288,7 +288,7 @@ export async function lookupCreationReceipt(kind, idempotencyKey, { url = runtim
       throw new Error(`receipt lookup failed: the creation.subscribe exchange failed (${error.message}); refusing to create without a receipt`);
     }
     if (response?.error) throw new Error(`receipt lookup failed: the daemon answered with an error (${response.error}); refusing to create without a receipt`);
-    return response?.snapshot ?? null;
+    return checkedReceiptSnapshot(response, kind, idempotencyKey);
   } finally {
     await daemon.close().catch(() => {});
   }
