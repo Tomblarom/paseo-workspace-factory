@@ -248,6 +248,7 @@ const TEXT = {
     workerHead: (repo, title, from, to, owner) => `Worker-Auffrischung für ${repo}: „${title}“ ${from} → ${to} (Owner Steer ${owner}, Epoch unverändert).`,
     workerRewindHead: (repo, title, id, owner) => `Worker-Auffrischung für ${repo}: „${title}“ ${id} behält seinen Tab (Kontext per Rewind geleert, Owner Steer ${owner}, Epoch unverändert).`,
     refreshRole: (slot) => `Du bist Steer ${slot} dieses Scopes (nicht aktiv: nur antworten, nicht koordinieren).`,
+    refreshRoleActive: (slot) => `Du bist Steer ${slot} dieses Scopes und aktiv: koordiniere ab dem Checkpoint unten.`,
     workerRole: (title, owner) => `Du bist Worker „${title}“; dein Owner ist Steer ${owner} — mache mit dem Checkpoint unten weiter.`,
     refreshNote: (id, at) => `Notiz von ${id}${at ? ` (${at})` : ''}:`,
     noNote: 'Agentennotiz: keine dokumentiert; der Checkpoint unten ist die einzige Quelle.',
@@ -271,6 +272,7 @@ const TEXT = {
     workerHead: (repo, title, from, to, owner) => `Worker refresh for ${repo}: "${title}" ${from} → ${to} (owner Steer ${owner}, epoch unchanged).`,
     workerRewindHead: (repo, title, id, owner) => `Worker refresh for ${repo}: "${title}" ${id} keeps its tab (rewound context, owner Steer ${owner}, epoch unchanged).`,
     refreshRole: (slot) => `You are Steer ${slot} of this scope (not active: answer only, do not coordinate).`,
+    refreshRoleActive: (slot) => `You are Steer ${slot} of this scope and active: coordinate from the checkpoint below.`,
     workerRole: (title, owner) => `You are worker "${title}"; your owner is Steer ${owner} — continue from the checkpoint below.`,
     refreshNote: (id, at) => `Note of ${id}${at ? ` (${at})` : ''}:`,
     noNote: 'Agent note: none recorded; the checkpoint below is the only source.',
@@ -387,7 +389,7 @@ export function buildRefreshPacket(status, { kind, slot = null, owner = null, ti
         : t.refreshHead(status.repo, slot, epoch, active)),
     kind === 'worker'
       ? t.workerRole(title ?? from.title ?? 'Worker', owner ?? '?')
-      : t.refreshRole(slot),
+      : (slot && slot === active ? t.refreshRoleActive(slot) : t.refreshRole(slot)),
     `Workspace ${status.workspace.id} · ${status.workspace.directory}`,
     git ? t.git(git) : t.noGit,
   ];

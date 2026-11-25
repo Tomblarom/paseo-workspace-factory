@@ -324,6 +324,24 @@ test('buildRefreshPacket heads the same tab when rewound', async () => {
   assert.match(workerPacket, new RegExp(`"Build" ${from.id} keeps its tab \\(rewound context`));
 });
 
+test('buildRefreshPacket tells a refreshed active steer to coordinate', async () => {
+  const world = makeWorld();
+  provisioned(world);
+  const status = steerStatus(discoveryOf(world));
+  const active = status.state.activeSteer;
+  const activeSteer = status.steers.find((s) => s.slot === active);
+  const other = status.steers.find((s) => s.slot !== active);
+  const forActive = buildRefreshPacket(status, {
+    kind: 'steer', slot: active, from: activeSteer, to: { id: activeSteer.id }, epoch: 1, git: null, rewound: true, language: 'en',
+  });
+  assert.match(forActive, new RegExp(`You are Steer ${active} of this scope and active: coordinate`));
+  assert.doesNotMatch(forActive, /not active: answer only/);
+  const forOther = buildRefreshPacket(status, {
+    kind: 'steer', slot: other.slot, from: other, to: { id: other.id }, epoch: 1, git: null, rewound: true, language: 'en',
+  });
+  assert.match(forOther, /not active: answer only, do not coordinate/);
+});
+
 // ------------------------------------------------------- fresh preview mode
 
 test('fresh --slot preview shows rewind vs new agent', async () => {
