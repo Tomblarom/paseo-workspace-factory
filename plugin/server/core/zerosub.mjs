@@ -290,9 +290,9 @@ export function inheritContinuationLabels(live, origin) {
  * state, without a family, or when every account is exhausted. No live call;
  * the caller passes `metadata` at creation (or pins via the RPC after).
  */
-export function suggestAccountPin(zerosub, family, { exhaustedPct = QUOTA_DEFAULTS.exhaustedPct, now = Date.now() } = {}) {
+export function suggestAccountPin(zerosub, family, { exhaustedPct = QUOTA_DEFAULTS.exhaustedPct, now = Date.now(), model = null } = {}) {
   if (!zerosub || typeof family !== 'string' || !family) return null;
-  const best = bestFamilyAccount(zerosub, family, { exhaustedPct, now });
+  const best = bestFamilyAccount(zerosub, family, { exhaustedPct, now, model });
   if (!best) return null;
   return {
     pluginId: ACCOUNT_PIN_PLUGIN_ID,

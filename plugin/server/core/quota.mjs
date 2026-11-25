@@ -91,16 +91,34 @@ export function familyAccounts(zerosub, family) {
   return (zerosub?.accounts ?? []).filter((account) => account && String(account.family ?? '').toLowerCase() === want);
 }
 
+/** Model family tokens that a provider may use to scope a quota window. */
+const MODEL_FAMILY_TOKENS = ['gemini', 'claude', 'gpt', 'opus', 'sonnet', 'haiku', 'codex', 'llama', 'mistral', 'grok', 'qwen', 'deepseek'];
+
+/**
+ * True when a quota window applies to `model`. A window whose id or label
+ * names model families (e.g. "agy-claude-and-gpt-models-weekly") applies only
+ * to models of those families; a window naming none, or an unknown model,
+ * applies to everything.
+ */
+export function windowAppliesToModel(window, model) {
+  const wanted = String(model ?? '').toLowerCase();
+  if (!wanted) return true;
+  const text = `${window?.id ?? ''} ${window?.label ?? ''} ${window?.shortLabel ?? ''}`.toLowerCase();
+  const named = MODEL_FAMILY_TOKENS.filter((token) => text.includes(token));
+  return !named.length || named.some((token) => wanted.includes(token));
+}
+
 /**
  * Max usedPct over the windows whose reset has not passed, or null when no
  * window carries a usable percent. A window whose resetsAt is in the past is
  * expired and its usedPct is stale, so it never counts; windows without a
  * reset stamp count (nothing proves them stale). Accounts without windows
  * fall back to the scalar maxUsedPct. An ordinary future resetsAt never marks
- * exhaustion by itself; only an explicit limit or the threshold does.
+ * exhaustion by itself; only an explicit limit or the threshold does. With
+ * `model`, only windows that apply to that model count (windowAppliesToModel).
  */
-export function freshMaxUsedPct(account, now = Date.now()) {
-  const windows = Array.isArray(account?.windows) ? account.windows : null;
+export function freshMaxUsedPct(account, now = Date.now(), model = null) {
+  const windows = Array.isArray(account?.windows) ? account.windows.filter((window) => windowAppliesToModel(window, model)) : null;
   if (!windows || !windows.length) {
     return Number.isFinite(account?.maxUsedPct) ? account.maxUsedPct : null;
   }
@@ -119,12 +137,12 @@ export function freshMaxUsedPct(account, now = Date.now()) {
  * future limitedUntil, or the fresh (non-expired) max usedPct at the
  * exhausted threshold.
  */
-export function accountExhausted(account, { exhaustedPct = QUOTA_DEFAULTS.exhaustedPct, now = Date.now() } = {}) {
+export function accountExhausted(account, { exhaustedPct = QUOTA_DEFAULTS.exhaustedPct, now = Date.now(), model = null } = {}) {
   if (!account || typeof account !== 'object') return false;
   if (account.exhausted === true) return true;
   const until = Date.parse(account.limitedUntil ?? '');
   if (Number.isFinite(until) && until > now) return true;
-  const pct = freshMaxUsedPct(account, now);
+  const pct = freshMaxUsedPct(account, now, model);
   return pct !== null && pct >= exhaustedPct;
 }
 
@@ -156,18 +174,19 @@ export function bestFamilyAccount(zerosub, family, opts = {}) {
   if (!open.length) return null;
   const now = opts?.now ?? Date.now();
   const room = (account) => {
-    const pct = freshMaxUsedPct(account, now);
+    const pct = freshMaxUsedPct(account, now, opts?.model ?? null);
     return pct !== null ? pct : Infinity;
   };
   return open.slice().sort((a, b) => room(a) - room(b) || String(a.id).localeCompare(String(b.id)))[0];
 }
 
 /** Earliest future resetsAt/limitedUntil across the given accounts, or null. */
-export function earliestResetOf(accounts, { now = Date.now() } = {}) {
+export function earliestResetOf(accounts, { now = Date.now(), model = null } = {}) {
   let best = null;
   let bestMs = Infinity;
   for (const account of accounts ?? []) {
-    const stamps = [account?.limitedUntil, ...(account?.windows ?? []).map((window) => window?.resetsAt)];
+    const windows = (account?.windows ?? []).filter((window) => windowAppliesToModel(window, model));
+    const stamps = [account?.limitedUntil, ...windows.map((window) => window?.resetsAt)];
     for (const stamp of stamps) {
       const ms = Date.parse(stamp ?? '');
       if (Number.isFinite(ms) && ms > now && ms < bestMs) {

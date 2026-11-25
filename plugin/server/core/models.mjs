@@ -154,8 +154,9 @@ export function resolveProfile(config, providerEntries, list, { role = 'worker',
     }
     const family = profileFamily(config.profiles[name]);
     if (zerosub && familyAccounts(zerosub, family).length) {
-      if (familyExhausted(zerosub, family, { exhaustedPct: zerosubExhaustedPct, now })) {
-        const reset = earliestFamilyReset(zerosub, family, { now });
+      const model = config.profiles[name].model ?? null;
+      if (familyExhausted(zerosub, family, { exhaustedPct: zerosubExhaustedPct, now, model })) {
+        const reset = earliestFamilyReset(zerosub, family, { now, model });
         skipped.push({ name, reason: reset ? `accounts exhausted, earliest reset ${reset}` : 'accounts exhausted' });
         continue;
       }
@@ -193,8 +194,9 @@ export function resolveProfile(config, providerEntries, list, { role = 'worker',
       skipped.push({ name, reason: problems[name].join('; ') });
       continue;
     }
-    const account = zerosub ? bestFamilyAccount(zerosub, family, { exhaustedPct: zerosubExhaustedPct, now }) : null;
-    const pin = suggestAccountPin(zerosub, family, { exhaustedPct: zerosubExhaustedPct, now });
+    const pickModel = config.profiles[name].model ?? null;
+    const account = zerosub ? bestFamilyAccount(zerosub, family, { exhaustedPct: zerosubExhaustedPct, now, model: pickModel }) : null;
+    const pin = suggestAccountPin(zerosub, family, { exhaustedPct: zerosubExhaustedPct, now, model: pickModel });
     return { profile: { name, ...config.profiles[name] }, skipped, zerosubAccount: account ? account.id : null, zerosubPin: pin };
   }
   return { profile: null, skipped, zerosubAccount: null, zerosubPin: null };

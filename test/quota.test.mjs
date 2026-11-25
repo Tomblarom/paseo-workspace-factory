@@ -110,3 +110,18 @@ test('usage JSON parsing is fail-soft and extracts the 5h window', () => {
   assert.deepEqual(parseUsageJson(null), {});
 });
 
+
+test('model-scoped quota windows only count for their model family', async () => {
+  const { accountExhausted, freshMaxUsedPct, earliestResetOf, windowAppliesToModel } = await import('../plugin/server/core/quota.mjs');
+  const now = Date.parse('2026-11-25T23:00:00Z');
+  const account = { family: 'antigravity', windows: [
+    { id: 'agy-gemini-models-weekly', usedPct: 17, resetsAt: '2026-12-01T08:59:32Z' },
+    { id: 'agy-claude-and-gpt-models-weekly', usedPct: 100, resetsAt: '2026-11-29T10:50:35Z' },
+  ] };
+  assert.equal(accountExhausted(account, { now, model: 'gemini-4-hydrogen' }), false);
+  assert.equal(freshMaxUsedPct(account, now, 'gemini-4-hydrogen'), 17);
+  assert.equal(earliestResetOf([account], { now, model: 'gemini-4-hydrogen' }), '2026-12-01T08:59:32Z');
+  assert.equal(accountExhausted(account, { now, model: 'claude-sonnet-4-6' }), true);
+  assert.equal(accountExhausted(account, { now }), true, 'without a model every window counts');
+  assert.equal(windowAppliesToModel({ id: 'session-5h' }, 'gemini-4-hydrogen'), true, 'unscoped windows apply to all models');
+});
