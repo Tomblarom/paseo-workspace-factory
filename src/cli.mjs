@@ -20,7 +20,7 @@ import { DRAIN_DEFAULT_TIMEOUT_MS, drain, parseTimeout } from './drain.mjs';
 import { assessWorker, readGitState, startScopedWorker } from './workers.mjs';
 import { formatWorkersPruneText, formatWorkersText, pruneWorkerRegister, readWorkers, staleWorkerEntries, workersReport } from './supervision.mjs';
 import { assignScope } from './assign.mjs';
-import { flagValue, formatCatalog, formatWorkerModel, parseProviderModel, paseoRunFlags, planAdvisorTag, planSensitiveTag, planSlotRemove, planSlotSet, planSteerRemove, planSteerSet, planWorkerDefault, planWorkerRemove, planWorkerSet, previewConfig, resolveProfile, steerFallbackList, writeConfigAtomic } from './models.mjs';
+import { flagValue, formatCatalog, formatWorkerModel, parseProviderModel, paseoRunFlags, planAdvisorTag, planSensitiveTag, planSlotRemove, planSlotSet, planSteerRemove, planSteerSet, planWorkerDefault, planWorkerRemove, planWorkerSet, previewConfig, resolveProfile, resolveWorkerPick, steerFallbackList, workerListRows, writeConfigAtomic } from './models.mjs';
 import { scopeRows, scopeCandidates, formatScopeRows, formatScopeCandidates, formatStatus } from './scopes-view.mjs';
 import { applyContinuations } from './discovery.mjs';
 import { validateProfilesAgainstCatalog } from './config.mjs';
@@ -68,7 +68,7 @@ const USAGE = `Usage: paseo-factory <command> [options]
   cleanup [--json]                   read-only cleanup report over the whole instance
   cleanup --plan [--allow-destructive] [--allow-ignored] [--only <id,...>] [--json]
   models [--json]                    list the live provider catalog
-  worker list [--json]                 worker priority with availability and the current pick
+  worker list [scope] [--json]         worker priority with availability; → marks what worker pick returns
   worker set <n> <profile|provider/model> [--thinking X] [--mode Y] [--profile name] [--dry-run]
   worker rm <n> [--dry-run]
   worker pick [scope] [--json]         chosen worker profile plus paseo run flags
@@ -770,27 +770,6 @@ async function runModelCommand({ command, args, values, config, configPath, clie
   }
   if (command === 'worker') {
     const [sub, ...rest] = args;
-    if (sub === 'list') {
-      if (rest.length) throw new Error('worker list takes no arguments');
-      const entries = await catalog();
-      const priority = workerPriority(config);
-      const problems = validateProfilesAgainstCatalog(config, entries, priority);
-      const { profile } = resolveProfile(config, entries, priority, { role: 'worker', repoPublic: null });
-      const rows = priority.map((name, index) => ({
-        position: index + 1, profile: name,
-        provider: config.profiles[name]?.provider ?? '?', model: config.profiles[name]?.model ?? '?',
-        advisor: isAdvisorProfile(config, name), sensitive: isSensitiveProfile(config, name),
-        startable: !problems[name], issues: problems[name] ?? [], chosen: profile?.name === name,
-      }));
-      if (values.json) return console.log(JSON.stringify({ defaultProfile: config.workers?.defaultProfile ?? null, priority, chosen: profile?.name ?? null, entries: rows }, null, 2));
-      const lines = [`Worker priority (default "${config.workers?.defaultProfile ?? '-'}", → currently picked):`];
-      for (const row of rows) {
-        const tags = `${row.advisor ? ' [advisor]' : ''}${row.sensitive ? ' [sensitive]' : ''}`;
-        lines.push(`${row.chosen ? '→' : ' '} ${row.position}. ${row.profile}${tags} ${row.startable ? '✓' : '✗'} ${row.provider}/${row.model}${row.startable ? '' : ` (${row.issues.join('; ')})`}`);
-      }
-      if (!rows.length) lines.push('(no worker profiles configured)');
-      return console.log(lines.join('\n'));
-    }
     if (sub === 'set') {
       const [nArg, specArg, ...extra] = rest;
       if (!nArg || !specArg || extra.length) throw new Error('worker set needs <n> <profile|provider/model>');
@@ -806,9 +785,11 @@ async function runModelCommand({ command, args, values, config, configPath, clie
       const planned = planWorkerRemove(config, nArg);
       return writePlanned({ planned, configPath, dryRun });
     }
-    if (sub === 'pick' || sub === 'start') {
+    if (sub === 'pick' || sub === 'start' || sub === 'list') {
       const starting = sub === 'start';
+      const listing = sub === 'list';
       const [scopeArg, ...extra] = rest;
+      if (listing && values.failed !== undefined) throw new Error('--failed is only accepted with worker pick');
       if (extra.length) throw new Error(`worker ${sub} takes at most one scope`);
       if (starting && !values.task?.trim()) throw new Error('worker start needs --task <text>');
       if (starting && values.failed !== undefined) throw new Error('--failed is only accepted with worker pick');
@@ -857,7 +838,24 @@ async function runModelCommand({ command, args, values, config, configPath, clie
         await client.workspaces.ref(discovery.mainWorkspace.id).setMetadata({ [METADATA_KEY]: { ...metadata, profileHealth } });
       }
       const zerosub = await readZerosubState().catch(() => null);
-      const { profile, skipped, zerosubAccount } = resolveProfile(config, entries, workerPriority(config), { role: 'worker', repoPublic, profileHealth, zerosub });
+      // Single snapshot/selection for pick and start: start reuses this
+      // result, it never re-reads or re-resolves.
+      const selection = resolveWorkerPick(config, entries, { repoPublic, profileHealth, zerosub });
+      const { profile, skipped, zerosubAccount } = selection;
+      if (listing) {
+        // Same scope, snapshot and selection as pick: the arrow marks exactly
+        // the profile `worker pick` returns.
+        const rows = workerListRows(config, entries, selection);
+        const priority = workerPriority(config);
+        if (values.json) return console.log(JSON.stringify({ defaultProfile: config.workers?.defaultProfile ?? null, priority, chosen: profile?.name ?? null, repoPublic, entries: rows }, null, 2));
+        const lines = [`Worker priority (default "${config.workers?.defaultProfile ?? '-'}", → currently picked):`];
+        for (const row of rows) {
+          const tags = `${row.advisor ? ' [advisor]' : ''}${row.sensitive ? ' [sensitive]' : ''}`;
+          lines.push(`${row.chosen ? '→' : ' '} ${row.position}. ${row.profile}${tags} ${row.startable ? '✓' : '✗'} ${row.provider}/${row.model}${row.startable ? '' : ` (${row.issues.join('; ')})`}`);
+        }
+        if (!rows.length) lines.push('(no worker profiles configured)');
+        return console.log(lines.join('\n'));
+      }
       if (!profile) {
         const tried = skipped.length ? skipped.map((s) => `"${s.name}" (${s.reason})`).join('; ') : 'no worker profiles configured';
         throw new Error(`No startable worker profile (tried ${tried})`);

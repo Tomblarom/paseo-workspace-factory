@@ -201,6 +201,46 @@ export function resolveProfile(config, providerEntries, list, { role = 'worker',
 }
 
 /**
+ * Worker pick selection: `resolveProfile` over `workerPriority(config)` with
+ * role `worker`. The single selection function for `worker list`, `worker
+ * pick` and `worker start`: every caller passes the same snapshot
+ * (`quotaSnapshot`, `zerosub`) plus its scope context (`repoPublic`,
+ * `profileHealth`), so the list marks the profile pick would return.
+ */
+export function resolveWorkerPick(config, providerEntries, opts = {}) {
+  return resolveProfile(config, providerEntries, workerPriority(config), { role: 'worker', ...opts });
+}
+
+/**
+ * Worker list rows derived from a `resolveWorkerPick` selection, so list and
+ * pick agree. Each row carries `{ position, profile, provider, model,
+ * advisor, sensitive, startable, issues, chosen }`: `chosen` is the picked
+ * profile, skipped rows are not startable and show the pick skip reason
+ * (e.g. `accounts exhausted, earliest reset …`) as their first issue,
+ * profiles past the pick keep their catalog availability as fallback info.
+ */
+export function workerListRows(config, providerEntries, selection) {
+  const priority = workerPriority(config);
+  const skipByName = new Map((selection?.skipped ?? []).map((s) => [s?.name, s?.reason]));
+  const chosen = selection?.profile?.name ?? null;
+  const known = priority.filter((name) => typeof name === 'string' && config?.profiles?.[name]);
+  const problems = validateProfilesAgainstCatalog(config, providerEntries, known);
+  return priority.map((name, index) => {
+    const entry = config?.profiles?.[name];
+    const skipReason = skipByName.get(name) ?? null;
+    const catalogIssues = entry ? (problems[name] ?? []) : [];
+    return {
+      position: index + 1, profile: name,
+      provider: entry?.provider ?? '?', model: entry?.model ?? '?',
+      advisor: isAdvisorProfile(config, name), sensitive: isSensitiveProfile(config, name),
+      startable: !skipReason && catalogIssues.length === 0,
+      issues: skipReason ? [skipReason] : [...catalogIssues],
+      chosen: chosen === name,
+    };
+  });
+}
+
+/**
  * Pure model/account selection for a future `steer add`: validates or
  * suggests the slot, then picks the profile and ZeroSub account. `slot`
  * null/empty suggests the next free letter (slot priority, A first); an

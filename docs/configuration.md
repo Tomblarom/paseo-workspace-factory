@@ -195,7 +195,7 @@ Use these commands in the Paseo composer. The catalog and priority checks also a
 
 ```text
 /factory models
-/factory worker list | /factory worker pick [scope] | /factory worker set <n> <profile|provider/model> [--thinking X] [--mode Y] [--profile name] [--dry-run] | /factory worker rm <n> [--dry-run]
+/factory worker list [scope] | /factory worker pick [scope] | /factory worker set <n> <profile|provider/model> [--thinking X] [--mode Y] [--profile name] [--dry-run] | /factory worker rm <n> [--dry-run]
 /factory steer list | /factory steer set <n|slot> <profile|provider/model> [--thinking X] [--mode Y] [--profile name] [--dry-run] | /factory steer rm <n|slot> [--dry-run]
 /factory model advisor|sensitive <profile|provider/model> on|off [--dry-run]
 ```
@@ -283,7 +283,7 @@ The CLI reads its configuration from the host file. Use `paseo-factory --help` f
 
 ```text
 paseo-factory models [--json]
-paseo-factory worker list [--json]
+paseo-factory worker list [scope] [--json]
 paseo-factory worker set <n> <profile|provider/model> [--thinking X] [--mode Y] [--profile name] [--dry-run]
 paseo-factory worker rm <n> [--dry-run]
 paseo-factory worker pick [scope] [--json]
