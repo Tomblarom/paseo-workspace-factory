@@ -1,7 +1,7 @@
 import { AGENTS_KEY, currentFreshHint, updateAgentEntry } from "./factory/agent-state.js";
 import { isAdvisorSlot } from "./factory/config.js";
 import { LEGACY_PREFIX, METADATA_KEY, readPaseoState } from "./factory/paseo.js";
-import { quotaEntry, quotaExhausted, quotaPct } from "./factory/quota.js";
+import { QUOTA_DEFAULTS, accountExhausted, freshMaxUsedPct, quotaEntry, quotaExhausted, quotaPct } from "./factory/quota.js";
 import { listScopes } from "./factory/scope.js";
 import { WORKERS_KEY } from "./factory/supervision.js";
 import { buildRewindRecord } from "./factory/steer.js";
@@ -24,6 +24,7 @@ import {
   type NeedsResumeReason,
 } from "../shared/idle-cleanup.js";
 import { MAX_FRESH_REASON } from "../shared/auto-checkpoint.js";
+import { resolveZerosub, type ZerosubState } from "./zerosub-runtime.js";
 
 const CHECKPOINT_KEY = `${METADATA_KEY}.checkpoint`;
 const LEGACY_CHECKPOINT_KEY = `${LEGACY_PREFIX}.checkpoint`;
@@ -180,23 +181,60 @@ export interface SweepDeps {
   log?: (message: string) => void;
   /** Quota snapshot override; tests only (defaults to the sampled one). */
   quotaSnapshot?: Record<string, any> | null;
+  /** Explicit ZeroSub state (tests); undefined resolves through getZerosub. */
+  zerosub?: ZerosubState;
+  /** Fail-soft ZeroSub supplier for the per-account compact check. */
+  getZerosub?: () => Promise<ZerosubState>;
+  /** Exhaustion threshold for the compact check; the quota default applies. */
+  exhaustedPct?: number;
   /** Lock for the entry write; tests only (defaults to the real one). */
   lock?: (name: string, fn: (held: { verify: () => void }) => Promise<any>) => Promise<any>;
   /** Same-tab rewind runner; tests only (defaults to the synced rewind core). */
   rewindFn?: (agentId: string) => Promise<{ status: string; messageId?: string; error?: string }>;
 }
 
+export interface CleanupQuotaCheck {
+  /** Agent to resolve through the ZeroSub routes; without it the pool fallback applies. */
+  agentId?: string | null;
+  /** Normalized ZeroSub state; null/undefined keeps the provider-pool check. */
+  zerosub?: ZerosubState;
+  /** Exhaustion threshold; the quota default applies without it. */
+  exhaustedPct?: number;
+  nowMs?: number;
+}
+
 /**
- * True only with a quota reading that shows headroom. Missing provider
- * entries and unsupported telemetry are unknown.
+ * True only with a quota reading that shows headroom. Checks the ZeroSub
+ * account the agent actually runs on (the pending move account wins as the
+ * live session, else the agent route) and falls back to the provider pool
+ * only when no route is known. Missing entries and unsupported telemetry
+ * are unknown.
  */
 export function quotaAvailableForCleanup(
   provider: string,
   snapshot: Record<string, any> | null | undefined,
+  opts: CleanupQuotaCheck = {},
 ): boolean | null {
+  const nowMs = Number.isFinite(opts.nowMs) ? (opts.nowMs as number) : Date.now();
+  const exhaustedPct = Number.isFinite(opts.exhaustedPct)
+    ? (opts.exhaustedPct as number)
+    : QUOTA_DEFAULTS.exhaustedPct;
+  const agentId = typeof opts.agentId === "string" && opts.agentId ? opts.agentId : null;
+  const zerosub = opts.zerosub ?? null;
+  if (agentId && zerosub) {
+    const liveId = zerosub.pending?.[agentId] ?? zerosub.agentAccount?.[agentId] ?? null;
+    const account =
+      typeof liveId === "string" && liveId
+        ? ((zerosub.accounts ?? []).find((entry: any) => entry?.id === liveId) ?? null)
+        : null;
+    if (account) {
+      if (accountExhausted(account, { exhaustedPct, now: nowMs })) return false;
+      return freshMaxUsedPct(account, nowMs) !== null ? true : null;
+    }
+  }
   const entry = quotaEntry(snapshot, provider);
   if (!entry) return null;
-  if (quotaExhausted(snapshot, provider)) return false;
+  if (quotaExhausted(snapshot, provider, exhaustedPct, nowMs)) return false;
   return quotaPct(entry) !== null || entry.unlimited === true ? true : null;
 }
 
@@ -215,6 +253,9 @@ export async function sweepOnce({
   nowMs = Date.now(),
   log = console.log,
   quotaSnapshot,
+  zerosub: zerosubOverride,
+  getZerosub,
+  exhaustedPct,
   lock,
   rewindFn,
 }: SweepDeps): Promise<SweepResult[]> {
@@ -241,9 +282,11 @@ export async function sweepOnce({
   const sampledAt = getQuotaSampledAt();
   const sampleIsFresh = sampledAt !== null && nowMs - sampledAt >= 0 && nowMs - sampledAt <= 30 * 60_000;
   const quota = quotaSnapshot !== undefined ? quotaSnapshot : sampleIsFresh ? getQuotaSnapshot() : null;
+  const zerosub = zerosubOverride !== undefined ? zerosubOverride : await resolveZerosub({ getZerosub });
+  const quotaCtx = { zerosub, exhaustedPct };
   for (const agent of state.agents ?? []) {
     try {
-      const result = await sweepAgent(paseo, agent, state, lookup, liveIds, settings, nowMs, log, quota, lock, rewindFn);
+      const result = await sweepAgent(paseo, agent, state, lookup, liveIds, settings, nowMs, log, quota, quotaCtx, lock, rewindFn);
       if (result) results.push(result);
     } catch (error) {
       log(
@@ -285,6 +328,7 @@ async function sweepAgent(
   nowMs: number,
   log: (message: string) => void,
   quota: Record<string, any> | null,
+  quotaCtx: { zerosub?: ZerosubState; exhaustedPct?: number } = {},
   lock?: (name: string, fn: (held: { verify: () => void }) => Promise<any>) => Promise<any>,
   rewindFn?: (agentId: string) => Promise<{ status: string; messageId?: string; error?: string }>,
 ): Promise<SweepResult | null> {
@@ -303,7 +347,12 @@ async function sweepAgent(
       effectBlocked: isEffectBlocked(),
       nowMs,
       workerState: workerStateOf(reads.workers, agent.id),
-      quotaAvailable: quotaAvailableForCleanup(agent?.provider, quota),
+      quotaAvailable: quotaAvailableForCleanup(agent?.provider, quota, {
+        agentId: typeof agent?.id === "string" ? agent.id : null,
+        zerosub: quotaCtx.zerosub ?? null,
+        exhaustedPct: quotaCtx.exhaustedPct,
+        nowMs,
+      }),
       openWorkers: openWorkerCount(reads.workers),
     }),
   );
@@ -355,7 +404,12 @@ async function sweepAgent(
       effectBlocked: isEffectBlocked(),
       nowMs: Date.now(),
       workerState: workerStateOf(freshWorkers, agent.id),
-      quotaAvailable: quotaAvailableForCleanup(freshAgent?.provider, quota),
+      quotaAvailable: quotaAvailableForCleanup(freshAgent?.provider, quota, {
+        agentId: typeof agent?.id === "string" ? agent.id : null,
+        zerosub: quotaCtx.zerosub ?? null,
+        exhaustedPct: quotaCtx.exhaustedPct,
+        nowMs: Date.now(),
+      }),
       openWorkers: openWorkerCount(freshWorkers),
     }),
   );
@@ -563,6 +617,21 @@ export interface TimerDeps {
   readSettings: () => Promise<CleanupSettings | null>;
   intervalMs?: number;
   log?: (message: string) => void;
+  /** Fail-soft ZeroSub supplier for the per-account compact check. */
+  getZerosub?: () => Promise<ZerosubState>;
+  /** Quota settings supplier for the exhaustion threshold (defaults apply). */
+  getQuotaSettings?: () => Promise<any>;
+}
+
+/** Fail-soft exhaustion threshold from the quota settings, else the default. */
+async function sweepThreshold(getQuotaSettings?: () => Promise<any>): Promise<number | undefined> {
+  if (!getQuotaSettings) return undefined;
+  try {
+    const pct = Number((await getQuotaSettings())?.quota?.exhaustedPct);
+    return Number.isFinite(pct) ? pct : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -573,6 +642,8 @@ export function startCleanupTimer({
   readSettings,
   intervalMs = 5 * 60_000,
   log = console.log,
+  getZerosub,
+  getQuotaSettings,
 }: TimerDeps): () => void {
   let stopped = false;
   const timer = setInterval(() => {
@@ -582,7 +653,14 @@ export function startCleanupTimer({
       try {
         const settings = await readSettings();
         if (!settings) return;
-        await sweepOnce({ paseo, settings, log });
+        const exhaustedPct = await sweepThreshold(getQuotaSettings);
+        await sweepOnce({
+          paseo,
+          settings,
+          log,
+          ...(getZerosub ? { getZerosub } : {}),
+          ...(exhaustedPct !== undefined ? { exhaustedPct } : {}),
+        });
       } catch (error) {
         log(
           `[factory] idle cleanup tick failed (${error instanceof Error ? error.message : String(error)})`,

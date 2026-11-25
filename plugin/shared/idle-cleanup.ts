@@ -257,10 +257,9 @@ export interface CleanupInput {
   /** Model id for the cache-group classifier; null falls back to the provider. */
   model: string | null;
   /**
-   * Provider quota for the compact gate: false blocks the compact, true or
-   * unknown (null/undefined) allows it. Unknown fails open on purpose: quota
-   * sampling is best-effort, and a compact that hits a real limit is flagged
-   * by the turn hook as needsResume=limit, which blocks later compacts.
+   * Quota for the compact gate: true allows the compact, false blocks it as
+   * exhausted, unknown (null/undefined) skips it. Unknown fails closed on
+   * purpose: a compact must only spend quota that is proven available.
    */
   quotaAvailable?: boolean | null;
   /**
@@ -356,7 +355,7 @@ export function cleanupInputOf(args: {
   nowMs: number;
   /** The agent's wsf.workers register state, if any. */
   workerState?: string | null;
-  /** Provider quota for the compact gate (null/undefined = unknown, allowed). */
+  /** Quota for the compact gate (null/undefined = unknown, skipped). */
   quotaAvailable?: boolean | null;
   /** Scope workers with unfinished state (null/undefined = unknown). */
   openWorkers?: number | null;
@@ -390,8 +389,8 @@ export function cleanupInputOf(args: {
 /**
  * One C5 evaluation per agent. Every condition is checked on its own and the
  * first failure wins with a reason, so each rule is testable in isolation.
- * Unknown timestamps or context sizes fail closed (no action); unknown quota
- * fails open (the turn hook flags a real limit, which then blocks compacts).
+ * Unknown timestamps, context sizes, or quota fail closed (no action):
+ * a compact must only spend quota that is proven available.
  * Compact-only groups (Codex) map mode clear to a compact, never a /clear.
  * Hybrid compact/fresh rule: mid-package agents compact while warm; cold,
  * over-compacted, or boundary agents get `fresh-recommended` (a recorded

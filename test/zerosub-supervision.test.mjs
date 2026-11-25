@@ -367,12 +367,21 @@ test('exhausted wake can scope to one family', () => {
 
 test('exhausted without a future reset proceeds (nothing to wait for)', () => {
   const zerosub = state(
-    [account('acc-a', 99, { resetsAt: PAST }), account('acc-b', 95, { resetsAt: PAST })],
+    [account('acc-a', 99, { resetsAt: null }), account('acc-b', 95, { resetsAt: null })],
     [],
   );
   assert.deepEqual(
     exhaustedWakeDecision({ zerosub, now: NOW }),
     { decision: 'proceed', reason: 'no-reset-known', wakeAt: null },
+  );
+  // Expired windows are stale, not exhausted: nothing waits for them.
+  const stale = state(
+    [account('acc-a', 99, { resetsAt: PAST }), account('acc-b', 95, { resetsAt: PAST })],
+    [],
+  );
+  assert.deepEqual(
+    exhaustedWakeDecision({ zerosub: stale, now: NOW }),
+    { decision: 'proceed', reason: 'has-room', wakeAt: null },
   );
   const limited = state(
     [account('acc-a', 10, { status: 'limited', limitedUntil: RESET_5H, resetsAt: PAST })],

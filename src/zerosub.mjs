@@ -30,7 +30,9 @@ function asId(value) {
  * carries { id, family, label, status, limitedUntil, windows, maxUsedPct,
  * exhausted }. `exhausted` is the status-based limit flag only (status or a
  * future limitedUntil); percent thresholds live in quota.mjs
- * (`accountExhausted`). `waiting` maps agent ids to their move waiting state
+ * (`accountExhausted`). `maxUsedPct` covers only windows whose reset has not
+ * passed; an expired window's usedPct is stale and never counts. `waiting`
+ * maps agent ids to their move waiting state
  * (`idle`, `turn`, `background`, `restart`); unknown values are dropped.
  * `version` is the raw payload version (null when missing, i.e. v1);
  * consumers fall back to the usage snapshot on explicit unknown versions.
@@ -62,7 +64,13 @@ export function normalizeZerosubState(raw, { now = Date.now() } = {}) {
         ...(models && models.length ? { models } : {}),
       });
     }
-    const pcts = windows.map((window) => window.usedPct).filter((pct) => Number.isFinite(pct));
+    const pcts = windows
+      .filter((window) => {
+        if (!Number.isFinite(window.usedPct)) return false;
+        const reset = window.resetsAt ? Date.parse(window.resetsAt) : NaN;
+        return !Number.isFinite(reset) || reset > now;
+      })
+      .map((window) => window.usedPct);
     const limitedMs = limitedUntil ? Date.parse(limitedUntil) : NaN;
     accounts.push({
       id,

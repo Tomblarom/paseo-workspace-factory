@@ -711,6 +711,61 @@ test("quotaAvailableForCleanup is true only with a reading that shows headroom",
   );
 });
 
+test("quotaAvailableForCleanup checks the routed ZeroSub account before the pool", () => {
+  const nowMs = Date.parse("2026-11-24T12:00:00.000Z");
+  const future = new Date(nowMs + HOUR).toISOString();
+  const past = new Date(nowMs - HOUR).toISOString();
+  const account = (id, windows) => ({
+    id, family: "claude", status: "active", limitedUntil: null, exhausted: false,
+    windows, maxUsedPct: Math.max(...windows.map((window) => window.usedPct)),
+  });
+  const zerosub = {
+    accounts: [
+      account("acc-roomy", [{ id: "five_hour", usedPct: 20, resetsAt: future }]),
+      account("acc-full", [{ id: "five_hour", usedPct: 99, resetsAt: future }]),
+      account("acc-stale", [{ id: "five_hour", usedPct: 99, resetsAt: past }]),
+      account("acc-mixed", [
+        { id: "five_hour", usedPct: 99, resetsAt: past },
+        { id: "seven_day", usedPct: 20, resetsAt: future },
+      ]),
+    ],
+    agentAccount: {
+      "steer-roomy": "acc-roomy",
+      "steer-full": "acc-full",
+      "steer-stale": "acc-stale",
+      "steer-mixed": "acc-mixed",
+    },
+    pending: { "steer-moved": "acc-roomy" },
+  };
+  const exhaustedPool = { claude: { sessionPct: 99 } };
+  const healthyPool = { claude: { sessionPct: 10 } };
+  const cases = [
+    ["routed healthy account wins over exhausted pool", "steer-roomy", exhaustedPool, true],
+    ["routed exhausted account blocks despite healthy pool", "steer-full", healthyPool, false],
+    ["expired window on routed account is unknown, not exhausted", "steer-stale", healthyPool, null],
+    ["expired window plus fresh headroom allows", "steer-mixed", null, true],
+    ["pending move account is live", "steer-moved", exhaustedPool, true],
+    ["unknown route falls back to healthy pool", "steer-unknown", healthyPool, true],
+    ["unknown route falls back to exhausted pool", "steer-unknown", exhaustedPool, false],
+    ["unknown route without pool is unknown", "steer-unknown", null, null],
+    ["no agent falls back to the pool", null, healthyPool, true],
+  ];
+  for (const [name, agentId, snapshot, want] of cases) {
+    assert.equal(sweep.quotaAvailableForCleanup("claude", snapshot, { agentId, zerosub, nowMs }), want, name);
+  }
+  const dangling = { ...zerosub, agentAccount: { ...zerosub.agentAccount, "steer-gone": "acc-missing" } };
+  assert.equal(
+    sweep.quotaAvailableForCleanup("claude", healthyPool, { agentId: "steer-gone", zerosub: dangling, nowMs }),
+    true,
+    "dangling route falls back to the pool",
+  );
+  assert.equal(
+    sweep.quotaAvailableForCleanup("claude", null, { agentId: "steer-full", zerosub, exhaustedPct: 100, nowMs }),
+    true,
+    "configured threshold applies to the routed account",
+  );
+});
+
 function sweepWorld({ provider = "claude", model = "m", idleMs = 55 * MIN, usage = 120_000, workers = {} } = {}) {
   const nowMs = Date.now();
   const stamp = (ms) => new Date(ms).toISOString();

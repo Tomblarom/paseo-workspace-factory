@@ -48,22 +48,32 @@ test("quota view shapes snapshot pools with warn states and slot mappings", () =
   ]);
 });
 
-test("quota view exhausts on session pct, weekly pct, or a future reset", () => {
-  const view = shapeQuotaView({
-    snapshot: {
-      codex: { sessionPct: 95 },
-      claude: { sessionPct: 10, weeklyPct: 91 },
-      copilot: { sessionPct: 5, limitUntil: "2026-06-01T13:00:00.000Z" },
-      muse: { sessionPct: 5, limitUntil: "2026-06-01T11:00:00.000Z" },
-    },
-    sampledAt: SAMPLED,
-    config: fakeConfig(),
-    nowMs: NOW,
-  });
+test("quota view exhausts only on threshold, explicit limit, or limited status", () => {
+  const FUTURE = "2026-06-01T13:00:00.000Z";
+  const PAST = "2026-06-01T11:00:00.000Z";
+  const cases = [
+    ["session threshold", { sessionPct: 95 }, "exhausted"],
+    ["weekly threshold", { sessionPct: 10, weeklyPct: 91 }, "exhausted"],
+    ["explicit future limitUntil", { sessionPct: 5, limitUntil: FUTURE }, "exhausted"],
+    ["explicit future limitedUntil", { sessionPct: 5, limitedUntil: FUTURE }, "exhausted"],
+    ["limited status", { sessionPct: 5, status: "limited" }, "exhausted"],
+    ["exhausted flag", { sessionPct: 5, exhausted: true }, "exhausted"],
+    ["healthy pool with ordinary future reset", { sessionPct: 12, weeklyPct: 20, resetsAt: FUTURE }, "ok"],
+    ["past limitUntil is not a hold", { sessionPct: 5, limitUntil: PAST }, "ok"],
+    ["warn band", { sessionPct: 82 }, "warn"],
+  ];
+  const snapshot = Object.fromEntries(cases.map(([name, entry], index) => [`pool-${index}`, entry]));
+  const view = shapeQuotaView({ snapshot, sampledAt: SAMPLED, config: fakeConfig(), nowMs: NOW });
   const states = Object.fromEntries(view.pools.map((pool) => [pool.pool, pool.state]));
-  assert.deepEqual(states, { codex: "exhausted", claude: "exhausted", copilot: "exhausted", muse: "ok" });
-  assert.equal(view.pools.find((pool) => pool.pool === "claude").weeklyPct, 91);
-  assert.equal(view.pools.find((pool) => pool.pool === "copilot").resetAt, "2026-06-01T13:00:00.000Z");
+  for (const [index, [name, , want]] of cases.entries()) {
+    assert.equal(states[`pool-${index}`], want, name);
+  }
+  const healthy = view.pools.find((pool) => pool.pool === "pool-6");
+  assert.equal(healthy.sessionPct, 12);
+  assert.equal(healthy.weeklyPct, 20);
+  assert.equal(healthy.resetAt, FUTURE);
+  const limited = view.pools.find((pool) => pool.pool === "pool-2");
+  assert.equal(limited.resetAt, FUTURE);
 });
 
 test("quota view tolerates a missing snapshot, pools wrapper, and missing thresholds", () => {
@@ -106,6 +116,27 @@ test("quota view lists ZeroSub accounts with warn states", () => {
   assert.equal(view.accounts[0].family, "claude");
   assert.equal(view.accounts[0].resetsAt, "2026-06-01T15:00:00.000Z");
   assert.equal(view.accounts[1].resetsAt, null);
+});
+
+test("quota view ignores expired ZeroSub windows", () => {
+  const view = shapeQuotaView({
+    snapshot: null,
+    sampledAt: null,
+    config: fakeConfig(),
+    nowMs: NOW,
+    zerosub: {
+      accounts: [
+        { id: "acc-expired", family: "claude", status: "active", limitedUntil: null, maxUsedPct: 99, exhausted: false, windows: [{ id: "five_hour", usedPct: 99, resetsAt: "2026-06-01T11:00:00.000Z" }] },
+        { id: "acc-current", family: "claude", status: "active", limitedUntil: null, maxUsedPct: 99, exhausted: false, windows: [{ id: "five_hour", usedPct: 99, resetsAt: "2026-06-01T15:00:00.000Z" }] },
+        { id: "acc-mixed", family: "claude", status: "active", limitedUntil: null, maxUsedPct: 99, exhausted: false, windows: [{ id: "five_hour", usedPct: 99, resetsAt: "2026-06-01T11:00:00.000Z" }, { id: "seven_day", usedPct: 20, resetsAt: "2026-06-08T12:00:00.000Z" }] },
+      ],
+    },
+  });
+  assert.deepEqual(
+    view.accounts.map((account) => [account.account, account.usedPct, account.state]),
+    [["acc-current", 99, "exhausted"], ["acc-expired", null, "ok"], ["acc-mixed", 20, "ok"]],
+  );
+  assert.equal(view.accounts.find((account) => account.account === "acc-expired").resetsAt, null);
 });
 
 test("quota view has no accounts without ZeroSub", () => {

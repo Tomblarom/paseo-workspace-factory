@@ -188,10 +188,15 @@ test('resolveSteerAdd reports the earliest reset across account-blocked families
   assert.ok(none.skipped.every((s) => s.reason.startsWith('accounts over warn threshold (≥75%)')));
   assert.equal(none.earliestReset, RESET_5H);
   // Without a future reset the reason stays actionable but bare.
-  const past = state([acc('acc-x', 'fake-x', 80, { resetsAt: PAST })]);
-  const bare = resolveSteerAdd(CONFIG, PROVIDERS, { profile: 'alpha', zerosub: past, now: NOW });
+  const unknown = state([acc('acc-x', 'fake-x', 80, { resetsAt: null })]);
+  const bare = resolveSteerAdd(CONFIG, PROVIDERS, { profile: 'alpha', zerosub: unknown, now: NOW });
   assert.equal(bare.skipped[0].reason, 'accounts over warn threshold (≥75%)');
   assert.equal(bare.earliestReset, null);
+  // An expired window does not block: its percent is stale.
+  const past = state([acc('acc-x', 'fake-x', 80, { resetsAt: PAST })]);
+  const roomy = resolveSteerAdd(CONFIG, PROVIDERS, { profile: 'alpha', zerosub: past, now: NOW });
+  assert.equal(roomy.profile.name, 'alpha');
+  assert.equal(roomy.zerosubAccount, 'acc-x');
   // Families blocked by other reasons do not set the reset.
   const down = [{ provider: 'fake-x', enabled: true, status: 'ready', models: [{ id: 'x2' }] }, PROVIDERS[1]];
   const mixed = resolveSteerAdd(CONFIG, down, { zerosub, now: NOW });

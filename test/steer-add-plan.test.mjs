@@ -237,8 +237,8 @@ test('planSteerAdd reports all accounts exhausted with the earliest reset', () =
   assert.equal(blocked.skipped.length, 3);
   assert.ok(blocked.skipped.every((s) => s.reason.startsWith('accounts over warn threshold')));
   assert.equal(blocked.earliestReset, RESET_5H);
-  const past = state([acc('acc-x', 'fake-x', 80, { resetsAt: PAST })]);
-  const bare = planSteerAdd(CONFIG, PROVIDERS, [], { spec: 'alpha', zerosub: past, scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW });
+  const unknown = state([acc('acc-x', 'fake-x', 80, { resetsAt: null })]);
+  const bare = planSteerAdd(CONFIG, PROVIDERS, [], { spec: 'alpha', zerosub: unknown, scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW });
   assert.equal(bare.skipped[0].reason, 'accounts over warn threshold (≥75%)');
   assert.equal(bare.earliestReset, null);
 });

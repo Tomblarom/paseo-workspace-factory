@@ -616,6 +616,7 @@ export async function sendScopeWake(
     currentPool: activeProfile ? profilePool(activeProfile) : null,
     warnPct: config?.quota?.warnPct ?? settings?.quota?.warnPct ?? 75,
     zerosub,
+    now: stampsOf(deps).nowMs,
   });
   if (quotaLine) text = `${text}\n${quotaLine}`;
   if (args.zerosubNote) text = `${text}\n${args.zerosubNote}`;

@@ -5,7 +5,7 @@ import type { RpcInput } from "@getpaseo/plugin";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import type { factoryQuota } from "../shared/factory.js";
 import type { ConfigLoader } from "./config.js";
-import { QUOTA_DEFAULTS, accountExhausted, earliestResetOf, profilePool, quotaPct } from "./factory/quota.js";
+import { QUOTA_DEFAULTS, accountExhausted, earliestResetOf, freshMaxUsedPct, profilePool, quotaPct } from "./factory/quota.js";
 import { getQuotaSampledAt, getQuotaSnapshot } from "./quota.js";
 import { resolveZerosub, type ZerosubSource } from "./zerosub-runtime.js";
 
@@ -51,9 +51,25 @@ function snapshotEntries(snapshot: Record<string, any> | null): Record<string, a
   return snapshot;
 }
 
-function resetStamp(entry: any): string | null {
-  const raw = entry?.resetAt ?? entry?.limitUntil ?? entry?.resetsAt ?? null;
+/** Explicit limit stamps only; an ordinary reset time never marks exhaustion. */
+function limitStamp(entry: any): string | null {
+  const raw = entry?.limitUntil ?? entry?.limitedUntil ?? null;
   return typeof raw === "string" && raw ? raw : null;
+}
+
+/** Display stamp: the binding explicit limit first, else the ordinary reset. */
+function resetStamp(entry: any): string | null {
+  const raw = limitStamp(entry) ?? entry?.resetAt ?? entry?.resetsAt ?? null;
+  return typeof raw === "string" && raw ? raw : null;
+}
+
+/** Limited pool statuses, mirroring the ZeroSub normalizer's limit set. */
+const LIMITED_POOL_STATUSES: ReadonlySet<string> = new Set(["limited", "exhausted", "suspended", "blocked"]);
+
+function limitedByStatus(entry: any): boolean {
+  if (entry?.exhausted === true) return true;
+  const status = entry?.status;
+  return typeof status === "string" && LIMITED_POOL_STATUSES.has(status.trim().toLowerCase());
 }
 
 function weeklyNumber(entry: any): number | null {
@@ -61,15 +77,17 @@ function weeklyNumber(entry: any): number | null {
 }
 
 function classify(
+  entry: any,
   sessionPct: number | null,
   weeklyPct: number | null,
-  resetAt: string | null,
   warnPct: number,
   exhaustedPct: number,
   nowMs: number,
 ): QuotaState {
-  const resetMs = resetAt ? Date.parse(resetAt) : NaN;
-  if (Number.isFinite(resetMs) && resetMs > nowMs) return "exhausted";
+  if (limitedByStatus(entry)) return "exhausted";
+  const limit = limitStamp(entry);
+  const limitMs = limit ? Date.parse(limit) : NaN;
+  if (Number.isFinite(limitMs) && limitMs > nowMs) return "exhausted";
   const worst = Math.max(sessionPct ?? -1, weeklyPct ?? -1);
   if (worst >= exhaustedPct) return "exhausted";
   if (worst >= warnPct) return "warn";
@@ -95,7 +113,7 @@ export function shapeQuotaView(args: {
     .filter((account): account is Record<string, any> => !!account && typeof account.id === "string" && !!account.id)
     .sort((a, b) => a.id.localeCompare(b.id))
     .map((account) => {
-      const usedPct = finiteNumber(account.maxUsedPct);
+      const usedPct = freshMaxUsedPct(account, nowMs);
       return {
         account: account.id,
         family: typeof account.family === "string" ? account.family : "",
@@ -120,7 +138,7 @@ export function shapeQuotaView(args: {
         sessionPct,
         weeklyPct,
         resetAt,
-        state: classify(sessionPct, weeklyPct, resetAt, warnPct, exhaustedPct, nowMs),
+        state: classify(entry, sessionPct, weeklyPct, warnPct, exhaustedPct, nowMs),
         sampledAt: args.sampledAt,
       };
     });

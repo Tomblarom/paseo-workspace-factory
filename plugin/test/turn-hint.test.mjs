@@ -132,7 +132,7 @@ function zerosubFor(steers, pctA, pctB = 20) {
   const account = (id, pct) => ({
     id, family: "claude", label: id, kind: "oauth", plan: "pro",
     status: "active", isDefault: false, limitedUntil: null,
-    usage: { fetchedAt: "2026-11-24T11:59:00.000Z", windows: [{ id: "five_hour", label: "5h", usedPercent: pct, resetsAt: "2026-11-24T15:00:00Z" }], cached: false },
+    usage: { fetchedAt: new Date(Date.now() - 60_000).toISOString(), windows: [{ id: "five_hour", label: "5h", usedPercent: pct, resetsAt: new Date(Date.now() + 3_600_000).toISOString() }], cached: false },
     agentCount: 1,
   });
   const route = (agentId, accountId) => ({ agentId, family: "claude", accountId, pinned: false, pendingAccountId: null, movable: true });

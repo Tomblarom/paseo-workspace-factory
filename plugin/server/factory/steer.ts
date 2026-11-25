@@ -23,7 +23,7 @@ import { resolveScope, scopeToEntry, sameScopeId, domainOfScope } from './scope.
 import { STEER_TITLE, activeMarker, markSteerTitle, stripActiveMarker } from './discovery.js';
 import { AGENTS_KEY, currentFreshHint, updateAgentEntry } from './agent-state.js';
 import { SUPERVISION_DEFAULTS, failoverChain, openWorkers as openRegisterWorkers, readWorkers, zerosubMoveDecision } from './supervision.js';
-import { QUOTA_DEFAULTS, accountExhausted, accountForAgent, formatQuotaLine, profilePool } from './quota.js';
+import { QUOTA_DEFAULTS, accountExhausted, accountForAgent, formatQuotaLine, freshMaxUsedPct, profilePool } from './quota.js';
 import { readRewindPoint, rewindAndBrief } from './rewind.js';
 import { findingsPassage } from './findings.js';
 
@@ -562,7 +562,7 @@ export function buildResumeBrief(status, { agentId = null, agentState = null, gi
   const findings = findingsPassage(promptOptions);
   if (findings) lines.push(findings);
   const quotaPool = active ? profilePool(config?.profiles?.[config?.steers?.slots?.[active.slot]]) : null;
-  const quotaLine = formatQuotaLine(config, quotaSnapshot, { currentPool: quotaPool, warnPct: quotaWarnPct, zerosub });
+  const quotaLine = formatQuotaLine(config, quotaSnapshot, { currentPool: quotaPool, warnPct: quotaWarnPct, zerosub, now: now() });
   if (quotaLine) lines.push(quotaLine);
 
   const cp = status.checkpoint;
@@ -786,8 +786,8 @@ export function proactiveSwitchDecision({
   if (move.decision === 'wait-zerosub') return { decision: 'stay', reason: 'zerosub-move-pending', pending: move.pending };
   const account = accountForAgent(zerosub, agentId);
   if (!account) return { decision: 'stay', reason: 'no-route' };
-  const used = account.maxUsedPct ?? null;
-  if (!Number.isFinite(used)) return { decision: 'stay', reason: 'unknown-usage', accountId: account.id };
+  const used = freshMaxUsedPct(account, now);
+  if (used === null) return { decision: 'stay', reason: 'unknown-usage', accountId: account.id };
   if (used < warnPct) return { decision: 'stay', reason: 'below-warn', accountId: account.id, usedPct: used };
   const chain = failoverChain({
     steers, activeSlot, retiredIds, interruptedIds, advisorIds, domainSteer, hubSteer,

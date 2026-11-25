@@ -21,16 +21,17 @@ export const ASSIGNMENT_KEY = `${METADATA_KEY}.assignment`;
 
 const none = 'none recorded';
 
-/** Deterministic assignment packet (no wall-clock time, so preview == delivery). */
-export function buildAssignment(status, { slot, steerId, epoch, task, tests, blockers, next, workerModel = null, config = null, quotaSnapshot = null, quotaWarnPct = 75, zerosub = null, reportTo = null, promptOptions }) {
+/** Deterministic assignment packet (pass the same `now` so preview == delivery). */
+export function buildAssignment(status, { slot, steerId, epoch, task, tests, blockers, next, workerModel = null, config = null, quotaSnapshot = null, quotaWarnPct = 75, zerosub = null, reportTo = null, promptOptions, now = Date.now() }) {
   const findings = findingsPassage(promptOptions);
+  const quotaLine = formatQuotaLine(config, quotaSnapshot, { warnPct: quotaWarnPct, zerosub, now });
   const lines = [
     `Assignment for ${status.repo} (epoch ${epoch}).`,
     `Active steer ${slot} (${steerId}): this assignment replaces the recorded checkpoint.`,
     ...(status.domain ? [`Domain ${status.domain}: prefix blockers for the domain steer with \`domain:\`, for the hub with \`hub:\`.`] : []),
     ...((status.domainChildren ?? []).length ? [`Domain scope for ${status.domainChildren.length} child scope(s) (${status.domainChildren.join(', ')}); lifecycle (create/archive/delete) stays with the hub.`] : []),
     ...(workerModel ? [workerModel] : []),
-    ...(formatQuotaLine(config, quotaSnapshot, { warnPct: quotaWarnPct, zerosub }) ? [formatQuotaLine(config, quotaSnapshot, { warnPct: quotaWarnPct, zerosub })] : []),
+    ...(quotaLine ? [quotaLine] : []),
     'Task checkpoint:',
     `- Task: ${task}`,
     `- Tests: ${tests?.length ? tests.join('; ') : none}`,

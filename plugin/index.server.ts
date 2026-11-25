@@ -233,7 +233,7 @@ export default function contribute(server: PluginServerContext) {
     captureSupervisionPaseo(context.paseo);
     await handleWorkerTurnAfter(payload, context, { getSettings: readSupervision, getConfig: () => loader.loadEffectiveConfig(), resumeSteer, getZerosub });
   });
-  const stopCleanupTimer = startCleanupTimer({ readSettings });
+  const stopCleanupTimer = startCleanupTimer({ readSettings, getZerosub, getQuotaSettings: readQuotaSettings });
   const stopSupervisionTimer = startSupervisionTimer({ getSettings: readSupervision, getConfig: () => loader.loadEffectiveConfig(), resumeSteer, getZerosub });
   const stopQuotaTimer = startQuotaTimer({ getSettings: readQuotaSettings });
   return () => {

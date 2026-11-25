@@ -142,17 +142,17 @@ test('below warnPct: no quota line and no proactive switch signal', () => {
     accounts: [account('acc-a', 74), account('acc-b', 40)],
     agents: [route('steer-d', 'acc-a')],
   }, { now: NOW });
-  assert.equal(formatQuotaLine(CONFIG, null, { currentPool: 'claude', zerosub }), null);
+  assert.equal(formatQuotaLine(CONFIG, null, { currentPool: 'claude', zerosub, now: NOW }), null);
   assert.equal(
-    formatQuotaLine(CONFIG, null, { currentPool: 'claude', warnPct: 80, zerosub }),
+    formatQuotaLine(CONFIG, null, { currentPool: 'claude', warnPct: 80, zerosub, now: NOW }),
     null,
   );
   const tight = normalizeZerosubState({
     accounts: [account('acc-a', 79), account('acc-b', 40)],
     agents: [route('steer-d', 'acc-a')],
   }, { now: NOW });
-  assert.equal(formatQuotaLine(CONFIG, null, { currentPool: 'claude', warnPct: 80, zerosub }), null);
-  assert.equal(buildResumeBrief(briefStatus(), { config: CONFIG, zerosub }).includes('Quota:'), false);
+  assert.equal(formatQuotaLine(CONFIG, null, { currentPool: 'claude', warnPct: 80, zerosub, now: NOW }), null);
+  assert.equal(buildResumeBrief(briefStatus(), { config: CONFIG, zerosub, now: () => NOW }).includes('Quota:'), false);
   // Picking a profile for a new worker still prefers the roomiest account;
   // only the proactive switch signal (the quota line) is gated by warnPct.
   const picked = resolveProfile(CONFIG, PROVIDERS, ['sonnet', 'codex'], { role: 'worker', repoPublic: true, zerosub, now: NOW });
@@ -167,7 +167,7 @@ test('at warnPct and above: quota line, chain and pick prefer the roomiest accou
       agents: [route('steer-d', 'acc-a'), route('steer-e', 'acc-b')],
     }, { now: NOW });
     assert.equal(
-      formatQuotaLine(CONFIG, null, { currentPool: 'claude', zerosub }),
+      formatQuotaLine(CONFIG, null, { currentPool: 'claude', zerosub, now: NOW }),
       `Quota: claude ${pct}% (5h) — prefer acc-b`,
     );
     const chain = failoverChain({
@@ -180,14 +180,14 @@ test('at warnPct and above: quota line, chain and pick prefer the roomiest accou
     assert.deepEqual(chain.map((candidate) => candidate.steerId), ['steer-e']);
     const picked = resolveProfile(CONFIG, PROVIDERS, ['sonnet', 'codex'], { role: 'worker', repoPublic: true, zerosub, now: NOW });
     assert.equal(picked.zerosubAccount, 'acc-b');
-    assert.match(buildResumeBrief(briefStatus(), { config: CONFIG, zerosub }), new RegExp(`Quota: claude ${pct}% \\(5h\\) — prefer acc-b`));
+    assert.match(buildResumeBrief(briefStatus(), { config: CONFIG, zerosub, now: () => NOW }), new RegExp(`Quota: claude ${pct}% \\(5h\\) — prefer acc-b`));
   }
   const custom = normalizeZerosubState({
     accounts: [account('acc-a', 80), account('acc-b', 40)],
     agents: [route('steer-d', 'acc-a')],
   }, { now: NOW });
   assert.equal(
-    formatQuotaLine(CONFIG, null, { currentPool: 'claude', warnPct: 80, zerosub: custom }),
+    formatQuotaLine(CONFIG, null, { currentPool: 'claude', warnPct: 80, zerosub: custom, now: NOW }),
     'Quota: claude 80% (5h) — prefer acc-b',
   );
 });

@@ -5,7 +5,7 @@ import { resolveProfile } from '../src/models.mjs';
 import { failoverChain } from '../src/supervision.mjs';
 import { buildAssignment } from '../src/assign.mjs';
 import { buildResumeBrief } from '../src/steer.mjs';
-import { formatQuotaLine, parseUsageJson, profilePool } from '../src/quota.mjs';
+import { accountExhausted, formatQuotaLine, freshMaxUsedPct, parseUsageJson, profilePool, quotaExhausted } from '../src/quota.mjs';
 
 const config = {
   version: 1, github: { owner: 'Test', cloneProtocol: 'https', upstreamRemote: 'upstream' },
@@ -63,6 +63,42 @@ test('quota warning is included in briefs and assignments only above threshold',
   assert.match(buildAssignment(status, { slot: 'A', steerId: 'a', epoch: 1, task: 't', tests: [], blockers: [], next: null, config, quotaSnapshot: snapshot }), /Quota: shared 78%/);
   assert.equal(formatQuotaLine(config, { shared: { sessionPct: 74 } }), null);
   assert.ok(line.includes('prefer codex'));
+});
+
+test('account exhaustion ignores ordinary resets and expired windows', () => {
+  const NOW = Date.parse('2026-11-24T12:00:00Z');
+  const FUTURE = '2026-11-24T15:00:00Z';
+  const PAST = '2026-11-20T12:00:00Z';
+  const cases = [
+    ['fresh threshold hit', { windows: [{ usedPct: 95, resetsAt: FUTURE }] }, true],
+    ['healthy pool with ordinary future reset', { windows: [{ usedPct: 12, resetsAt: FUTURE }, { usedPct: 20, resetsAt: FUTURE }] }, false],
+    ['explicit future limitedUntil', { limitedUntil: FUTURE, windows: [{ usedPct: 10, resetsAt: FUTURE }] }, true],
+    ['past limitedUntil is not a hold', { limitedUntil: PAST, windows: [{ usedPct: 10, resetsAt: FUTURE }] }, false],
+    ['limited status flag', { exhausted: true, windows: [{ usedPct: 10, resetsAt: FUTURE }] }, true],
+    ['expired high window only', { windows: [{ usedPct: 99, resetsAt: PAST }] }, false],
+    ['expired high plus fresh low window', { windows: [{ usedPct: 99, resetsAt: PAST }, { usedPct: 20, resetsAt: FUTURE }] }, false],
+    ['window without reset counts', { windows: [{ usedPct: 95, resetsAt: null }] }, true],
+    ['scalar fallback without windows', { maxUsedPct: 95 }, true],
+    ['no data is not exhausted', {}, false],
+  ];
+  for (const [name, account, want] of cases) {
+    assert.equal(accountExhausted(account, { now: NOW }), want, name);
+  }
+  assert.equal(freshMaxUsedPct({ windows: [{ usedPct: 99, resetsAt: PAST }] }, NOW), null);
+  assert.equal(freshMaxUsedPct({ windows: [{ usedPct: 99, resetsAt: PAST }, { usedPct: 20, resetsAt: FUTURE }] }, NOW), 20);
+  assert.equal(freshMaxUsedPct({ maxUsedPct: 55 }, NOW), 55);
+});
+
+test('pool exhaustion honors explicit limits but never an ordinary reset', () => {
+  const NOW = Date.parse('2026-11-24T12:00:00Z');
+  const FUTURE = '2026-11-24T15:00:00Z';
+  const PAST = '2026-11-20T12:00:00Z';
+  assert.equal(quotaExhausted({ p: { sessionPct: 10, resetsAt: FUTURE } }, 'p', 90, NOW), false);
+  assert.equal(quotaExhausted({ p: { sessionPct: 10, limitUntil: FUTURE } }, 'p', 90, NOW), true);
+  assert.equal(quotaExhausted({ p: { sessionPct: 10, limitedUntil: FUTURE } }, 'p', 90, NOW), true);
+  assert.equal(quotaExhausted({ p: { sessionPct: 10, limitUntil: PAST } }, 'p', 90, NOW), false);
+  assert.equal(quotaExhausted({ p: { sessionPct: 10, exhausted: true } }, 'p', 90, NOW), true);
+  assert.equal(quotaExhausted({ p: { sessionPct: 95 } }, 'p', 90, NOW), true);
 });
 
 test('usage JSON parsing is fail-soft and extracts the 5h window', () => {

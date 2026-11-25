@@ -54,15 +54,40 @@ export function familyAccounts(zerosub, family) {
 }
 
 /**
+ * Max usedPct over the windows whose reset has not passed, or null when no
+ * window carries a usable percent. A window whose resetsAt is in the past is
+ * expired and its usedPct is stale, so it never counts; windows without a
+ * reset stamp count (nothing proves them stale). Accounts without windows
+ * fall back to the scalar maxUsedPct. An ordinary future resetsAt never marks
+ * exhaustion by itself; only an explicit limit or the threshold does.
+ */
+export function freshMaxUsedPct(account, now = Date.now()) {
+  const windows = Array.isArray(account?.windows) ? account.windows : null;
+  if (!windows || !windows.length) {
+    return Number.isFinite(account?.maxUsedPct) ? account.maxUsedPct : null;
+  }
+  const pcts = [];
+  for (const window of windows) {
+    if (!Number.isFinite(window?.usedPct)) continue;
+    const reset = Date.parse(window?.resetsAt ?? '');
+    if (Number.isFinite(reset) && reset <= now) continue;
+    pcts.push(window.usedPct);
+  }
+  return pcts.length ? Math.max(...pcts) : null;
+}
+
+/**
  * Account exhaustion with real percents: the status-based limit flag, a
- * future limitedUntil, or maxUsedPct at the exhausted threshold.
+ * future limitedUntil, or the fresh (non-expired) max usedPct at the
+ * exhausted threshold.
  */
 export function accountExhausted(account, { exhaustedPct = QUOTA_DEFAULTS.exhaustedPct, now = Date.now() } = {}) {
   if (!account || typeof account !== 'object') return false;
   if (account.exhausted === true) return true;
   const until = Date.parse(account.limitedUntil ?? '');
   if (Number.isFinite(until) && until > now) return true;
-  return Number.isFinite(account.maxUsedPct) && account.maxUsedPct >= exhaustedPct;
+  const pct = freshMaxUsedPct(account, now);
+  return pct !== null && pct >= exhaustedPct;
 }
 
 /** True when the family has accounts and every one of them is exhausted. */
@@ -85,13 +110,17 @@ export function accountForAgent(zerosub, agentId) {
 }
 
 /**
- * Non-exhausted account with the most room (lowest maxUsedPct, unknown last,
- * ties by id), or null when the family has no usable account.
+ * Non-exhausted account with the most room (lowest fresh maxUsedPct, unknown
+ * last, ties by id), or null when the family has no usable account.
  */
 export function bestFamilyAccount(zerosub, family, opts = {}) {
   const open = familyAccounts(zerosub, family).filter((account) => !accountExhausted(account, opts));
   if (!open.length) return null;
-  const room = (account) => (Number.isFinite(account.maxUsedPct) ? account.maxUsedPct : Infinity);
+  const now = opts?.now ?? Date.now();
+  const room = (account) => {
+    const pct = freshMaxUsedPct(account, now);
+    return pct !== null ? pct : Infinity;
+  };
   return open.slice().sort((a, b) => room(a) - room(b) || String(a.id).localeCompare(String(b.id)))[0];
 }
 
@@ -145,7 +174,8 @@ export function quotaExhausted(snapshot, pool, threshold = QUOTA_DEFAULTS.exhaus
   if (!entry) return false;
   const pct = quotaPct(entry);
   if ((pct !== null && pct >= threshold) || (Number.isFinite(entry.weeklyPct) && entry.weeklyPct >= threshold)) return true;
-  const until = Date.parse(entry.limitUntil ?? '');
+  if (entry.exhausted === true) return true;
+  const until = Date.parse(entry.limitUntil ?? entry.limitedUntil ?? '');
   return Number.isFinite(until) && until > now;
 }
 
@@ -167,16 +197,16 @@ export function preferredQuotaPool(config, currentPool, snapshot = null) {
   return available ?? pools[0];
 }
 
-export function formatQuotaLine(config, snapshot, { currentPool = null, warnPct = QUOTA_DEFAULTS.warnPct, zerosub = null } = {}) {
+export function formatQuotaLine(config, snapshot, { currentPool = null, warnPct = QUOTA_DEFAULTS.warnPct, zerosub = null, now = Date.now() } = {}) {
   if (!snapshot && !zerosub) return null;
   const pool = currentPool || quotaPools(config, { includeAdvisors: false })[0];
   if (!pool) return null;
   const accounts = zerosub ? familyAccounts(zerosub, pool) : [];
   if (accounts.length) {
-    const pcts = accounts.map((account) => account.maxUsedPct).filter((pct) => Number.isFinite(pct));
+    const pcts = accounts.map((account) => freshMaxUsedPct(account, now)).filter((pct) => pct !== null);
     const worst = pcts.length ? Math.max(...pcts) : null;
     if (worst === null || worst < warnPct) return null;
-    const best = bestFamilyAccount(zerosub, pool);
+    const best = bestFamilyAccount(zerosub, pool, { now });
     return `Quota: ${pool} ${worst}% (5h) — prefer ${best ? best.id : 'none'}`;
   }
   if (!snapshot) return null;

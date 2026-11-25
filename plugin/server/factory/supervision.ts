@@ -6,7 +6,7 @@
 // writes go through the workspace lock like checkpoints (see agent-state.mjs).
 import { isDeepStrictEqual } from 'node:util';
 import { LABEL, METADATA_KEY } from './paseo.js';
-import { QUOTA_DEFAULTS, accountExhausted, allAccountsExhausted, earliestFamilyReset, earliestReset, familyExhausted } from './quota.js';
+import { QUOTA_DEFAULTS, accountExhausted, allAccountsExhausted, earliestFamilyReset, earliestReset, familyExhausted, freshMaxUsedPct } from './quota.js';
 import { withLock, workspaceLockName } from './lock.js';
 
 export const WORKERS_KEY = `${METADATA_KEY}.workers`;
@@ -402,8 +402,8 @@ export function failoverChain({ steers = [], activeSlot = null, retiredIds = [],
       kept = ordered.filter((candidate) => accountOf(candidate) !== failingAccountId);
     }
     const room = (candidate) => {
-      const pct = byId.get(accountOf(candidate))?.maxUsedPct;
-      return Number.isFinite(pct) ? pct : Infinity;
+      const pct = freshMaxUsedPct(byId.get(accountOf(candidate)), now);
+      return pct !== null ? pct : Infinity;
     };
     kept = kept.map((candidate, index) => [candidate, index])
       .sort((a, b) => room(a[0]) - room(b[0]) || a[1] - b[1])

@@ -129,8 +129,8 @@ sends the brief into the existing session, including Codex with default settings
 model/thinking choice for a known routine task, or consecutive turns without a CHECKPOINT.
 Missing checkpoint evidence currently inhibits cleanup without telling the user why.
 The generic 60-minute badge misses shorter modeled cache windows, and a five-minute sweep
-can miss an entire warm-compaction interval. The compact guard uses a provider-wide
-sample and skips unknown quota, while the existing design text says unknown allows it.
+can miss an entire warm-compaction interval. The compact guard checks the routed
+ZeroSub account (provider-wide sample only as fallback) and skips unknown quota.
 Fresh recommendations occur before the sweep's cap check and the optional rewind fetches
 the first anchor again, dropping the brief anchor. The proactive account hint itself sends
 another prompt. Measured cache warmth and exact compaction cost are often unavailable.

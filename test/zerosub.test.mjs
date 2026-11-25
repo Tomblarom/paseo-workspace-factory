@@ -134,6 +134,23 @@ test('normalizeZerosubState keeps version, waiting and model windows', () => {
   assert.equal('models' in roomy.windows[0], false);
 });
 
+test('normalizeZerosubState excludes expired windows from maxUsedPct', () => {
+  const raw = fakeRaw();
+  raw.accounts[0].usage.windows = [
+    { id: 'five_hour', label: '5h', usedPercent: 99, resetsAt: PAST },
+    { id: 'seven_day', label: 'week', usedPercent: 20, resetsAt: FUTURE_WEEK },
+  ];
+  const state = normalizeZerosubState(raw, { now: NOW });
+  const roomy = state.accounts.find((account) => account.id === 'acc-roomy');
+  assert.equal(roomy.maxUsedPct, 20);
+  assert.equal(roomy.windows.length, 2);
+  const stale = normalizeZerosubState(
+    { accounts: [{ id: 'a-stale', usage: { windows: [{ id: 'w', usedPercent: 99, resetsAt: PAST }] } }] },
+    { now: NOW },
+  );
+  assert.equal(stale.accounts[0].maxUsedPct, null);
+});
+
 test('readZerosubState normalizes RPC output and returns null on any failure', async () => {
   const factory = async () => ({
     calls: [],
@@ -213,10 +230,10 @@ test('failoverChain excludes steers on the same exhausted account and prefers ro
 test('quota line uses real account percents with ZeroSub state', () => {
   const zerosub = normalizeZerosubState(fakeRaw(), { now: NOW });
   assert.equal(
-    formatQuotaLine(CONFIG, null, { currentPool: 'claude', zerosub }),
+    formatQuotaLine(CONFIG, null, { currentPool: 'claude', zerosub, now: NOW }),
     'Quota: claude 99% (5h) — prefer acc-roomy',
   );
-  assert.equal(formatQuotaLine(CONFIG, null, { currentPool: 'codex', zerosub }), null);
+  assert.equal(formatQuotaLine(CONFIG, null, { currentPool: 'codex', zerosub, now: NOW }), null);
 });
 
 test('behavior without ZeroSub state is unchanged', () => {
