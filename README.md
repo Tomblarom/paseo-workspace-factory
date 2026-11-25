@@ -27,6 +27,8 @@ Install on the Paseo host using either method.
 | Update | Run `git pull` and `paseo plugin reload workspace-factory`. Settings survive reload. | Note your settings, remove the current installation, then install the next release directory. Removing the plugin deletes its settings. |
 | Findings | **Ask agents to record factory findings** is on by default and directs agents to `<checkout>/FINDINGS.md`. | Unavailable. |
 
+**Self-improvement when built from source.** An installation from the git checkout automatically adds a short passage to the prompts of new steers and workers: they record what they notice while using the factory (friction, expensive or wasted context, quota waste, unclear briefs, bugs) in `<checkout>/FINDINGS.md`. You decide which entries become tasks. Turn it off with **Ask agents to record factory findings** in the plugin settings. A normal installation from a built release never adds the passage.
+
 After [host setup](docs/getting-started.md#configure-and-use-the-factory), open a regular agent tab in Paseo and use the composer.
 
 | To | Type |
