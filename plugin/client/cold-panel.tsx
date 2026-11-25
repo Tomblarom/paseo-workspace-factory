@@ -127,8 +127,9 @@ function useColdSelf(agentId: string): ColdSelf {
 function useColdStyles(theme: PluginHostProps["theme"], compact: boolean) {
   return useMemo(
     () => ({
-      screen: { flex: 1, padding: compact ? 16 : 24, gap: compact ? 8 : 12 },
-      title: { color: theme.colors.foreground, fontSize: compact ? 18 : 20 },
+      screen: { padding: 8, gap: 6 },
+      inner: { gap: 6 },
+      title: { color: theme.colors.foreground, fontSize: compact ? 15 : 16 },
       body: { color: theme.colors.foreground, fontSize: 14 },
       muted: { color: theme.colors.foregroundMuted, fontSize: 13 },
       warn: { color: theme.colors.statusWarning, fontSize: 13 },
@@ -171,7 +172,7 @@ function ColdBody({
   return (
     <View style={styles.screen}>
       {self ? (
-        <View style={styles.screen}>
+        <View style={styles.inner}>
           <Text style={styles.title}>
             {reminder
               ? reminder.title

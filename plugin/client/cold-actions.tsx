@@ -72,29 +72,29 @@ export function ColdActions({
 
   const styles = useMemo(
     () => ({
-      actions: { gap: compact ? 8 : 12 },
-      row: { flexDirection: "row" as const, gap: 8, flexWrap: "wrap" as const },
+      actions: { gap: 6 },
+      row: { flexDirection: "row" as const, gap: 6, flexWrap: "nowrap" as const },
       button: {
-        paddingVertical: 10,
-        paddingHorizontal: 14,
+        paddingVertical: 5,
+        paddingHorizontal: 10,
         borderRadius: 8,
         backgroundColor: theme.colors.accent,
       },
       buttonText: { color: theme.colors.accentForeground, fontSize: 14 },
       coldButton: {
-        paddingVertical: 10,
-        paddingHorizontal: 14,
+        paddingVertical: 5,
+        paddingHorizontal: 10,
         borderRadius: 8,
         backgroundColor: "#f87171",
       },
       coldText: { color: "#450a0a", fontSize: 14 },
       freshButton: {
-        paddingVertical: 10,
-        paddingHorizontal: 14,
+        paddingVertical: 5,
+        paddingHorizontal: 10,
         borderRadius: 8,
         backgroundColor: theme.colors.statusSuccess,
       },
-      freshText: { color: "#ffffff", fontSize: 14 },
+      freshText: { color: "#ffffff", fontSize: 13 },
       body: { color: theme.colors.foreground, fontSize: 14 },
       muted: { color: theme.colors.foregroundMuted, fontSize: 13 },
       error: { color: theme.colors.statusDanger, fontSize: 14 },
