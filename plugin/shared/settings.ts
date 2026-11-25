@@ -80,7 +80,7 @@ export const factoryConfigSettings = defineSettings({
 // unconditionally and shown/hidden in Paseo's own sidebar settings; any
 // stored factory-sidebar value is ignored.
 
-// Chat display preference: full CHECKPOINT blocks or one summary line.
+// Preferences for chat display and the findings passage in agent prompts.
 // The client entry reads this host setting before any settings screen opens.
 export const factoryDisplaySettings = defineSettings({
   id: "factory-display",
@@ -88,6 +88,7 @@ export const factoryDisplaySettings = defineSettings({
   version: 1,
   schema: z.object({
     checkpointInChat: z.boolean().default(true),
+    findingsInPrompts: z.boolean().default(true),
   }),
 });
 

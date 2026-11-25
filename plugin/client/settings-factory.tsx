@@ -1,5 +1,5 @@
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
-import { usePaseo, useRpc, useSettings } from "@getpaseo/plugin/client";
+import { usePaseo, useRpc } from "@getpaseo/plugin/client";
 import {
   SettingsAction,
   SettingsCard,
@@ -16,37 +16,41 @@ import { CleanupSettingsSection } from "./settings-cleanup.js";
 import { ResumeSettingsSection } from "./settings-resume.js";
 import { factoryModelsList } from "../shared/factory.js";
 import { formatModelList, profileBadges } from "../shared/models-format.js";
+import { factoryPromptSettings } from "../shared/prompt-settings.js";
 import { factoryConfigSettings, factoryDisplaySettings } from "../shared/settings.js";
 import {
+  GITHUB_OWNER_PATTERN,
+  isAbsolutePath,
   validateFactorySettings,
-  validateHostSettings,
   validateProfilesAgainstCatalogLocal,
-  validateQuotaSettings,
+  type FactoryProfileValue,
   type FactorySettingsValues,
   type ProviderEntry,
 } from "../shared/settings-validate.js";
 import { setCheckpointInChat } from "./checkpoint-display.js";
+import { AutosaveInput, SettingsSaveError, useAutosave } from "./settings-autosave.js";
+import { commaSeparated, percentage, wholeNumber, type SettingsEdit } from "./settings-edit.js";
 
 const STEERS_INFO =
-  "A steer is an agent that coordinates one project. You can keep several (A, B, C \u2026), each on its own provider or model; one is in charge at a time and hands over with /factory switch when it hits a limit or its chat gets too long.";
+  "One steer coordinates a project at a time. Set up multiple slots to hand over with /factory switch.";
 
 const WORKERS_INFO =
-  "Workers are helper agents a steer starts. The list is a priority: the first entry that is available is used, so a limit or outage on one provider falls through to the next. Advisor profiles cannot be workers.";
+  "The factory starts workers using the first available profile in this order.";
 
 const EFFECTIVE_INFO =
-  "These lists are what the factory uses right now. Saving steers, profiles or workers below replaces the steer slots and the worker list from the config file with these settings; a profile that only exists in the file stays available. A GitHub owner or checkout root saved below replaces the matching file value.";
+  "The factory uses the effective lists below. Editing the factory configuration here sets the steer slots and worker order from this page. Profiles from the config file remain available.";
 
 const HOST_INFO =
-  "The host setup this plugin runs on. Both fields are optional while a config file exists: a saved value replaces the matching file value, an empty field keeps it. Without a config file both are required, and together with the steers, profiles and workers below they form the complete configuration.";
+  "An empty field uses the value from the config file. Fill in both fields when setting up a host without a config file.";
 
 const PROFILES_INFO =
   "A profile is a named choice of provider, model, thinking level and permission mode. Steers and workers refer to profiles by name, so you change a model in one place.";
 
 const QUOTA_INFO =
-  "The plugin samples provider quota in the background and shows it with /factory quota. At the warn level a pool counts as tight (the sidebar warns and briefs prefer another pool); at the exhausted level the pool is skipped when a profile is picked. Sampling runs at most every few minutes.";
+  "View sampled usage with /factory quota. Warnings favor other pools and exhausted pools are skipped.";
 
-function clone(values: FactorySettingsValues): FactorySettingsValues {
-  return JSON.parse(JSON.stringify(values)) as FactorySettingsValues;
+function usedProfileNames(values: FactorySettingsValues): string[] {
+  return [...new Set([...Object.values(values.slots), ...values.workerPriority])];
 }
 
 /** Profile a new steer slot starts on: the first non-advisor profile (worker priority first). */
@@ -90,16 +94,23 @@ type CatalogState =
   | { state: "ready"; entries: ProviderEntry[] }
   | { state: "error"; message: string };
 
-export function FactorySettings({ theme, layout }: PluginSurfaceProps) {
+export function FactorySettings(props: PluginSurfaceProps) {
+  return (
+    <View style={{ gap: props.layout.compact ? 12 : 16 }}>
+      <FactoryConfigSections {...props} />
+      <CleanupSettingsSection />
+      <ResumeSettingsSection />
+      <DisplaySettingsSection />
+    </View>
+  );
+}
+
+function FactoryConfigSections({ theme, layout }: PluginSurfaceProps) {
   const paseo = usePaseo();
-  const configState = useSettings(factoryConfigSettings);
-  const displayState = useSettings(factoryDisplaySettings);
-  const [draft, setDraft] = useState<FactorySettingsValues | null>(null);
-  const [baseRevision, setBaseRevision] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const { state: configState, change, errors: saveErrors } = useAutosave(factoryConfigSettings);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string | null>>({});
   const [newSlot, setNewSlot] = useState("");
   const [newProfile, setNewProfile] = useState("");
-  const [formKey, setFormKey] = useState(0);
   const [catalog, setCatalog] = useState<CatalogState>({ state: "loading" });
   const callModels = useRpc(factoryModelsList);
   const [effective, setEffective] = useState<{ text: string } | { error: string } | null>(null);
@@ -146,26 +157,6 @@ export function FactorySettings({ theme, layout }: PluginSurfaceProps) {
     };
   }, [callModels, settingsRevision]);
 
-  useEffect(() => {
-    if (configState.status === "ready" && draft === null) {
-      setDraft(clone(configState.values as FactorySettingsValues));
-      setBaseRevision(configState.revision);
-    }
-  }, [configState, draft]);
-
-  // After a successful save, adopt the new revision once the hook delivers it.
-  useEffect(() => {
-    if (
-      configState.status === "ready" &&
-      draft !== null &&
-      baseRevision !== null &&
-      configState.revision !== baseRevision &&
-      JSON.stringify(configState.values) === JSON.stringify(draft)
-    ) {
-      setBaseRevision(configState.revision);
-    }
-  }, [configState, draft, baseRevision]);
-
   const styles = useMemo(
     () => ({
       screen: { gap: layout.compact ? 12 : 16 },
@@ -176,103 +167,56 @@ export function FactorySettings({ theme, layout }: PluginSurfaceProps) {
     [theme, layout.compact],
   );
 
-  const savedJson =
-    configState.status === "ready" ? JSON.stringify(configState.values) : null;
-  const changed = draft !== null && savedJson !== null && JSON.stringify(draft) !== savedJson;
-  const errors = useMemo(() => (draft ? validateFactorySettings(draft) : []), [draft]);
-  const quotaErrors = useMemo(() => (draft ? validateQuotaSettings(draft) : []), [draft]);
-  const hostErrors = useMemo(() => (draft ? validateHostSettings(draft) : []), [draft]);
-  const usedProfiles = useMemo(
-    () => (draft ? [...new Set([...Object.values(draft.slots), ...draft.workerPriority])] : []),
-    [draft],
-  );
-  const catalogProblems = useMemo(
-    () =>
-      draft && catalog.state === "ready" && errors.length === 0
-        ? validateProfilesAgainstCatalogLocal(draft.profiles, catalog.entries, usedProfiles)
-        : {},
-    [draft, catalog, errors.length, usedProfiles],
-  );
-  const catalogBlockers = Object.keys(catalogProblems).length;
-
-  async function save(): Promise<void> {
-    if (!draft || !baseRevision || configState.status !== "ready") return;
-    setNotice(null);
-    const ok = await configState.save(draft, baseRevision);
-    setNotice(
-      ok
-        ? "Saved. Running steers are not changed; /factory plan shows what would change."
-        : `Not saved: ${configState.saveError ?? "revision conflict"}. Reload and retry.`,
-    );
-  }
-
-  function discard(): void {
-    if (configState.status !== "ready") return;
-    setDraft(clone(configState.values as FactorySettingsValues));
-    setBaseRevision(configState.revision);
-    setNotice(null);
-    setFormKey((key) => key + 1);
-  }
-
-  async function reset(): Promise<void> {
-    if (configState.status !== "ready" && configState.status !== "invalid") return;
-    const ok = await configState.reset();
-    if (ok) {
-      setDraft(null);
-      setBaseRevision(null);
-      setNotice("Reset to defaults.");
-    } else {
-      setNotice(`Reset failed: ${configState.saveError ?? "unknown error"}.`);
-    }
-  }
-
-  async function toggleDisplay(next: boolean): Promise<void> {
-    if (displayState.status !== "ready") return;
-    const ok = await displayState.save({ checkpointInChat: next }, displayState.revision);
-    if (ok) setCheckpointInChat(next);
-  }
-
-  if (configState.status === "loading") {
+  if (configState.status !== "ready") {
     return (
-      <View style={styles.screen}>
-        <Text style={styles.muted}>Loading factory settings…</Text>
-      </View>
-    );
-  }
-  if (configState.status === "error") {
-    return (
-      <View style={styles.screen}>
-        <Text style={styles.error}>{configState.error}</Text>
-        <SettingsSection title="Factory">
-          <SettingsCard>
-            <SettingsAction label="Retry" actionLabel="Reload" onPress={() => void configState.reload()} />
-          </SettingsCard>
-        </SettingsSection>
-      </View>
-    );
-  }
-  if (configState.status === "invalid" || !draft) {
-    return (
-      <View style={styles.screen}>
-        {configState.status === "invalid" ? (
-          <Text style={styles.error}>Stored settings are invalid: {configState.error}</Text>
-        ) : (
-          <Text style={styles.muted}>Loading factory settings…</Text>
-        )}
-        <SettingsSection title="Factory">
-          <SettingsCard>
-            <SettingsAction
-              label="Defaults"
-              hint="Back to one steer (A) with the default profile; clears the host setup."
-              actionLabel="Reset to defaults"
-              onPress={() => void reset()}
-            />
-          </SettingsCard>
-        </SettingsSection>
-      </View>
+      <SettingsSection title="Factory">
+        <SettingsCard>
+          {configState.status === "loading" ? (
+            <SettingsRow label="Loading factory settings…" />
+          ) : (
+            <SettingsAction label="Factory settings" error={configState.error} actionLabel="Reload" onPress={() => void configState.reload()} />
+          )}
+        </SettingsCard>
+      </SettingsSection>
     );
   }
 
+  const draft = configState.values;
+  const usedProfiles = usedProfileNames(draft);
+
+  function catalogIssues(values: FactorySettingsValues) {
+    return catalog.state === "ready"
+      ? validateProfilesAgainstCatalogLocal(values.profiles, catalog.entries, usedProfileNames(values))
+      : {};
+  }
+
+  function issues(values: FactorySettingsValues) {
+    const catalogErrors = Object.entries(catalogIssues(values)).flatMap(([name, problems]) =>
+      problems.map((problem) => `Profile ${name}: ${problem}`),
+    );
+    return [...validateFactorySettings(values), ...catalogErrors];
+  }
+
+  function validated(edit: SettingsEdit<FactorySettingsValues>): SettingsEdit<FactorySettingsValues> {
+    return (current) => {
+      const next = edit(current);
+      if (typeof next === "string") return next;
+      const existing = new Set(issues(current));
+      return issues(next).find((problem) => !existing.has(problem)) ?? next;
+    };
+  }
+
+  function update(section: string, field: string, edit: SettingsEdit<FactorySettingsValues>) {
+    setFieldErrors((current) => ({ ...current, [field]: null }));
+    return change(section)(validated(edit)).then((result) => {
+      if (result.status === "invalid") {
+        setFieldErrors((current) => ({ ...current, [field]: result.error }));
+      }
+      return result.status === "saved";
+    });
+  }
+
+  const catalogProblems = catalogIssues(draft);
   const profileNames = Object.keys(draft.profiles).sort();
   const slotNames = Object.keys(draft.slots).sort();
   const providerNames =
@@ -280,10 +224,27 @@ export function FactorySettings({ theme, layout }: PluginSurfaceProps) {
   const entryFor = (provider: string) =>
     catalog.state === "ready" ? catalog.entries.find((e) => e.provider === provider) : undefined;
 
-  const updateDraft = (next: FactorySettingsValues) => {
-    setDraft(next);
-    setNotice(null);
-  };
+  const slotName = newSlot.trim().toUpperCase();
+  const slotNameError = slotName && (
+    !/^[A-Z]$/.test(slotName) ? "Enter one letter from A to Z."
+      : Object.hasOwn(draft.slots, slotName) ? "This steer slot already exists." : null
+  );
+  const profileName = newProfile.trim();
+  const profileNameError = profileName && (
+    Object.hasOwn(draft.profiles, profileName) ? "This profile already exists."
+      : Object.hasOwn(Object.prototype, profileName) ? "Choose another profile name." : null
+  );
+
+  function updateProfile(
+    name: string,
+    field: keyof FactoryProfileValue,
+    edit: (profile: FactoryProfileValue) => FactoryProfileValue,
+  ) {
+    return update("Profiles", `${name}.${field}`, (current) => {
+      if (!Object.hasOwn(current.profiles, name)) return "This profile was removed.";
+      return { ...current, profiles: { ...current.profiles, [name]: edit(current.profiles[name]) } };
+    });
+  }
 
   return (
     <View style={styles.screen}>
@@ -303,29 +264,31 @@ export function FactorySettings({ theme, layout }: PluginSurfaceProps) {
 
       <SettingsSection title="Host" info={HOST_INFO}>
         <SettingsCard>
-          <SettingsInput
-            key={`github-owner-${formKey}`}
+          <AutosaveInput
             label="GitHub owner"
-            hint="Account that owns the forks, e.g. octocat. Empty keeps the config file value."
+            hint="Account that owns the forks."
             placeholder="octocat"
-            initialValue={draft.githubOwner ?? ""}
-            onChangeText={(value) =>
-              updateDraft({ ...draft, githubOwner: value.trim() ? value.trim() : null })
-            }
+            stored={draft.githubOwner ?? ""}
+            save={change("Host")}
+            edit={(text) => {
+              const githubOwner = text.trim() || null;
+              if (githubOwner && !GITHUB_OWNER_PATTERN.test(githubOwner)) return "Enter a GitHub account name.";
+              return (current) => ({ ...current, githubOwner });
+            }}
           />
-          <SettingsInput
-            key={`checkout-root-${formKey}`}
+          <AutosaveInput
             label="Checkout root"
-            hint="Absolute directory below which repositories are cloned, e.g. /home/you/projects. Empty keeps the config file value."
+            hint="Absolute directory where the factory clones repositories."
             placeholder="/home/you/projects"
-            initialValue={draft.checkoutRoot ?? ""}
-            onChangeText={(value) =>
-              updateDraft({ ...draft, checkoutRoot: value.trim() ? value.trim() : null })
-            }
+            stored={draft.checkoutRoot ?? ""}
+            save={change("Host")}
+            edit={(text) => {
+              const checkoutRoot = text.trim() || null;
+              if (checkoutRoot && !isAbsolutePath(checkoutRoot)) return "Enter an absolute path.";
+              return (current) => ({ ...current, checkoutRoot });
+            }}
           />
-          {hostErrors.map((message) => (
-            <SettingsRow key={message} label="Please fix" error={message} />
-          ))}
+          <SettingsSaveError error={saveErrors.Host} />
         </SettingsCard>
       </SettingsSection>
 
@@ -340,89 +303,104 @@ export function FactorySettings({ theme, layout }: PluginSurfaceProps) {
               <SettingsSelect
                 key={slot}
                 label={`${slotNames.indexOf(slot) + 1}. Steer ${slot}${profileBadges(draft.profiles[current] ?? { advisor: false, sensitive: false })}`}
-                hint="Profile (provider and model) this steer uses. Slot order is the priority: if a steer's model is unavailable when steers are created, the next slot's profile is used."
+                hint="Creation tries slots in letter order."
+                error={fieldErrors[`slot-${slot}`]}
                 value={current}
                 options={options}
                 onValueChange={(value) =>
-                  updateDraft({ ...draft, slots: { ...draft.slots, [slot]: value } })
+                  void update("Steers", `slot-${slot}`, (latest) => {
+                    if (!Object.hasOwn(latest.slots, slot)) return "This steer slot was removed.";
+                    return { ...latest, slots: { ...latest.slots, [slot]: value } };
+                  })
                 }
               />
             );
           })}
           <SettingsInput
             label="Add a steer"
-            hint="Next free letter, A-Z. A second steer on another provider lets you hand over when one hits its limit."
+            hint="Choose a free letter, A to Z."
             placeholder="B"
             ref={newSlotRef}
-            onChangeText={setNewSlot}
+            error={slotNameError || fieldErrors.addSlot}
+            onChangeText={(text) => {
+              setNewSlot(text);
+              setFieldErrors((current) => ({ ...current, addSlot: null }));
+            }}
           />
           <SettingsAction
             label="Add steer"
             actionLabel="Add"
-            disabled={!/^[A-Za-z]$/.test(newSlot.trim()) || Boolean(draft.slots[newSlot.trim().toUpperCase()])}
-            onPress={() => {
-              const slot = newSlot.trim().toUpperCase();
-              updateDraft({
-                ...draft,
-                slots: { ...draft.slots, [slot]: coordinatorProfile(draft) },
-                prepare: [...draft.prepare, slot],
-              });
-              setNewSlot("");
-              newSlotRef.current?.replaceText("");
-            }}
+            disabled={!slotName || Boolean(slotNameError)}
+            onPress={() => void update("Steers", "addSlot", (current) => {
+              if (Object.hasOwn(current.slots, slotName)) return "This steer slot already exists.";
+              return {
+                ...current,
+                slots: { ...current.slots, [slotName]: coordinatorProfile(current) },
+                prepare: [...current.prepare, slotName],
+              };
+            }).then((saved) => {
+              if (saved && newSlotRef.current?.getText() === newSlot) {
+                setNewSlot("");
+                newSlotRef.current?.replaceText("");
+              }
+            })}
           />
           {slotNames.length > 1
             ? slotNames.map((slot) => (
                 <SettingsAction
                   key={`rm-${slot}`}
                   label={`Remove Steer ${slot}`}
-                  hint="Only removes it from the settings; a running agent is not touched."
+                  hint="Removes the slot from future plans."
+                  error={fieldErrors[`remove-slot-${slot}`]}
                   actionLabel="Remove"
-                  onPress={() => {
-                    const slots = { ...draft.slots };
+                  onPress={() => void update("Steers", `remove-slot-${slot}`, (current) => {
+                    const slots = { ...current.slots };
                     delete slots[slot];
-                    let prepare = draft.prepare.filter((s) => s !== slot);
-                    if (!prepare.length) prepare = [Object.keys(slots).sort()[0]];
-                    updateDraft({
-                      ...draft,
-                      slots,
-                      prepare,
-                      initialActive: prepare.includes(draft.initialActive)
-                        ? draft.initialActive
-                        : prepare[0],
-                    });
-                  }}
+                    const eligible = Object.keys(slots).sort().find((name) => !current.profiles[slots[name]]?.advisor);
+                    if (!eligible) return "Keep at least one coordinating steer slot.";
+                    const prepare = current.prepare.filter((name) => name !== slot);
+                    const initialActive = prepare.includes(current.initialActive)
+                      ? current.initialActive
+                      : prepare.find((name) => !current.profiles[slots[name]]?.advisor) ?? eligible;
+                    if (!prepare.includes(initialActive)) prepare.push(initialActive);
+                    return { ...current, slots, prepare, initialActive };
+                  })}
                 />
               ))
             : null}
-          <SettingsInput
-            key={`prepare-${formKey}`}
+          <AutosaveInput
             label="Steers to create"
-            hint="Letters that /factory plan sets up, comma-separated, e.g. A,B. Default A: one steer, add more when you need them."
-            initialValue={draft.prepare.join(",")}
-            onChangeText={(value) =>
-              updateDraft({
-                ...draft,
-                prepare: value
-                  .split(",")
-                  .map((s) => s.trim().toUpperCase())
-                  .filter(Boolean),
-              })
-            }
+            hint="Comma-separated slot letters for /factory plan. If you remove the initial steer, the first eligible slot takes over."
+            stored={draft.prepare.join(",")}
+            save={change("Steers")}
+            edit={(text) => {
+              const prepare = commaSeparated(text).map((slot) => slot.toUpperCase());
+              if (!prepare.length) return "Enter at least one steer slot.";
+              if (new Set(prepare).size !== prepare.length) return "List each steer slot only once.";
+              const editPrepare = validated((current) => {
+                const unknownSlot = prepare.find((slot) => !Object.hasOwn(current.slots, slot));
+                if (unknownSlot) return `Steer slot ${unknownSlot} does not exist.`;
+                const canCoordinate = (slot: string) => current.profiles[current.slots[slot]]?.advisor === false;
+                const initialActive = prepare.includes(current.initialActive) && canCoordinate(current.initialActive)
+                  ? current.initialActive
+                  : prepare.find(canCoordinate);
+                if (!initialActive) return "Include a steer slot whose profile can coordinate.";
+                return { ...current, prepare, initialActive };
+              });
+              const preview = editPrepare(draft);
+              return typeof preview === "string" ? preview : editPrepare;
+            }}
           />
           <SettingsSelect
-            label="Steer in charge at first"
-            hint="Which steer coordinates right after a new project is set up."
-            value={
-              draft.prepare.includes(draft.initialActive)
-                ? draft.initialActive
-                : (draft.prepare[0] ?? "")
-            }
+            label="Initial coordinating steer"
+            value={draft.initialActive}
+            error={fieldErrors.initialActive}
             options={draft.prepare
               .filter((slot) => draft.profiles[draft.slots[slot]]?.advisor !== true)
               .map((slot) => ({ label: `Steer ${slot}`, value: slot }))}
-            onValueChange={(value) => updateDraft({ ...draft, initialActive: value })}
+            onValueChange={(initialActive) => void update("Steers", "initialActive", (current) => ({ ...current, initialActive }))}
           />
+          <SettingsSaveError error={saveErrors.Steers} />
         </SettingsCard>
       </SettingsSection>
 
@@ -430,7 +408,7 @@ export function FactorySettings({ theme, layout }: PluginSurfaceProps) {
         <SettingsCard>
           {catalog.state === "error" ? (
             <SettingsRow label="Provider catalog" hint={catalog.message}>
-              <Text style={styles.muted}>Could not load the list of providers and models; you can still save, but choices are not checked.</Text>
+              <Text style={styles.muted}>Provider and model validation is unavailable.</Text>
             </SettingsRow>
           ) : null}
           {profileNames.map((name) => {
@@ -475,27 +453,19 @@ export function FactorySettings({ theme, layout }: PluginSurfaceProps) {
                   <View style={{ flex: 1 }}>
                     <SettingsSwitch
                       label="Advisor"
-                      hint="Second opinion only: never a coordinating steer or a worker."
+                      hint="Use this profile for second opinions."
                       value={profile.advisor}
-                      onValueChange={(value) =>
-                        updateDraft({
-                          ...draft,
-                          profiles: { ...draft.profiles, [name]: { ...profile, advisor: value } },
-                        })
-                      }
+                      error={fieldErrors[`${name}.advisor`]}
+                      onValueChange={(advisor) => void updateProfile(name, "advisor", (current) => ({ ...current, advisor }))}
                     />
                   </View>
                   <View style={{ flex: 1 }}>
                     <SettingsSwitch
-                      label="Sensibel (nur bereinigte Aufträge)"
+                      label="Sensitive"
                       hint="Workers on this profile only get sanitized technical tasks: no personal data, accounts or credentials."
                       value={profile.sensitive}
-                      onValueChange={(value) =>
-                        updateDraft({
-                          ...draft,
-                          profiles: { ...draft.profiles, [name]: { ...profile, sensitive: value } },
-                        })
-                      }
+                      error={fieldErrors[`${name}.sensitive`]}
+                      onValueChange={(sensitive) => void updateProfile(name, "sensitive", (current) => ({ ...current, sensitive }))}
                     />
                   </View>
                 </View>
@@ -503,80 +473,76 @@ export function FactorySettings({ theme, layout }: PluginSurfaceProps) {
                   label="Provider"
                   value={profile.provider}
                   options={providerOptions}
-                  onValueChange={(value) =>
-                    updateDraft({
-                      ...draft,
-                      profiles: { ...draft.profiles, [name]: { ...profile, provider: value } },
-                    })
-                  }
+                  error={fieldErrors[`${name}.provider`]}
+                  onValueChange={(provider) => void updateProfile(name, "provider", (current) => {
+                    if (provider === current.provider) return current;
+                    const offered = entryFor(provider)?.models ?? [];
+                    const model = offered.find((item) => item.id === current.model)?.id ?? offered[0]?.id ?? current.model;
+                    return { ...current, provider, model, thinking: null, mode: null };
+                  })}
                 />
                 <SettingsSelect
                   label="Model"
                   value={profile.model}
                   options={modelOptions}
-                  onValueChange={(value) =>
-                    updateDraft({
-                      ...draft,
-                      profiles: { ...draft.profiles, [name]: { ...profile, model: value } },
-                    })
-                  }
+                  error={fieldErrors[`${name}.model`]}
+                  onValueChange={(model) => void updateProfile(name, "model", (current) => {
+                    if (model === current.model) return current;
+                    const selected = entryFor(current.provider)?.models?.find((item) => item.id === model);
+                    const thinking = selected?.thinkingOptions?.some((item) => item.id === current.thinking)
+                      ? current.thinking : null;
+                    return { ...current, model, thinking };
+                  })}
                 />
                 <SettingsSelect
                   label="Thinking"
-                  hint="How long the model reasons before answering. None uses the provider default."
                   value={profile.thinking ?? ""}
                   options={thinkingOptions}
-                  onValueChange={(value) =>
-                    updateDraft({
-                      ...draft,
-                      profiles: {
-                        ...draft.profiles,
-                        [name]: { ...profile, thinking: value === "" ? null : value },
-                      },
-                    })
-                  }
+                  error={fieldErrors[`${name}.thinking`]}
+                  onValueChange={(value) => void updateProfile(name, "thinking", (current) => ({ ...current, thinking: value || null }))}
                 />
                 <SettingsSelect
                   label="Permission mode"
-                  hint="What the agent may do without asking, as offered by the provider. None uses the provider default."
                   value={profile.mode ?? ""}
                   options={modeOptions}
-                  onValueChange={(value) =>
-                    updateDraft({
-                      ...draft,
-                      profiles: {
-                        ...draft.profiles,
-                        [name]: { ...profile, mode: value === "" ? null : value },
-                      },
-                    })
-                  }
+                  error={fieldErrors[`${name}.mode`]}
+                  onValueChange={(value) => void updateProfile(name, "mode", (current) => ({ ...current, mode: value || null }))}
                 />
               </SettingsRow>
             );
           })}
           <SettingsInput
             label="Add a profile"
-            hint="A short name, e.g. claude-strong or codex-cheap. Then pick provider and model above."
+            hint="Choose a name, then edit its provider and model."
             placeholder="my-profile"
             ref={newProfileRef}
-            onChangeText={setNewProfile}
+            error={profileNameError || fieldErrors.addProfile}
+            onChangeText={(text) => {
+              setNewProfile(text);
+              setFieldErrors((current) => ({ ...current, addProfile: null }));
+            }}
           />
           <SettingsAction
             label="Add profile"
             actionLabel="Add"
-            disabled={!newProfile.trim() || Boolean(draft.profiles[newProfile.trim()])}
-            onPress={() => {
-              const name = newProfile.trim();
-              updateDraft({
-                ...draft,
+            disabled={!profileName || Boolean(profileNameError)}
+            onPress={() => void update("Profiles", "addProfile", (current) => {
+              if (Object.hasOwn(current.profiles, profileName)) return "This profile already exists.";
+              const source = current.profiles[current.workerPriority[0]];
+              if (!source) return "Choose a valid worker profile first.";
+              return {
+                ...current,
                 profiles: {
-                  ...draft.profiles,
-                  [name]: { ...draft.profiles[draft.workerPriority[0]], advisor: false, sensitive: false },
+                  ...current.profiles,
+                  [profileName]: { ...source, advisor: false, sensitive: false },
                 },
-              });
-              setNewProfile("");
-              newProfileRef.current?.replaceText("");
-            }}
+              };
+            }).then((saved) => {
+              if (saved && newProfileRef.current?.getText() === newProfile) {
+                setNewProfile("");
+                newProfileRef.current?.replaceText("");
+              }
+            })}
           />
           {profileNames
             .filter((name) => !usedProfiles.includes(name))
@@ -584,50 +550,62 @@ export function FactorySettings({ theme, layout }: PluginSurfaceProps) {
               <SettingsAction
                 key={`rm-${name}`}
                 label={`Remove profile ${name}`}
+                error={fieldErrors[`remove-profile-${name}`]}
                 actionLabel="Remove"
-                onPress={() => {
-                  const profiles = { ...draft.profiles };
+                onPress={() => void update("Profiles", `remove-profile-${name}`, (current) => {
+                  if (usedProfileNames(current).includes(name)) return "This profile is in use.";
+                  const profiles = { ...current.profiles };
                   delete profiles[name];
-                  updateDraft({ ...draft, profiles });
-                }}
+                  return { ...current, profiles };
+                })}
               />
             ))}
           <SettingsRow
-            label="Running steers stay as they are"
-            hint="Changes here apply to steers created later. The Factory panel marks a running steer whose model differs from its profile; the next plan lists the difference."
+            label="Changes to steer profiles"
+            hint="Future steers use the updated profile. The Factory panel and /factory plan show differences for running steers."
           />
+          <SettingsSaveError error={saveErrors.Profiles} />
         </SettingsCard>
       </SettingsSection>
 
       <SettingsSection title="Workers" info={WORKERS_INFO}>
         <SettingsCard>
           {draft.workerPriority.map((name, index) => {
-            const move = (to: number) => {
-              const next = [...draft.workerPriority];
-              const [item] = next.splice(index, 1);
-              next.splice(to, 0, item);
-              updateDraft({ ...draft, workerPriority: next });
+            const move = (offset: number) => {
+              void update("Workers", name, (current) => {
+                const workerPriority = [...current.workerPriority];
+                const from = workerPriority.indexOf(name);
+                if (from === -1) return "This worker profile was removed.";
+                const to = from + offset;
+                if (to < 0 || to >= workerPriority.length) return current;
+                workerPriority.splice(from, 1);
+                workerPriority.splice(to, 0, name);
+                return { ...current, workerPriority };
+              });
             };
             return (
               <SettingsRow
                 key={`worker-${name}`}
                 label={`${index + 1}. ${name}${profileBadges(draft.profiles[name] ?? { advisor: false, sensitive: false })}`}
                 hint={draft.profiles[name] ? `${draft.profiles[name].provider}/${draft.profiles[name].model}` : "unknown profile"}
+                error={fieldErrors[name]}
               >
                 <View style={{ flexDirection: "row", gap: 8 }}>
-                  <SettingsAction label="Priority" actionLabel="Up" disabled={index === 0} onPress={() => move(index - 1)} />
+                  <SettingsAction label="Priority" actionLabel="Up" disabled={index === 0} onPress={() => move(-1)} />
                   <SettingsAction
                     label="Priority"
                     actionLabel="Down"
                     disabled={index === draft.workerPriority.length - 1}
-                    onPress={() => move(index + 1)}
+                    onPress={() => move(1)}
                   />
                   <SettingsAction
                     label="Remove"
                     actionLabel="Remove"
                     disabled={draft.workerPriority.length === 1}
                     onPress={() =>
-                      updateDraft({ ...draft, workerPriority: draft.workerPriority.filter((n) => n !== name) })
+                      void update("Workers", name, (current) => ({
+                        ...current, workerPriority: current.workerPriority.filter((profile) => profile !== name),
+                      }))
                     }
                   />
                 </View>
@@ -636,7 +614,8 @@ export function FactorySettings({ theme, layout }: PluginSurfaceProps) {
           })}
           <SettingsSelect
             label="Add a worker profile"
-            hint="Appended at the end of the priority list. Advisor profiles are not offered."
+            hint="Append a profile to the priority list."
+            error={fieldErrors.addWorker}
             value=""
             options={[
               { label: "Choose…", value: "" },
@@ -645,124 +624,126 @@ export function FactorySettings({ theme, layout }: PluginSurfaceProps) {
                 .map((name) => ({ label: name, value: name })),
             ]}
             onValueChange={(value) => {
-              if (value) updateDraft({ ...draft, workerPriority: [...draft.workerPriority, value] });
+              if (value) {
+                void update("Workers", "addWorker", (current) => current.workerPriority.includes(value)
+                  ? current
+                  : { ...current, workerPriority: [...current.workerPriority, value] });
+              }
             }}
           />
+          <SettingsSaveError error={saveErrors.Workers} />
         </SettingsCard>
       </SettingsSection>
 
       <SettingsSection title="Quota" info={QUOTA_INFO}>
         <SettingsCard>
-          <SettingsInput
-            key={`warn-${formKey}`}
-            label="Warn at (percent)"
-            hint="A pool at or above this session usage counts as tight. Default 75."
-            initialValue={String(draft.quota?.warnPct ?? 75)}
-            onChangeText={(value) =>
-              updateDraft({
-                ...draft,
-                quota: { ...(draft.quota ?? { exhaustedPct: 90, warnPct: 75 }), warnPct: Number(value.trim()) },
-              })
-            }
-          />
-          <SettingsInput
-            key={`exhausted-${formKey}`}
-            label="Exhausted at (percent)"
-            hint="A pool at or above this session usage is skipped when a profile is picked. Default 90."
-            initialValue={String(draft.quota?.exhaustedPct ?? 90)}
-            onChangeText={(value) =>
-              updateDraft({
-                ...draft,
-                quota: { ...(draft.quota ?? { exhaustedPct: 90, warnPct: 75 }), exhaustedPct: Number(value.trim()) },
-              })
-            }
-          />
-          <SettingsInput
-            key={`sample-${formKey}`}
+          {([
+            { key: "warnPct", label: "Warn at (percent)", hint: "Default 75." },
+            { key: "exhaustedPct", label: "Exhausted at (percent)", hint: "Default 90." },
+          ] as const).map(({ key, label, hint }) => (
+            <AutosaveInput
+              key={key}
+              label={label}
+              hint={hint}
+              stored={String(draft.quota[key])}
+              save={change("Quota")}
+              edit={(text) => {
+                const value = percentage(text);
+                if (!Number.isFinite(value) || value > 100) return "Enter a percentage from 0 to 100.";
+                return (current) => ({ ...current, quota: { ...current.quota, [key]: value } });
+              }}
+            />
+          ))}
+          <AutosaveInput
             label="Sample at most every (minutes)"
-            hint="How often the plugin may ask Paseo for fresh quota numbers. Whole minutes, at least 10. Default 10."
-            initialValue={String(draft.quotaSampleMinutes ?? 10)}
-            onChangeText={(value) =>
-              updateDraft({ ...draft, quotaSampleMinutes: Number.parseInt(value.trim(), 10) })
-            }
+            hint="Default 10."
+            stored={String(draft.quotaSampleMinutes)}
+            save={change("Quota")}
+            edit={(text) => {
+              const quotaSampleMinutes = wholeNumber(text);
+              if (!Number.isSafeInteger(quotaSampleMinutes) || quotaSampleMinutes < 10) {
+                return "Enter a whole number of minutes, at least 10.";
+              }
+              return (current) => ({ ...current, quotaSampleMinutes });
+            }}
           />
-          {quotaErrors.map((message) => (
-            <SettingsRow key={message} label="Please fix" error={message} />
-          ))}
-        </SettingsCard>
-      </SettingsSection>
-
-      <CleanupSettingsSection theme={theme} layout={layout} />
-      <ResumeSettingsSection theme={theme} />
-
-      <SettingsSection title="Save settings">
-        <SettingsCard>
-          {errors.map((message) => (
-            <SettingsRow key={message} label="Please fix" error={message} />
-          ))}
-          {Object.entries(catalogProblems).map(([name, problems]) =>
-            problems.map((message) => (
-              <SettingsRow key={`${name}-${message}`} label={`Profile ${name}`} error={message} />
-            )),
-          )}
-          {notice ? (
-            <SettingsRow label="Status">
-              <Text style={styles.text}>{notice}</Text>
-            </SettingsRow>
-          ) : null}
-          {configState.saveError && !notice ? (
-            <SettingsRow label="Save error" error={configState.saveError} />
-          ) : null}
-          <SettingsAction
-            label="Save"
-            hint={changed ? "Saves these settings." : "No unsaved changes."}
-            actionLabel={configState.saving ? "Saving…" : "Save"}
-            disabled={!changed || configState.saving || errors.length > 0 || catalogBlockers > 0}
-            onPress={() => void save()}
-          />
-          <SettingsAction
-            label="Discard"
-            actionLabel="Discard changes"
-            disabled={!changed}
-            onPress={discard}
-          />
-          <SettingsAction
-            label="Defaults"
-            hint="Back to one steer (A) with the default profile; clears the host setup."
-            actionLabel="Reset to defaults"
-            onPress={() => void reset()}
-          />
-        </SettingsCard>
-      </SettingsSection>
-
-      <SettingsSection title="Chat display">
-        <SettingsCard>
-          {displayState.status === "ready" ? (
-            <SettingsSwitch
-              label="Show CHECKPOINT blocks in chat"
-              hint="Turn off to show a checkmark and short title in place of the full CHECKPOINT block. The model still writes the full block."
-              value={displayState.values.checkpointInChat}
-              disabled={displayState.saving}
-              onValueChange={(next) => void toggleDisplay(next)}
-            />
-          ) : displayState.status === "invalid" ? (
-            <SettingsAction
-              label="Chat display"
-              hint={displayState.error}
-              actionLabel="Reset to full blocks"
-              onPress={() => void displayState.reset().then((ok) => {
-                if (ok) setCheckpointInChat(true);
-              })}
-            />
-          ) : (
-            <SettingsRow label="Show CHECKPOINT blocks">
-              <Text style={styles.muted}>
-                {displayState.status === "loading" ? "Loading…" : "Unavailable."}
-              </Text>
-            </SettingsRow>
-          )}
+          <SettingsSaveError error={saveErrors.Quota} />
         </SettingsCard>
       </SettingsSection>
     </View>
+  );
+}
+
+const DISPLAY_SECTION = "Chat and prompts";
+
+function DisplaySettingsSection() {
+  const { state, change, errors } = useAutosave(factoryDisplaySettings);
+  const readPromptSettings = useRpc(factoryPromptSettings);
+  const [installation, setInstallation] = useState<{
+    read: typeof readPromptSettings;
+    factoryRoot: string | null;
+    error?: string;
+  } | null>(null);
+  const save = change(DISPLAY_SECTION);
+
+  useEffect(() => {
+    let cancelled = false;
+    readPromptSettings({}).then(
+      ({ factoryRoot }) => {
+        if (!cancelled) setInstallation({ read: readPromptSettings, factoryRoot });
+      },
+      (error: unknown) => {
+        if (!cancelled) {
+          setInstallation({
+            read: readPromptSettings,
+            factoryRoot: null,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [readPromptSettings]);
+
+  const currentInstallation = installation?.read === readPromptSettings ? installation : null;
+  const factoryRoot = currentInstallation?.factoryRoot ?? null;
+  const findingsHint = factoryRoot !== null
+    ? `Adds a short passage to prompts of new steers and workers: record observations about using the factory in ${factoryRoot}/FINDINGS.md; entries move to TODO.md only with your consent. Off leaves the passage out.`
+    : currentInstallation
+      ? "Only available when the plugin is installed from the git checkout (build from source)."
+      : "Checking the plugin installation…";
+
+  return (
+    <SettingsSection title={DISPLAY_SECTION}>
+      <SettingsCard>
+        {state.status === "ready" ? (
+          <>
+            <SettingsSwitch
+              label="Show CHECKPOINT blocks in chat"
+              hint="Turn off to show a checkmark and short title in chat."
+              value={state.values.checkpointInChat}
+              onValueChange={(checkpointInChat) => void save((current) => ({ ...current, checkpointInChat })).then((result) => {
+                if (result.status === "saved") setCheckpointInChat(result.values.checkpointInChat);
+              })}
+            />
+            <SettingsSwitch
+              label="Ask agents to record factory findings"
+              hint={currentInstallation?.error ? undefined : findingsHint}
+              error={currentInstallation?.error}
+              disabled={factoryRoot === null}
+              value={factoryRoot !== null && state.values.findingsInPrompts}
+              onValueChange={(findingsInPrompts) => void save((current) => ({ ...current, findingsInPrompts }))}
+            />
+          </>
+        ) : state.status === "loading" ? (
+          <SettingsRow label="Loading chat and prompt settings…" />
+        ) : (
+          <SettingsAction label="Chat and prompt settings" error={state.error} actionLabel="Reload" onPress={() => void state.reload()} />
+        )}
+        <SettingsSaveError error={errors[DISPLAY_SECTION]} />
+      </SettingsCard>
+    </SettingsSection>
   );
 }

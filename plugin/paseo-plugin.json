@@ -2,6 +2,7 @@
   "id": "workspace-factory",
   "name": "Workspace Factory",
   "description": "Provision and steer standardized Paseo workspaces from GitHub repositories.",
+  "icon": "assets/icon.png",
   "media": [],
   "requirements": {
     "paseo": ">=0.16.2"

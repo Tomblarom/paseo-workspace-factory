@@ -1,306 +1,141 @@
-import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
-import { useSettings } from "@getpaseo/plugin/client";
 import {
   SettingsAction,
   SettingsCard,
-  SettingsInput,
   SettingsRow,
   SettingsSection,
   SettingsSelect,
   SettingsSwitch,
 } from "@getpaseo/plugin/client/ui";
-import { useEffect, useMemo, useState } from "react";
-import { Text, View } from "react-native";
 import { factoryCleanupSettings } from "../shared/settings.js";
-import {
-  validateCleanupSettings,
-  type CleanupSettingsValues,
-} from "../shared/settings-validate.js";
+import { AutosaveInput, SettingsSaveError, useAutosave } from "./settings-autosave.js";
+import { commaSeparated, wholeNumber } from "./settings-edit.js";
 
-function clone(values: CleanupSettingsValues): CleanupSettingsValues {
-  return JSON.parse(JSON.stringify(values)) as CleanupSettingsValues;
-}
-
-// Validated document shape for save(); mirrors the zod schema in
-// shared/settings.ts (the draft stays loose so invalid input can be shown).
-type CleanupDoc = {
-  mode: "off" | "clear" | "compact-warm";
-  profile: "efficiency" | "balanced" | "comfort";
-  idleMinutes: number;
-  minContextTokens: number;
-  providers: string[];
-  roles: ("steer" | "worker")[];
-  seedAfterClear: boolean;
-  clearAcknowledged: boolean;
-  dailyCap: number;
-  rewindFresh: boolean;
-};
-
-const SECTION_TITLE = "Idle agents (save quota)";
-
+const SECTION_TITLE = "Idle agents";
 const SECTION_INFO =
-  "An agent that sat idle for a long time loses its provider cache: its next message re-reads the whole chat and can cost a large share of a usage limit. These settings decide what the plugin does with such agents. Nothing is deleted and the agent keeps its tab; afterwards it continues from its checkpoint with /factory resume.";
+  "Long-idle agents lose their provider cache. The next message can then use a large share of quota. Cleanup keeps the agent tab so it can continue from its checkpoint with /factory resume.";
 
-function asList(value: string): string[] {
-  return value
-    .split(",")
-    .map((part) => part.trim())
-    .filter(Boolean);
-}
-
-/**
- * Host-scope idle cleanup (C5) settings: automation mode, thresholds, and the
- * explicit acknowledgement that unlocks mode clear.
- */
-export function CleanupSettingsSection({
-  theme,
-  layout,
-}: Pick<PluginSurfaceProps, "theme" | "layout">) {
-  const state = useSettings(factoryCleanupSettings);
-  const [draft, setDraft] = useState<CleanupSettingsValues | null>(null);
-  const [baseRevision, setBaseRevision] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [formKey, setFormKey] = useState(0);
-
-  useEffect(() => {
-    if (state.status === "ready" && draft === null) {
-      setDraft(clone(state.values as CleanupSettingsValues));
-      setBaseRevision(state.revision);
-    }
-  }, [state, draft]);
-
-  useEffect(() => {
-    if (
-      state.status === "ready" &&
-      draft !== null &&
-      baseRevision !== null &&
-      state.revision !== baseRevision &&
-      JSON.stringify(state.values) === JSON.stringify(draft)
-    ) {
-      setBaseRevision(state.revision);
-    }
-  }, [state, draft, baseRevision]);
-
-  const styles = useMemo(
-    () => ({
-      text: { color: theme.colors.foreground, fontSize: 14 },
-      muted: { color: theme.colors.foregroundMuted, fontSize: 13 },
-      error: { color: theme.colors.statusDanger, fontSize: 14 },
-    }),
-    [theme, layout.compact],
-  );
-
-  const savedJson = state.status === "ready" ? JSON.stringify(state.values) : null;
-  const changed = draft !== null && savedJson !== null && JSON.stringify(draft) !== savedJson;
-  const errors = useMemo(() => (draft ? validateCleanupSettings(draft) : []), [draft]);
-
-  async function save(): Promise<void> {
-    if (!draft || !baseRevision || state.status !== "ready" || errors.length > 0) return;
-    setNotice(null);
-    const ok = await state.save(draft as unknown as CleanupDoc, baseRevision);
-    setNotice(
-      ok
-        ? "Saved. Takes effect within five minutes (next check of idle agents)."
-        : `Not saved: ${state.saveError ?? "revision conflict"}. Reload and retry.`,
-    );
-  }
-
-  function discard(): void {
-    if (state.status !== "ready") return;
-    setDraft(clone(state.values as CleanupSettingsValues));
-    setBaseRevision(state.revision);
-    setNotice(null);
-    setFormKey((key) => key + 1);
-  }
-
-  async function reset(): Promise<void> {
-    if (state.status !== "ready" && state.status !== "invalid") return;
-    const ok = await state.reset();
-    if (ok) {
-      setDraft(null);
-      setBaseRevision(null);
-      setNotice("Reset to defaults: idle agents are only marked, nothing is sent.");
-    } else {
-      setNotice(`Reset failed: ${state.saveError ?? "unknown error"}.`);
-    }
-  }
-
-  if (state.status === "loading") {
+export function CleanupSettingsSection() {
+  const { state, change, errors } = useAutosave(factoryCleanupSettings);
+  if (state.status !== "ready") {
     return (
       <SettingsSection title={SECTION_TITLE} info={SECTION_INFO}>
         <SettingsCard>
-          <SettingsRow label="Automation">
-            <Text style={styles.muted}>Loading…</Text>
-          </SettingsRow>
-        </SettingsCard>
-      </SettingsSection>
-    );
-  }
-
-  if (state.status === "error") {
-    return (
-      <SettingsSection title={SECTION_TITLE} info={SECTION_INFO}>
-        <SettingsCard>
-          <SettingsRow label="Automation" error={state.error}>
-            <SettingsAction label="Retry" actionLabel="Reload" onPress={() => void state.reload()} />
-          </SettingsRow>
-        </SettingsCard>
-      </SettingsSection>
-    );
-  }
-
-  if (state.status === "invalid" || !draft) {
-    return (
-      <SettingsSection title={SECTION_TITLE} info={SECTION_INFO}>
-        <SettingsCard>
-          {state.status === "invalid" ? (
-            <SettingsRow label="Stored settings are invalid" error={state.error} />
+          {state.status === "loading" ? (
+            <SettingsRow label="Loading idle-agent settings…" />
           ) : (
-            <SettingsRow label="Automation">
-              <Text style={styles.muted}>Loading…</Text>
-            </SettingsRow>
+            <SettingsAction label="Idle-agent settings" error={state.error} actionLabel="Reload" onPress={() => void state.reload()} />
           )}
-          <SettingsAction
-            label="Defaults"
-            hint="Back to the defaults: off, 60 minutes, claude only."
-            actionLabel="Reset to defaults"
-            onPress={() => void reset()}
-          />
         </SettingsCard>
       </SettingsSection>
     );
   }
 
-  const update = (next: CleanupSettingsValues) => {
-    setDraft(next);
-    setNotice(null);
-  };
-  const numberInput = (key: "idleMinutes" | "minContextTokens" | "dailyCap") =>
-    String(draft[key] ?? "");
+  const values = state.values;
+  const save = change(SECTION_TITLE);
+  const needsAcknowledgement = values.mode === "clear" && !values.clearAcknowledged;
 
   return (
     <SettingsSection title={SECTION_TITLE} info={SECTION_INFO}>
       <SettingsCard>
         <SettingsSelect
           label="What to do with idle agents"
-          hint="Off only shows a \u201cKontext kalt\u201d hint on the agent; nothing is sent. Compact shrinks the chat shortly before the provider cache expires (one small model turn). Clear empties the chat (no model turn) and needs the confirmation below."
-          value={draft.mode}
+          hint="Off shows a “Kontext kalt” hint. Compact shrinks the chat with a small model turn. Clear uses a new chat in the same tab after you acknowledge it below."
+          value={values.mode}
           options={[
-            { label: "Off \u2013 only show a hint", value: "off" },
+            { label: "Off – only show a hint", value: "off" },
             { label: "Compact before the cache expires", value: "compact-warm" },
             { label: "Clear the chat (default)", value: "clear" },
           ]}
-          onValueChange={(value) => update({ ...draft, mode: value })}
+          onValueChange={(mode) => void save((current) => ({ ...current, mode }))}
         />
         <SettingsSelect
-          label="Cost profile (when to compact)"
-          hint="Used by Compact. Balanced compacts shortly before the provider cache expires (Claude 50, current OpenAI 25 minutes idle). Efficiency compacts earlier, even small chats. Comfort compacts rarely and late, and uses more quota; it is a side product, provided as-is."
-          value={draft.profile}
+          label="Cost profile"
+          hint="Timing for Compact. Efficiency acts earlier, Balanced acts shortly before the cache expires, and Comfort acts less often."
+          value={values.profile}
           options={[
             { label: "Maximum efficiency – compact early, even small chats", value: "efficiency" },
             { label: "Balanced (default) – compact before the cache cools", value: "balanced" },
             { label: "Comfort – compact rarely and late", value: "comfort" },
           ]}
-          onValueChange={(value) => update({ ...draft, profile: value })}
+          onValueChange={(profile) => void save((current) => ({ ...current, profile }))}
         />
-        <SettingsInput
-          key={`idle-${formKey}`}
+        <AutosaveInput
           label="Clear after (minutes idle)"
-          hint="Used by Clear and by the hint. Default 60, the cache lifetime of subscription plans."
-          initialValue={numberInput("idleMinutes")}
-          onChangeText={(value) =>
-            update({ ...draft, idleMinutes: Number.parseInt(value.trim(), 10) })
-          }
+          hint="Also controls when the idle hint appears. Default 60."
+          stored={String(values.idleMinutes)}
+          save={save}
+          edit={(text) => {
+            const idleMinutes = wholeNumber(text);
+            if (!Number.isSafeInteger(idleMinutes) || idleMinutes < 5) return "Enter a whole number of minutes, at least 5.";
+            return (current) => ({ ...current, idleMinutes });
+          }}
         />
-        <SettingsInput
-          key={`ctx-${formKey}`}
+        <AutosaveInput
           label="Only chats larger than (tokens)"
-          hint="Smaller chats are cheap to continue and are left alone. Default 60000."
-          initialValue={numberInput("minContextTokens")}
-          onChangeText={(value) =>
-            update({ ...draft, minContextTokens: Number.parseInt(value.trim(), 10) })
-          }
+          hint="Default 60,000."
+          stored={String(values.minContextTokens)}
+          save={save}
+          edit={(text) => {
+            const minContextTokens = wholeNumber(text);
+            if (!Number.isSafeInteger(minContextTokens) || minContextTokens < 1000) return "Enter a whole number of tokens, at least 1,000.";
+            return (current) => ({ ...current, minContextTokens });
+          }}
         />
-        <SettingsInput
-          key={`providers-${formKey}`}
+        <AutosaveInput
           label="Providers"
-          hint="Comma-separated provider ids. Default claude. Codex agents are compacted, never cleared (no native /clear)."
-          initialValue={draft.providers.join(",")}
-          onChangeText={(value) => update({ ...draft, providers: asList(value) })}
+          hint="Comma-separated provider IDs. Default claude. Codex supports Compact."
+          stored={values.providers.join(",")}
+          save={save}
+          edit={(text) => {
+            const providers = commaSeparated(text);
+            if (!providers.length) return "Enter at least one provider ID.";
+            return (current) => ({ ...current, providers });
+          }}
         />
-        <SettingsInput
-          key={`roles-${formKey}`}
+        <AutosaveInput
           label="Agent roles"
-          hint="steer (coordinating agents), worker (helpers), or both, comma-separated. Default both."
-          initialValue={draft.roles.join(",")}
-          onChangeText={(value) => update({ ...draft, roles: asList(value) })}
+          hint="Enter steer, worker, or both separated by a comma."
+          stored={values.roles.join(",")}
+          save={save}
+          edit={(text) => {
+            const roles = commaSeparated(text);
+            if (!roles.length || !roles.every((role) => role === "steer" || role === "worker")) {
+              return "Enter steer, worker, or both.";
+            }
+            return (current) => ({ ...current, roles });
+          }}
         />
         <SettingsSwitch
           label="I understand what Clear does"
-          hint="Required for Clear. The agent keeps its tab, but after an app reload or daemon restart the tab shows only the new, short chat. The old chat can still be opened as an extra tab from the \u201cKontext kalt\u201d panel."
-          value={draft.clearAcknowledged}
-          disabled={state.saving}
-          onValueChange={(next) => update({ ...draft, clearAcknowledged: next })}
+          hint="After a reload, the agent tab shows the new chat. Open the old chat from the “Kontext kalt” panel."
+          error={needsAcknowledgement ? "Clear starts after you turn on this acknowledgement." : null}
+          value={values.clearAcknowledged}
+          onValueChange={(clearAcknowledged) => void save((current) => ({ ...current, clearAcknowledged }))}
         />
-        {draft.mode === "clear" && !draft.clearAcknowledged ? (
-          <SettingsRow
-            label="Clear is not active yet"
-            error="Turn on \u201cI understand what Clear does\u201d, or pick another option."
-          />
-        ) : null}
         <SettingsSwitch
           label="Remind the agent after clearing"
-          hint="Sends one line asking the agent to run resume before its next task. Costs one small turn. Off by default; the steer instructions already contain this rule."
-          value={draft.seedAfterClear}
-          disabled={state.saving}
-          onValueChange={(next) => update({ ...draft, seedAfterClear: next })}
+          hint="Asks the agent to run resume before its next task. Costs one small turn."
+          value={values.seedAfterClear}
+          onValueChange={(seedAfterClear) => void save((current) => ({ ...current, seedAfterClear }))}
         />
         <SettingsSwitch
           label="Rewind “fresh” Codex chats in place"
-          hint="When the cleanup recommends a fresh agent for a Codex chat (no native /clear), rewind it in the same tab instead of only recording the hint. The agent keeps its tab and continues from its checkpoint with /factory resume. Off by default; Claude chats always keep their native /clear."
-          value={draft.rewindFresh}
-          disabled={state.saving}
-          onValueChange={(next) => update({ ...draft, rewindFresh: next })}
+          hint="When cleanup recommends a fresh Codex agent, rewind the chat in its existing tab. The agent continues from its checkpoint with /factory resume."
+          value={values.rewindFresh}
+          onValueChange={(rewindFresh) => void save((current) => ({ ...current, rewindFresh }))}
         />
-        <SettingsInput
-          key={`cap-${formKey}`}
+        <AutosaveInput
           label="Max automatic actions per day"
-          hint="Safety limit for this host. Default 20."
-          initialValue={numberInput("dailyCap")}
-          onChangeText={(value) =>
-            update({ ...draft, dailyCap: Number.parseInt(value.trim(), 10) })
-          }
+          hint="Host-wide limit. Default 20."
+          stored={String(values.dailyCap)}
+          save={save}
+          edit={(text) => {
+            const dailyCap = wholeNumber(text);
+            if (!Number.isSafeInteger(dailyCap) || dailyCap < 1) return "Enter a whole number of actions, at least 1.";
+            return (current) => ({ ...current, dailyCap });
+          }}
         />
-        {errors.map((message) => (
-          <SettingsRow key={message} label="Please fix" error={message} />
-        ))}
-        {notice ? (
-          <SettingsRow label="Status">
-            <Text style={styles.text}>{notice}</Text>
-          </SettingsRow>
-        ) : null}
-        {state.saveError && !notice ? (
-          <SettingsRow label="Save error" error={state.saveError} />
-        ) : null}
-        <SettingsAction
-          label="Save"
-          hint={changed ? "Saves all idle-agent settings." : "No unsaved changes."}
-          actionLabel={state.saving ? "Saving…" : "Save"}
-          disabled={!changed || state.saving || errors.length > 0}
-          onPress={() => void save()}
-        />
-        <SettingsAction
-          label="Discard"
-          actionLabel="Discard changes"
-          disabled={!changed}
-          onPress={discard}
-        />
-        <SettingsAction
-          label="Defaults"
-          hint="Back to the defaults: off, 60 minutes, claude only."
-          actionLabel="Reset to defaults"
-          onPress={() => void reset()}
-        />
+        <SettingsSaveError error={errors[SECTION_TITLE]} />
       </SettingsCard>
     </SettingsSection>
   );
