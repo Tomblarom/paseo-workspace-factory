@@ -5,10 +5,7 @@
 // windows of usedPercent/resetsAt, agentCount), agent routes and logins.
 // Account `email`/`organization`/`home` fields are never stored or output;
 // the normaliser drops them. All reads fail soft (null) so callers fall back.
-import { createRequire } from 'node:module';
-import { realpathSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
-import { LABEL, PARENT_LABEL, daemonPassword, paseoBinary } from './paseo.mjs';
+import { LABEL, PARENT_LABEL, connectPluginRpc, paseoBinary } from './paseo.mjs';
 import { runtime } from './runtime.mjs';
 import { QUOTA_DEFAULTS, bestFamilyAccount } from './quota.mjs';
 
@@ -77,26 +74,6 @@ export function normalizeZerosubState(raw, { now = Date.now() } = {}) {
     if (asId(route.pendingAccountId)) pending[agentId] = route.pendingAccountId;
   }
   return { accounts, agentAccount, pending };
-}
-
-/**
- * Default client factory: the internal DaemonClient that ships with the
- * installed CLI (the high-level client has no plugin RPC). Mirrors the load
- * path of lookupCreationReceipt in paseo.mjs; any failure throws and the
- * caller below turns it into a null (fallback) result.
- */
-async function defaultCreateClient({ url, cliPath }) {
-  const require = createRequire(realpathSync(cliPath));
-  const { DaemonClient } = await import(pathToFileURL(require.resolve('@getpaseo/client/internal/daemon-client')).href);
-  const daemon = new DaemonClient({
-    url,
-    password: daemonPassword(),
-    clientId: 'paseo-workspace-factory-zerosub',
-    logger: { debug() {}, info() {}, warn() {}, error() {} },
-    reconnect: { enabled: false },
-  });
-  await daemon.connect();
-  return daemon;
 }
 
 /**
@@ -321,4 +298,8 @@ export async function readZerosubState({ url = null, cliPath = null, createClien
   } finally {
     await client?.close?.().catch(() => {});
   }
+}
+
+function defaultCreateClient(options) {
+  return connectPluginRpc({ ...options, clientId: 'paseo-workspace-factory-zerosub' });
 }

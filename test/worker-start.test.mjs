@@ -29,7 +29,7 @@ function setup() {
         steers: [{ id: parentId, slot: 'B', workspaceId }] },
       callerId: parentId,
       profile: { name: 'worker', provider: 'codex', model: 'example', mode: 'full-access' },
-      accountId: 'example-account', title: 'Check unit tests', prompt: 'Review the synthetic fixture.',
+      accountId: 'example-account', title: 'Check unit tests', prompt: 'Review the synthetic fixture.', promptOptions: { factoryRoot: '/srv/factory' },
     },
   };
 }
@@ -48,9 +48,17 @@ test('worker start previews without changes and pins the account at native creat
   });
   assert.deepEqual(request.metadata, { 'zerosub.account': 'example-account' });
   assert.equal(request.config.modeId, 'full-access');
+  assert.ok(request.prompt.startsWith(`${options.prompt}\n\n`));
+  assert.match(request.prompt, /FINDINGS\.md/);
   await startScopedWorker({ ...options, accountId: null, apply: true });
   assert.equal(requests[1].metadata, undefined);
   assert.equal(requests[1].idempotencyKey, request.idempotencyKey);
+});
+
+test('worker start leaves the task verbatim when findings are disabled', async () => {
+  const { options, requests } = setup();
+  await startScopedWorker({ ...options, apply: true, promptOptions: { findingsInPrompts: false } });
+  assert.equal(requests[0].prompt, options.prompt);
 });
 
 test('worker start requires the active steer and rejects a stale epoch', async () => {

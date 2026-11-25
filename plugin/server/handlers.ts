@@ -247,6 +247,7 @@ export async function getResume(
   const git = createGit();
   const briefOptions: any = {
     agentId,
+    promptOptions: await loader.loadPromptOptions(paseo),
     agentState: discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null,
     git: status.workspace ? readGitBrief(git, status.workspace.directory) : null,
     scope: discovery.scope ?? scope ?? null,
@@ -287,6 +288,7 @@ export function createResumeBriefBuilder(loader: ConfigLoader) {
     const git = createGit();
     const briefOptions: any = {
       agentId,
+      promptOptions: await loader.loadPromptOptions(paseo),
       agentState: discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null,
       git: status.workspace ? readGitBrief(git, status.workspace.directory) : null,
       scope: discovery.scope ?? scope ?? null,
@@ -370,6 +372,7 @@ async function takeoverIfNonActive(
   const switchOptions: any = {
     client: paseo,
     discovery,
+    promptOptions: await loader.loadPromptOptions(paseo),
     toSlot: slot,
     apply: true,
     send: false,
@@ -393,7 +396,7 @@ export async function previewFresh(
     input.repo,
     input.workspaceId,
   );
-  const freshOptions: any = { client: paseo, discovery, config, apply: false, slot: input.slot ?? null, git: createGit(), rewindClient: defaultCreateRewindClient };
+  const freshOptions: any = { client: paseo, discovery, config, apply: false, slot: input.slot ?? null, git: createGit(), rewindClient: defaultCreateRewindClient, promptOptions: await loader.loadPromptOptions(paseo) };
   const dry: any = await freshSteer(freshOptions);
   return {
     repo: dry.repo,
@@ -420,7 +423,8 @@ export async function applyFresh(
 ): Promise<any> {
   const { config, discovery } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
   const git = createGit();
-  const dryOptions: any = { client: paseo, discovery, config, apply: false, slot: input.slot ?? null, git, rewindClient: defaultCreateRewindClient };
+  const promptOptions = await loader.loadPromptOptions(paseo);
+  const dryOptions: any = { client: paseo, discovery, config, apply: false, slot: input.slot ?? null, git, rewindClient: defaultCreateRewindClient, promptOptions };
   const dry: any = await freshSteer(dryOptions);
   const fresh = freshFingerprint({ repo: dry.repo, slot: dry.slot, epoch: dry.epoch });
   if (fresh !== input.fingerprint) {
@@ -437,6 +441,7 @@ export async function applyFresh(
   const applyOptions: any = {
     client: paseo,
     discovery,
+    promptOptions,
     config,
     apply: true,
     slot: input.slot ?? null,
@@ -619,6 +624,7 @@ export async function previewSwitch(
   const switchOptions: any = {
     client: paseo,
     discovery,
+    promptOptions: await loader.loadPromptOptions(paseo),
     toSlot: to,
     apply: false,
     git: createGit(),
@@ -646,7 +652,8 @@ export async function applySwitch(
   const { config, discovery } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
   const to = checkedSlot(input.to, "--to");
   const git = createGit();
-  const dryOptions: any = { client: paseo, discovery, toSlot: to, apply: false, git };
+  const promptOptions = await loader.loadPromptOptions(paseo);
+  const dryOptions: any = { client: paseo, discovery, promptOptions, toSlot: to, apply: false, git };
   const dry: any = await switchSteer(dryOptions);
   const fresh = switchFingerprint({ repo: dry.repo, from: dry.from, to: dry.to, epoch: dry.epoch });
   if (fresh !== input.fingerprint) {
@@ -654,7 +661,7 @@ export async function applySwitch(
       "Something changed since the switch preview (for example another switch or checkpoint). Run /factory switch again and confirm the new preview.",
     );
   }
-  const applyOptions: any = { client: paseo, discovery, config, toSlot: to, apply: true, send: true, git, paseoCli: createPaseoCli() };
+  const applyOptions: any = { client: paseo, discovery, promptOptions, config, toSlot: to, apply: true, send: true, git, paseoCli: createPaseoCli() };
   const applied: any = await switchSteer(applyOptions);
   return applied;
 }
@@ -988,6 +995,7 @@ export async function previewAssign(
   const dry: any = await (assignScope as any)({
     client: paseo,
     discovery,
+    promptOptions: await loader.loadPromptOptions(paseo),
     task: input.task,
     tests: input.tests ?? [],
     blockers: input.blockers ?? [],
@@ -1019,9 +1027,11 @@ export async function applyAssign(
   loader: ConfigLoader,
 ): Promise<any> {
   const { discovery } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
+  const promptOptions = await loader.loadPromptOptions(paseo);
   const dry: any = await (assignScope as any)({
     client: paseo,
     discovery,
+    promptOptions,
     task: input.task,
     tests: input.tests ?? [],
     blockers: input.blockers ?? [],
@@ -1044,6 +1054,7 @@ export async function applyAssign(
   const applied: any = await (assignScope as any)({
     client: paseo,
     discovery,
+    promptOptions,
     task: input.task,
     tests: input.tests ?? [],
     blockers: input.blockers ?? [],
@@ -1066,6 +1077,7 @@ export async function previewRelocate(
   const dry: any = await (relocateScope as any)({
     client: paseo,
     discovery,
+    promptOptions: await loader.loadPromptOptions(paseo),
     config,
     to: input.to,
     apply: false,
@@ -1099,9 +1111,11 @@ export async function applyRelocate(
 ): Promise<any> {
   const { config, discovery } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
   const git = createGit();
+  const promptOptions = await loader.loadPromptOptions(paseo);
   const dry: any = await (relocateScope as any)({
     client: paseo,
     discovery,
+    promptOptions,
     config,
     to: input.to,
     apply: false,
@@ -1123,6 +1137,7 @@ export async function applyRelocate(
   const applied: any = await (relocateScope as any)({
     client: paseo,
     discovery,
+    promptOptions,
     config,
     to: input.to,
     apply: true,

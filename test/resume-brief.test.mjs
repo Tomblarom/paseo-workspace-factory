@@ -93,9 +93,12 @@ test('brief header names scope, role and activity', () => {
   const { steers } = provisioned(world);
   const status = statusOf(world, discoveryOf(world));
   const scope = { id: REPO, kind: 'github' };
-  const active = buildResumeBrief(status, { agentId: steers.A.id, scope, now: () => NOW });
+  const active = buildResumeBrief(status, { agentId: steers.A.id, scope, now: () => NOW, promptOptions: { factoryRoot: '/srv/factory' } });
   assert.match(active, new RegExp(`Resume brief for ${REPO.replace('/', '\\/')} \\(github\\) · epoch 3 · active steer A`));
   assert.match(active, /You are the active steer of this scope\./);
+  assert.match(active, /FINDINGS\.md/);
+  const withoutFindings = buildResumeBrief(status, { promptOptions: { findingsInPrompts: false } });
+  assert.doesNotMatch(withoutFindings, /FINDINGS\.md/);
   const other = buildResumeBrief(status, { agentId: steers.B.id, scope, now: () => NOW });
   assert.match(other, /You are not active: answer only, do not coordinate\./);
   const unknown = buildResumeBrief(status, { agentId: 'agent-ghost', scope, now: () => NOW });
@@ -314,17 +317,19 @@ test('switch handoff carries the brief only when interrupted', async () => {
     checkpoint: { task: 't', tests: [], blockers: [], next: null, epoch: 3, updatedAt: hoursAgo(1), source: 'manual', interrupted: { agentId: 'agent-1', at: hoursAgo(1) } },
     agents: { 'agent-1': { interrupted: { excerpt: 'boom tail' } } },
   });
-  const dry = await runSwitch({ client: fakeClient(world), discovery: discoveryOf(world), toSlot: 'B', git: fakeGit({}), lock: noLock });
+  const dry = await runSwitch({ client: fakeClient(world), discovery: discoveryOf(world), toSlot: 'B', git: fakeGit({}), lock: noLock, promptOptions: { factoryRoot: '/srv/factory' } });
   assert.match(dry.packet, /Previous steer was interrupted at .*; verify git state before continuing\./);
   assert.match(dry.packet, /--- resume brief ---/);
   assert.match(dry.packet, /epoch 4 · active steer B/);
   assert.match(dry.packet, /You are the active steer of this scope/);
   assert.doesNotMatch(dry.packet, /You are not active/);
   assert.match(dry.packet, /boom tail/);
+  assert.equal(dry.packet.match(/FINDINGS\.md/g)?.length, 1, 'nested resume and handoff share a reminder');
   const clean = makeWorld();
   provisioned(clean, { checkpoint: { task: 't', epoch: 3 } });
-  const plain = await runSwitch({ client: fakeClient(clean), discovery: discoveryOf(clean), toSlot: 'B', git: fakeGit({}), lock: noLock });
+  const plain = await runSwitch({ client: fakeClient(clean), discovery: discoveryOf(clean), toSlot: 'B', git: fakeGit({}), lock: noLock, promptOptions: { findingsInPrompts: false } });
   assert.ok(!plain.packet.includes('resume brief'));
+  assert.doesNotMatch(plain.packet, /FINDINGS\.md/);
 });
 
 test('fresh preview carries the brief when interrupted', async () => {
@@ -336,11 +341,12 @@ test('fresh preview carries the brief when interrupted', async () => {
   const config = { version: 1, github: { owner: 'e', cloneProtocol: 'https', upstreamRemote: 'upstream' }, checkoutRoot: '/p', workspaceTitle: 'Main', profiles: { std: { provider: 'codex', model: 'gpt-6.2-sol', thinking: null, mode: null } }, steers: { slots: { A: 'std', B: 'std' }, prepare: ['A'], initialActive: 'A' } };
   const providers = [{ provider: 'codex', enabled: true, status: 'ready', models: [{ id: 'gpt-6.2-sol', thinkingOptions: [] }], modes: [] }];
   const discovery = { ...discoveryOf(world), providers };
-  const preview = await freshSteer({ client: fakeClient(world), discovery, config, git: fakeGit({}), lock: noLock });
+  const preview = await freshSteer({ client: fakeClient(world), discovery, config, git: fakeGit({}), lock: noLock, promptOptions: { factoryRoot: '/srv/factory' } });
   assert.match(preview.packet, /Previous steer was interrupted at .*; verify git state before continuing\./);
   assert.match(preview.packet, /epoch 4 · active steer A \(new agent, created on apply\)/);
   assert.match(preview.packet, /You are the active steer of this scope/);
   assert.match(preview.packet, /fresh tail/);
+  assert.equal(preview.packet.match(/FINDINGS\.md/g)?.length, 1);
 });
 
 test('CLI usage documents resume', () => {

@@ -329,7 +329,7 @@ test('buildRefreshPacket heads the same tab when rewound', async () => {
 test('fresh --slot preview shows rewind vs new agent', async () => {
   const world = makeWorld();
   const { steers } = provisioned(world);
-  const rewind = await freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', git: fakeGit(), lock: testLock, language: 'en', rewindClient: fakeDaemon({ timeline: userTimeline() }) });
+  const rewind = await freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', git: fakeGit(), lock: testLock, language: 'en', rewindClient: fakeDaemon({ timeline: userTimeline() }), promptOptions: { factoryRoot: '/srv/factory' } });
   assert.equal(rewind.refreshMode, 'rewind');
   assert.equal(rewind.from, steers.B.id);
   assert.equal(rewind.to, steers.B.id);
@@ -337,14 +337,16 @@ test('fresh --slot preview shows rewind vs new agent', async () => {
   assert.equal(rewind.epochBumped, false);
   assert.equal(rewind.idempotencyKey, null);
   assert.match(rewind.packet, /keeps agent .* in the same tab \(rewound context/);
+  assert.match(rewind.packet, /FINDINGS\.md/);
   assert.deepEqual(world.calls, [], 'preview reads only');
 
   const world2 = makeWorld();
   provisioned(world2);
-  const fallback = await freshSteer({ client: fakeClient(world2), discovery: discoveryOf(world2), config: CONFIG, slot: 'B', git: fakeGit(), lock: testLock, language: 'en', rewindClient: fakeDaemon({ timeline: { entries: [] } }) });
+  const fallback = await freshSteer({ client: fakeClient(world2), discovery: discoveryOf(world2), config: CONFIG, slot: 'B', git: fakeGit(), lock: testLock, language: 'en', rewindClient: fakeDaemon({ timeline: { entries: [] } }), promptOptions: { findingsInPrompts: false } });
   assert.equal(fallback.refreshMode, 'new-agent');
   assert.equal(fallback.to, null);
   assert.match(fallback.packet, /gets a new agent/);
+  assert.doesNotMatch(fallback.packet, /FINDINGS\.md/);
   assert.ok(fallback.warnings.some((w) => /falling back to a new agent/.test(w)));
 
   const world3 = makeWorld();

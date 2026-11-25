@@ -1,5 +1,6 @@
 import { loadConfig, validateConfig } from "./factory/config.js";
 import { configureRuntime } from "./factory/runtime.js";
+import type { PromptOptionsReader } from "./prompt-settings.js";
 import {
   mergeFactoryConfig,
   minimalFileConfigBase,
@@ -42,7 +43,10 @@ function hostFieldLabel(field: string): string {
  * complete minimal config using the native defaults; anything less fails
  * with the missing piece named.
  */
-export function createConfigLoader(hostSettings: HostSettingsReader | null) {
+export function createConfigLoader(
+  hostSettings: HostSettingsReader | null,
+  loadPromptOptions: PromptOptionsReader = async () => ({ findingsInPrompts: true, factoryRoot: null }),
+) {
   async function loadEffectiveConfig(): Promise<any> {
     let fileConfig: any = null;
     let fileError: unknown = null;
@@ -106,7 +110,7 @@ export function createConfigLoader(hostSettings: HostSettingsReader | null) {
     return merged;
   }
 
-  return { loadFileConfig, loadEffectiveConfig };
+  return { loadFileConfig, loadEffectiveConfig, loadPromptOptions };
 }
 
 export type ConfigLoader = ReturnType<typeof createConfigLoader>;

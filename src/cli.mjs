@@ -2,13 +2,13 @@
 // Paseo Workspace Factory. Dry-run is the default; every write needs --apply.
 import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { loadConfig, defaultConfigPath, workerPriority, isAdvisorProfile, isAdvisorSlot, isSensitiveProfile, isSensitiveSlot, slotOrder } from './config.mjs';
 import { configureRuntime, runtime } from './runtime.mjs';
 import { createGh } from './github.mjs';
 import { createGit } from './local.mjs';
-import { LABEL, METADATA_KEY, connect, createPaseoCli, daemonStartedAt, lookupCreationReceipt, readPaseoState, restartMessage } from './paseo.mjs';
+import { LABEL, METADATA_KEY, connect, connectPluginRpc, createPaseoCli, daemonStartedAt, lookupCreationReceipt, readPaseoState, restartMessage } from './paseo.mjs';
 import { createRunner } from './factory.mjs';
 import { planHash } from './planner.mjs';
 import { applyPlans, createExecutors, createAuthorization, storeAuthorization, fileProgress, withApplyLock } from './apply.mjs';
@@ -29,6 +29,28 @@ import { readZerosubState } from './zerosub.mjs';
 import { defaultCreateRewindClient } from './rewind.mjs';
 import { attachProjectArchivedAgents, collectCleanupCandidates, formatCandidate, formatLoss, planCleanupOps, selectApplyRunPlans } from './cleanup.mjs';
 import { relocateScope } from './relocate.mjs';
+import { FACTORY_PLUGIN_ID, PROMPT_SETTINGS_RPC, findFactoryCheckout } from './findings.mjs';
+
+export async function readCliPromptOptions({ createClient = connectPluginRpc } = {}) {
+  let client;
+  let settings = null;
+  try {
+    client = await createClient();
+    settings = await client.invokePluginRpc(FACTORY_PLUGIN_ID, PROMPT_SETTINGS_RPC, {});
+  } catch {
+    // Standalone CLI or an older plugin: a CLI run from the checkout is itself
+    // a git install, so it keeps the passage pointing at its own checkout.
+  } finally {
+    try { await client?.close?.(); } catch { /* best-effort cleanup */ }
+  }
+  if (settings && typeof settings === 'object') {
+    // The plugin knows how it was installed: only a git-checkout install
+    // reports a factoryRoot, otherwise the passage is left out.
+    const factoryRoot = typeof settings.factoryRoot === 'string' && settings.factoryRoot ? settings.factoryRoot : null;
+    return { factoryRoot, findingsInPrompts: settings.findingsInPrompts !== false };
+  }
+  return { factoryRoot: findFactoryCheckout(fileURLToPath(new URL('..', import.meta.url))), findingsInPrompts: true };
+}
 
 const USAGE = `Usage: paseo-factory <command> [options]
   plan   <repo...> [--repos-file f.json] [--local <path>]... [--name <id>] [--subject <text>] [--checkout <path>] [--main workspace:<id>] [--domain <id>] [--hub <path|workspace:id>] [--allow-fork] [--adopt <scope-id>:A=<agent-id>] [--adopt-worker <agent-id>[@A]] [--detach] [--slots A,B] [--retitle] [--rename-project <name>] [--json] [--out f.json]
@@ -542,6 +564,7 @@ async function main() {
           lookupReceipt: lookupCreationReceipt, language: runtime().handoffLanguage,
           workerModel: workerModelLine(config, discovery), paseoCli: createPaseoCli(),
           rewindClient: defaultCreateRewindClient,
+          promptOptions: await readCliPromptOptions(),
         });
         const mode = result.refreshMode === 'rewind' ? 'rewind' : 'new agent';
         const target = result.kind === 'worker'
@@ -566,6 +589,7 @@ async function main() {
           client, discovery, toSlot: values.to, apply: Boolean(values.apply), send: !values['no-send'], git,
           wait: Boolean(values.wait), notifyPrevious: Boolean(values['notify-previous']), language: values.language ?? runtime().handoffLanguage,
           config, workerModel: workerModelLine(config, discovery), paseoCli: createPaseoCli(),
+          promptOptions: await readCliPromptOptions(),
         });
         console.log(`${result.applied ? 'Switched' : 'Dry-run'}: Steer ${result.from} → ${result.to} (epoch ${result.epoch}) · handoff ${result.packetChars} characters, built without a model call${result.checkpoint ? '' : ' · NO task checkpoint'}${result.delivered ? ' · delivered' : ''}${result.previousNotified ? ' · previous steer notified' : ''}${result.deliveryError ? ` · delivery failed: ${result.deliveryError}` : ''}${result.renameError ? ` · title rename failed: ${result.renameError}` : ''}\n---\n${result.packet}`);
         if (result.reply !== null) console.log(`--- reply of Steer ${result.to}\n${result.reply ?? '(no answer text)'}`);
@@ -600,6 +624,7 @@ async function main() {
           assignedBy: process.env.PASEO_AGENT_ID ?? null,
           reportTo: values['report-to'] ?? process.env.PASEO_AGENT_ID ?? null,
           workerModel: workerModelLine(config, discovery),
+          promptOptions: await readCliPromptOptions(),
           ...(expectEpoch !== undefined ? { expectEpoch } : {}),
         });
         if (values.json) return console.log(JSON.stringify(result, null, 2));
@@ -620,6 +645,7 @@ async function main() {
           scope: discovery.scope ?? null,
           ...(heuristic ?? {}),
           config, workerModel: workerModelLine(config, discovery),
+          promptOptions: await readCliPromptOptions(),
         });
         if (values.json) {
           const restartInterrupted = status.restartInterrupted ?? restartInterruptions({ checkpoint: status.checkpoint, agentState });
@@ -665,6 +691,7 @@ async function main() {
         client, discovery, config, to: values.to, apply: Boolean(values.apply), git,
         lookupReceipt: lookupCreationReceipt, language: runtime().handoffLanguage,
         workerModel: workerModelLine(config, discovery),
+        promptOptions: await readCliPromptOptions(),
       });
       console.log(`${result.applied ? 'Relocated' : 'Dry-run'}: ${result.scope} ${result.fromWorkspace} → ${result.toDir} (${result.toWorkspace ?? 'new workspace'}) · ${result.steers.length} steer(s) · epoch 1 · movedTo ${result.movedTo}${result.domain ? ` · domain ${result.domain}` : ''}${result.checkpoint ? '' : ' · NO task checkpoint'}${result.delivered.length ? ` · handoffs delivered to ${result.delivered.length}` : ''}${result.previousNotified.length ? ` · ${result.previousNotified.length} previous steer(s) notified` : ''}${result.deliveryErrors.map((d) => ` · delivery failed: ${d.error}`).join('')}${result.notifyErrors.map((d) => ` · notify failed: ${d.error}`).join('')}${(result.notes ?? []).map((n) => `\nNote: ${n}`).join('')}\nNote: the retired scope ${result.fromWorkspace} keeps its agents; archive it via \`cleanup --plan\` (never automatic). Until then, address the new scope by workspace id or path.`);
       for (const packet of result.packets) console.log(`--- Steer ${packet.slot} → ${packet.to ?? '(new agent)'}\n${packet.packet}`);
@@ -839,6 +866,7 @@ async function runModelCommand({ command, args, values, config, configPath, clie
         const result = await startScopedWorker({
           client, status: steerStatus(discovery, { config }), callerId: process.env.PASEO_AGENT_ID,
           profile, accountId: zerosubAccount, prompt: values.task, title: values.title, apply: Boolean(values.apply),
+          promptOptions: await readCliPromptOptions(),
         });
         if (values.json) return console.log(JSON.stringify(result, null, 2));
         if (result.agentId) return console.log(`Started worker ${result.agentId} (${result.provider}) in ${result.scope}`);

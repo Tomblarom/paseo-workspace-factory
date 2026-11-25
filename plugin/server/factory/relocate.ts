@@ -87,7 +87,7 @@ function checkedReceipt(lookupReceipt, kind, key, idOf) {
  * including the domain pointer — is carried over verbatim and shown in the
  * preview as `domain <id>` (result `domain`, null when the scope has none).
  */
-export async function relocateScope({ client, discovery, config, to, apply = false, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, readState = readPaseoState, existsDir = defaultExistsDir, workerModel = null }) {
+export async function relocateScope({ client, discovery, config, to, apply = false, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, readState = readPaseoState, existsDir = defaultExistsDir, workerModel = null, promptOptions }) {
   const status = steerStatus(discovery);
   if (!status.workspace || !status.state) throw new RelocateRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
@@ -174,7 +174,7 @@ export async function relocateScope({ client, discovery, config, to, apply = fal
   });
   const packetFor = (holder, toId, lastMessage) => {
     const cover = `Scope relocated: ${status.workspace.id} → ${target.dir} (${toId}).`;
-    return `${cover}\n${buildHandoff(status, { from: holder, to: { slot: holder.slot, id: toId }, epoch: expected.epoch, git: gitSnapshot, lastMessage, language, workerModel })}`;
+    return `${cover}\n${buildHandoff(status, { from: holder, to: { slot: holder.slot, id: toId }, epoch: expected.epoch, git: gitSnapshot, lastMessage, language, workerModel, promptOptions })}`;
   };
   const previewTarget = assessTarget(state.workspaces);
   const result = {

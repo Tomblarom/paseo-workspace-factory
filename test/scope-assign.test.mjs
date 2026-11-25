@@ -63,7 +63,7 @@ function fakeClient(world) {
 const noLock = (_name, fn) => fn({ verify() {} });
 const assign = (world, discovery, extra = {}) => assignScope({
   client: fakeClient(world), discovery, task: 'Ship it', tests: ['npm test'], blockers: [], next: 'confirm takeover',
-  lock: noLock, now: () => new Date('2026-11-23T12:00:00.000Z'), ...extra,
+  lock: noLock, now: () => new Date('2026-11-23T12:00:00.000Z'), promptOptions: { factoryRoot: '/srv/factory' }, ...extra,
 });
 
 test('preview writes nothing and shows scope, steer, fields and packet', async () => {
@@ -81,8 +81,11 @@ test('preview writes nothing and shows scope, steer, fields and packet', async (
   assert.match(result.packet, /- Tests: npm test/);
   assert.match(result.packet, /- Open blockers: none recorded/);
   assert.match(result.packet, /- Next step: confirm takeover/);
+  assert.match(result.packet, /FINDINGS\.md/);
   assert.equal(result.packetChars, result.packet.length);
   assert.deepEqual(world.calls, [], 'preview reads only');
+  const withoutFindings = await assign(world, discoveryOf(world), { promptOptions: { findingsInPrompts: false } });
+  assert.doesNotMatch(withoutFindings.packet, /FINDINGS\.md/);
 });
 
 test('preview names the replaced previous task', async () => {

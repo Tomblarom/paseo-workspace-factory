@@ -7,6 +7,7 @@ import { CHECKPOINT_KEY, checkpointRules, formatCheckpointBlock, steerStatus } f
 import { METADATA_KEY } from './paseo.mjs';
 import { withLock, workspaceLockName } from './lock.mjs';
 import { formatQuotaLine } from './quota.mjs';
+import { findingsPassage } from './findings.mjs';
 
 export class AssignRefused extends Error {}
 
@@ -21,7 +22,8 @@ export const ASSIGNMENT_KEY = `${METADATA_KEY}.assignment`;
 const none = 'none recorded';
 
 /** Deterministic assignment packet (no wall-clock time, so preview == delivery). */
-export function buildAssignment(status, { slot, steerId, epoch, task, tests, blockers, next, workerModel = null, config = null, quotaSnapshot = null, quotaWarnPct = 75, zerosub = null, reportTo = null }) {
+export function buildAssignment(status, { slot, steerId, epoch, task, tests, blockers, next, workerModel = null, config = null, quotaSnapshot = null, quotaWarnPct = 75, zerosub = null, reportTo = null, promptOptions }) {
+  const findings = findingsPassage(promptOptions);
   const lines = [
     `Assignment for ${status.repo} (epoch ${epoch}).`,
     `Active steer ${slot} (${steerId}): this assignment replaces the recorded checkpoint.`,
@@ -34,6 +36,7 @@ export function buildAssignment(status, { slot, steerId, epoch, task, tests, blo
     `- Tests: ${tests?.length ? tests.join('; ') : none}`,
     `- Open blockers: ${blockers?.length ? blockers.join('; ') : none}`,
     `- Next step: ${next ? next : 'not recorded'}`,
+    ...(findings ? [findings] : []),
     // Rules first: their format example is a block too, and readers take the LAST block.
     checkpointRules({ reportTo }),
     formatCheckpointBlock({ task, tests, blockers, next }),
@@ -47,7 +50,7 @@ export function buildAssignment(status, { slot, steerId, epoch, task, tests, blo
  * --expect-epoch from the preview), write, read back, release; delivery
  * happens after the lock is released.
  */
-export async function assignScope({ client, discovery, task, tests = [], blockers = [], next = null, apply = false, send = true, expectEpoch, assignedBy = null, reportTo = assignedBy, lock = withLock, now = () => new Date(), workerModel = null, config = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, zerosub = null }) {
+export async function assignScope({ client, discovery, task, tests = [], blockers = [], next = null, apply = false, send = true, expectEpoch, assignedBy = null, reportTo = assignedBy, lock = withLock, now = () => new Date(), workerModel = null, config = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, zerosub = null, promptOptions }) {
   const status = steerStatus(discovery);
   if (!status.workspace || !status.state) throw new AssignRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
@@ -67,7 +70,7 @@ export async function assignScope({ client, discovery, task, tests = [], blocker
 
   const fields = { task: task.trim(), tests, blockers, next: next?.trim() || null };
   const report = typeof reportTo === 'string' && reportTo.trim() && reportTo.trim() !== target.id ? reportTo.trim() : null;
-  const packet = buildAssignment(status, { slot: target.slot, steerId: target.id, epoch: expected.epoch, workerModel, config, quotaSnapshot, quotaWarnPct, zerosub, reportTo: report, ...fields });
+  const packet = buildAssignment(status, { slot: target.slot, steerId: target.id, epoch: expected.epoch, workerModel, config, quotaSnapshot, quotaWarnPct, zerosub, reportTo: report, promptOptions, ...fields });
   const result = {
     scope: status.repo, epoch: expected.epoch, slot: target.slot, steerId: target.id,
     domain: status.domain ?? null, domainChildren: [...(status.domainChildren ?? [])],

@@ -29,6 +29,7 @@ Exactly one steer coordinates at a time.
   switch/fresh starts clean; delegate routine work to a cheap worker.
 - Batch tool calls, filter big outputs, write big artifacts to files and paste
   only summary + path. If status marks your agent id as retired, stop coordinating.
+- When your brief includes the findings reminder, record Factory observations in its indicated FINDINGS.md and propose moving them to TODO.md only when needed, with the user's consent.
 - Keep working through the actionable TODO items. While workers run or an item
   is blocked, work on independent items or wait briefly for the first result.
   Stay in the turn until the work is done or every remaining item needs user

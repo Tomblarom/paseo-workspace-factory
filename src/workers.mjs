@@ -7,13 +7,14 @@
 import { LABEL, METADATA_KEY, parentOf } from './paseo.mjs';
 import { idempotencyKey, requestDigest } from './planner.mjs';
 import { ACCOUNT_METADATA_KEY, continuedFromId, inheritContinuationLabels, resolveContinuations } from './zerosub.mjs';
+import { findingsPassage } from './findings.mjs';
 
 export const LIFECYCLE_LABEL = 'wsf.lifecycle'; // "reusable" keeps a worker
 export const RETIREMENT_ENABLED = false;
 
 const BUSY = new Set(['running', 'initializing']);
 
-export async function startScopedWorker({ client, status, callerId, profile, accountId, prompt, title, apply = false }) {
+export async function startScopedWorker({ client, status, callerId, profile, accountId, prompt, title, apply = false, promptOptions }) {
   const { state, workspace, repo, steers } = status;
   const slot = state?.activeSteer;
   const holders = steers.filter((steer) => steer.slot === slot && !steer.retired && !steer.superseded);
@@ -24,10 +25,11 @@ export async function startScopedWorker({ client, status, callerId, profile, acc
   if (!prompt?.trim()) throw new Error('worker start needs --task <text>');
   const scopeId = state.scope?.id ?? repo;
   const labels = { [LABEL.scope]: scopeId, [LABEL.role]: 'worker', [LABEL.owner]: slot };
+  const findings = findingsPassage(promptOptions);
   const request = {
     title: title?.trim() || 'Worker',
     parent: parent.id,
-    prompt,
+    prompt: findings ? `${prompt}\n\n${findings}` : prompt,
     labels,
     config: {
       provider: `${profile.provider}/${profile.model}`,
@@ -39,6 +41,7 @@ export async function startScopedWorker({ client, status, callerId, profile, acc
   const result = { scope: scopeId, workspaceId: workspace.id, parentId: parent.id, profile: profile.name, provider: request.config.provider, accountId: accountId ?? null };
   if (!apply) return result;
 
+  // The same assignment keeps its key when prompt settings change between retries.
   const key = idempotencyKey(scopeId, 'worker', slot, `e${state.epoch}`, requestDigest({ parentId: parent.id, title: request.title, prompt }));
   const workspaceHandle = client.workspaces.ref(workspace.id);
   const current = (await workspaceHandle.refresh())?.metadata?.[METADATA_KEY];

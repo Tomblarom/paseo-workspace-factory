@@ -82,6 +82,15 @@ export async function loadSdk(cliPath = paseoBinary()) {
   return import(pathToFileURL(require.resolve('@getpaseo/client')).href);
 }
 
+/** The public SDK has no plugin RPC surface. Use the internal client from the installed CLI. */
+export async function connectPluginRpc({ url = runtime().paseo.url, cliPath = paseoBinary(), clientId = 'paseo-workspace-factory-rpc' } = {}) {
+  const require = createRequire(realpathSync(cliPath));
+  const { DaemonClient } = await import(pathToFileURL(require.resolve('@getpaseo/client/internal/daemon-client')).href);
+  const daemon = new DaemonClient({ url, password: daemonPassword(), clientId, logger: SILENT, reconnect: { enabled: false } });
+  await daemon.connect();
+  return daemon;
+}
+
 export async function connect({ url = runtime().paseo.url, clientId = 'paseo-workspace-factory' } = {}) {
   const { createPaseoClient } = await loadSdk();
   const client = createPaseoClient({ url, password: daemonPassword(), clientId, logger: SILENT, reconnect: { enabled: false } });

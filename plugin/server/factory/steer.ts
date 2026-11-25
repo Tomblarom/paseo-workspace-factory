@@ -25,6 +25,7 @@ import { AGENTS_KEY, currentFreshHint, updateAgentEntry } from './agent-state.js
 import { SUPERVISION_DEFAULTS, failoverChain, openWorkers as openRegisterWorkers, readWorkers, zerosubMoveDecision } from './supervision.js';
 import { QUOTA_DEFAULTS, accountExhausted, accountForAgent, formatQuotaLine, profilePool } from './quota.js';
 import { readRewindPoint, rewindAndBrief } from './rewind.js';
+import { findingsPassage } from './findings.js';
 
 export const CHECKPOINT_KEY = `${METADATA_KEY}.checkpoint`;
 export class SwitchRefused extends Error {}
@@ -316,10 +317,12 @@ export function formatCheckpointBlock({ task, tests = [], blockers = [], next = 
  * Deterministic handoff text from Paseo/git state. No model call is made to build
  * it; the receiving steer still reads it as normal input on its next turn.
  */
-export function buildHandoff(status, { from, to, epoch, git, lastMessage, maxLastChars = 800, language = 'en', workerModel = null }) {
+export function buildHandoff(status, { from, to, epoch, git, lastMessage, maxLastChars = 800, language = 'en', workerModel = null, promptOptions }) {
   const t = TEXT[language] ?? TEXT.en;
   const lines = [t.head(status.repo, epoch), t.active(to, from), `Workspace ${status.workspace.id} · ${status.workspace.directory}`, git ? t.git(git) : t.noGit];
   if (workerModel) lines.push(workerModel);
+  const findings = findingsPassage(promptOptions);
+  if (findings) lines.push(findings);
   const cp = status.checkpoint;
   if (!cp?.task) {
     lines.push(t.noCheckpoint);
@@ -371,7 +374,7 @@ export function refreshWorkerNotice(to, language = 'en') {
  * With `rewound: true` the packet heads the same tab after a Paseo rewind
  * (from.id is kept, no new agent, no retire notice).
  */
-export function buildRefreshPacket(status, { kind, slot = null, owner = null, title = null, from, to, epoch, git, note = null, noteAt = null, lastMessage = null, maxLastChars = 800, language = 'en', workerModel = null, rewound = false }) {
+export function buildRefreshPacket(status, { kind, slot = null, owner = null, title = null, from, to, epoch, git, note = null, noteAt = null, lastMessage = null, maxLastChars = 800, language = 'en', workerModel = null, rewound = false, promptOptions }) {
   const t = TEXT[language] ?? TEXT.en;
   const active = status.state?.activeSteer ?? '?';
   const lines = [
@@ -389,6 +392,8 @@ export function buildRefreshPacket(status, { kind, slot = null, owner = null, ti
     git ? t.git(git) : t.noGit,
   ];
   if (workerModel) lines.push(workerModel);
+  const findings = findingsPassage(promptOptions);
+  if (findings) lines.push(findings);
   if (typeof note === 'string' && note.trim()) {
     lines.push(t.refreshNote(from.id, noteAt));
     lines.push(clip(note, 1500));
@@ -537,7 +542,7 @@ function ageAgo(when, now) {
  * the last turn had no CHECKPOINT) enable the heuristic restart guess; without
  * them only plugin-marked interruptions are shown.
  */
-export function buildResumeBrief(status, { agentId = null, agentState = null, git = null, scope = null, now = () => Date.now(), daemonStartedAt = null, lastTurnCheckpoints = null, config = null, workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, zerosub = null } = {}) {
+export function buildResumeBrief(status, { agentId = null, agentState = null, git = null, scope = null, now = () => Date.now(), daemonStartedAt = null, lastTurnCheckpoints = null, config = null, workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, zerosub = null, promptOptions } = {}) {
   const id = scope?.id ?? status.repo;
   const kind = scope?.kind ?? 'unknown';
   const epoch = status.state?.epoch ?? '?';
@@ -552,6 +557,8 @@ export function buildResumeBrief(status, { agentId = null, agentState = null, gi
   else if (callerWorker) lines.push(`You are worker "${callerWorker.title}"; your owner is Steer ${callerWorker.owner ?? callerWorker.parentSlot ?? '?'} — continue from the checkpoint below.`);
   else lines.push('Caller unknown; treat this brief as read-only context.');
   if (workerModel) lines.push(workerModel);
+  const findings = findingsPassage(promptOptions);
+  if (findings) lines.push(findings);
   const quotaPool = active ? profilePool(config?.profiles?.[config?.steers?.slots?.[active.slot]]) : null;
   const quotaLine = formatQuotaLine(config, quotaSnapshot, { currentPool: quotaPool, warnPct: quotaWarnPct, zerosub });
   if (quotaLine) lines.push(quotaLine);
@@ -649,8 +656,8 @@ export function buildResumeBrief(status, { agentId = null, agentState = null, gi
  * receiving agent and the verify-git line. Without interruption this is
  * exactly buildHandoff.
  */
-function handoffWithBrief(status, args, { discovery, git, language, workerModel = null, quotaSnapshot = null, quotaWarnPct = 75, zerosub = null }) {
-  const packet = buildHandoff(status, { ...args, workerModel });
+function handoffWithBrief(status, args, { discovery, git, language, workerModel = null, quotaSnapshot = null, quotaWarnPct = 75, zerosub = null, promptOptions }) {
+  const packet = buildHandoff(status, { ...args, workerModel, promptOptions });
   const at = status.checkpoint?.interrupted?.at ?? null;
   if (at === null && !status.checkpoint?.interrupted) return packet;
   const receivingStatus = {
@@ -667,6 +674,7 @@ function handoffWithBrief(status, args, { discovery, git, language, workerModel 
     quotaSnapshot,
     quotaWarnPct,
     zerosub,
+    promptOptions: { findingsInPrompts: false }, // the outer handoff already carries the passage
   });
   const line = language === 'de'
     ? `Der vorherige Steer wurde um ${at ?? 'unbekannter Zeit'} unterbrochen; Git-Stand vor dem Weitermachen prüfen.`
@@ -808,7 +816,7 @@ function refuseIfRetired(status) {
  * re-read, check the expected epoch and active steer, write, read back, release;
  * the handoff is delivered after the lock is released.
  */
-export async function switchSteer({ client, discovery, toSlot, apply = false, send = true, wait = false, waitTimeoutMs = 600_000, notifyPrevious = false, language = runtime().handoffLanguage, git, lock = withLock, now = () => new Date(), config = null, workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, zerosub = null, callerId = process.env.PASEO_AGENT_ID, paseoCli = null }) {
+export async function switchSteer({ client, discovery, toSlot, apply = false, send = true, wait = false, waitTimeoutMs = 600_000, notifyPrevious = false, language = runtime().handoffLanguage, git, lock = withLock, now = () => new Date(), config = null, workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, zerosub = null, callerId = process.env.PASEO_AGENT_ID, paseoCli = null, promptOptions }) {
   const status = steerStatus(discovery);
   if (!status.workspace || !status.state) throw new SwitchRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
@@ -842,7 +850,7 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
   }
   const fromInfo = from ?? { slot: expected.activeSteer, id: 'unknown' };
   const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory) : null;
-  const packet = handoffWithBrief(status, { from: fromInfo, to, epoch: expected.epoch, git: gitSnapshot, lastMessage, language }, { discovery, git, language, workerModel, quotaSnapshot, quotaWarnPct, zerosub });
+  const packet = handoffWithBrief(status, { from: fromInfo, to, epoch: expected.epoch, git: gitSnapshot, lastMessage, language }, { discovery, git, language, workerModel, quotaSnapshot, quotaWarnPct, zerosub, promptOptions });
   const result = {
     repo: status.repo, from: fromInfo.slot, to: toSlot, epoch: expected.epoch + 1, packet,
     packetChars: packet.length, checkpoint: Boolean(status.checkpoint?.task), applied: false, delivered: false, deliveryError: null, reply: null, previousNotified: false, selfTakeover, renameError: null,
@@ -938,7 +946,7 @@ async function runTabRewind({ client, workspaceId, agentId, packet, checkpoint, 
  * applied, or idempotent double-click), or `{ fallback }` when the caller
  * must continue with the new-agent path.
  */
-async function tryActiveRewind({ client, discovery, status, expected, slot, from, apply, language, git, lock, now, workerModel, rewindClient }) {
+async function tryActiveRewind({ client, discovery, status, expected, slot, from, apply, language, git, lock, now, workerModel, rewindClient, promptOptions }) {
   const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;
   const entry = agentState?.[from.id] ?? null;
   const previousBriefId = entry?.refreshed?.briefMessageId;
@@ -950,7 +958,7 @@ async function tryActiveRewind({ client, discovery, status, expected, slot, from
     const packet = buildRefreshPacket(status, {
       kind: 'steer', slot, from, to: { id: from.id }, epoch: expected.epoch, git: gitSnapshot,
       note: entry?.note ?? null, noteAt: entry?.noteAt ?? null,
-      lastMessage: await hintOf(client, from.id), language, workerModel, rewound: true,
+      lastMessage: await hintOf(client, from.id), language, workerModel, rewound: true, promptOptions,
     });
     return {
       repo: status.repo, slot, kind: 'steer', from: from.id, to: from.id, epoch: expected.epoch, epochBumped: false, profile: null,
@@ -972,7 +980,7 @@ async function tryActiveRewind({ client, discovery, status, expected, slot, from
   const packet = buildRefreshPacket(status, {
     kind: 'steer', slot, from, to: { id: from.id }, epoch: expected.epoch, git: gitSnapshot,
     note: entry?.note ?? null, noteAt: entry?.noteAt ?? null,
-    lastMessage: await hintOf(client, from.id), language, workerModel, rewound: true,
+    lastMessage: await hintOf(client, from.id), language, workerModel, rewound: true, promptOptions,
   });
   const { outcome } = await runTabRewind({ client, workspaceId: status.workspace.id, agentId: from.id, packet, checkpoint: status.checkpoint, lock, now, rewindClient, previousBriefId });
   if (outcome.status !== 'rewound') return { fallback: outcome.status };
@@ -1008,7 +1016,7 @@ async function tryActiveRewind({ client, discovery, status, expected, slot, from
  * point exists or the provider lacks rewind; the preview names `rewind` vs
  * `new agent` in `refreshMode`.
  */
-export async function freshSteer({ client, discovery, config, apply = false, slot: slotArg = null, workerId = null, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, now = () => new Date(), workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 90, zerosub = null, paseoCli = null, rewindClient = null }) {
+export async function freshSteer({ client, discovery, config, apply = false, slot: slotArg = null, workerId = null, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, now = () => new Date(), workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? 75, quotaExhaustedPct = config?.quota?.exhaustedPct ?? 90, zerosub = null, paseoCli = null, rewindClient = null, promptOptions }) {
   const status = steerStatus(discovery);
   if (!status.workspace || !status.state) throw new SwitchRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
@@ -1017,12 +1025,12 @@ export async function freshSteer({ client, discovery, config, apply = false, slo
   const wantWorker = workerId !== null && workerId !== undefined && String(workerId).trim() !== '';
   if (wantSlot && wantWorker) throw new SwitchRefused('fresh takes either --slot or --worker, not both');
   if (wantWorker) {
-    return freshWorkerAgent({ client, discovery, status, expected, workerId: String(workerId).trim(), config, apply, language, git, lookupReceipt, execute, workerModel, lock, now, rewindClient });
+    return freshWorkerAgent({ client, discovery, status, expected, workerId: String(workerId).trim(), config, apply, language, git, lookupReceipt, execute, workerModel, lock, now, rewindClient, promptOptions });
   }
   const target = wantSlot ? String(slotArg).trim().toUpperCase() : expected.activeSteer;
   if (!/^[A-Z]$/.test(target ?? '')) throw new SwitchRefused(`Not a steer slot: ${JSON.stringify(slotArg)}`);
   if (target !== expected.activeSteer) {
-    return freshNonActiveSteer({ client, discovery, status, expected, slot: target, config, apply, language, git, lookupReceipt, execute, workerModel, quotaSnapshot, quotaExhaustedPct, zerosub, lock, now, rewindClient });
+    return freshNonActiveSteer({ client, discovery, status, expected, slot: target, config, apply, language, git, lookupReceipt, execute, workerModel, quotaSnapshot, quotaExhaustedPct, zerosub, lock, now, rewindClient, promptOptions });
   }
   const slot = expected.activeSteer;
   const holders = status.steers.filter((s) => s.slot === slot);
@@ -1040,7 +1048,7 @@ export async function freshSteer({ client, discovery, config, apply = false, slo
   // fallback when no rewind point exists or the provider lacks rewind.
   let rewindFallback = null;
   if (typeof rewindClient === 'function' && single) {
-    const rewound = await tryActiveRewind({ client, discovery, status, expected, slot, from: single, config, apply, language, git, lock, now, workerModel, rewindClient });
+    const rewound = await tryActiveRewind({ client, discovery, status, expected, slot, from: single, config, apply, language, git, lock, now, workerModel, rewindClient, promptOptions });
     if (rewound && !rewound.fallback) return rewound;
     if (rewound?.fallback) rewindFallback = rewound.fallback;
   }
@@ -1094,7 +1102,7 @@ export async function freshSteer({ client, discovery, config, apply = false, slo
   };
   if (!apply) {
     if (!single) throw new SwitchRefused(`Steer ${slot} has several live agents (${holders.map((s) => s.id).join(', ')}); if a previous fresh apply was interrupted, rerun with --apply to recover it, otherwise archive the retired one in Paseo`);
-    result.packet = handoffWithBrief(status, { from: single, to: { slot, id: 'new agent, created on apply' }, epoch: expected.epoch, git: gitSnapshot, lastMessage: await hintOf(client, single.id), language }, { discovery, git, language, workerModel, quotaSnapshot, quotaWarnPct, zerosub });
+    result.packet = handoffWithBrief(status, { from: single, to: { slot, id: 'new agent, created on apply' }, epoch: expected.epoch, git: gitSnapshot, lastMessage: await hintOf(client, single.id), language }, { discovery, git, language, workerModel, quotaSnapshot, quotaWarnPct, zerosub, promptOptions });
     result.packetChars = result.packet.length;
     return result;
   }
@@ -1143,7 +1151,7 @@ export async function freshSteer({ client, discovery, config, apply = false, slo
     paseoCli, marker: activeMarker(config),
     mark: null, unmark: { id: from.id, title: from.title ?? null, slot },
   });
-  result.packet = handoffWithBrief(status, { from, to: { slot, id: freshId }, epoch: expected.epoch, git: gitSnapshot, lastMessage: await hintOf(client, from.id), language }, { discovery, git, language, workerModel, quotaSnapshot, quotaWarnPct, zerosub });
+  result.packet = handoffWithBrief(status, { from, to: { slot, id: freshId }, epoch: expected.epoch, git: gitSnapshot, lastMessage: await hintOf(client, from.id), language }, { discovery, git, language, workerModel, quotaSnapshot, quotaWarnPct, zerosub, promptOptions });
   result.packetChars = result.packet.length;
   try {
     await client.agents.ref(freshId).send(result.packet);
@@ -1167,7 +1175,7 @@ export async function freshSteer({ client, discovery, config, apply = false, slo
  * must continue with the new-agent path. `packetArgs` carries the
  * kind-specific buildRefreshPacket fields (slot or owner/title).
  */
-async function tryTabRewind({ client, discovery, status, expected, from, kind, packetArgs, apply, language, git, lock, now, workerModel, rewindClient, resultBase }) {
+async function tryTabRewind({ client, discovery, status, expected, from, kind, packetArgs, apply, language, git, lock, now, workerModel, rewindClient, resultBase, promptOptions }) {
   const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;
   const entry = agentState?.[from.id] ?? null;
   const previousBriefId = entry?.refreshed?.briefMessageId;
@@ -1176,7 +1184,7 @@ async function tryTabRewind({ client, discovery, status, expected, from, kind, p
   const packetOf = async () => buildRefreshPacket(status, {
     kind, from, to: { id: from.id }, epoch: expected.epoch, git: gitSnapshot,
     note: entry?.note ?? null, noteAt: entry?.noteAt ?? null,
-    lastMessage: await hintOf(client, from.id), language, workerModel, rewound: true,
+    lastMessage: await hintOf(client, from.id), language, workerModel, rewound: true, promptOptions,
     ...packetArgs,
   });
   if (!apply) {
@@ -1220,7 +1228,7 @@ async function tryTabRewind({ client, discovery, status, expected, from, kind, p
  * agent id, so retries reuse the receipt while later refreshes get a new
  * key. The new agent is created without the active marker and parent-free.
  */
-async function freshNonActiveSteer({ client, discovery, status, expected, slot, config, apply, language, git, lookupReceipt, execute, workerModel, quotaSnapshot, quotaExhaustedPct, zerosub, lock = withLock, now = () => new Date(), rewindClient = null }) {
+async function freshNonActiveSteer({ client, discovery, status, expected, slot, config, apply, language, git, lookupReceipt, execute, workerModel, quotaSnapshot, quotaExhaustedPct, zerosub, lock = withLock, now = () => new Date(), rewindClient = null, promptOptions }) {
   const holders = status.steers.filter((s) => s.slot === slot);
   if (!holders.length) throw new SwitchRefused(`No live Steer ${slot} to refresh for ${status.repo}; plan and apply one first`);
   const live = holders.filter((h) => !h.superseded);
@@ -1228,7 +1236,7 @@ async function freshNonActiveSteer({ client, discovery, status, expected, slot, 
   if (single && BUSY.has(single.status)) throw new SwitchRefused(`Steer ${slot} is ${single.status}; stop it or wait for its turn to end first`);
   let rewindFallback = null;
   if (typeof rewindClient === 'function' && single) {
-    const rewound = await tryTabRewind({ client, discovery, status, expected, from: single, kind: 'steer', packetArgs: { slot }, apply, language, git, lock, now, workerModel, rewindClient, resultBase: { repo: status.repo, slot, kind: 'steer' } });
+    const rewound = await tryTabRewind({ client, discovery, status, expected, from: single, kind: 'steer', packetArgs: { slot }, apply, language, git, lock, now, workerModel, rewindClient, promptOptions, resultBase: { repo: status.repo, slot, kind: 'steer' } });
     if (rewound && !rewound.fallback) return rewound;
     if (rewound?.fallback) rewindFallback = rewound.fallback;
   }
@@ -1283,7 +1291,7 @@ async function freshNonActiveSteer({ client, discovery, status, expected, slot, 
     result.packet = buildRefreshPacket(status, {
       kind: 'steer', slot, from: single, to: { id: 'new agent, created on apply' }, epoch: expected.epoch, git: gitSnapshot,
       note: agentState?.[single.id]?.note ?? null, noteAt: agentState?.[single.id]?.noteAt ?? null,
-      lastMessage: await hintOf(client, single.id), language, workerModel,
+      lastMessage: await hintOf(client, single.id), language, workerModel, promptOptions,
     });
     result.packetChars = result.packet.length;
     return result;
@@ -1318,7 +1326,7 @@ async function freshNonActiveSteer({ client, discovery, status, expected, slot, 
   result.packet = buildRefreshPacket(status, {
     kind: 'steer', slot, from, to: { id: freshId }, epoch: expected.epoch, git: gitSnapshot,
     note: agentState?.[from.id]?.note ?? null, noteAt: agentState?.[from.id]?.noteAt ?? null,
-    lastMessage: await hintOf(client, from.id), language, workerModel,
+    lastMessage: await hintOf(client, from.id), language, workerModel, promptOptions,
   });
   result.packetChars = result.packet.length;
   try {
@@ -1343,7 +1351,7 @@ async function freshNonActiveSteer({ client, discovery, status, expected, slot, 
  * otherwise the provider defaults apply. The new worker keeps the
  * previous parent (the owning steer), never the calling agent.
  */
-async function freshWorkerAgent({ client, discovery, status, expected, workerId, config, apply, language, git, lookupReceipt, execute, workerModel, lock = withLock, now = () => new Date(), rewindClient = null }) {
+async function freshWorkerAgent({ client, discovery, status, expected, workerId, config, apply, language, git, lookupReceipt, execute, workerModel, lock = withLock, now = () => new Date(), rewindClient = null, promptOptions }) {
   const matches = (status.workers ?? []).filter((w) => w.id === workerId || w.id.startsWith(workerId));
   if (!matches.length) throw new SwitchRefused(`${workerId} is not a live worker of ${status.repo}`);
   if (matches.length > 1) throw new SwitchRefused(`Worker ${JSON.stringify(workerId)} is ambiguous (${matches.map((w) => w.id).join(', ')}); pass the full agent id`);
@@ -1353,7 +1361,7 @@ async function freshWorkerAgent({ client, discovery, status, expected, workerId,
   const title = from.title ?? 'Worker';
   let rewindFallback = null;
   if (typeof rewindClient === 'function') {
-    const rewound = await tryTabRewind({ client, discovery, status, expected, from, kind: 'worker', packetArgs: { owner, title }, apply, language, git, lock, now, workerModel, rewindClient, resultBase: { repo: status.repo, kind: 'worker', workerId: from.id, owner } });
+    const rewound = await tryTabRewind({ client, discovery, status, expected, from, kind: 'worker', packetArgs: { owner, title }, apply, language, git, lock, now, workerModel, rewindClient, promptOptions, resultBase: { repo: status.repo, kind: 'worker', workerId: from.id, owner } });
     if (rewound && !rewound.fallback) return rewound;
     if (rewound?.fallback) rewindFallback = rewound.fallback;
   }
@@ -1388,7 +1396,7 @@ async function freshWorkerAgent({ client, discovery, status, expected, workerId,
     result.packet = buildRefreshPacket(status, {
       kind: 'worker', owner, title: request.title, from, to: { id: 'new agent, created on apply' }, epoch: expected.epoch, git: gitSnapshot,
       note: agentState?.[from.id]?.note ?? null, noteAt: agentState?.[from.id]?.noteAt ?? null,
-      lastMessage: await hintOf(client, from.id), language, workerModel,
+      lastMessage: await hintOf(client, from.id), language, workerModel, promptOptions,
     });
     result.packetChars = result.packet.length;
     return result;
@@ -1412,7 +1420,7 @@ async function freshWorkerAgent({ client, discovery, status, expected, workerId,
   result.packet = buildRefreshPacket(status, {
     kind: 'worker', owner, title: request.title, from, to: { id: freshId }, epoch: expected.epoch, git: gitSnapshot,
     note: agentState?.[from.id]?.note ?? null, noteAt: agentState?.[from.id]?.noteAt ?? null,
-    lastMessage: await hintOf(client, from.id), language, workerModel,
+    lastMessage: await hintOf(client, from.id), language, workerModel, promptOptions,
   });
   result.packetChars = result.packet.length;
   try {

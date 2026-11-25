@@ -1,5 +1,6 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { createConfigLoader } from "./server/config.js";
+import { registerPromptSettings } from "./server/prompt-settings.js";
 import {
   applyAssign,
   applyFresh,
@@ -104,8 +105,8 @@ export default function contribute(server: PluginServerContext) {
   const cleanupSettings = server.registerSettings(factoryCleanupSettings);
   const supervisionSettings = server.registerSettings(factorySupervisionSettings);
   const resumeSettings = server.registerSettings(factoryResumeSettings);
-  server.registerSettings(factoryDisplaySettings);
-  const loader = createConfigLoader(hostSettings);
+  const displaySettings = server.registerSettings(factoryDisplaySettings);
+  const loader = createConfigLoader(hostSettings, registerPromptSettings(server, displaySettings));
   const readSettings = () => readCleanupSettings(cleanupSettings);
   const readSupervision = () => readSupervisionSettings(supervisionSettings);
   const readQuotaSettings = () => readSupervisionSettings(supervisionSettings);
