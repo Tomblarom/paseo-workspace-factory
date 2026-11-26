@@ -108,6 +108,7 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
   const setFactoryResult = results.setResult;
   const lastResult = useRef(result);
   const scroll = useRef<ScrollView>(null);
+  const tabHandles = useRef<Partial<Record<FactoryView, View | null>>>({});
   useEffect(() => {
     if (result && result !== lastResult.current) setView("Diagnostics");
     lastResult.current = result;
@@ -584,11 +585,25 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
         </Pressable>
       </View>
       <View accessibilityRole="tablist" style={styles.navigation}>
-        {factoryViews.map(({ name, icon }) => (
+        {factoryViews.map(({ name, icon }, index) => (
           <Pressable
             key={name}
+            ref={(handle) => { tabHandles.current[name] = handle; }}
             accessibilityRole="tab"
             aria-selected={view === name}
+            {...(layout.platform === "web" ? {
+              tabIndex: view === name || (view === "Diagnostics" && index === 0) ? 0 : -1,
+              onKeyDown: (event: { key: string; preventDefault(): void }) => {
+                const next = event.key === "Home" ? 0 : event.key === "End" ? factoryViews.length - 1
+                  : event.key === "ArrowLeft" ? (index + factoryViews.length - 1) % factoryViews.length
+                    : event.key === "ArrowRight" ? (index + 1) % factoryViews.length : null;
+                if (next === null) return;
+                event.preventDefault();
+                const target = factoryViews[next].name;
+                setView(target);
+                tabHandles.current[target]?.focus();
+              },
+            } : {})}
             style={({ pressed }) => [styles.viewButton, view === name && styles.selectedView,
               pressed && { backgroundColor: theme.colors.surface1 }]}
             onPress={() => setView(name)}

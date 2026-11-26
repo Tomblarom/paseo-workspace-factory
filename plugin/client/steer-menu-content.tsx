@@ -738,15 +738,9 @@ export function SteerMenu({
         (recoveryRoute?.kind === "resume-apply" || recoveryRoute?.kind === "fresh");
       return (
         <View style={{ gap: 4 }}>
-          <Text style={styles.section}>
-            Hand over to Steer {flow.to} (epoch {text(preview.epoch)} → {text(preview.epoch + 1)})
-          </Text>
-          <Text style={styles.body}>
-            {text(preview.packetChars)} characters, {preview.checkpoint ? "with" : "without"} task checkpoint.
-          </Text>
-          <Text style={styles.label}>
-            One brief goes to the destination. The previous tab is updated through Factory state.
-          </Text>
+          <Text style={[styles.section, { fontWeight: "600" }]}>Steer {preview.from} → Steer {flow.to}</Text>
+          <Text style={styles.body}>{preview.checkpoint ? "Continue from the saved task checkpoint." : "Continue with the available workspace state."}</Text>
+          <Text style={styles.label}>{initializeNewSteer === "send" ? "Send the continuation brief after the handover." : "Stage the continuation brief for the destination."}</Text>
           {canRecover
             ? actionButton("resume-handover", STEER_MENU_LABELS.resumeAndHandover, `Resume Steer ${flow.to} and hand over`, () =>
               onConfirmSwitch(flow, true),
