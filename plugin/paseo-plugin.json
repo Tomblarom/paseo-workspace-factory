@@ -1,7 +1,7 @@
 {
   "id": "workspace-factory",
   "name": "Workspace Factory",
-  "description": "Provision and steer standardized Paseo workspaces from GitHub repositories.",
+  "description": "Coordinate Paseo steers and workers across models and accounts while preserving work through handovers and recovery.",
   "icon": "assets/icon.png",
   "media": [],
   "requirements": {
