@@ -1,6 +1,6 @@
 import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
 import type { PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
-import { useRpc } from "@getpaseo/plugin/client";
+import { useHosts, useRpc } from "@getpaseo/plugin/client";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
@@ -36,9 +36,10 @@ import type {
 } from "./factory-store.js";
 import { record, type FactorySteerFeed } from "./factory-workspace-state.js";
 import { FactoryWorkspaceActivity } from "./factory-workspace-activity.js";
+import { FactoryWorkspaceResources } from "./factory-workspace-resources.js";
 import { FactoryWorkspaceStatus } from "./factory-workspace-status.js";
 
-const factoryViews = ["Overview", "Steers", "Activity", "Tools"] as const;
+const factoryViews = ["Overview", "Steers", "Resources", "Activity", "Tools"] as const;
 type FactoryView = typeof factoryViews[number];
 
 function text(value: unknown): string {
@@ -74,6 +75,8 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
   results: FactoryResultStore;
 }) {
   const { theme, layout, workspaceId, host, steerFeed, results } = props;
+  const connection = useHosts().find(({ serverId }) => serverId === host.id)?.status;
+  const offline = connection !== undefined && connection !== "online";
   const callStatus = useRpc(factoryStatus);
   const callPlan = useRpc(factoryPlan);
   const callApply = useRpc(factoryApply);
@@ -559,8 +562,10 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
           </Pressable>
         ))}
       </View>
-      {view === "Activity" ? (
-        <FactoryWorkspaceActivity workspaceId={workspaceId} layout={layout} host={host} styles={styles} />
+      {view === "Resources" ? (
+        <FactoryWorkspaceResources workspaceId={workspaceId} layout={layout} host={host} offline={offline} styles={styles} />
+      ) : view === "Activity" ? (
+        <FactoryWorkspaceActivity workspaceId={workspaceId} layout={layout} host={host} offline={offline} styles={styles} />
       ) : view !== "Tools" ? (
         <FactoryWorkspaceStatus
           view={view}

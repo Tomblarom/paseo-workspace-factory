@@ -48,10 +48,11 @@ const descriptions: Record<ActivityEvent["reason"], string> = {
 };
 
 interface Props extends Pick<PluginWorkspacePanelProps, "workspaceId" | "layout" | "host"> {
+  offline: boolean;
   styles: FactoryResultStyles;
 }
 
-export function FactoryWorkspaceActivity({ workspaceId, layout, host, styles }: Props) {
+export function FactoryWorkspaceActivity({ workspaceId, layout, host, offline, styles }: Props) {
   const callActivity = useRpc(factoryWorkspaceActivity);
   const activity = useQuery({
     queryKey: ["workspace-factory", "activity", host.id, workspaceId],
@@ -60,6 +61,7 @@ export function FactoryWorkspaceActivity({ workspaceId, layout, host, styles }: 
       if (result.workspaceId !== workspaceId) throw new Error("Factory returned activity for a different workspace.");
       return result;
     },
+    enabled: !offline,
     refetchOnMount: "always",
     refetchOnWindowFocus: false,
     retry: false,
@@ -72,19 +74,20 @@ export function FactoryWorkspaceActivity({ workspaceId, layout, host, styles }: 
         <Text accessibilityRole="header" style={[styles.body, { fontSize: layout.compact ? 18 : 21, fontWeight: "600" }]}>
           Recent recorded activity
         </Text>
-        <Pressable accessibilityRole="button" accessibilityLabel="Refresh workspace activity" disabled={activity.isFetching}
+        <Pressable accessibilityRole="button" accessibilityLabel="Refresh workspace activity" disabled={offline || activity.isFetching}
           onPress={() => { void activity.refetch(); }} style={{ minHeight: 36, justifyContent: "center" }}>
           <Text style={activity.isFetching ? styles.label : [styles.body, { textDecorationLine: "underline" }]}>
             {activity.isFetching ? "Checking…" : "Refresh"}
           </Text>
         </Pressable>
       </View>
-      {activity.isError ? (
+      {offline || activity.isError ? (
         <Text accessibilityRole="alert" style={styles.error}>
-          {events ? "Activity could not be refreshed. Showing the last snapshot." : "Workspace activity could not be loaded."}
+          {offline ? events ? "Host disconnected. Showing the last activity snapshot." : "Host disconnected. Activity unavailable."
+            : events ? "Activity could not be refreshed. Showing the last snapshot." : "Workspace activity could not be loaded."}
         </Text>
       ) : null}
-      {!events && activity.isPending ? <Text style={styles.label}>Loading workspace activity…</Text> : null}
+      {!offline && !events && activity.isPending ? <Text style={styles.label}>Loading workspace activity…</Text> : null}
       {events?.length === 0 ? <Text style={styles.label}>No activity recorded.</Text> : null}
       {events?.map((event, index) => (
         <View key={`${event.reason}-${event.observedAt}-${index}`} style={[styles.card, { gap: 6 }]}>
