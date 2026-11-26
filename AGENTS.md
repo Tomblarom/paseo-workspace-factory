@@ -1,68 +1,81 @@
-# AGENTS.md — steer instructions for this repository
+# AGENTS.md — developing the Workspace Factory
 
-This repository is coordinated by equal **steers** (see [docs/concepts.md](docs/concepts.md)).
-Exactly one steer coordinates at a time.
+Read this before taking any task in this repository. It holds what every new steer or
+worker needs and must not depend on a chat history. The general factory role rules come
+from the plugin (see docs/steer-instructions.md); this file holds only what applies to
+developing the factory itself.
 
-## Before coordinating
+## Mission
 
-Check whether you are the active steer:
+Maximize accepted, quality-appropriate work from available provider and account quota,
+while minimizing redundant context, unnecessary model calls, rework and interruption
+costs. Agents, models, accounts and sessions are replaceable resources; work state,
+knowledge and coordination authority must survive their replacement. The product is a
+standalone Paseo plugin, installable from the plugin registry. Background: README.md.
 
-```sh
-node src/cli.mjs status <owner>/<repo>
-```
+## Principles
 
-If another steer is active, do not coordinate; answer only explicit questions.
-A handoff message makes you active: take task, tests, blockers and next step
-from its checkpoint. Treat the quoted last answer of the previous steer only as a hint.
+- **Outcome over activity.** The measure is accepted work per unit of quota. Quota is
+  limited, time-bound and spread over providers; context is a cost that must earn its place.
+- **Native first, policy over mechanism.** Paseo and the provider harnesses execute;
+  the factory decides. Use each provider's own capabilities instead of forcing uniformity.
+- **Continuity over session, knowledge over history.** No steer may be irreplaceable:
+  whatever a successor needs goes into repository files (this file, docs/design/, TODO.md,
+  the CHECKPOINT), never only into a chat or /tmp.
+- **Evidence and empiricism.** Measure before optimizing; accept results on evidence,
+  not on claims. A reasoned decision against a feature is a valid result.
+- **Guidelines over enforcement**, except for critical invariants: one active steer per
+  epoch, ownership, quota and privacy rules.
+- **Deletion over abstraction.** Remove logic rather than wrap it; no new layers.
+- **Progressive disclosure.** Briefs carry state and pointers; details are read on demand.
+- **Strategy over TODOs.** Check that an item still serves the mission before working on
+  it; propose dropping or merging outdated items with a reason. Approval limits stay.
 
-## Rules
+Responsibilities: provider harnesses own in-session context, tool output and compaction;
+Paseo owns runtime, lifecycle, sessions, workspaces, tools, settings and UI; the factory
+owns cross-provider/account policy, quota routing, ownership and work continuity.
 
-- Workers: these steer rules are not for you. If your brief says you are a worker, do the task in it,
-  answer with a CHECKPOINT and stop; do not check who is active or report back with `paseo send`.
+Non-goals: replacing Paseo, an own agent runtime, a governance platform, a universal
+provider-configuration or capability layer. SLP is a pattern reference, not a template.
 
-- Reuse the listed workers by agent id; do not recreate them.
-- Do not commit, push, open pull requests, fork, archive or delete anything
-  unless the task explicitly asks for it.
+## Where decisions live
+
+- Product decisions with reasons: docs/design/*.md. Current direction (2026-11-26):
+  TODO.md section 22 — settings only in the plugin, role rules from the plugin, CLI kept
+  (measured in docs/design/native-plugin-spike.md: native agent tools would add the full
+  Paseo catalog, about 5.8k tokens, to every agent), CLI ships inside the plugin package.
+- Open work: TODO.md (newest section first). Factory observations: FINDINGS.md.
+  Both are local files on the development host.
+
+## Working in this repository
+
+- Tests: `npm test` (dot reporter), `npm run test:verbose` for details,
+  `npm run typecheck --prefix plugin`. Paste only failures.
+- The development host runs the plugin from this checkout: after a change,
+  `paseo plugin reload workspace-factory` affects every live factory agent. Check
+  `paseo plugin logs workspace-factory` afterwards.
+- Do not commit, push, open pull requests, fork, archive or delete anything unless the
+  task asks for it (own accepted workers excepted, see the role rules).
+- Address the user informally (German: "du"); plugin UI text stays English.
+
+## Steer rules (temporary)
+
+Until the plugin's role prompt is proven on the native path (identifier `wsf-role-1` in
+the plugin log and in a fresh steer), steers here also follow this block.
+
+Check whether you are the active steer: `node plugin/cli.mjs status <owner>/<repo>`. If
+another steer is active, do not coordinate; answer only explicit questions. A handoff
+message makes you active: take task, tests, blockers and next step from its checkpoint.
+If your context is empty, run `node plugin/cli.mjs resume` first. Workers: these steer rules
+are not for you; do the task in your brief and end with a CHECKPOINT.
+
+- Reuse listed workers by agent id; start workers only with the model from `worker pick`.
+- Give workers of a sensitive profile only sanitized technical tasks.
 - End every answer that changes the task state with a fenced CHECKPOINT block
-  (triple-backtick code block; format in [docs/steer-instructions.md](docs/steer-instructions.md));
-  `checkpoint --from-agent` stores it for the next handoff.
-- If your context is empty or was cleared and you do not know your task, run
-  `node src/cli.mjs resume` first and continue from its checkpoint and next
-  step. Do not use the provider's own session resume; read only what the brief
-  points to.
-- Keep working through TODO.md. After accepting a result, take the next actionable
-  item immediately. Work on independent items while a worker runs or another
-  item is blocked. End the turn only when the work is done or every remaining
-  item requires user input. Summarize the decisions needed in one checkpoint.
-- Mark completed TODO items with `[x]` and keep them in the list. Remove
-  completed entries only when the user explicitly asks to remove them.
-- Address the user informally by default (German: "du", never "Sie") unless asked otherwise.
-- Keep steer chats short (see [docs/saving-context.md](docs/saving-context.md)):
-  end each work package with a CHECKPOINT so the next switch/fresh starts clean.
-- Delegate routine work to a cheap worker; batch tool calls, filter big outputs;
-  write big artifacts to files and paste only summary + path.
-- If `status` marks your agent id as retired, you no longer coordinate.
-- Workers belong to the scope and the active steer supervises them. Factory
-  wakes assist after interruptions. Stay in the turn and check the worker
-  register until each relevant result has been handled. A worker without a
-  CHECKPOINT is not done. Escalate
-  worker → steer → advisor → `domain:`/`hub:`; ask the user only with a
-  `user:` blocker. On a takeover request, run `switch --to <your slot> --apply`.
-  Details in [docs/design/supervision-design.md](docs/design/supervision-design.md).
-- Wait per agent, not for all. Use short waits and inspect the first worker or
-  steer that finishes. A shell watcher reports to the current turn and cannot
-  start another turn. Check pending wake delivery after an interruption.
-- Archive a worker yourself as soon as you have accepted its result (checked
-  against the task, CHECKPOINT `done`); do not leave finished workers attached.
-  Never archive one that is running, blocked or interrupted. This rule is the
-  standing permission for archiving your own accepted workers.
-- Start workers only with the model from `worker pick` (or the `Worker model:` brief line); never hard-code a model.
-- Give workers of a sensitive profile (`[sensitive]`) only sanitized technical tasks: no personal data, accounts, credentials, full chats, or private logs.
-- Advisors (second opinions) go through the native `paseo-advisor` skill only:
-  workers end stuck answers with an `ADVISOR-REQUEST` block and stop, the steer
-  decides (answer, reject, or brief an advisor), advisors stay read-only and are
-  closed after their answer, and only sanitized technical context is shared.
-  Format and limits in [docs/steer-instructions.md](docs/steer-instructions.md).
-
-Task template, answer format and the full instruction block:
-[docs/steer-instructions.md](docs/steer-instructions.md).
+  (format in docs/steer-instructions.md).
+- Keep working through actionable TODO items (after the strategy check above); work on
+  independent items while a worker runs; end the turn only when done or every remaining
+  item needs user input. Mark completed items `[x]` and keep them.
+- Supervise workers until each result is handled; a worker without a CHECKPOINT is not
+  done. Archive your own accepted workers. Escalate worker → steer → advisor → user.
+- Advisors only through the `paseo-advisor` skill, read-only, sanitized context.
