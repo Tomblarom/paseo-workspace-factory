@@ -107,7 +107,7 @@ old attempt when the new holder has actually accepted it.
 
 **Today.** Status has an optional token-size warning, disabled by default. The composer
 feed uses a generic idle/size threshold or saved fresh recommendation. Idle cleanup
-defaults to Claude, 60 minutes and 60k context tokens. Idle clear needs acknowledgment.
+defaults to Claude, 60 minutes and 100k context tokens. Idle clear needs acknowledgment.
 The configurable warm compact mode runs on a five-minute sweep, requires recent checkpoint
 or note and protects interrupted workers. The cache model estimates TTL by model group.
 The sweep recommends fresh after the TTL, after repeated compaction, at a package boundary or
@@ -243,3 +243,16 @@ re-reading whole files for isolated facts.
    replacement ever become an opt-in automatic operation?
 3. Which native cancellation reasons reliably distinguish a user Stop from provider and
    resource interruption across Codex, Claude and ZeroSub?
+
+## Decision 2026-11-26: no proactive quota handover
+
+The warn threshold is informative only (status, pill, quota line in briefs). Remove the
+proactive account hint (`proactiveSwitchDecision`, `proactiveHintDecision`,
+`proactiveHintForTurn` and its agent-state fact). Reasons: it sends its own prompt, i.e. an
+extra model turn; the switch it proposes is refused while the receiving steer is running
+(the hint itself starts that turn); and a handover at 75 % gives up up to a quarter of the
+window, a warm cache and pays a new initialization without evidence that this is cheaper.
+Real limits are covered without it: ZeroSub continues a limited agent on another account,
+the factory follows the continuation (slots-live-design decision 5), and new agents are
+pinned to the roomiest account at creation (decision 6). Exclusion of accounts uses
+`exhaustedPct` everywhere; `steer add` no longer treats the warn threshold as exhausted.
