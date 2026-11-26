@@ -106,6 +106,7 @@ You are a worker for this repository: do the assigned task, do not coordinate.
   block, see Answer format in the steer instructions).
 - If a second opinion would help, end with an ADVISOR-REQUEST block instead
   and stop; your steer decides (see Advisor policy).
+- Run tests/builds with a quiet reporter, show only failures; write long logs to a file and give the path.
 ```
 
 Start workers only with the model from `<factory> worker pick` (scope optional: bare `worker pick` derives the scope like `resume` — the calling agent's scope, else the workspace of the current directory — and it already applies priority, availability and privacy rules); never hard-code a model. The command prints the chosen `workers.priority` entry plus the matching `paseo run` flags, and the resume brief repeats it as `Worker model: …`, so no extra turn is needed. Change the list with `/factory worker set <n> <model>`: inserting moves the others down and removes duplicates. Running workers keep their model. Advisor-tagged profiles are never picked. Give workers of a sensitive profile only sanitized technical tasks (no personal data, accounts, credentials, full chats, or private logs).

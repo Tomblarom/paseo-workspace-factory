@@ -30,6 +30,8 @@ import { readSteerAction, readCleanupAction, actionEntry, newSteerAction, reconc
 import { actionFact } from './action-facts.mjs';
 
 export const CHECKPOINT_KEY = `${METADATA_KEY}.checkpoint`;
+// Worker efficiency rule, same wording as the Worker instructions block in docs/steer-instructions.md.
+export const WORKER_EFFICIENCY_LINE = '- Run tests/builds with a quiet reporter, show only failures; write long logs to a file and give the path.';
 export class SwitchRefused extends Error {}
 async function guardSteerScope(args) {
   try { return await guardScope(args); }
@@ -449,6 +451,7 @@ export function buildRefreshPacket(status, { kind, slot = null, owner = null, ti
     `Workspace ${status.workspace.id} · ${status.workspace.directory}`,
     git ? t.git(git) : t.noGit,
   ].map((line) => clip(line, 450));
+  if (kind === 'worker') lines.push(WORKER_EFFICIENCY_LINE);
   const worker = kind === 'worker' ? workerCheckpoint(status, from.id, { note, lastMessage, interrupted }) : null;
   const truncated = worker ? appendWorkerCheckpoint(lines, worker, t, epoch) : packetCheckpoint(lines, status.checkpoint, epoch, t);
   appendPacketPaths(lines, git);
@@ -581,6 +584,7 @@ export function buildResumeBrief(status, { agentId = null, agentState = null, wo
   else if (callerWorker) lines.push(`You are worker "${clip(callerWorker.title, 100)}"; your owner is Steer ${callerWorker.owner ?? callerWorker.parentSlot ?? '?'} — continue from the checkpoint below.`);
   else lines.push('Caller unknown; treat this brief as read-only context.');
   if (callerWorker) {
+    lines.push(WORKER_EFFICIENCY_LINE);
     const worker = workerCheckpoint(status, agentId, { ...agentState?.[agentId], lastMessage: workerLastAnswer });
     const truncated = appendWorkerCheckpoint(lines, worker, TEXT.en, epoch);
     appendPacketPaths(lines, git);

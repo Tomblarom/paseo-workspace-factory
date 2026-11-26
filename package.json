@@ -9,7 +9,8 @@
     "paseo-factory": "src/cli.mjs"
   },
   "scripts": {
-    "test": "node --experimental-strip-types --test --test-timeout=30000 test/*.test.mjs plugin/test/*.test.mjs",
+    "test": "node --experimental-strip-types --test --test-reporter=dot --test-timeout=30000 test/*.test.mjs plugin/test/*.test.mjs",
+    "test:verbose": "node --experimental-strip-types --test --test-reporter=spec --test-timeout=30000 test/*.test.mjs plugin/test/*.test.mjs",
     "build-snapshot": "node scripts/build-snapshot.mjs"
   },
   "engines": {

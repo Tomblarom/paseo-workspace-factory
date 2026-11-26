@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import { execFileSync } from 'node:child_process';
 import {
   buildHandoff, buildRefreshPacket, buildResumeBrief, BRIEF_BUDGET, parseCheckpointBlock, readGitBrief, switchSteer, freshSteer,
-  writeCheckpoint, steerStatus,
+  writeCheckpoint, steerStatus, WORKER_EFFICIENCY_LINE,
 } from '../plugin/server/core/steer.mjs';
 import { updateAgentEntry, flagCheckpointInterrupted, AGENTS_KEY, clipText } from '../plugin/server/core/agent-state.mjs';
 import { LABEL, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
@@ -211,6 +211,25 @@ test('an interrupted worker resumes its register task and latest checkpoint', ()
   assert.doesNotMatch(resume, /Scope rollout|Publish the release|Previous worker progress/);
   assert.match(buildResumeBrief(status, { agentId: worker.id, agentState }), /Next step: Read the board/);
   assert.match(buildResumeBrief(status, { agentId: worker.id }), /Worker CHECKPOINT: none recorded/);
+});
+
+test('worker briefs carry the quiet-reporter efficiency line', () => {
+  const worker = { id: 'w-1', title: 'PWM', owner: 'A' };
+  const status = {
+    repo: REPO, state: { activeSteer: 'A', epoch: 3 }, steers: [], workers: [worker],
+    workspace: { id: 'ws', directory: '/p/demo' },
+    checkpoint: { task: 'Scope rollout', next: 'Publish the release' },
+    openWorkers: [{ id: worker.id, task: 'Repair PWM', state: 'running' }],
+  };
+  const args = { from: { id: worker.id, title: 'PWM' }, to: { id: 'w-2' }, epoch: 3, owner: 'A' };
+  for (const brief of [
+    buildResumeBrief(status, { agentId: worker.id }),
+    buildRefreshPacket(status, { ...args, kind: 'worker' }),
+    buildRefreshPacket(status, { ...args, kind: 'worker', language: 'de' }),
+  ]) {
+    assert.ok(brief.includes(WORKER_EFFICIENCY_LINE));
+  }
+  assert.ok(!buildRefreshPacket(status, { ...args, kind: 'steer', slot: 'A' }).includes(WORKER_EFFICIENCY_LINE));
 });
 
 test('handoff and refresh bound the packet while keeping the checkpoint, paths and unfinished workers', () => {
