@@ -37,6 +37,9 @@ import type {
 import { record, type FactorySteerFeed } from "./factory-workspace-state.js";
 import { FactoryWorkspaceStatus } from "./factory-workspace-status.js";
 
+const factoryViews = ["Overview", "Steers", "Tools"] as const;
+type FactoryView = typeof factoryViews[number];
+
 function text(value: unknown): string {
   if (value === null || value === undefined) return "-";
   if (typeof value === "string") return value === "" ? "-" : value;
@@ -86,11 +89,19 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
   const callSteerAdd = useRpc(factorySteerAdd);
   const [repo, setRepo] = useState("");
   const result = useSyncExternalStore(results.subscribe, results.getResult, results.getResult);
+  const [view, setView] = useState<FactoryView>(() => {
+    const needsReview = result?.kind.endsWith("Preview") ||
+      (result?.kind === "plan" && result.plan.plans.some((plan) => plan.ops.length > 0));
+    return needsReview ? "Tools" : "Overview";
+  });
   const setFactoryResult = results.setResult;
+  const lastResult = useRef(result);
   const scroll = useRef<ScrollView>(null);
   useEffect(() => {
-    if (result) scroll.current?.scrollTo({ y: 0, animated: false });
+    if (result && result !== lastResult.current) setView("Tools");
+    lastResult.current = result;
   }, [result]);
+  useEffect(() => { scroll.current?.scrollTo({ y: 0, animated: false }); }, [view, result]);
 
   const workspaceStatus = useQuery({
     queryKey: ["workspace-factory", "status", host.id, workspaceId],
@@ -112,7 +123,26 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
         gap: layout.compact ? 8 : 12,
         backgroundColor: theme.colors.surface0,
       },
-      title: { color: theme.colors.foreground, fontSize: layout.compact ? 20 : 24 },
+      navigation: {
+        flexDirection: "row" as const,
+        flexWrap: "wrap" as const,
+        alignSelf: "flex-start" as const,
+        padding: 4,
+        gap: 4,
+        backgroundColor: theme.colors.surface1,
+        borderColor: theme.colors.border,
+        borderWidth: 1,
+        borderRadius: 10,
+      },
+      viewButton: {
+        paddingHorizontal: layout.compact ? 12 : 16,
+        minHeight: 40,
+        justifyContent: "center" as const,
+        borderRadius: 6,
+      },
+      selectedView: { backgroundColor: theme.colors.accent },
+      viewLabel: { color: theme.colors.foreground, fontSize: 14, fontWeight: "500" as const },
+      selectedViewLabel: { color: theme.colors.accentForeground },
       label: { color: theme.colors.foregroundMuted, fontSize: 13 },
       body: { color: theme.colors.foreground, fontSize: 14 },
       hash: { color: theme.colors.foreground, fontSize: 14 },
@@ -144,7 +174,6 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
         padding: 12,
         gap: 4,
       },
-      hint: { color: theme.colors.foregroundMuted, fontSize: 13 },
     }),
     [theme, layout.compact],
   );
@@ -400,9 +429,8 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
     });
   };
 
-  return (
-    <ScrollView ref={scroll} style={styles.screen} contentContainerStyle={{ gap: styles.screen.gap }}>
-      <Text accessibilityRole="header" style={styles.title}>Factory</Text>
+  const tools = view === "Tools" ? (
+    <>
       {busy ? <Text style={styles.label}>Working…</Text> : null}
       {result ? (
         <ResultView
@@ -420,21 +448,6 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
           }}
         />
       ) : null}
-      <FactoryWorkspaceStatus
-        workspaceId={workspaceId}
-        layout={layout}
-        host={host}
-        navigation={props.navigation}
-        feed={steerFeed}
-        styles={styles}
-        status={workspaceStatus.data}
-        statusUpdatedAt={workspaceStatus.dataUpdatedAt}
-        statusError={workspaceStatus.error}
-        statusFetching={workspaceStatus.isFetching}
-        refresh={() => { void workspaceStatus.refetch(); }}
-        setup={planMutation.mutate}
-        setupBusy={busy}
-      />
       <Text accessibilityRole="header" style={styles.body}>Commands</Text>
       <Text style={styles.label}>
         Project (optional): owner/repo, scope id, workspace id (wks_…) or folder path. Leave empty for
@@ -527,10 +540,43 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
           <Text style={styles.buttonText}>Help</Text>
         </Pressable>
       </View>
-      <Text style={styles.hint}>
-        Recommended tab order is read only: Steers A to Z first, then workers. Paseo owns tab
-        order, so arrange tabs manually. This plugin never moves tabs.
-      </Text>
+    </>
+  ) : null;
+
+  return (
+    <ScrollView ref={scroll} style={styles.screen} contentContainerStyle={{ gap: styles.screen.gap }}>
+      <View accessibilityRole="tablist" style={styles.navigation}>
+        {factoryViews.map((section) => (
+          <Pressable
+            key={section}
+            accessibilityRole="tab"
+            aria-selected={view === section}
+            style={[styles.viewButton, view === section && styles.selectedView]}
+            onPress={() => setView(section)}
+          >
+            <Text style={[styles.viewLabel, view === section && styles.selectedViewLabel]}>{section}</Text>
+          </Pressable>
+        ))}
+      </View>
+      {view !== "Tools" ? (
+        <FactoryWorkspaceStatus
+          view={view}
+          workspaceId={workspaceId}
+          layout={layout}
+          host={host}
+          theme={theme}
+          navigation={props.navigation}
+          feed={steerFeed}
+          styles={styles}
+          status={workspaceStatus.data}
+          statusUpdatedAt={workspaceStatus.dataUpdatedAt}
+          statusError={workspaceStatus.error}
+          statusFetching={workspaceStatus.isFetching}
+          refresh={() => { void workspaceStatus.refetch(); }}
+          setup={planMutation.mutate}
+          setupBusy={busy}
+        />
+      ) : tools}
     </ScrollView>
   );
 }
