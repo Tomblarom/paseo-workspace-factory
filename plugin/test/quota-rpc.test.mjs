@@ -104,6 +104,7 @@ test("quota view lists ZeroSub accounts with warn states", () => {
         { id: "acc-full", family: "claude", status: "active", limitedUntil: null, maxUsedPct: 99, exhausted: false, windows: [{ id: "five_hour", usedPct: 99, resetsAt: "2026-06-01T15:00:00.000Z" }] },
         { id: "acc-warn", family: "claude", status: "active", limitedUntil: null, maxUsedPct: 80, exhausted: false, windows: [] },
         { id: "acc-ok", family: "codex", status: "active", limitedUntil: null, maxUsedPct: 10, exhausted: false, windows: [] },
+        { id: "api", label: "API testing", family: "codex", auth: "api", status: "ready", windows: [] },
         { id: "", family: "claude", maxUsedPct: 99, windows: [] },
         null,
       ],
@@ -111,8 +112,9 @@ test("quota view lists ZeroSub accounts with warn states", () => {
   });
   assert.deepEqual(
     view.accounts.map((account) => [account.account, account.usedPct, account.state]),
-    [["acc-full", 99, "exhausted"], ["acc-ok", 10, "ok"], ["acc-warn", 80, "warn"]],
+    [["acc-full", 99, "exhausted"], ["acc-ok", 10, "ok"], ["acc-warn", 80, "warn"], ["api", null, "unknown"]],
   );
+  assert.equal(view.accounts.find((row) => row.account === "api").label, "API testing");
   assert.equal(view.accounts[0].family, "claude");
   assert.equal(view.accounts[0].resetsAt, "2026-06-01T15:00:00.000Z");
   assert.equal(view.accounts[1].resetsAt, null);
@@ -134,7 +136,7 @@ test("quota view ignores expired ZeroSub windows", () => {
   });
   assert.deepEqual(
     view.accounts.map((account) => [account.account, account.usedPct, account.state]),
-    [["acc-current", 99, "exhausted"], ["acc-expired", null, "ok"], ["acc-mixed", 20, "ok"]],
+    [["acc-current", 99, "exhausted"], ["acc-expired", null, "unknown"], ["acc-mixed", 20, "ok"]],
   );
   assert.equal(view.accounts.find((account) => account.account === "acc-expired").resetsAt, null);
 });

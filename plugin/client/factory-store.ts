@@ -116,21 +116,31 @@ export type FactoryPanelResult =
   | { kind: "info"; at: string; text: string }
   | { kind: "error"; at: string; message: string };
 
-let current: FactoryPanelResult | null = null;
-const listeners = new Set<() => void>();
-
-export function getFactoryResult(): FactoryPanelResult | null {
-  return current;
+export interface FactoryResultStore {
+  getResult: () => FactoryPanelResult | null;
+  setResult: (next: FactoryPanelResult) => void;
+  subscribe: (listener: () => void) => () => void;
 }
 
-export function setFactoryResult(next: FactoryPanelResult): void {
-  current = next;
-  for (const listener of listeners) listener();
-}
-
-export function subscribeFactoryResult(listener: () => void): () => void {
-  listeners.add(listener);
-  return () => {
-    listeners.delete(listener);
+export function createFactoryResultStores() {
+  const workspaces = new Map<string, FactoryResultStore>();
+  return (workspaceId: string): FactoryResultStore => {
+    const existing = workspaces.get(workspaceId);
+    if (existing) return existing;
+    let current: FactoryPanelResult | null = null;
+    const listeners = new Set<() => void>();
+    const store: FactoryResultStore = {
+      getResult: () => current,
+      setResult(next) {
+        current = next;
+        for (const listener of listeners) listener();
+      },
+      subscribe(listener) {
+        listeners.add(listener);
+        return () => { listeners.delete(listener); };
+      },
+    };
+    workspaces.set(workspaceId, store);
+    return store;
   };
 }

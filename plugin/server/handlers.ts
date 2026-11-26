@@ -21,6 +21,7 @@ import {
   factoryScopes,
   factoryScopesCandidates,
   factoryStatus,
+  factorySteerActivate,
   factorySteerBrief,
   factorySwitch,
   factorySwitchPreview,
@@ -38,6 +39,7 @@ import {
   assignFingerprint,
   checkpointFingerprint,
   freshFingerprint,
+  type FreshPreviewIdentity,
   isPlanHash,
   steerAddFingerprint,
   switchFingerprint,
@@ -58,24 +60,25 @@ import {
   withApplyLock,
 } from "./core/apply.mjs";
 import { assignScope } from "./core/assign.mjs";
-import { liveSlotHolders } from "./core/discovery.mjs";
+import { discoveredRepoPublic, liveSlotHolders, outgoingAssignmentRecords } from "./core/discovery.mjs";
 import {
   attachProjectArchivedAgents,
   collectCleanupCandidates,
 } from "./core/cleanup.mjs";
-import { isAdvisorSlot, isSensitiveProfile, workerPriority } from "./core/config.mjs";
+import { isAdvisorSteer, isSensitiveProfile, workerPriority } from "./core/config.mjs";
 import { DRAIN_DEFAULT_TIMEOUT_MS, drain, parseTimeout } from "./core/drain.mjs";
 import { createRunner } from "./core/factory.mjs";
 import { createGh } from "./core/github.mjs";
 import { createGit } from "./core/local.mjs";
-import { formatCatalog, paseoRunFlags, resolveProfile, resolveWorkerPick, usedProfilesByLiveSteers, workerListRows, workerModelLine } from "./core/models.mjs";
+import { formatCatalog, paseoRunFlags, resolveProfile, resolveWorkerPick, workerListRows, workerModelLine } from "./core/models.mjs";
 import { QUOTA_DEFAULTS, readProfileHealth, storeProfileFailure } from "./core/quota.mjs";
 import { applySteerAdd, formatSteerAddPreview, planSteerAdd } from "./core/steer-add.mjs";
 import { planHash } from "./core/planner.mjs";
 import { defaultCreateRewindClient } from "./core/rewind.mjs";
 import { deliverSteerBrief, stageSteerBrief } from "./steer-brief.js";
 import { formatWorkersPruneText, formatWorkersText, pruneWorkerRegister, readWorkers, staleWorkerEntries, workersReport } from "./core/supervision.mjs";
-import { discoveryScopeAliases } from "./core/scope-guard.mjs";
+import { discoveryScopeAliases, scopeHolder } from "./core/scope-guard.mjs";
+import { readSteerAction } from "./core/steer-action.mjs";
 import { startScopedWorker } from "./core/workers.mjs";
 import { formatStatus, scopeCandidates, scopeRows } from "./core/scopes-view.mjs";
 import {
@@ -89,7 +92,9 @@ import {
 } from "./core/paseo.mjs";
 import { daemonHost, runtime } from "./core/runtime.mjs";
 import { applyResume } from "./resume-apply.js";
-import { deliverSteer, type SteerDeliveryDeps } from "./steer-delivery.js";
+import { deliverSteer, finishSteerDelivery, type SteerDeliveryDeps } from "./steer-delivery.js";
+import { readAdmissionSnapshot, readPrivacyAdmission, scopePublic, steerQuotaAdmission } from "./steer-admission.js";
+import { hasActiveAgentWork } from "./agent-context.js";
 import { defaultPickAddress, listScopes } from "./core/scope.mjs";
 import { AGENTS_KEY } from "./core/agent-state.mjs";
 import {
@@ -98,6 +103,7 @@ import {
   lastAssistantText,
   parseCheckpointBlock,
   readGitBrief,
+  requireFreshPrivacy,
   resolveTargetEntry,
   restartInterruptions,
   steerStatus,
@@ -105,10 +111,10 @@ import {
   workerResumeAnswer,
   writeCheckpoint,
 } from "./core/steer.mjs";
-import type { ConfigLoader, HostSettingsReader } from "./config.js";
+import type { ConfigLoader, HostSettingsReader, HostSettingsState } from "./config.js";
 import { getQuotaSampledAt, getQuotaSnapshot } from "./quota.js";
-import { settingsFromConfig, validateFactorySettings, type FactorySettingsValues } from "../shared/settings-validate.js";
-import { readZerosubStateSafe } from "./zerosub-runtime.js";
+import { withWorkspaceLock } from "./core/lock.mjs";
+import { readZerosubStateSafe, resolveZerosub, type ZerosubSource } from "./zerosub-runtime.js";
 import { readZerosubState } from "./core/zerosub.mjs";
 import { workerIdentityFromMetadata } from "../shared/supervise.js";
 import { filterStaleWorkerEvents } from "./worker-wakes.js";
@@ -140,7 +146,7 @@ async function resolveEntryForAddress(
   repo: string | undefined,
   workspaceId: string | undefined,
   state?: any,
-): Promise<{ target: any; scope: any; deprecatedAlias: boolean }> {
+): Promise<{ target: any; scope: any; workspaceId: string | null; deprecatedAlias: boolean }> {
   const address = repo?.trim() || (workspaceId ? `workspace:${workspaceId}` : "");
   if (!address) {
     throw new Error(
@@ -167,6 +173,7 @@ async function resolveEntryForAddress(
   }
   return {
     target: resolved.entry,
+    workspaceId: resolved.scope?.workspaceId ?? null,
     scope: resolved.scope ? { id: resolved.scope.id, kind: resolved.scope.kind } : null,
     deprecatedAlias: resolved.deprecatedAlias === true,
   };
@@ -218,9 +225,26 @@ export async function getResume(
   input: RpcInput<typeof factoryResume>,
   { paseo }: PluginHandlerContext,
   loader: ConfigLoader,
+  quotaSource: ZerosubSource = {},
 ): Promise<any> {
   const agentId = input.agentId?.trim() || null;
-  const { config, discovery, scope, deprecatedAlias, status } = await discoverOne(paseo, loader, input.repo?.trim() || undefined, input.workspaceId, agentId);
+  const { config, discovery, scope, deprecatedAlias, status, snapshot } = await discoverOne(paseo, loader, input.repo?.trim() || undefined, input.workspaceId, agentId);
+  // The CLI's reply becomes agent context. An explicit --agent changes the
+  // subject of the brief, while the calling tab still receives its output.
+  const recipients = new Set([agentId, input.callerId?.trim()].filter((id): id is string => Boolean(id)));
+  const checkRecipients = async () => {
+    for (const id of recipients) {
+      const live = (await paseo.agents.ref(id).refresh())?.agent;
+      if (live?.id !== id || live.archivedAt || live.background === true ||
+          (!agentScopeId(live) && !status.steers.some((steer: any) => steer.id === id) &&
+           !snapshot.workspaces.some((workspace: any) => (readWorkers as any)(workspace.metadata)[id]))) {
+        throw new Error("Resume brief unavailable: the recipient has no verified Factory identity.");
+      }
+      const privacy = await readPrivacyAdmission(live, { paseo, getConfig: () => loader.loadEffectiveConfig() }, discovery.mainWorkspace?.id);
+      if (!privacy.allowed) throw new Error(`Resume brief unavailable: ${privacy.reason}.`);
+    }
+  };
+  if (recipients.size) await checkRecipients();
   const git = createGit();
   const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;
   const briefOptions: any = {
@@ -228,15 +252,18 @@ export async function getResume(
     workerLastAnswer: await workerResumeAnswer(paseo, status, agentId),
     promptOptions: await loader.loadPromptOptions(paseo),
     agentState,
+    assignments: discovery.assignmentRecords ?? [],
     git: status.workspace ? readGitBrief(git, status.workspace.directory) : null,
     scope: discovery.scope ?? scope ?? null,
     config,
     workerModel: (workerModelLine as any)(config, discovery),
     quotaSnapshot: getQuotaSnapshot(),
     quotaWarnPct: config.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct,
+    zerosub: await resolveZerosub(quotaSource),
   };
   const brief: string = buildResumeBrief(status, briefOptions);
   const restartInterrupted = status.restartInterrupted ?? restartInterruptions({ checkpoint: status.checkpoint, agentState });
+  if (recipients.size) await checkRecipients();
   return {
     scope: scope?.id ?? status.repo,
     kind: scope?.kind ?? null,
@@ -257,9 +284,9 @@ export async function getResume(
  * resolution mirrors getResume: the agent's scope label wins, else the
  * workspace address.
  */
-export function createResumeBriefBuilder(loader: ConfigLoader) {
+export function createResumeBriefBuilder(loader: ConfigLoader, quotaSource: ZerosubSource = {}) {
   return async (paseo: any, workspaceId: string, agentId: string): Promise<string> => {
-    const { discovery, scope, status } = await discoverOne(paseo, loader, undefined, workspaceId, agentId);
+    const { config, discovery, scope, status, snapshot } = await discoverOne(paseo, loader, undefined, workspaceId, agentId);
     const metadata = discovery.mainWorkspace?.metadata;
     status.openWorkers = await filterStaleWorkerEvents(paseo, metadata,
       (status.openWorkers ?? []).map((entry: any) => ({ ...entry, workerId: entry.id })));
@@ -269,8 +296,13 @@ export function createResumeBriefBuilder(loader: ConfigLoader) {
       workerLastAnswer: await workerResumeAnswer(paseo, status, agentId),
       promptOptions: await loader.loadPromptOptions(paseo),
       agentState: metadata?.[AGENTS_KEY] ?? null,
+      assignments: discovery.assignmentRecords ?? outgoingAssignmentRecords(snapshot.workspaces, status.workspace?.id,
+        (discovery.steers?.labelled ?? []).map((steer: any) => steer.id)),
       git: status.workspace ? readGitBrief(git, status.workspace.directory) : null,
       scope: discovery.scope ?? scope ?? null,
+      config,
+      quotaSnapshot: getQuotaSnapshot(),
+      zerosub: await resolveZerosub(quotaSource),
     };
     return buildResumeBrief(status, briefOptions);
   };
@@ -294,17 +326,13 @@ export async function applyResumeRpc(
     {
       ...extra,
       getConfig: () => loader.loadEffectiveConfig(),
-      buildBrief: extra?.buildBrief ?? createResumeBriefBuilder(loader),
+      buildBrief: extra?.buildBrief ?? createResumeBriefBuilder(loader, extra),
       refreshWorker: async (workspaceId, workerId) => {
-        const { config, discovery } = await discoverOne(paseo, loader, undefined, workspaceId);
-        const git = createGit();
+        const { options } = await freshRpcOptions({ workspaceId, workerId }, paseo, loader, extra);
+        const lookupReceipt = lookupCreationReceipt;
         return freshSteer({
-          client: paseo, discovery, config, workerId, git,
-          apply: true, notifyPrevious: false,
-          lookupReceipt: lookupCreationReceipt,
-          execute: (createExecutors as any)({ client: paseo, paseoCli: createPaseoCli(), getZerosub: readZerosubState, lookupReceipt: lookupCreationReceipt, reservePins: true }),
-          rewindClient: extra?.rewindClient ?? defaultCreateRewindClient,
-          promptOptions: await loader.loadPromptOptions(paseo),
+          ...options, apply: true, notifyPrevious: false, lookupReceipt,
+          execute: (createExecutors as any)({ client: paseo, getZerosub: () => resolveZerosub(extra ?? {}), lookupReceipt }),
         } as any);
       },
       beforeDelivery: input.takeover === true ? async () => {
@@ -345,7 +373,7 @@ async function takeoverIfNonActive(
   if (!scopeId) throw new Error("agent has no factory scope label");
   if (typeof slot !== "string" || !/^[A-Z]$/.test(slot)) throw new Error("agent has no steer slot label");
   const config = await loader.loadEffectiveConfig();
-  if ((isAdvisorSlot as unknown as (c: unknown, s: string) => boolean)(config, slot)) {
+  if (isAdvisorSteer(config, found.labels, found.metadata)) {
     throw new Error("advisor steers never coordinate");
   }
   const { target } = await resolveEntryForAddress(paseo, scopeId, undefined, snapshot);
@@ -369,28 +397,67 @@ async function takeoverIfNonActive(
   return { from: switched.from, to: switched.to, epoch: switched.epoch };
 }
 
+function freshPrivacyReader(paseo: any, loader: ConfigLoader, deps?: SteerDeliveryDeps) {
+  return (agent: any, workspaceId: string) => readPrivacyAdmission(agent, {
+    ...deps, paseo, getConfig: () => loader.loadEffectiveConfig(),
+  }, workspaceId);
+}
+
+type FreshInput = RpcInput<typeof factoryFreshPreview>;
+type FreshDeps = SteerDeliveryDeps & { lookupFreshReceipt?: typeof lookupCreationReceipt; freshPaseoCli?: ReturnType<typeof createPaseoCli> };
+
+async function freshPolicy(paseo: any, loader: ConfigLoader, deps: FreshDeps | undefined, discovery: any, config?: any) {
+  const [snapshot, providers, workspace] = await Promise.all([
+    readAdmissionSnapshot({ ...deps, getConfig: () => config ?? loader.loadEffectiveConfig() }),
+    config ? discovery.providers : paseo.providers.snapshot().then((result: any) => result.entries ?? []),
+    config ? discovery.mainWorkspace : paseo.workspaces.ref(discovery.mainWorkspace.id).refresh(),
+  ]);
+  const scope = workspace?.metadata?.[METADATA_KEY]?.scope;
+  const repoPublic = scope ? scope.kind === "github" ? await scopePublic(workspace, deps ?? {}) : null
+    : discoveredRepoPublic(discovery);
+  const quotaSnapshot = snapshot.quotaSampledAt !== null && snapshot.nowMs >= snapshot.quotaSampledAt &&
+    snapshot.nowMs - snapshot.quotaSampledAt <= 30 * 60_000 ? snapshot.quota : null;
+  return { config: snapshot.config, providers, repoPublic, quotaSnapshot, zerosub: snapshot.zerosub,
+    quotaExhaustedPct: snapshot.config.quota?.exhaustedPct };
+}
+
+async function freshRpcOptions(input: FreshInput, paseo: any, loader: ConfigLoader, deps?: FreshDeps) {
+  const found = await discoverOne(paseo, loader, input.repo, input.workspaceId, input.workerId);
+  const { config, discovery } = found;
+  const policy = await freshPolicy(paseo, loader, deps, discovery, config);
+  const options: any = {
+    client: paseo, discovery, config, slot: input.slot ?? null, workerId: input.workerId ?? null,
+    provider: input.provider ?? null, model: input.model ?? null,
+    git: createGit(), rewindClient: deps?.rewindClient ?? defaultCreateRewindClient,
+    promptOptions: await loader.loadPromptOptions(paseo), admitTarget: freshPrivacyReader(paseo, loader, deps),
+    quotaSnapshot: policy.quotaSnapshot, zerosub: policy.zerosub, repoPublic: policy.repoPublic,
+    readPolicy: () => freshPolicy(paseo, loader, deps, discovery),
+    lookupReceipt: deps?.lookupFreshReceipt ?? lookupCreationReceipt,
+    ...(deps?.lock ? { lock: deps.lock } : {}),
+  };
+  return { ...found, options };
+}
+
 export async function previewFresh(
   input: RpcInput<typeof factoryFreshPreview>,
   { paseo }: PluginHandlerContext,
   loader: ConfigLoader,
+  deps?: FreshDeps,
 ): Promise<any> {
-  const { config, discovery, scope, deprecatedAlias } = await discoverOne(
-    paseo,
-    loader,
-    input.repo,
-    input.workspaceId,
-  );
-  const freshOptions: any = { client: paseo, discovery, config, apply: false, slot: input.slot ?? null, git: createGit(), rewindClient: defaultCreateRewindClient, promptOptions: await loader.loadPromptOptions(paseo) };
-  const dry: any = await freshSteer(freshOptions);
+  const { scope, deprecatedAlias, options } = await freshRpcOptions(input, paseo, loader, deps);
+  const dry: any = await freshSteer(options);
   return {
     repo: dry.repo,
     workspaceId: dry.workspaceId,
     slot: dry.slot,
+    kind: dry.kind,
+    workerId: dry.workerId,
     from: dry.from,
     epoch: dry.epoch,
     profile: dry.profile,
     provider: dry.provider,
     model: dry.model,
+    routeEvidence: dry.routeEvidence,
     packet: dry.packet,
     packetChars: dry.packetChars,
     checkpoint: dry.checkpoint,
@@ -403,17 +470,7 @@ export async function previewFresh(
   };
 }
 
-function freshIdentityOf(dry: any): {
-  repo: string;
-  workspaceId: string | null;
-  slot: string;
-  from: string | null;
-  epoch: number;
-  refreshMode: string | null;
-  provider: string | null;
-  model: string | null;
-  checkpointAt: string | null;
-} {
+function freshIdentityOf(dry: any): FreshPreviewIdentity {
   return {
     repo: dry.repo,
     workspaceId: typeof dry.workspaceId === "string" ? dry.workspaceId : null,
@@ -424,6 +481,7 @@ function freshIdentityOf(dry: any): {
     provider: typeof dry.provider === "string" ? dry.provider : null,
     model: typeof dry.model === "string" ? dry.model : null,
     checkpointAt: typeof dry.checkpointAt === "string" ? dry.checkpointAt : null,
+    routeBinding: dry.routeBinding ?? null,
   };
 }
 
@@ -435,8 +493,8 @@ function freshIdentityOf(dry: any): {
  */
 async function stageAppliedPacket(
   paseo: any,
-  args: { workspaceId: unknown; agentId: unknown; packet: unknown; kind: string; deliver: unknown; deliveryError: unknown },
-): Promise<{ staged: boolean; stagedTo: string | null; stagingError: string | null }> {
+  args: { workspaceId: unknown; agentId: unknown; packet: unknown; kind: string; epoch: number; deliver: unknown; deliveryError: unknown },
+): Promise<{ staged: boolean; stagedTo: string | null; stagingError: string | null; stageId?: string }> {
   const quiet = { staged: false, stagedTo: null, stagingError: null };
   const packet = typeof args.packet === "string" && args.packet.trim() ? args.packet : null;
   const agentId = typeof args.agentId === "string" && args.agentId ? args.agentId : null;
@@ -444,53 +502,37 @@ async function stageAppliedPacket(
   if (!packet || !agentId || !workspaceId) return quiet;
   if (args.deliver !== "stage" && (args.deliveryError === null || args.deliveryError === undefined)) return quiet;
   try {
-    await stageSteerBrief(paseo, { workspaceId, agentId, packet, kind: args.kind });
+    const { stageId } = await stageSteerBrief(paseo, { workspaceId, agentId, packet, kind: args.kind, epoch: args.epoch });
+    return { staged: true, stagedTo: agentId, stagingError: null, stageId };
   } catch (error) {
     return { staged: false, stagedTo: null, stagingError: error instanceof Error ? error.message : String(error) };
   }
-  return { staged: true, stagedTo: agentId, stagingError: null };
 }
 
 export async function applyFresh(
   input: RpcInput<typeof factoryFresh>,
   { paseo }: PluginHandlerContext,
   loader: ConfigLoader,
+  deps?: FreshDeps,
 ): Promise<any> {
-  const { config, discovery } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
-  const git = createGit();
-  const promptOptions = await loader.loadPromptOptions(paseo);
-  const dryOptions: any = { client: paseo, discovery, config, apply: false, slot: input.slot ?? null, git, rewindClient: defaultCreateRewindClient, promptOptions };
-  const dry: any = await freshSteer(dryOptions);
-  const fresh = freshFingerprint(freshIdentityOf(dry));
-  if (fresh !== input.fingerprint) {
-    throw new Error(
-      "Something changed since the fresh preview (for example another switch). Open the preview again and confirm the new one.",
-    );
-  }
-  const executeOptions: any = {
-    client: paseo,
-    paseoCli: createPaseoCli(),
-    getZerosub: readZerosubState,
-    lookupReceipt: lookupCreationReceipt,
-    reservePins: true,
+  const { discovery, options: dryOptions } = await freshRpcOptions(input, paseo, loader, deps);
+  const confirmPreview = (candidate: any) => {
+    if (freshFingerprint(freshIdentityOf(candidate)) !== input.fingerprint) {
+      throw new Error("Something changed since the Fresh preview. Open the preview again and confirm the new route.");
+    }
   };
+  const dry: any = await freshSteer(dryOptions);
+  confirmPreview(dry);
+  const lookupReceipt = deps?.lookupFreshReceipt ?? lookupCreationReceipt;
+  // CLI resolution is lazy for rewind, which never retires a tab.
+  const paseoCli: ReturnType<typeof createPaseoCli> = deps?.freshPaseoCli ?? ((args) => createPaseoCli()(args));
   const applyOptions: any = {
-    client: paseo,
-    discovery,
-    promptOptions,
-    config,
-    apply: true,
+    ...dryOptions, apply: true, confirmPreview,
     send: input.deliver !== "stage",
     notifyPrevious: input.notifyPrevious !== false,
-    slot: input.slot ?? null,
-    git,
-    lookupReceipt: lookupCreationReceipt,
-    execute: createExecutors(executeOptions),
-    paseoCli: createPaseoCli(),
-    rewindClient: defaultCreateRewindClient,
-    // Step 4 binds the previewed rewind route: no silent fallback to a new
-    // agent at apply time. A bound failure keeps the brief (staged below).
-    ...(dry.refreshMode === "rewind" ? { requireRefreshMode: "rewind" } : {}),
+    lookupReceipt, paseoCli,
+    execute: (createExecutors as any)({ client: paseo, paseoCli, getZerosub: () => resolveZerosub(deps ?? {}), lookupReceipt }),
+    requireRefreshMode: dry.refreshMode,
   };
   let applied: any;
   try {
@@ -501,27 +543,44 @@ export async function applyFresh(
     const workspaceId = typeof dry.workspaceId === "string" && dry.workspaceId ? dry.workspaceId : null;
     if (typeof packet === "string" && packet.trim() && from && workspaceId) {
       try {
-        await stageSteerBrief(paseo, { workspaceId, agentId: from, packet, kind: "fresh" });
+        await stageSteerBrief(paseo, { workspaceId, agentId: from, packet, kind: "fresh", epoch: dry.epoch });
       } catch {
-        // Staging is best-effort; the message below still keeps the brief.
+        throw error;
       }
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(`${message} The brief is staged for this tab; retry from the steer menu.`);
     }
     throw error;
   }
-  if (!applied.applied) return applied;
+  const { routeBinding: _internalRoute, ...result } = applied;
+  if (!applied.applied) return result;
   const destination = typeof applied.to === "string" && applied.to ? applied.to : applied.from;
+  const staged = await stageAppliedPacket(paseo, {
+    workspaceId: dry.workspaceId,
+    agentId: destination,
+    packet: applied.packet,
+    kind: "fresh",
+    epoch: applied.epoch,
+    deliver: input.deliver,
+    deliveryError: applied.deliveryError,
+  });
+  // Keep the packet in Factory state if the destination changed during Fresh.
+  // Composer insertion rechecks admission when it fetches the stage.
+  if (staged.staged || applied.deliveryError) {
+    try {
+      await requireFreshPrivacy({ client: paseo, workspaceId: dry.workspaceId,
+        scopeId: discovery.mainWorkspace?.metadata?.[METADATA_KEY]?.scope?.id,
+        epoch: applied.epoch, agentId: destination, admitTarget: dryOptions.admitTarget,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      return { ...result, packet: "", packetChars: 0, staged: false, stagedTo: null, stagingError: detail,
+        deliveryError: applied.deliveryError ?? detail };
+    }
+  }
   return {
-    ...applied,
-    ...(await stageAppliedPacket(paseo, {
-      workspaceId: dry.workspaceId,
-      agentId: destination,
-      packet: applied.packet,
-      kind: "fresh",
-      deliver: input.deliver,
-      deliveryError: applied.deliveryError,
-    })),
+    ...result,
+    ...staged,
   };
 }
 
@@ -530,11 +589,7 @@ export async function deliverSteerBriefRpc(
   { paseo }: PluginHandlerContext,
   delivery?: SteerDeliveryDeps,
 ): Promise<any> {
-  return deliverSteerBrief(paseo, {
-    workspaceId: input.workspaceId,
-    agentId: input.agentId,
-    action: input.action,
-  }, delivery);
+  return deliverSteerBrief(paseo, input, delivery);
 }
 
 export interface SteerSettingsHandlerExtra {
@@ -602,7 +657,7 @@ export async function applySteerSettingsRpc(
     ...(input.deliver !== undefined ? { deliver: input.deliver } : {}),
   }, {
     ...deps,
-    buildBrief: extra?.buildBrief ?? createResumeBriefBuilder(loader),
+    buildBrief: extra?.buildBrief ?? createResumeBriefBuilder(loader, deps),
     rewindClient: defaultCreateRewindClient,
     configClient: defaultCreateRewindClient,
   });
@@ -673,17 +728,10 @@ export async function openHistory(
   return { agentId, sessionId, imported: true, detail: output.trim().slice(0, 500) };
 }
 
-function checkedSlots(raw: string[] | undefined, config: any): string[] | undefined {
+function checkedEnrollmentSlots(raw: string[] | undefined): string[] | undefined {
   if (raw === undefined) return undefined;
-  const slots = raw.map((s) => String(s).trim().toUpperCase()).filter(Boolean);
-  for (const slot of slots) {
-    if (!/^[A-Z]$/.test(slot)) throw new Error(`slots expects slot letters A-Z, got ${JSON.stringify(slot)}`);
-  }
-  if (new Set(slots).size !== slots.length) throw new Error("slots contains duplicates");
-  for (const slot of slots) {
-    if (!config.steers.slots[slot]) throw new Error(`slots names slot ${slot}, which is not defined in steers.slots`);
-  }
-  return slots.length ? slots : undefined;
+  if (raw.length !== 1) throw new Error("--slots expects one live coordinator letter A-Z for initial enrollment");
+  return [checkedSlot(raw[0], "--slots")];
 }
 
 export async function getPlan(
@@ -692,7 +740,7 @@ export async function getPlan(
   loader: ConfigLoader,
 ): Promise<any> {
   const config = await loader.loadEffectiveConfig();
-  const slots = checkedSlots(input.slots, config);
+  const slots = checkedEnrollmentSlots(input.slots);
   const repos = input.repos ?? [];
   const localFlags = input.local ?? [];
   const hubFlags = input.hub ?? [];
@@ -772,8 +820,9 @@ async function discoverOne(
   repo: string | undefined,
   workspaceId?: string,
   agentId?: string | null,
+  settingsState?: HostSettingsState,
 ): Promise<any> {
-  const config = await loader.loadEffectiveConfig();
+  const config = await loader.loadEffectiveConfig(settingsState);
   const snapshot: any = await readPaseoState(paseo);
   const agent: any = agentId ? (snapshot.agents ?? []).find((a: any) => a?.id === agentId) ?? null : null;
   const workerWs = !repo && agentId && !agentScopeId(agent)
@@ -814,6 +863,60 @@ function switchIdentityOf(dry: any): {
     toId: typeof dry.toId === "string" ? dry.toId : null,
     epoch: dry.epoch,
     checkpointAt: typeof dry.checkpointAt === "string" ? dry.checkpointAt : null,
+  };
+}
+
+export async function activateSteer(
+  input: RpcInput<typeof factorySteerActivate>,
+  { paseo }: PluginHandlerContext,
+  loader: ConfigLoader,
+  delivery?: SteerDeliveryDeps,
+): Promise<{ status: "sent" | "pending" | "blocked"; detail: string }> {
+  const { workspaceId, agentId, epoch } = input;
+  const { config, discovery, status, snapshot } = await discoverOne(paseo, loader, undefined, workspaceId);
+  const scope = status.state;
+  const target = status.steers.find((steer: any) => steer.id === agentId && !steer.retired && !steer.superseded);
+  if (status.workspace?.id !== workspaceId || !scope || scope.retired || target?.workspaceId !== workspaceId) {
+    throw new Error("This tab is no longer a live steer in this Factory workspace.");
+  }
+  const live = (scopeHolder as any)({ agents: snapshot.agents, workspaceId, scopeId: scope.scope?.id ?? status.repo,
+    slot: target.slot, aliases: discoveryScopeAliases(discovery) });
+  if (live.id !== agentId || live.background || isAdvisorSteer(config, live.labels, live.metadata)) {
+    throw new Error("Only a live coordinator steer can be activated in its own tab.");
+  }
+  const deps = { ...delivery, getConfig: () => loader.loadEffectiveConfig(),
+    buildBrief: delivery?.buildBrief ?? createResumeBriefBuilder(loader, delivery) };
+  const entries = discovery.mainWorkspace.metadata?.[AGENTS_KEY] ?? {};
+  const receipt = readSteerAction(entries[agentId]);
+  if (scope.epoch === epoch + 1 && scope.activeSteer === target.slot && scope.activeAgentId === agentId &&
+      receipt?.kind === "activate" && receipt.epoch === scope.epoch) {
+    return (await finishSteerDelivery(paseo, { workspaceId, agentId, epoch: scope.epoch, actionId: receipt.wakeId }, deps)) ??
+      { status: "pending", detail: "Activation was applied. The continuation receipt is being reconciled." };
+  }
+  const switched = await switchSteer({
+    client: paseo, discovery, config, toSlot: target.slot, apply: true,
+    ...(deps.lock ? { lock: deps.lock } : {}),
+    paseoCli: createPaseoCli(),
+    admitTarget: (agent: any) => readPrivacyAdmission(agent, { ...deps, paseo }, workspaceId),
+    activation: {
+      agentId, epoch,
+      async check({ target, holder, entries }: any) {
+        if (target.background || hasActiveAgentWork(target, entries[target.id])) {
+          throw new Error("This steer is busy. Resolve any permission request or wait for its turn to finish.");
+        }
+        if (hasActiveAgentWork(holder, entries[holder.id])) {
+          throw new Error("The active steer is busy. Resolve any permission request or stop its turn before activating this steer.");
+        }
+        const quota = await steerQuotaAdmission(target, entries[target.id], { ...deps, paseo }, entries);
+        if (!quota.allowed) throw new Error(`This steer cannot be activated: ${quota.reason}.`);
+      },
+    },
+    deliverSteer: (args: Parameters<typeof deliverSteer>[1]) => deliverSteer(paseo, args, deps),
+  } as any);
+  return {
+    status: switched.delivered ? "sent" : switched.deliveryBlocked ? "blocked" : "pending",
+    detail: switched.delivered ? `Steer ${target.slot} is active and received the continuation brief.` :
+      `Steer ${target.slot} is active. ${switched.deliveryDetail ?? switched.deliveryError ?? "Continuation is pending."}`,
   };
 }
 
@@ -892,12 +995,22 @@ export async function applySwitch(
     workerModel,
     git,
     paseoCli: createPaseoCli(),
+    admitTarget: (agent: any) => readPrivacyAdmission(agent, {
+      ...delivery, paseo, getConfig: () => loader.loadEffectiveConfig(),
+    }, dry.workspaceId),
     deliverSteer: (args: Parameters<typeof deliverSteer>[1]) => deliverSteer(paseo, args, {
-      ...delivery, buildBrief: delivery?.buildBrief ?? createResumeBriefBuilder(loader),
+      ...delivery, getConfig: () => loader.loadEffectiveConfig(),
+      buildBrief: delivery?.buildBrief ?? createResumeBriefBuilder(loader, delivery),
     }),
   };
   const applied: any = await switchSteer(applyOptions);
-  if (applied.applied && input.deliver === "stage") return { ...applied, staged: true, stagedTo: applied.toId, stagingError: null };
+  if (applied.applied && (input.deliver === "stage" || applied.deliveryPending || applied.deliveryBlocked || applied.deliveryError)) {
+    const live = (await paseo.agents.ref(applied.toId).refresh())?.agent;
+    const privacy = await applyOptions.admitTarget(live);
+    if (!privacy.allowed) return { ...applied, packet: "", packetChars: 0, staged: false, stagedTo: null, stageId: undefined,
+      stagingError: privacy.reason, deliveryError: applied.deliveryError ?? privacy.reason };
+  }
+  if (applied.applied && input.deliver === "stage") return { ...applied, staged: !!applied.stageId, stagedTo: applied.stageId ? applied.toId : null, stagingError: null };
   if (!applied.applied || applied.deliveryPending || applied.deliveryBlocked) return applied;
   return {
     ...applied,
@@ -906,6 +1019,7 @@ export async function applySwitch(
       agentId: dry.toId,
       packet: applied.packet,
       kind: "switch",
+      epoch: applied.epoch,
       deliver: input.deliver,
       deliveryError: applied.deliveryError,
     })),
@@ -1078,8 +1192,7 @@ export async function applyPlan(
       paseoCli: createPaseoCli(),
       getZerosub: readZerosubState,
       lookupReceipt: lookupCreationReceipt,
-      reservePins: true,
-    };
+      };
     const applyOptions: any = {
       authorization,
       config,
@@ -1173,7 +1286,6 @@ export async function getWorkers(
 export interface ZerosubHandlerExtra {
   getZerosub?: () => Promise<any>;
   lookupReceipt?: (kind: string, key: string) => Promise<any>;
-  reservePins?: boolean;
 }
 
 async function readHandlerZerosub(extra?: ZerosubHandlerExtra): Promise<any> {
@@ -1277,7 +1389,7 @@ export async function pickWorker(
   }
   const sensitive = (isSensitiveProfile as any)(config, profile.name);
   const text = [
-    `Worker pick: "${profile.name}" (${profile.provider}/${profile.model})${sensitive ? " [sensitive: give only sanitized technical tasks]" : ""}${zerosubAccount ? ` [account ${zerosubAccount}]` : ""}`,
+    `Worker pick: "${profile.name}" (${profile.provider}/${profile.model})${sensitive ? " [sensitive: give only sanitized technical tasks]" : ""}${zerosubAccount ? ` [quota candidate ${zerosubAccount}]` : ""}`,
     `paseo run ${(paseoRunFlags as any)(profile)}`,
     ...skipped.map((s: any) => `skipped "${s.name}": ${s.reason}`),
   ].join("\n");
@@ -1344,16 +1456,17 @@ export async function startWorkerRpc(
     callerId: input.callerId,
     aliases: (discoveryScopeAliases as any)(discovery),
     profile,
+    config,
     accountId: zerosubAccount,
     prompt: input.task,
     title: input.title,
     apply: Boolean(input.apply),
     promptOptions: await loader.loadPromptOptions(paseo),
-    execute: (createExecutors as any)({ client: paseo, getZerosub: extra?.getZerosub ?? readZerosubState, lookupReceipt: extra?.lookupReceipt ?? lookupCreationReceipt, reservePins: extra?.reservePins ?? true }),
+    execute: (createExecutors as any)({ client: paseo, getZerosub: extra?.getZerosub ?? readZerosubState, lookupReceipt: extra?.lookupReceipt ?? lookupCreationReceipt }),
   });
   const text = result.agentId
     ? `Started worker ${result.agentId} (${result.provider}) in ${result.scope}`
-    : `Dry-run: worker in ${result.scope} (${result.provider})${result.accountId ? ` · account ${result.accountId}` : ""}; add --apply to start`;
+    : `Dry-run: worker in ${result.scope} (${result.provider})${result.accountId ? ` · quota candidate ${result.accountId}` : ""}; add --apply to start`;
   return { ...result, text };
 }
 
@@ -1512,6 +1625,7 @@ export async function applyAssign(
     next: input.next ?? null,
     apply: true,
     send: input.send !== false,
+    admitTarget: (agent: any) => readPrivacyAdmission(agent, { paseo, getConfig: () => loader.loadEffectiveConfig() }, discovery.mainWorkspace?.id),
     expectEpoch: input.expectEpoch ?? dry.epoch,
     assignedBy: input.callerId ?? null,
     requester,
@@ -1529,29 +1643,27 @@ export async function previewSteerAdd(
   { paseo }: PluginHandlerContext,
   loader: ConfigLoader,
   hostSettings: HostSettingsReader | null,
+  readZerosub: () => Promise<any> = readZerosubStateSafe,
 ): Promise<any> {
   if (!hostSettings) throw new Error("Factory settings are not available; open Factory settings and save them again");
-  const state = await hostSettings.read();
+  const state = structuredClone(await hostSettings.read());
   if (state.status !== "ready") {
     throw new Error(`Factory settings are ${state.status}: ${(state as any).error ?? "unreadable"}; open the settings page and save them again`);
   }
-  const { discovery, status } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
+  const { config, discovery, status } = await discoverOne(paseo, loader, input.repo, input.workspaceId, null, state);
   if (!status.workspace || !status.state) {
     throw new Error(
       "This project is not set up by the factory yet (no main workspace with steers). Run /factory plan, then /factory apply <hash>.",
     );
   }
-  const config = await loader.loadEffectiveConfig();
   if (status.state.retired) throw new Error("This scope is retired; choose an active scope.");
-  const liveSteers = (discovery.steers?.labelled ?? []).filter((a: any) => !a.archivedAt);
   const scopeId = discovery.scope?.id ?? discovery.forkName;
   const repo = discovery.forkName;
   const workspaceId = status.workspace.id;
-  const used = (usedProfilesByLiveSteers as any)(config, liveSteers);
   const quotaSnapshot = getQuotaSnapshot();
   const profileHealth = readProfileHealth(discovery.mainWorkspace?.metadata);
-  const zerosub = await readZerosubStateSafe().catch(() => null);
-  const plan: any = (planSteerAdd as any)(config, discovery.providers ?? [], liveSteers, {
+  const zerosub = await readZerosub().catch(() => null);
+  const plan: any = (planSteerAdd as any)(config, discovery.providers ?? [], discovery.agents ?? [], {
     slot: input.slot ?? null,
     spec: input.spec ?? null,
     thinking: input.thinking,
@@ -1560,14 +1672,15 @@ export async function previewSteerAdd(
     scopeId,
     workspaceId,
     repo,
-    usedProfiles: used,
+    repoPublic: discoveredRepoPublic(discovery),
+    resolvedSteers: discovery.steers?.labelled ?? [],
+    epoch: status.state.epoch,
+    activeSlot: status.state.activeSteer,
+    settingsRevision: state.revision ?? "",
     quotaSnapshot,
     profileHealth,
     zerosub,
   });
-  const values = (settingsFromConfig as any)(plan.config, state.values as FactorySettingsValues);
-  const errors = (validateFactorySettings as any)(values);
-  if (errors.length) throw new Error(`The change does not fit the settings:\n- ${errors.join("\n- ")}`);
   const text = (formatSteerAddPreview as any)(plan, { scopeId });
   return {
     scope: scopeId,
@@ -1587,53 +1700,94 @@ export async function previewSteerAdd(
     text,
     fingerprint: plan.fingerprintInput ? (steerAddFingerprint as any)(plan.fingerprintInput) : null,
     revision: (state as any).revision ?? "",
-    values,
+    values: state.values,
   };
 }
+
+const STEER_ADD_PENDING_KEY = `${METADATA_KEY}.steer-add-pending`;
+type SteerAddPending = { key: string; fingerprint: string; slot: string };
 
 export async function applySteerAddRpc(
   input: RpcInput<typeof factorySteerAdd>,
   { paseo }: PluginHandlerContext,
   loader: ConfigLoader,
+  hostSettings?: HostSettingsReader | null,
+  { lookupReceipt = lookupCreationReceipt, readZerosub = readZerosubStateSafe, getZerosub = readZerosubState } = {},
 ): Promise<any> {
-  const { discovery, status } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
-  if (!status.workspace || !status.state) {
-    throw new Error(
-      "This project is not set up by the factory yet (no main workspace with steers). Run /factory plan, then /factory apply <hash>.",
-    );
-  }
-  const config = await loader.loadEffectiveConfig();
-  if (status.state.retired) throw new Error("This scope is retired; choose an active scope.");
-  const slot = input.slot?.trim().toUpperCase();
-  if (!slot || !config.steers.slots[slot]) {
-    throw new Error("The confirmed slot is not saved in the Factory settings. Run /factory steer add again and confirm it in the panel.");
-  }
-  const liveSteers = (discovery.steers?.labelled ?? []).filter((a: any) => !a.archivedAt);
-  const executeOptions: any = {
-    client: paseo,
-    gh: createGh(),
-    git: createGit(),
-    paseoCli: createPaseoCli(),
-    getZerosub: readZerosubState,
-    lookupReceipt: lookupCreationReceipt,
-    reservePins: true,
-  };
-  return (applySteerAdd as any)(config, discovery.providers ?? [], liveSteers, {
-    slot,
-    spec: input.spec ?? null,
-    thinking: input.thinking,
-    mode: input.mode,
-    profile: input.profile,
-    scopeId: discovery.scope?.id ?? discovery.forkName,
-    workspaceId: status.workspace.id,
-    repo: discovery.forkName,
-    fingerprint: input.fingerprint,
-    fingerprintOf: steerAddFingerprint,
-    usedProfiles: (usedProfilesByLiveSteers as any)(config, liveSteers),
-    quotaSnapshot: getQuotaSnapshot(),
-    profileHealth: readProfileHealth(discovery.mainWorkspace?.metadata),
-    zerosub: await readZerosubStateSafe().catch(() => null),
-    lookupReceipt: lookupCreationReceipt,
-    execute: (createExecutors as any)(executeOptions),
+  const workspaceId = input.workspaceId ?? (await resolveEntryForAddress(paseo, input.repo, undefined)).workspaceId;
+  if (!workspaceId) throw new Error("Steer creation requires an enrolled workspace.");
+  return withWorkspaceLock(workspaceId, async (held: { verify(): void }) => {
+    const state = await hostSettings?.read();
+    if (input.revision !== undefined && input.revision !== (state?.revision ?? "")) {
+      throw new Error("Factory settings changed. Review the steer creation preview again.");
+    }
+    const { config, discovery, status } = await discoverOne(paseo, loader, input.repo, workspaceId, null, state);
+    if (!status.workspace || !status.state) {
+      throw new Error(
+        "This project is not set up by the factory yet (no main workspace with steers). Run /factory plan, then /factory apply <hash>.",
+      );
+    }
+    if (status.state.retired) throw new Error("This scope is retired; choose an active scope.");
+    const slot = input.slot?.trim().toUpperCase();
+    if (!slot || status.workspace.id !== workspaceId) throw new Error("The creation target changed. Review the preview again.");
+    const workspace = paseo.workspaces.ref(workspaceId);
+    const agents = discovery.agents ?? [];
+    let pending: SteerAddPending | null = discovery.mainWorkspace?.metadata?.[STEER_ADD_PENDING_KEY] ?? null;
+    const writePending = async (value: SteerAddPending | null) => {
+      held.verify();
+      await workspace.setMetadata({ [STEER_ADD_PENDING_KEY]: value });
+      const written = (await workspace.refresh())?.metadata?.[STEER_ADD_PENDING_KEY] as SteerAddPending | null | undefined;
+      if ((written?.key ?? null) !== (value?.key ?? null) || (written?.fingerprint ?? null) !== (value?.fingerprint ?? null) ||
+          (written?.slot ?? null) !== (value?.slot ?? null)) {
+        throw new Error("Steer creation journal could not be verified.");
+      }
+      pending = value;
+    };
+    if (pending && pending.fingerprint !== input.fingerprint) {
+      const receipt = await lookupReceipt("agent", pending.key);
+      const agent = agents.find((entry: any) => entry.id === receipt?.agentId);
+      if (receipt?.phase !== "completed" || receipt.outcomeUnknown || agent?.workspaceId !== workspaceId ||
+          agent.labels?.[LABEL.role] !== "steer" || agent.labels?.[LABEL.slot] !== pending.slot) {
+        throw new Error(`Creation of Steer ${pending.slot} is still pending. Retry its original confirmation or reconcile the creation in Paseo.`);
+      }
+      await writePending(null);
+    }
+    const executeOptions: any = {
+      client: paseo,
+      paseoCli: createPaseoCli(),
+      getZerosub,
+      lookupReceipt,
+    };
+    const result = await (applySteerAdd as any)(config, discovery.providers ?? [], agents, {
+      slot,
+      spec: input.spec ?? null,
+      thinking: input.thinking,
+      mode: input.mode,
+      profile: input.profile,
+      scopeId: discovery.scope?.id ?? discovery.forkName,
+      workspaceId: status.workspace.id,
+      repo: discovery.forkName,
+      repoPublic: discoveredRepoPublic(discovery),
+      fingerprint: input.fingerprint,
+      fingerprintOf: steerAddFingerprint,
+      resolvedSteers: discovery.steers?.labelled ?? [],
+      epoch: status.state.epoch,
+      activeSlot: status.state.activeSteer,
+      settingsRevision: state?.revision ?? "",
+      quotaSnapshot: getQuotaSnapshot(),
+      profileHealth: readProfileHealth(discovery.mainWorkspace?.metadata),
+      zerosub: await readZerosub().catch(() => null),
+      lookupReceipt,
+      pendingKey: pending?.key,
+      execute: (op: any, effectiveConfig: any, { newCreation = false } = {}) => (createExecutors as any)({
+        ...executeOptions,
+        beforeSteerCreate: async () => {
+          if (newCreation && !pending) await writePending({ slot, key: op.params.idempotencyKey, fingerprint: input.fingerprint });
+          held.verify();
+        },
+      })(op, effectiveConfig),
+    });
+    if (pending) await writePending(null);
+    return result;
   });
 }

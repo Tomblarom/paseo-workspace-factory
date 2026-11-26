@@ -1,17 +1,18 @@
 // Manual /factory resume validates the preview and captures a checkpoint before delivery.
 import { AGENTS_KEY } from "./core/agent-state.mjs";
-import { readCleanupAction } from "./core/steer-action.mjs";
+import { readCleanupAction, readSteerAction } from "./core/steer-action.mjs";
 import { actionFact } from "./core/action-facts.mjs";
 import { withLock, workspaceLockName } from "./core/lock.mjs";
 import { METADATA_KEY, readPaseoState } from "./core/paseo.mjs";
 import { listScopes, sameScopeId } from "./core/scope.mjs";
 import { guardScope, scopeHolder } from "./core/scope-guard.mjs";
-import { lastAssistantText, parseCheckpointBlock } from "./core/steer.mjs";
+import { lastAssistantText, parseCheckpointBlock, reconcileFreshDelivery, requireFreshPrivacy, SwitchRefused } from "./core/steer.mjs";
 import { WORKERS_KEY } from "./core/supervision.mjs";
 import { CLEANUP_DEFAULTS, cleanupIdentity, formatResumeMessage, type ResumeClearSettings } from "../shared/idle-cleanup.js";
-import { decideSteerDelivery, deliverSteer, type DeliveryResult, type SteerDeliveryDeps } from "./steer-delivery.js";
+import { decideSteerDelivery, deliverSteer, finishSteerDelivery, type DeliveryResult, type SteerDeliveryDeps } from "./steer-delivery.js";
 import { resumeFingerprint } from "../shared/preview.js";
-import { agentContextInputs } from "./agent-context.js";
+import { readPrivacyAdmission } from "./steer-admission.js";
+import { agentContextInputs, hasActiveAgentWork } from "./agent-context.js";
 import { projectAgentContext } from "../shared/steer-state.js";
 import { resolveZerosub } from "./zerosub-runtime.js";
 import { workerIdentityFromMetadata } from "../shared/supervise.js";
@@ -41,6 +42,25 @@ export interface ResumeApplyDeps extends SteerDeliveryDeps {
   }>;
 }
 
+function checkFreshPrivacy(paseo: any, workspaceId: string, scopeId: string, deps: ResumeApplyDeps) {
+  return (agentId: string, epoch: unknown) => requireFreshPrivacy({ client: paseo, workspaceId, scopeId, epoch, agentId,
+    admitTarget: (agent: any) => readPrivacyAdmission(agent, { ...deps, paseo }, workspaceId),
+  });
+}
+
+async function resumeFreshDelivery(paseo: any, workspaceId: string, scopeId: string, agentId: string, entry: unknown, deps: ResumeApplyDeps, lock: NonNullable<ResumeApplyDeps["lock"]>): Promise<ResumeApplyResult | null> {
+  const action = readSteerAction(entry);
+  if (action?.kind !== "fresh-delivery" || action.phase === "done") return null;
+  const result = await reconcileFreshDelivery({ client: paseo, workspaceId, agentId, actionId: action.wakeId,
+    lock, checkPrivacy: checkFreshPrivacy(paseo, workspaceId, scopeId, deps),
+  });
+  return {
+    agentId, cleared: false, renewed: true,
+    status: result.status === "sent" ? "sent" : result.status === "blocked" || result.status === "missing" ? "blocked" : "pending",
+    detail: result.status === "sent" ? "Fresh brief delivered." : result.detail ?? "Fresh brief needs receipt reconciliation.",
+  };
+}
+
 async function applyWorkerResume(paseo: any, mainId: string, agentId: string, scopeId: string, deps: ResumeApplyDeps, lock: NonNullable<ResumeApplyDeps["lock"]>): Promise<ResumeApplyResult> {
   return lock(`worker-resume-${agentId}`, async () => {
     const ref = paseo.agents.ref(agentId);
@@ -57,17 +77,24 @@ async function applyWorkerResume(paseo: any, mainId: string, agentId: string, sc
     if (typeof entry?.replacedBy === "string") {
       return { agentId: entry.replacedBy, status: "blocked", cleared: false, detail: `Continue in replacement worker ${entry.replacedBy}.` };
     }
-    if (identity?.role !== "worker" || !sameScopeId(identity.scopeId, scopeId) || agent.archivedAt || agent.background === true || (!entry?.interrupted && worker?.state !== "interrupted")) {
-      throw new Error("/factory resume is available for steers and interrupted workers.");
+    const partial = worker?.state === "partial";
+    if (identity?.role !== "worker" || !sameScopeId(identity.scopeId, scopeId) || agent.archivedAt || agent.background === true || (!entry?.interrupted && worker?.state !== "interrupted" && !partial)) {
+      throw new Error("/factory resume is available for steers and workers with interrupted or partial work.");
     }
-    if (readCleanupAction(entry) || agent.activeTurn || agent.pendingPermissions?.length || agent.status === "initializing" || agent.status === "running") {
+    if (readCleanupAction(entry) || hasActiveAgentWork(agent, entry)) {
       return { agentId, status: "blocked", cleared: false, detail: "The worker is busy. Try again after the current operation." };
     }
+    const pendingFresh = await resumeFreshDelivery(paseo, mainId, scopeId, agentId, entry, deps, lock);
+    if (pendingFresh) return pendingFresh;
     const context = agentContextInputs(agent, entry, cleanup ?? CLEANUP_DEFAULTS, routes, deps.now ? Date.parse(deps.now()) : Date.now());
     const { warmth, large } = projectAgentContext(context);
     const replacementMessageId = !context.lastTurnEndedAt && typeof entry?.workerResumeMessageId === "string" ? entry.workerResumeMessageId : null;
     const alreadyRenewed = context.cleanedAfter || replacementMessageId !== null;
-    if (alreadyRenewed && asRecord(actionFact(entry, "refreshed"))?.briefMessageId) {
+    const receipt = readSteerAction(entry);
+    if (replacementMessageId && receipt?.kind === "fresh-delivery" && receipt.phase === "done" && receipt.wakeId === replacementMessageId) {
+      return { agentId, status: "sent", cleared: false, renewed: true, detail: "The renewed worker already received its brief." };
+    }
+    if (!partial && alreadyRenewed && asRecord(actionFact(entry, "refreshed"))?.briefMessageId) {
       return { agentId, status: "sent", cleared: false, renewed: true, detail: "The renewed worker already received its brief." };
     }
     const mode = decideSteerDelivery({ warmth: warmth.warmth, large, recovery: true, settings: null, keepChatHistory: true });
@@ -86,8 +113,31 @@ async function applyWorkerResume(paseo: any, mainId: string, agentId: string, sc
     }
     const brief = await deps.buildBrief?.(paseo, mainId, agentId);
     if (!brief) throw new Error("No worker resume brief is available.");
-    const at = asRecord(entry?.interrupted)?.at ?? worker?.pendingWake?.queuedAt ?? context.lastTurnEndedAt;
+    const at = partial ? entry?.lastTurnId ?? context.lastTurnEndedAt ?? entry?.noteAt ?? worker?.pendingWake?.queuedAt
+      : asRecord(entry?.interrupted)?.at ?? worker?.pendingWake?.queuedAt ?? context.lastTurnEndedAt;
+    if (partial) {
+      const [latest, live] = await Promise.all([paseo.workspaces.ref(mainId).refresh(), ref.refresh()]);
+      const metadata = latest?.metadata;
+      const latestWorker = metadata?.[WORKERS_KEY]?.[agentId];
+      const latestEntry = metadata?.[AGENTS_KEY]?.[agentId];
+      const liveIdentity = cleanupIdentity(live?.agent?.labels) ?? workerIdentityFromMetadata(live?.agent);
+      if (!at || metadata?.[METADATA_KEY]?.epoch !== scope.epoch || metadata?.[METADATA_KEY]?.retired ||
+          latestWorker?.state !== "partial" || latestWorker.task !== worker.task ||
+          latestWorker.startedBy !== worker.startedBy || latestWorker.epoch !== worker.epoch ||
+          latestEntry?.lastTurnId !== entry?.lastTurnId || latestEntry?.lastTurnEndedAt !== entry?.lastTurnEndedAt ||
+          latestEntry?.noteAt !== entry?.noteAt || latestEntry?.replacedBy || readCleanupAction(latestEntry) ||
+          liveIdentity?.role !== "worker" || !sameScopeId(liveIdentity.scopeId, scopeId) ||
+          live.agent.archivedAt || live.agent.background || hasActiveAgentWork(live.agent, latestEntry)) {
+        return { agentId, status: "blocked", cleared: false, detail: "The partial worker checkpoint is unavailable or changed during resume." };
+      }
+    }
     const messageId = replacementMessageId ?? (typeof at === "string" ? `wsf-worker-resume-${agentId}-${at}` : null);
+    try {
+      await checkFreshPrivacy(paseo, mainId, scopeId, deps)(agentId, scope.epoch);
+    } catch (error) {
+      if (error instanceof SwitchRefused) return { agentId, status: "blocked", cleared: false, detail: error.message };
+      throw error;
+    }
     if (messageId) await ref.send(formatResumeMessage(brief), { messageId });
     else await ref.send(formatResumeMessage(brief));
     return { agentId, status: "sent", cleared: false, detail: "Worker resume brief sent." };
@@ -195,7 +245,7 @@ export async function applyResume(
   const identity = cleanupIdentity(agent.labels ?? null) ?? workerIdentityFromMetadata(agent);
   if (!identity) {
     throw new Error(
-      `/factory resume is available for steers and interrupted workers; ${agentId} is outside that scope.`,
+      `/factory resume is available for steers and workers with interrupted or partial work; ${agentId} is outside that scope.`,
     );
   }
   if (agent.status === "running" || agent.status === "initializing") {
@@ -230,11 +280,21 @@ export async function applyResume(
       );
     }
   }
-  const activeHolder = (scopeHolder as any)({ agents: state.agents, workspaceId: mainId, scopeId: identity.scopeId, slot: wsf.activeSteer, ownerId: wsf.activeAgentId, previousSteer: wsf.previousSteer, strictLegacy: true });
+  const activeHolder = (scopeHolder as any)({ agents: state.agents, workspaceId: mainId, scopeId: identity.scopeId, slot: wsf.activeSteer });
   await lock(workspaceLockName(mainId), async (held: { verify: () => void }) => {
     await (guardScope as any)({ client: paseo, held, workspaceId: mainId, scopeId: identity.scopeId, epoch: wsf.epoch, agentId: activeHolder.id, config });
   });
   if (identity.role === "worker") return applyWorkerResume(paseo, mainId, agentId, identity.scopeId, deps, lock);
+  const pendingFresh = await resumeFreshDelivery(paseo, mainId, identity.scopeId, agentId, entry, deps, lock);
+  if (pendingFresh) return pendingFresh;
+  if (readSteerAction(entry)?.phase === "sent") {
+    const settled = await finishSteerDelivery(paseo, { workspaceId: mainId, agentId }, deps);
+    if (settled) return { agentId, ...settled };
+  }
+  const liveAgent = (await paseo.agents.ref(agentId).refresh())?.agent;
+  if (!liveAgent || liveAgent.archivedAt) return { agentId, status: "blocked", cleared: false, detail: "The steer is unavailable." };
+  const privacy = await readPrivacyAdmission(liveAgent, { ...deps, paseo }, mainId);
+  if (!privacy.allowed) return { agentId, status: "blocked", cleared: false, detail: `Resume refused: ${privacy.reason}.` };
   const cleanup = readCleanupAction(entry);
   if (cleanup) {
     const record = asRecord(cleanup);

@@ -11,8 +11,10 @@ send, rewind and session APIs. It describes the current implementation separatel
 ## A. Start the same way at any quota level
 
 **Today.** The documented workflow sends the prompt to the active steer. Quota controls work
-mainly around profile selection and unattended supervision. A worker wake checks a configured
-pool and may defer to a ZeroSub reset. The turn-before hook tracks the open turn and never
+mainly around profile selection and unattended supervision. A worker wake uses the account
+bound to the steer. A bound account can lack usage windows, particularly with API billing.
+Its missing or stale percentages remain unknown. A limit reported for that account and
+model still blocks delivery until recovery. Provider-pool usage applies to unbound routes. The turn-before hook tracks the open turn and never
 checks quota or context. The composer can already show a cold or resume pill before typing.
 [`concepts.md:15–21`](../concepts.md#work-in-one-scope) ·
 [`supervise.ts:550–601`](../../plugin/server/supervise.ts#L550-L601) ·
@@ -253,8 +255,9 @@ extra model turn; the switch it proposes is refused while the receiving steer is
 (the hint itself starts that turn); and a handover at 75 % gives up up to a quarter of the
 window, a warm cache and pays a new initialization without evidence that this is cheaper.
 Real limits are covered without it: ZeroSub continues a limited agent on another account,
-the factory follows the continuation (slots-live-design decision 5), and new agents are
-pinned to the roomiest account at creation (decision 6). Exclusion of accounts uses
+the factory follows the continuation (slots-live-design decision 5), and ZeroSub
+chooses the start account at creation (decision 6). Factory previews may show the
+roomiest account as quota evidence. Exclusion of accounts uses
 `exhaustedPct` everywhere; `steer add` no longer treats the warn threshold as exhausted.
 
 Policy (configurable defaults, pragmatic, not empirically tuned): below `warnPct` 93 % work
@@ -265,7 +268,125 @@ a running turn and never send a prompt only to warn or to hand over. This reuses
 existing delivery target choice (deliverSteer and the failover order); if that cannot pick
 another holder at dispatch, note the gap instead of adding switching infrastructure.
 
-Dispatch review: `deliverSteer` uses the supplied agent ID. Worker wakes can invoke the
-failover order when the active provider pool is exhausted and can wait for a ZeroSub
-reset. A single bound account crossing `exhaustedPct` does not by itself select another
-holder for wakes, reports or resume. Account-based target selection at dispatch remains open.
+## Open P0 — Quota admission before context renewal
+
+Live evidence: three Assignment Reports were delivered once each to the active Claude
+holder. All three turns failed at the quota limit, two after a confirmed `/clear`. A
+subsequent worker-completion wake triggered automatic failover, and the next steer took
+over successfully. The recorded failover reason named the configured Codex pool while
+the failed holder was running Claude. The takeover proves the mechanism works. The
+reason string does not establish which account or window was depleted.
+
+- **Admission and failure detection.** `flushScopeWake` checks the configured pool and
+  can invoke `runFailoverCheck` or wait for a reset. Reports reserve a target and Resume
+  passes an agent ID into `deliverSteer`. That function chooses send, clear or rewind
+  without a shared admission decision. The failed-turn fallback also missed this case:
+  `isLimitFailure` returns false for `You've hit your 5-hour limit`, and the live holder
+  was recorded as `needsResume: failed`, so the limit-specific forced check did not run.
+- **Holder resolution.** The server resolves one live holder per affected slot. The
+  feed also projected archived rows for both slots, and the menu counted those rows
+  as competing holders. It even marked both rows of the active slot as active by slot
+  alone. Use the same resolved holder IDs for routing, the feed and menu eligibility.
+  Keep genuinely ambiguous live membership blocked.
+- **Continuation and batching.** K7 `reportedAt` records delivery, which can precede a
+  failed recipient turn. Source assignments already preserve the report text, target
+  and stable action ID. The successor brief omits these records, duplicates the
+  checkpoint in handoff and resume sections, and clips `next` before applying the
+  overall budget. The existing worker `EventBatch` and K7 receipt reconciliation provide
+  a path to group reports without a new queue. A report action currently retains one
+  source reference, so grouping requires preserving all source/action pairs and
+  reconciling each source receipt.
+
+Reuse the worker-wake admission and failover mechanisms across wakes, Assignment Reports
+and Resume. Resolve the live holder and effective account/model first. Use fresh account
+evidence with the configured `exhaustedPct`, falling back to the provider pool when
+only pool evidence is available. Preserve the existing fail-soft behavior for unknown
+quota. Admit before reserving renewal or clearing/rewinding context, and revalidate the
+holder, epoch, quota, busy state and permissions at the existing guarded dispatch points.
+If ZeroSub has continued or is moving the holder, follow that decision. Otherwise use
+the existing failover order or defer to an eligible reset via the current sweep. Keep
+explicit tab recovery and takeover targets subject to the existing authority and consent
+checks. Route scope work via failover without silently editing a different tab. Treat
+provider-reported hard limits as admission evidence and feed them into the same path.
+
+Gather reports already pending for the same resolved recipient and epoch into one K7
+delivery when useful, with a bounded brief and stable source references. Do not delay a
+ready report to create a batch. Rebind only deliveries known to be unattempted, and
+reconcile attempted or uncertain deliveries by receipt before any resend. Surface
+outgoing assignments and reports delivered without a corresponding completed recipient
+turn in one canonical successor brief, using the existing source records and compact
+references. Preserve delivery receipts independently of the processing state.
+
+With the original holder and epoch still valid, the daemon can reconcile an exact
+send replay against its durable receipt. After an authority change, reconciliation
+requires a read-only acceptance receipt keyed by recipient and message ID. The
+current Paseo contract exposes that receipt through send only. Keep unresolved
+reports queued until positive acceptance evidence is available. A timeline row alone
+cannot establish acceptance.
+
+ZeroSub's `move_before_limit` adds a candidate when delivery is due, the active
+Claude or Pi agent is idle with no user pin, and another eligible subscription
+account has enough quota. Rank the move with handover, renewal and creation
+using the [effective routing plan](control-concept/implementation-plan.md#p1-routing-acceptance).
+An automatic binding can move. A user pin, including a pin applied by creation
+metadata, is an explicit routing constraint. A confirmed move can preserve the
+holder and provider conversation while cache reuse on the target account is
+still unknown. Verify the runtime account and quota before sending. The move
+result and the K7 send receipt track separate effects.
+
+Acceptance: each of the three entry points refuses renewal on a known exhausted holder.
+A pending report alone can trigger the demonstrated takeover, or wait for quota when no
+route is eligible. Reproduce the Claude wording and the archived B/E rows. Verify that
+batched reports survive interruption and epoch changes without duplicate messages or lost
+source receipts, and that a successor can continue from one brief after a failed handler
+turn. Reuse the existing sweep, K7 records and delivery locks.
+
+### P0 bounded acceptance and remaining work
+
+- Shared admission reads the live target's provider/model and account, applies the
+  configured threshold and hard-limit evidence, and is rechecked at reservation and
+  guarded effects (`plugin/server/steer-admission.ts:14`,
+  `plugin/server/steer-delivery.ts:314,512,729,877`). Claude limit wording feeds the
+  existing forced-failover path (`plugin/shared/idle-cleanup.ts:65`,
+  `plugin/server/turn-hook.ts:581`). Resume keeps explicit authority and consent.
+- A lone report can request takeover without a worker; the candidate can switch itself
+  without a turn from the exhausted holder, or the sweep retains the report until a
+  route becomes available (`plugin/test/turn-hint.test.mjs:565,699`).
+  Direct reports, report sweep and forced failover respect boot and global/source/target
+  drain; confirmed receipts can still be reconciled (`plugin/server/supervise.ts:319,1075,1313`,
+  `plugin/test/turn-hint.test.mjs:605`, `plugin/test/supervise.test.mjs:832`).
+- Live title-based holder resolution excludes archived rows and refuses genuine
+  ambiguity (`plugin/server/core/scope-guard.mjs:16`,
+  `plugin/test/steer-menu.test.mjs:98,120`). Already-pending K7 reports share one turn
+  with independent source receipts; interruptions, failed recipient turns and epoch
+  changes are covered (`plugin/test/turn-hint.test.mjs:364,401,497`).
+  The successor brief includes outgoing work and marks delivery as unverified processing
+  (`plugin/server/core/discovery.mjs:365`, `plugin/server/core/steer.mjs:572,705`,
+  `test/resume-brief.test.mjs:138`).
+- Fixture measurement: three short pending `result 1`–`result 3` reports go from
+  three turns / 24 total report characters to one turn / 172 characters including
+  source/action identifiers. For the interrupted handoff fixture, the baseline
+  `steer.mjs` run against the current shared fixture dependencies produces 1,553
+  characters and two checkpoint sections; current produces 1,190 and one. These
+  isolated comparisons do not predict live token use.
+- **Native dependency:** an uncertain send after an epoch change cannot be safely
+  reconciled or replayed without read-only positive acceptance evidence keyed by
+  recipient and message ID; keep it visibly blocked (`plugin/server/core/steer-action.mjs:33`,
+  `plugin/test/turn-hint.test.mjs:497`). A timeline row alone is insufficient.
+  Full retained-history renewal and ordinary composer pre-dispatch remain separate
+  native dependencies of the control plan, not claims of this package.
+- **Local follow-up:** failed or incomplete boot scans need bounded retry and
+  per-scope recovery; quiet admission does not repair the boot once-flag risk
+  (`plugin/index.server.ts:159`, `docs/design/control-concept/research-automation.md:142`).
+  Due-delivery initiation belongs to
+  [Z1](control-concept/implementation-plan.md#z1--native-early-account-move).
+  The development host now runs
+  [1.34.0](https://github.com/kapybara-org/zerosub/releases/tag/v1.34.0).
+  The merged [ZeroSub #108](https://github.com/kapybara-org/zerosub/pull/108)
+  ships the one-agent RPC. Delivery admission now waits while ZeroSub
+  reports a different live account from the destination.
+  The combined regression in `plugin/test/turn-hint.test.mjs` clears supervision
+  memory after a confirmed takeover request and verifies that K7 preserves the
+  answer window, rejects a stale switch and delivers the report once to the
+  successor. A real daemon restart and provider behavior still need live
+  validation.

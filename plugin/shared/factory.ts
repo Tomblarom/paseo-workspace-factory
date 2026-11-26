@@ -36,6 +36,7 @@ export const factoryStatus = defineRpc({
     checkpoint: z.unknown().optional(),
     steers: z.array(steerSummary),
     workers: z.array(workerSummary),
+    pendingWorkerWakeCount: z.number().int().nonnegative().optional(),
     scope: z.unknown().optional(),
     deprecatedAlias: z.boolean().optional(),
   }),
@@ -190,11 +191,25 @@ export const factorySwitch = defineRpc({
     /** True when the packet was staged (deliver=stage or a failed send). */
     staged: z.boolean().optional(),
     stagedTo: z.string().nullable().optional(),
+    stageId: z.string().optional(),
     packet: z.string().optional(),
     packetChars: z.number().optional(),
     checkpoint: z.boolean().optional(),
     deliveryError: z.unknown().optional(),
     previousNotified: z.boolean().optional(),
+  }),
+});
+
+export const factorySteerActivate = defineRpc({
+  name: "factory.steer.activate",
+  input: z.object({
+    workspaceId: z.string().min(1),
+    agentId: z.string().min(1),
+    epoch: z.number().int().nonnegative(),
+  }).strict(),
+  output: z.object({
+    status: z.enum(["sent", "pending", "blocked"]),
+    detail: z.string(),
   }),
 });
 
@@ -256,6 +271,7 @@ export const factoryResume = defineRpc({
     repo: z.string().min(1).optional(),
     workspaceId: z.string().min(1).optional(),
     agentId: z.string().min(1).optional(),
+    callerId: z.string().min(1).optional(),
   }),
   output: z.looseObject({
     scope: z.string(),
@@ -331,6 +347,9 @@ export const factoryFreshPreview = defineRpc({
   name: "factory.fresh.preview",
   input: z.object({
     slot: z.string().regex(/^[A-Za-z]$/).optional(),
+    workerId: z.string().trim().min(1).optional(),
+    provider: z.string().trim().min(1).optional(),
+    model: z.string().trim().min(1).optional(),
     repo: z.string().min(1).optional(),
     workspaceId: z.string().min(1).optional(),
   }),
@@ -338,11 +357,14 @@ export const factoryFreshPreview = defineRpc({
     repo: z.string(),
     workspaceId: z.string(),
     slot: z.string(),
+    kind: z.enum(["steer", "worker"]).optional(),
+    workerId: z.string().optional(),
     from: z.unknown().optional(),
     epoch: z.number(),
     profile: z.unknown().optional(),
     provider: z.unknown().optional(),
     model: z.unknown().optional(),
+    routeEvidence: z.unknown().optional(),
     refreshMode: z.string().optional(),
     packet: z.string(),
     packetChars: z.number(),
@@ -359,6 +381,9 @@ export const factoryFresh = defineRpc({
   name: "factory.fresh",
   input: z.object({
     slot: z.string().regex(/^[A-Za-z]$/).optional(),
+    workerId: z.string().trim().min(1).optional(),
+    provider: z.string().trim().min(1).optional(),
+    model: z.string().trim().min(1).optional(),
     repo: z.string().min(1).optional(),
     workspaceId: z.string().min(1).optional(),
     fingerprint: z.string().min(1),
@@ -383,6 +408,7 @@ export const factoryFresh = defineRpc({
     /** True when the packet was staged (deliver=stage or a failed send). */
     staged: z.boolean().optional(),
     stagedTo: z.string().nullable().optional(),
+    stageId: z.string().optional(),
     packetChars: z.number().optional(),
     checkpoint: z.boolean().optional(),
     deliveryError: z.unknown().optional(),
@@ -391,21 +417,28 @@ export const factoryFresh = defineRpc({
   }),
 });
 
-// Sends or dismisses a staged steer brief (see factory.switch/factory.fresh
-// with deliver=stage, or a packet left staged after a failed send). Sending
-// is exactly-once: the stored packet is taken before the send, so a second
-// call reports that nothing is staged instead of duplicating the brief.
+const briefTarget = z.object({ workspaceId: z.string().min(1), agentId: z.string().min(1) });
+const briefIdentity = briefTarget.extend({ stageId: z.string().min(1), epoch: z.number().int().nonnegative().nullable() });
+
 export const factorySteerBrief = defineRpc({
   name: "factory.steer.brief",
-  input: z.object({
-    workspaceId: z.string().min(1),
-    agentId: z.string().min(1),
-    action: z.enum(["send", "dismiss"]),
-  }),
+  input: z.discriminatedUnion("action", [
+    briefTarget.extend({ action: z.literal("inspect") }),
+    briefIdentity.extend({ action: z.enum(["send", "dismiss"]) }),
+    briefIdentity.extend({ action: z.literal("composer"), claimId: z.string().min(1), automatic: z.boolean().optional() }),
+    briefIdentity.extend({ action: z.enum(["composer-complete", "composer-release"]), claimId: z.string().min(1) }),
+    briefIdentity.extend({ action: z.literal("composer-resolve"), recoveryId: z.string().min(1), resolution: z.enum(["placed", "retry"]) }),
+  ]),
   output: z.looseObject({
     agentId: z.string(),
     delivered: z.boolean(),
     dismissed: z.boolean().optional(),
+    transferred: z.boolean().optional(),
+    resolved: z.boolean().optional(),
+    recoveryId: z.string().optional(),
+    packet: z.string().optional(),
+    stageId: z.string().optional(),
+    epoch: z.number().int().nonnegative().nullable().optional(),
     detail: z.string(),
   }),
 });
@@ -499,6 +532,8 @@ export const factorySteerSettings = defineRpc({
     delivered: z.boolean().optional(),
     staged: z.boolean().optional(),
     stagedTo: z.string().nullable().optional(),
+    stageId: z.string().optional(),
+    epoch: z.number().int().nonnegative().nullable().optional(),
     packet: z.string().optional(),
     packetChars: z.number().optional(),
     deliveryError: z.unknown().optional(),
@@ -545,7 +580,7 @@ const modelRow = z.looseObject({
   reasons: z.array(z.string()),
 });
 
-// Effective worker priority and steer slots (settings document)
+// Effective worker and steer priorities (settings document)
 // with catalog availability. `revision` is the settings revision the lists were
 // read at; `selected` is the profile a worker would start with now.
 export const factoryModelsList = defineRpc({
@@ -555,6 +590,8 @@ export const factoryModelsList = defineRpc({
     revision: z.string().nullable(),
     workers: z.array(modelRow.extend({ selected: z.boolean() })),
     steers: z.array(modelRow.extend({ slot: z.string(), fallback: z.string().nullable() })),
+    steerPreferences: z.array(modelRow).optional(),
+    advisorPreferences: z.array(modelRow).optional(),
     selectedWorker: z.string().nullable(),
     catalogError: z.string().nullable(),
   }),
@@ -755,6 +792,14 @@ export const factoryQuota = defineRpc({
     warnPct: z.number(),
     exhaustedPct: z.number(),
     pools: z.array(quotaPool),
+    accounts: z.array(z.object({
+      account: z.string(),
+      label: z.string().optional(),
+      family: z.string(),
+      usedPct: z.number().nullable(),
+      resetsAt: z.string().nullable(),
+      state: z.enum(["ok", "warn", "exhausted", "unknown"]),
+    })).optional(),
     steers: z.array(
       z.looseObject({
         slot: z.string(),
@@ -784,7 +829,7 @@ const steerAddArgs = {
 };
 
 // Steer-add preview for the current scope (read-only): the slot, profile and
-// ZeroSub account the apply would use, the new settings document (unsaved)
+// ZeroSub quota evidence, the observed settings document and its revision,
 // and the fingerprint the apply must quote. Writes nothing.
 export const factorySteerAddPreview = defineRpc({
   name: "factory.steer.add.preview",
@@ -811,14 +856,10 @@ export const factorySteerAddPreview = defineRpc({
   }),
 });
 
-// Creates the previewed steer; the server recomputes the preview from fresh
-// state and refuses the write when the fingerprint no longer matches. The
-// client saves `values` through the settings RPC first (guarded by
-// `revision`), so a retry converges: a configured-but-unprovisioned slot
-// provisions, a live-occupied slot returns the existing agent.
+// Revalidate the confirmed selection against live membership under the workspace lock.
 export const factorySteerAdd = defineRpc({
   name: "factory.steer.add",
-  input: z.object({ ...steerAddArgs, fingerprint: z.string().min(1) }),
+  input: z.object({ ...steerAddArgs, fingerprint: z.string().min(1), revision: z.string().optional() }),
   output: z.looseObject({
     scope: z.string(),
     slot: z.string(),
@@ -862,6 +903,7 @@ const steerStateRow = z.looseObject({
   liveStatus: z.unknown().optional(),
   advisor: z.boolean().optional(),
   active: z.boolean().optional(),
+  activationEpoch: z.number().int().nonnegative().nullable().optional(),
   /** A permission request is waiting on this tab ("Review request"). */
   permissionNeeded: z.boolean().optional(),
   /** A brief is staged for this tab (initialize it from the steer menu). */

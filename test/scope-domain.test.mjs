@@ -24,7 +24,7 @@ const CONFIG = {
   workspaceTitle: 'Main',
   profiles: {
     sol: { provider: 'codex', model: 'gpt-6.2-sol', thinking: 'high', mode: 'full-access' },
-    muse: { provider: 'muse', model: 'muse-spark-1.3-contributor', thinking: null, mode: 'allowAll' },
+    muse: { provider: 'muse', model: 'muse-spark-1.3-contributor', thinking: null, mode: 'allowAll', sensitive: false },
   },
   steers: { slots: { A: 'sol', B: 'muse' }, prepare: ['A', 'B'], initialActive: 'A' },
   workers: { defaultProfile: 'muse' },
@@ -149,7 +149,7 @@ function fakeClient(world) {
         return workspaceHandle(workspace.id);
       },
     },
-    agents: { ref: agentHandle },
+    agents: { ref: agentHandle, list: async () => ({ entries: structuredClone(world.agents), pageInfo: { hasMore: false } }) },
   };
 }
 
@@ -404,7 +404,7 @@ test('sequential enrollment: domain first, then the child with --domain (K13: on
     });
   }
   const runner = runnerFor(world);
-  const execute = createExecutors({ client: fakeClient(world), paseoCli: fakePaseoCli(world) });
+  const execute = createExecutors({ client: fakeClient(world), paseoCli: fakePaseoCli(world), lock: (_name, fn) => fn({ verify() {} }) });
   const applyOne = async (entries, options = {}) => {
     const plans = await runner.runPlans(entries, options);
     assert.equal(plans[0].conflicts.length, 0, JSON.stringify(plans[0].conflicts));

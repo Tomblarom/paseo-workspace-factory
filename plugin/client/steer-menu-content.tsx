@@ -1,5 +1,5 @@
 import type { RpcOutput } from "@getpaseo/plugin";
-import type { PluginHostProps } from "@getpaseo/plugin/client";
+import type { PluginClientContext, PluginHostProps } from "@getpaseo/plugin/client";
 import { useComposers, useRpc, useSettings, useSubscription } from "@getpaseo/plugin/client";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
@@ -19,16 +19,16 @@ import {
   factorySwitch,
   factorySwitchPreview,
 } from "../shared/factory.js";
-import { factoryConfigSettings, factorySteerMenuSettings } from "../shared/settings.js";
-import type { FactorySettingsValues } from "../shared/settings-validate.js";
+import { factorySteerMenuSettings } from "../shared/settings.js";
 import {
   STEER_MENU_LABELS,
   isExpiredPreviewError,
-  needsDeliveryRetry,
   normalizeInitializeNewSteer,
   resumeActionLabel,
   resumeRouteFor,
-  stageComposerText,
+  transferStagedBrief,
+  type BriefTarget,
+  type ComposerTransferAttempt,
 } from "./steer-menu.js";
 import { steerRowsOf, type SteerPillRow } from "./steer-pill.js";
 
@@ -51,7 +51,7 @@ type RevertFlow = {
   kind: "revert";
   observed: { provider: string | null; model: string | null; thinking: string | null; speed: string | null; sessionId: string | null };
 };
-type StagedFlow = { kind: "staged" };
+type StagedFlow = { kind: "staged"; target: BriefTarget; recoveryId?: string };
 type MenuFlow = CreateFlow | SwitchFlow | ResumeFlow | FreshFlow | SettingsFlow | RevertFlow | StagedFlow;
 
 export type SteerMenuAction =
@@ -73,6 +73,7 @@ export interface SteerMenuProps {
   initialSlot?: string;
   initialAgentId?: string;
   observed?: RevertFlow["observed"] | null;
+  composers: PluginClientContext["composers"];
 }
 
 function text(value: unknown): string {
@@ -83,6 +84,8 @@ function text(value: unknown): string {
 }
 
 const NO_INPUT = {};
+// Keep an unacknowledged transfer when its popover is closed and reopened.
+const composerAttempts = new Map<string, ComposerTransferAttempt & { running: boolean }>();
 
 /**
  * One steer action per popover: the native menu item opens its own
@@ -100,6 +103,7 @@ export function SteerMenu({
   initialSlot,
   initialAgentId,
   observed,
+  composers,
 }: SteerMenuProps) {
   const callSteerAddPreview = useRpc(factorySteerAddPreview);
   const callSteerAdd = useRpc(factorySteerAdd);
@@ -115,7 +119,6 @@ export function SteerMenu({
   const callSettings = useRpc(factorySteerSettings);
   const callRevert = useRpc(factorySteerSettingsRevert);
   const menuSettings = useSettings(factorySteerMenuSettings);
-  const configState = useSettings(factoryConfigSettings);
 
   const [rows, setRows] = useState<SteerPillRow[] | null>(null);
   const onEvent = useCallback((event: unknown) => {
@@ -128,11 +131,9 @@ export function SteerMenu({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [pendingComposer, setPendingComposer] = useState<{ agentId: string; packet: string } | null>(null);
-  const [laterStage, setLaterStage] = useState<{ agentId: string; slot: string | null } | null>(null);
+  const [pendingComposer, setPendingComposer] = useState(false);
+  const [postStage, setPostStage] = useState<{ target: BriefTarget; slot: string | null; retry: boolean } | null>(null);
   const [historyAgent, setHistoryAgent] = useState<string | null>(null);
-  const [retryStage, setRetryStage] = useState<{ agentId: string } | null>(null);
-  const settleRef = useRef(false);
   const startedRef = useRef(false);
 
   const initializeNewSteer = normalizeInitializeNewSteer(
@@ -141,9 +142,13 @@ export function SteerMenu({
   const keepChatHistory =
     menuSettings.status === "ready" ? menuSettings.values.keepChatHistory === true : false;
 
-  // Destination composer for "place the brief in the composer"; while idle
-  // the hook watches this tab (harmless) so the call stays unconditional.
-  const [destComposer] = useComposers({ agentId: pendingComposer?.agentId ?? agentId });
+  const composerAgentId = postStage?.target.agentId ?? agentId;
+  const [destComposer] = useComposers({ agentId: composerAgentId });
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   const styles = useMemo(
     () => ({
@@ -206,88 +211,70 @@ export function SteerMenu({
     });
   };
 
-  // Places a staged packet into the destination composer once it is mounted.
-  // The composer of a fresh agent mounts shortly after the apply; when none
-  // appears within the grace period the brief is sent instead (fallback). The
-  // ref settles exactly one path, so a late composer cannot duplicate a send.
-  useEffect(() => {
-    if (!pendingComposer) return;
-    if (settleRef.current) return;
-    if (destComposer) {
-      settleRef.current = true;
-      const { agentId: target, packet } = pendingComposer;
-      const { method, text: staged } = stageComposerText(destComposer.prompt, packet);
-      void (async () => {
-        setBusy(true);
-        try {
-          if (method === "setPrompt") destComposer.setPrompt(staged);
-          else destComposer.insertText(staged);
-          await callBrief({ workspaceId, agentId: target, action: "dismiss" });
-          setNotice("Brief placed in the composer. It goes out with the next prompt.");
-          destComposer.focus().catch(() => {});
-        } catch (thrown) {
-          setError(thrown instanceof Error ? thrown.message : String(thrown));
-        } finally {
-          setBusy(false);
-          setPendingComposer(null);
-        }
-      })();
-      return;
-    }
-    const timer = setTimeout(() => {
-      if (settleRef.current) return;
-      settleRef.current = true;
-      const { agentId: target } = pendingComposer;
-      void (async () => {
-        setBusy(true);
-        try {
-          const sent = await callBrief({ workspaceId, agentId: target, action: "send" });
-          setNotice(
-            sent.delivered ? "No composer tab open. Brief sent instead." : sent.detail,
-          );
-        } catch (thrown) {
-          setError(thrown instanceof Error ? thrown.message : String(thrown));
-        } finally {
-          setBusy(false);
-          setPendingComposer(null);
-        }
-      })();
-    }, 5000);
-    return () => clearTimeout(timer);
-  }, [pendingComposer, destComposer, callBrief, workspaceId]);
-
-  const beginComposerStage = (target: string, packet: string): void => {
-    settleRef.current = false;
-    setPendingComposer({ agentId: target, packet });
+  const clearStage = (target: BriefTarget) => {
+    composerAttempts.delete(target.stageId);
+    setPostStage(null);
+    setFlow((current) => current?.kind === "staged" ? null : current);
   };
 
-  const onRetryDelivery = (target: string): void => {
+  const onPlaceBrief = (target: BriefTarget, automatic = false): void => {
+    setPendingComposer(false);
+    const composer = () => mounted.current ? composers({ agentId: target.agentId })[0] : undefined;
+    const attempt = composerAttempts.get(target.stageId) ?? {
+      claimId: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36)}`,
+      placed: false,
+      running: false,
+    };
+    if (attempt.running) return;
+    attempt.running = true;
+    composerAttempts.set(target.stageId, attempt);
     void run(async () => {
-      const sent = await callBrief({ workspaceId, agentId: target, action: "send" });
-      setRetryStage(null);
-      setNotice(sent.delivered ? "Brief sent." : sent.detail);
-      if (!sent.delivered) setLaterStage(null);
-    });
-  };
-
-  const onInitializeNow = (target: string): void => {
-    void run(async () => {
-      const sent = await callBrief({ workspaceId, agentId: target, action: "send" });
-      if (sent.delivered) {
-        setLaterStage(null);
-        setNotice("Brief sent.");
-      } else {
-        setNotice(sent.detail);
+      try {
+        await transferStagedBrief(callBrief, target, composer, attempt, automatic);
+        clearStage(target);
+        setNotice("Brief placed in the composer. It goes out with the next prompt.");
+        composer()?.focus().catch(() => {});
+      } finally {
+        attempt.running = false;
       }
     });
   };
 
-  const onDismissBrief = (target: string): void => {
+  useEffect(() => {
+    if (pendingComposer && postStage && destComposer && !busy) onPlaceBrief(postStage.target, true);
+    // The stage and composer availability determine when to start the transfer.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingComposer, postStage, destComposer, busy]);
+
+  const onInitializeNow = (target: BriefTarget): void => {
+    setPendingComposer(false);
     void run(async () => {
-      await callBrief({ workspaceId, agentId: target, action: "dismiss" });
-      setLaterStage(null);
-      setRetryStage(null);
-      setNotice("Staged brief dismissed.");
+      const sent = await callBrief({ ...target, action: "send" });
+      if (sent.delivered) clearStage(target);
+      setNotice(sent.detail);
+    });
+  };
+
+  const onDismissBrief = (target: BriefTarget): void => {
+    setPendingComposer(false);
+    void run(async () => {
+      const dismissed = await callBrief({ ...target, action: "dismiss" });
+      if (dismissed.dismissed) clearStage(target);
+      setNotice(dismissed.detail);
+    });
+  };
+
+  const onResolveTransfer = (target: BriefTarget, recoveryId: string, resolution: "placed" | "retry"): void => {
+    void run(async () => {
+      if (composerAttempts.get(target.stageId)?.running) throw new Error("The composer transfer is still running.");
+      const result = await callBrief({ ...target, action: "composer-resolve", recoveryId, resolution });
+      if (!result.resolved) throw new Error(result.detail);
+      if (resolution === "placed") clearStage(target);
+      else {
+        composerAttempts.delete(target.stageId);
+        setFlow({ kind: "staged", target });
+      }
+      setNotice(result.detail);
     });
   };
 
@@ -298,8 +285,8 @@ export function SteerMenu({
     tail: string | null;
     toAgentId: string;
     slot: string | null;
-    packet?: string;
-    staged?: boolean;
+    stageId?: string;
+    epoch?: number | null;
     delivered: boolean;
     deliveryError?: unknown;
   }): void => {
@@ -308,19 +295,10 @@ export function SteerMenu({
       setNotice(`${args.head}${tail}`);
       return;
     }
-    if (initializeNewSteer === "composer" && args.staged === true && args.packet) {
-      beginComposerStage(args.toAgentId, args.packet);
-      setNotice(`${args.head} Placing the brief in its composer…`);
-      return;
-    }
-    if (needsDeliveryRetry({ applied: true, delivered: args.delivered, staged: args.staged })) {
-      if (initializeNewSteer === "later") {
-        setLaterStage({ agentId: args.toAgentId, slot: args.slot });
-        setNotice(`${args.head} The brief is staged; initialize it from this menu or send it now.`);
-      } else {
-        setRetryStage({ agentId: args.toAgentId });
-        setNotice(`${args.head} The brief did not go out; retry the delivery.`);
-      }
+    if (args.stageId && args.epoch !== undefined) {
+      setPostStage({ target: { workspaceId, agentId: args.toAgentId, stageId: args.stageId, epoch: args.epoch }, slot: args.slot, retry: initializeNewSteer === "send" });
+      setPendingComposer(initializeNewSteer === "composer");
+      setNotice(args.head);
       return;
     }
     if (args.deliveryError) {
@@ -341,27 +319,9 @@ export function SteerMenu({
 
   const onConfirmCreate = (current: CreateFlow): void => {
     void run(async () => {
-      // The settings save between preview and apply makes staleness likely:
-      // re-preview and compare before writing anything.
-      const fresh = await callSteerAddPreview({ workspaceId });
-      if (fresh.fingerprint !== current.preview.fingerprint) {
-        setFlow({ kind: "create", preview: fresh });
-        setNotice("The preview changed. Review the new preview.");
-        return;
-      }
-      if (!fresh.fingerprint) {
-        throw new Error("The preview has no fingerprint. Review the preview again.");
-      }
-      if (configState.status !== "ready") {
-        throw new Error("Factory settings are not ready. Open the Factory settings and try again.");
-      }
-      const saved = await configState.save(fresh.values as FactorySettingsValues, fresh.revision);
-      if (!saved) {
-        throw new Error(
-          `Not saved: ${configState.saveError ?? "revision conflict"}. Review the preview again.`,
-        );
-      }
-      const added = await callSteerAdd({ workspaceId, slot: fresh.slot, fingerprint: fresh.fingerprint });
+      const preview = current.preview;
+      if (!preview.fingerprint) throw new Error("Choose an eligible steer before creating it.");
+      const added = await callSteerAdd({ workspaceId: preview.workspaceId, slot: preview.slot, fingerprint: preview.fingerprint, revision: preview.revision });
       setFlow(null);
       setNotice(
         `Steer ${added.slot} created (${added.provider}/${added.model}). ` +
@@ -408,12 +368,12 @@ export function SteerMenu({
       afterDelivery({
         head: `Steer ${applied.to} is now active (epoch ${applied.epoch}).`,
         tail: "The previous tab keeps its chat; it no longer coordinates.",
-        toAgentId: current.toAgentId,
+        toAgentId: applied.stagedTo ?? current.toAgentId,
         slot: current.to,
-        packet: applied.packet,
-        staged: applied.staged,
+        stageId: applied.stageId,
+        epoch: applied.epoch,
         delivered: applied.delivered,
-        deliveryError: applied.deliveryError,
+        deliveryError: applied.deliveryError ?? applied.stagingError,
       });
     });
   };
@@ -488,12 +448,12 @@ export function SteerMenu({
         tail: rewound
           ? "Earlier messages left this tab."
           : "The old tab keeps its chat; archive it in Paseo when done.",
-        toAgentId: toId,
+        toAgentId: applied.stagedTo ?? toId,
         slot: typeof applied.slot === "string" ? applied.slot : slot,
-        packet: applied.packet,
-        staged: applied.staged,
+        stageId: applied.stageId,
+        epoch: applied.epoch,
         delivered: applied.delivered,
-        deliveryError: applied.deliveryError,
+        deliveryError: applied.deliveryError ?? applied.stagingError,
       });
     });
   };
@@ -580,13 +540,15 @@ export function SteerMenu({
           tail: null,
           toAgentId: agentId,
           slot: self?.slot ?? null,
-          packet: applied.packet,
-          staged: applied.staged,
+          stageId: applied.stageId,
+          epoch: applied.epoch,
           delivered: applied.delivered === true,
           deliveryError: applied.deliveryError,
         });
       } else {
-        setRetryStage({ agentId });
+        if (applied.stageId && applied.epoch !== undefined) {
+          setPostStage({ target: { workspaceId, agentId, stageId: applied.stageId, epoch: applied.epoch }, slot: self?.slot ?? null, retry: true });
+        }
         setError(applied.detail);
       }
     });
@@ -609,7 +571,11 @@ export function SteerMenu({
   // --- Staged brief (this tab) ------------------------------------------------------
 
   const startStaged = (): void => {
-    setFlow({ kind: "staged" });
+    void run(async () => {
+      const brief = await callBrief({ workspaceId, agentId, action: "inspect" });
+      if (!brief.stageId || brief.epoch === undefined) throw new Error(brief.detail);
+      setFlow({ kind: "staged", target: { workspaceId, agentId, stageId: brief.stageId, epoch: brief.epoch }, recoveryId: brief.recoveryId });
+    });
   };
 
   // --- Auto-start ---------------------------------------------------------------
@@ -710,6 +676,18 @@ export function SteerMenu({
     >
       <Text style={selected ? styles.buttonText : styles.body}>{label}</Text>
     </Pressable>
+  );
+
+  const renderStagedBrief = (target: BriefTarget, slot: string | null = null, retry = false): ReactNode => (
+    <View style={{ gap: 4 }}>
+      <Text style={styles.body}>Brief staged{slot ? ` for Steer ${slot}` : " for this tab"}.</Text>
+      {pendingComposer && !destComposer ? <Text style={styles.label}>Waiting for the destination composer…</Text> : null}
+      {actionButton("place-composer", "Place in composer", "Place the staged brief in the composer", () => onPlaceBrief(target))}
+      {actionButton("init-now", retry ? STEER_MENU_LABELS.retryDelivery : STEER_MENU_LABELS.initializeNow,
+        "Send the staged brief now", () => onInitializeNow(target))}
+      {actionButton("dismiss", STEER_MENU_LABELS.dismissBrief, "Dismiss the staged brief",
+        () => onDismissBrief(target), { primary: false })}
+    </View>
   );
 
   const renderFlow = (): ReactNode => {
@@ -845,19 +823,15 @@ export function SteerMenu({
         </View>
       );
     }
+    const { target, recoveryId } = flow;
+    if (!recoveryId) return renderStagedBrief(target);
     return (
       <View style={{ gap: 4 }}>
-        <Text style={styles.body}>A brief is staged for this tab.</Text>
-        {actionButton("init-now", STEER_MENU_LABELS.initializeNow, "Send the staged brief now", () =>
-          onInitializeNow(agentId),
-        )}
-        {actionButton(
-          "dismiss",
-          STEER_MENU_LABELS.dismissBrief,
-          "Dismiss the staged brief",
-          () => onDismissBrief(agentId),
-          { primary: false },
-        )}
+        <Text style={styles.body}>A composer transfer is awaiting confirmation. Close the menu and check the draft after the previous attempt has stopped.</Text>
+        {actionButton("confirm-placed", "Brief is in the draft", "Confirm that the brief is in the composer draft",
+          () => onResolveTransfer(target, recoveryId, "placed"))}
+        {actionButton("release-transfer", "Brief is missing from the draft", "Release the transfer after checking the composer draft",
+          () => onResolveTransfer(target, recoveryId, "retry"), { primary: false })}
       </View>
     );
   };
@@ -960,47 +934,7 @@ export function SteerMenu({
     <ScrollView>
       <View style={styles.box}>
         {renderFlow()}
-        {pendingComposer ? (
-          <Text style={styles.label}>Placing the brief in the composer…</Text>
-        ) : null}
-        {laterStage ? (
-          <View style={{ gap: 4 }}>
-            <Text style={styles.body}>
-              Brief staged{laterStage.slot ? ` for Steer ${laterStage.slot}` : ""}. Initialize it from
-              this menu or send it now.
-            </Text>
-            {actionButton(
-              "init-now",
-              STEER_MENU_LABELS.initializeNow,
-              "Send the staged brief now",
-              () => onInitializeNow(laterStage.agentId),
-            )}
-            {actionButton(
-              "dismiss",
-              STEER_MENU_LABELS.dismissBrief,
-              "Dismiss the staged brief",
-              () => onDismissBrief(laterStage.agentId),
-              { primary: false },
-            )}
-          </View>
-        ) : null}
-        {retryStage ? (
-          <View style={{ gap: 4 }}>
-            {actionButton(
-              "retry",
-              STEER_MENU_LABELS.retryDelivery,
-              "Retry the brief delivery",
-              () => onRetryDelivery(retryStage.agentId),
-            )}
-            {actionButton(
-              "dismiss-retry",
-              STEER_MENU_LABELS.dismissBrief,
-              "Dismiss the staged brief",
-              () => onDismissBrief(retryStage.agentId),
-              { primary: false },
-            )}
-          </View>
-        ) : null}
+        {postStage ? renderStagedBrief(postStage.target, postStage.slot, postStage.retry) : null}
         {historyAgent ? (
           <Pressable
             accessibilityRole="button"

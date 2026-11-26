@@ -12,6 +12,7 @@ import {
   QUOTA_DEFAULTS,
   isDrainMarkerActive as coreIsDrainMarkerActive,
 } from "./defaults.mjs";
+import { openTurnOf } from "./auto-checkpoint.js";
 
 /** Agent metadata key carrying the immutable worker facts (plugin-owned). */
 export const WORKER_METADATA_KEY = "wsf.worker";
@@ -243,6 +244,7 @@ export type SteerWakeResponse = "answered" | "busy" | "unanswered";
 export function steerWakeResponse(args: {
   entry: {
     openTurnId?: unknown;
+    lastTurnId?: unknown;
     lastTurnEndedAt?: unknown;
     outcome?: unknown;
   } | null | undefined;
@@ -254,7 +256,7 @@ export function steerWakeResponse(args: {
   const entry = args.entry ?? null;
   const endMs = typeof entry?.lastTurnEndedAt === "string" ? Date.parse(entry.lastTurnEndedAt) : NaN;
   if (Number.isFinite(endMs) && endMs > wakeMs && entry?.outcome === "completed") return "answered";
-  if (entry?.openTurnId !== null && entry?.openTurnId !== undefined) return "busy";
+  if (openTurnOf(entry) !== null) return "busy";
   if (args.status === "running" || args.status === "initializing") return "busy";
   return "unanswered";
 }

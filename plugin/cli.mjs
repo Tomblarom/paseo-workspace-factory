@@ -8,7 +8,7 @@ import { FACTORY_PLUGIN_ID } from './server/core/findings.mjs';
 const USAGE = `Usage: paseo-factory <command> [options]
   status [scope] [--json]
   resume [scope] [--agent <id>] [--json]   cold-start brief: task, next step, git, workers
-  resume [scope] --agent <worker> --apply [--json]   continue an interrupted worker via the plugin
+  resume [scope] --agent <worker> --apply [--json]   continue an interrupted or partial worker via the plugin
   checkpoint [scope] --task <text> [--test <text>]... [--blocker <text>]... [--next <text>]
   checkpoint [scope] --from-agent <steer-id> [--next <text>]   take the CHECKPOINT block of its last answer
   switch [scope] --to <slot> [--apply] [--no-send] [--wait] [--notify-previous] [--language en|de]
@@ -194,14 +194,15 @@ export async function runCli(argv = process.argv.slice(2), { connectRpc = connec
         const status = await client.call('factory.status', { ...base, ...(!scope && targetAgent ? { agentId: targetAgent } : {}) });
         noteAlias(status, scope, err);
         if (!values.agent || !(status.workers ?? []).some((w) => w.id === values.agent)) {
-          throw new Error('resume --apply needs --agent <interrupted worker id>');
+          throw new Error('resume --apply needs --agent <worker id> from the scope');
         }
         const applied = await client.call('factory.resume.apply', { workspaceId: status.workspace.id, agentId: values.agent });
         out(values.json ? JSON.stringify(applied, null, 2) : need(applied, 'factory.resume.apply', 'detail'));
         if (applied.status === 'blocked') setExitCode(1);
         return;
       }
-      const res = await client.call('factory.resume', { ...base, ...(targetAgent ? { agentId: targetAgent } : {}) });
+      const res = await client.call('factory.resume', { ...base, ...(targetAgent ? { agentId: targetAgent } : {}),
+        ...(agentId && agentId !== targetAgent ? { callerId: agentId } : {}) });
       noteAlias(res, scope, err);
       if (values.json) {
         return out(JSON.stringify({

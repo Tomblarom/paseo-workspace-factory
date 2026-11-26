@@ -1,10 +1,11 @@
 // Central factory configuration: structural validation and validation
 // against the live provider catalog. The effective config is built from the
 // plugin settings only (see plugin/server/config.ts); there is no config file.
-// Roles never carry provider data; slots only reference a named profile.
+// Presets select future models. Each live steer keeps its coordination role.
 import { isAbsolute } from 'node:path';
 import { KNOWN_UNSUPPORTED, knownUnsupportedReason } from '../../shared/defaults.mjs';
 import { profilePool } from './quota.mjs';
+import { LABEL } from './paseo.mjs';
 
 export { KNOWN_UNSUPPORTED };
 
@@ -61,6 +62,14 @@ export function isAdvisorSlot(config, slot) {
   return typeof name === 'string' && isAdvisorProfile(config, name);
 }
 
+/** A holder keeps its coordination role when its title, model or host preset changes. */
+export function isAdvisorSteer(config, labels, metadata = null) {
+  const role = labels?.[LABEL.steerRole] ?? metadata?.[LABEL.steerRole];
+  if (role !== undefined) return role !== 'coordinator';
+  const slot = labels?.[LABEL.slot];
+  return isAdvisorSlot(config, slot) || config?.legacyAdvisorSlots?.includes(slot) === true;
+}
+
 /**
  * True when workers of this profile must only get sanitized technical tasks.
  * An explicit boolean wins; otherwise `muse` providers default to sensitive
@@ -70,10 +79,10 @@ export function isSensitiveProfile(config, name) {
   const profile = config?.profiles?.[name];
   if (!profile || typeof profile !== 'object') return false;
   if (typeof profile.sensitive === 'boolean') return profile.sensitive;
-  return profile.provider === 'muse';
+  return String(profile.provider ?? '').trim().toLowerCase() === 'muse';
 }
 
-/** True when the slot's profile is sensitive (displayed, never blocked). */
+/** True when the slot's profile is sensitive. */
 export function isSensitiveSlot(config, slot) {
   const name = config?.steers?.slots?.[slot];
   return typeof name === 'string' && isSensitiveProfile(config, name);
@@ -86,9 +95,28 @@ export function isSensitiveSlot(config, slot) {
  * hard-coded behavior, now config-driven.
  */
 export function providerIsSensitive(config, provider) {
-  const matches = Object.entries(config?.profiles ?? {}).filter(([, p]) => p?.provider === provider);
-  if (!matches.length) return provider === 'muse';
+  const key = String(provider ?? '').trim().toLowerCase();
+  const matches = Object.entries(config?.profiles ?? {}).filter(([, p]) => String(p?.provider ?? '').trim().toLowerCase() === key);
+  if (!matches.length) return key === 'muse';
   return matches.some(([name]) => isSensitiveProfile(config, name));
+}
+
+/** Factory packets have unverified provenance, even when addressed to their source tab. */
+export function advisorBriefAdmission(config, agent) {
+  const advisor = agent?.advisor === true || isAdvisorSteer(config, agent?.labels, agent?.metadata) ||
+    isAdvisorSteer(null, null, agent?.metadata);
+  return advisor ? { allowed: false, reason: 'advisor brief requires verified sanitized technical context; Factory packet provenance is unverified' } :
+    { allowed: true, reason: null };
+}
+
+export function steerPrivacyAdmission(config, agent, repoPublic) {
+  const provider = String(agent?.provider ?? '').trim().toLowerCase();
+  if (!provider) return { allowed: false, reason: 'runtime provider is unknown; inspect the target before delivery' };
+  if (providerIsSensitive(config, provider)) {
+    if (repoPublic !== true) return { allowed: false, reason: 'sensitive runtime requires a public scope; visibility is private or unknown' };
+    return { allowed: false, reason: 'sensitive runtime requires a verified sanitized brief; public repository visibility does not sanitize delivery' };
+  }
+  return advisorBriefAdmission(config, agent);
 }
 
 /** Slot letters in priority order (A first, then B, C, …). */

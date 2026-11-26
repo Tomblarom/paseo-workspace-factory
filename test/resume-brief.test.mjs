@@ -10,6 +10,7 @@ import {
 import { updateAgentEntry, flagCheckpointInterrupted, AGENTS_KEY, clipText } from '../plugin/server/core/agent-state.mjs';
 import { LABEL, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
 import { CHECKPOINT_KEY } from '../plugin/server/core/steer.mjs';
+import { outgoingAssignmentRecords } from '../plugin/server/core/discovery.mjs';
 
 const REPO = 'example-owner/example-repo';
 const NOW = new Date('2026-11-23T12:00:00.000Z').getTime();
@@ -24,7 +25,7 @@ function addWorkspace(world, { metadata }) {
   return ws;
 }
 function addAgent(world, fields) {
-  const agent = { id: `agent-${++world.seq}`, status: 'idle', archivedAt: null, labels: {}, ...fields };
+  const agent = { id: `agent-${++world.seq}`, provider: 'codex', model: 'm', status: 'idle', archivedAt: null, labels: {}, ...fields };
   world.agents.push(agent);
   return agent;
 }
@@ -132,6 +133,39 @@ test('brief handles missing checkpoint, git and notes gracefully', () => {
   assert.match(brief, /Git: state unreadable/);
   assert.match(brief, /Workers: none\./);
   assert.match(brief, /Open hub items: none\./);
+});
+
+test('brief preserves outgoing work and treats delivered reports as unverified, not replayable', () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world, { checkpoint: { task: 'Coordinate', tests: [], blockers: [], next: 'a'.repeat(500) + ' verify result', epoch: 3 } });
+  addWorkspace(world, { metadata: {
+    [METADATA_KEY]: { scope: { id: 'example/source' } },
+    [CHECKPOINT_KEY]: { task: 'Build feature' },
+    'wsf.assignment': { by: steers.A.id, requesterWorkspaceId: ws.id, reportActionId: 'report-id',
+      reportText: '[Factory report] Build feature done', reportStatus: 'done', reportedAt: hoursAgo(1) },
+  } });
+  const records = outgoingAssignmentRecords(world.workspaces, ws.id, [steers.A.id]);
+  const brief = buildResumeBrief(statusOf(world, discoveryOf(world)), { agentId: steers.B.id, assignments: records });
+  assert.match(brief, /example\/source.*report delivered; processing unverified/);
+  assert.match(brief, /do not blindly replay/);
+  assert.match(brief, /verify result/);
+  assert.ok(brief.length <= BRIEF_BUDGET);
+});
+
+test('brief without a checkpoint still surfaces recorded outgoing work', () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  addWorkspace(world, { metadata: {
+    [METADATA_KEY]: { scope: { id: 'example/source' } },
+    [CHECKPOINT_KEY]: { task: 'Build feature' },
+    'wsf.assignment': { by: steers.A.id, requesterWorkspaceId: ws.id, reportActionId: 'report-id',
+      reportText: 'Build feature done', reportedAt: hoursAgo(1) },
+  } });
+  const records = outgoingAssignmentRecords(world.workspaces, ws.id, [steers.A.id]);
+  const brief = buildResumeBrief(statusOf(world, discoveryOf(world)), { agentId: steers.B.id, assignments: records });
+  assert.match(brief, /Inspect the outgoing assignment records/);
+  assert.match(brief, /example\/source.*report delivered; processing unverified/);
+  assert.match(brief, /Build feature done/);
 });
 
 test('brief shows only the caller’s current fresh recommendation', () => {
@@ -337,7 +371,7 @@ test('clipText bounds stored fields', () => {
 test('writeCheckpoint records source fields and clears interruption', async () => {
   const world = makeWorld();
   const ws = addWorkspace(world, { metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1 }, [CHECKPOINT_KEY]: { task: 'old', interrupted: { agentId: 'a', at: 't' } } } });
-  world.agents.push({ id: 'agent-1', labels: { [LABEL.repo]: REPO, [LABEL.role]: 'steer', [LABEL.slot]: 'A' }, workspaceId: ws.id });
+  world.agents.push({ id: 'agent-1', title: 'Steer A', labels: { [LABEL.repo]: REPO, [LABEL.role]: 'steer', [LABEL.slot]: 'A' }, workspaceId: ws.id });
   const discovery = { forkName: REPO, mainWorkspace: structuredClone(ws), steers: { labelled: [{ id: 'agent-1', labels: { [LABEL.slot]: 'A' }, workspaceId: ws.id }], legacy: [] }, workers: [], providers: [] };
   const cp = await writeCheckpoint({ client: fakeClient(world), discovery, task: 'new', lock: noLock, now: () => new Date('2026-11-23T12:00:00.000Z') });
   assert.deepEqual(cp, { task: 'new', tests: [], blockers: [], next: null, epoch: 1, updatedAt: '2026-11-23T12:00:00.000Z', source: 'manual', agentId: null, turnId: null, capturedAt: '2026-11-23T12:00:00.000Z', interrupted: null });
@@ -350,7 +384,7 @@ test('writeCheckpoint records source fields and clears interruption', async () =
 test('writeCheckpoint with source auto never clears the interrupted flag', async () => {
   const world = makeWorld();
   const ws = addWorkspace(world, { metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1 }, [CHECKPOINT_KEY]: { task: 'old', interrupted: { agentId: 'a', at: 't' } } } });
-  world.agents.push({ id: 'agent-1', labels: { [LABEL.repo]: REPO, [LABEL.role]: 'steer', [LABEL.slot]: 'A' }, workspaceId: ws.id });
+  world.agents.push({ id: 'agent-1', title: 'Steer A', labels: { [LABEL.repo]: REPO, [LABEL.role]: 'steer', [LABEL.slot]: 'A' }, workspaceId: ws.id });
   const discovery = { forkName: REPO, mainWorkspace: structuredClone(ws), steers: { labelled: [{ id: 'agent-1', labels: { [LABEL.slot]: 'A' }, workspaceId: ws.id }], legacy: [] }, workers: [], providers: [] };
   const kept = await writeCheckpoint({ client: fakeClient(world), discovery, task: 'auto', source: 'auto', agentId: 'agent-1', turnId: 'turn-9', lock: noLock });
   assert.deepEqual(kept.interrupted, { agentId: 'a', at: 't' });
@@ -391,7 +425,7 @@ test('withWorkspaceLock runs under the workspace lock name', async () => {
 
 // ------------------------------------------------- switch/fresh integration
 
-test('switch handoff carries the brief only when interrupted', async () => {
+test('switch handoff carries a single brief for interruptions or recorded assignments', async () => {
   const { switchSteer: runSwitch } = await import('../plugin/server/core/steer.mjs');
   const world = makeWorld();
   provisioned(world, {
@@ -400,7 +434,8 @@ test('switch handoff carries the brief only when interrupted', async () => {
   });
   const dry = await runSwitch({ client: fakeClient(world), discovery: discoveryOf(world), toSlot: 'B', git: fakeGit({}), lock: noLock, promptOptions: { factoryRoot: '/srv/factory' } });
   assert.match(dry.packet, /Previous steer was interrupted at .*; verify git state before continuing\./);
-  assert.match(dry.packet, /--- resume brief ---/);
+  assert.equal((dry.packet.match(/Task checkpoint/g) ?? []).length, 1);
+  assert.match(dry.packet, /Resume brief for/);
   assert.match(dry.packet, /epoch 4 · active steer B/);
   assert.match(dry.packet, /You are the active steer of this scope/);
   assert.doesNotMatch(dry.packet, /You are not active/);
@@ -411,6 +446,13 @@ test('switch handoff carries the brief only when interrupted', async () => {
   const plain = await runSwitch({ client: fakeClient(clean), discovery: discoveryOf(clean), toSlot: 'B', git: fakeGit({}), lock: noLock, promptOptions: { findingsInPrompts: false } });
   assert.ok(!plain.packet.includes('resume brief'));
   assert.doesNotMatch(plain.packet, /FINDINGS\.md/);
+  const assignments = [{ scopeId: 'example/source', workspaceId: 'source', task: 'build', reportText: 'done',
+    actionId: 'report-id', reportedAt: hoursAgo(1) }];
+  const withAssignment = await runSwitch({ client: fakeClient(clean), discovery: { ...discoveryOf(clean), assignmentRecords: assignments },
+    toSlot: 'B', git: fakeGit({}), lock: noLock, promptOptions: { findingsInPrompts: false } });
+  assert.match(withAssignment.packet, /example\/source.*report delivered; processing unverified/);
+  assert.equal((withAssignment.packet.match(/Task checkpoint/g) ?? []).length, 1);
+  assert.doesNotMatch(withAssignment.packet, /Previous steer was interrupted/);
 });
 
 test('fresh preview carries the brief when interrupted', async () => {

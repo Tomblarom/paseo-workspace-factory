@@ -120,13 +120,28 @@ test('resolveProfile for steers filters by advisor tag and avoids live duplicate
   const limited = PROVIDERS.map((e) => (e.provider === 'codex' ? { ...e, models: [] } : e));
   const skippedAdvisor = resolveProfile(config, limited, steerFallbackList(config, 'A'), { role: 'steer', advisorSlot: false });
   assert.equal(skippedAdvisor.profile.name, 'agy', 'non-advisor slot skips the advisor profile muse');
-  const advisorSlot = resolveProfile(config, PROVIDERS, steerFallbackList(config, 'B'), { role: 'steer', advisorSlot: true });
+  const advisorSlot = resolveProfile(config, PROVIDERS, steerFallbackList(config, 'B'), { role: 'steer', advisorSlot: true, repoPublic: true });
   assert.equal(advisorSlot.profile.name, 'muse', 'advisor slot takes its advisor profile');
-  const used = resolveProfile(CONFIG, PROVIDERS, steerFallbackList(CONFIG, 'B'), { role: 'steer', advisorSlot: false, usedProfiles: ['agy'] });
+  const used = resolveProfile(CONFIG, PROVIDERS, steerFallbackList(CONFIG, 'B'), { role: 'steer', advisorSlot: false, usedProfiles: ['agy'], repoPublic: true });
   assert.equal(used.profile.name, 'muse', 'the slot profile itself is exempt from duplicate avoidance');
-  const usedFallback = resolveProfile(CONFIG, limited, steerFallbackList(CONFIG, 'A'), { role: 'steer', advisorSlot: false, usedProfiles: ['muse'] });
+  const usedFallback = resolveProfile(CONFIG, limited, steerFallbackList(CONFIG, 'A'), { role: 'steer', advisorSlot: false, usedProfiles: ['muse'], repoPublic: true });
   assert.equal(usedFallback.profile.name, 'agy', 'fallback entries used by a live steer are skipped');
   assert.ok(usedFallback.skipped.some((s) => /already used by a live steer/.test(s.reason)));
+});
+
+test('sensitive steer and advisor profiles require public scope evidence', () => {
+  for (const advisor of [false, true]) {
+    const config = structuredClone(CONFIG);
+    config.profiles.muse.advisor = advisor;
+    for (const repoPublic of [true, false, null, undefined]) {
+      const { profile, skipped } = resolveProfile(config, PROVIDERS, ['muse'], { role: 'steer', advisorSlot: advisor, repoPublic });
+      assert.equal(profile?.name ?? null, repoPublic === true ? 'muse' : null);
+      if (repoPublic !== true) assert.match(skipped[0].reason, /public scope required/);
+    }
+  }
+  const open = structuredClone(CONFIG);
+  open.profiles.muse.sensitive = false;
+  assert.equal(resolveProfile(open, PROVIDERS, ['muse'], { role: 'steer', repoPublic: null }).profile.name, 'muse');
 });
 
 test('resolveProfile reports unknown profiles and empty lists without a pick', () => {

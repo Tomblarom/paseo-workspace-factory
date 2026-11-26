@@ -533,6 +533,33 @@ test("a bound refresh rewinds, applies, verifies and stages the brief", async ()
   assert.equal(entry.settingsBaseline.thinking, "low");
 });
 
+test("settings refresh holds a private brief when the route becomes an advisor after rewind", async () => {
+  const world = makeWorld();
+  const { ws, steer } = provisioned(world, { entry: { lastTurnEndedAt: iso(NOW - 5 * MIN) } });
+  const client = fakeClient(world);
+  const preview = await settings.previewSteerSettings(client, { workspaceId: ws.id, agentId: steer.id, thinking: "low" }, depsOf());
+  const rewindClient = rewindClientFor(world);
+  const applied = await settings.applySteerSettings(client, {
+    workspaceId: ws.id, agentId: steer.id, fingerprint: preview.fingerprint,
+    route: "refresh", thinking: "low", deliver: "send",
+  }, depsOf({
+    configClient: configClientFor(world),
+    buildBrief: async () => "SYNTHETIC_PRIVATE_ACCOUNT_LOG",
+    rewindClient: async () => {
+      const daemon = await rewindClient();
+      return { ...daemon, rewindAgent: async (...args) => {
+        await daemon.rewindAgent(...args);
+        steer.metadata = { [LABEL.steerRole]: "advisor" };
+      } };
+    },
+  }));
+  assert.equal(applied.delivered, false);
+  assert.match(applied.deliveryError, /advisor brief requires verified/);
+  assert.doesNotMatch(JSON.stringify(applied), /SYNTHETIC_PRIVATE_/);
+  assert.equal(entryOf(world, ws.id, steer.id).action.packet, "SYNTHETIC_PRIVATE_ACCOUNT_LOG");
+  assert.equal(world.calls.some(([method]) => ["agent.send", "daemon.sendMessage"].includes(method)), false);
+});
+
 test("a bound refresh that cannot rewind fails without a new agent and keeps the brief", async () => {
   const world = makeWorld();
   const { ws, steer } = provisioned(world, { entry: { lastTurnEndedAt: iso(NOW - 5 * MIN) } });

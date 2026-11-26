@@ -22,10 +22,11 @@ export type QuotaPoolView = {
 
 export type ZeroSubAccountView = {
   account: string;
+  label?: string;
   family: string;
   usedPct: number | null;
   resetsAt: string | null;
-  state: QuotaState;
+  state: QuotaState | "unknown";
 };
 
 export type QuotaView = {
@@ -117,14 +118,13 @@ export function shapeQuotaView(args: {
       const usedPct = freshMaxUsedPct(account, nowMs);
       return {
         account: account.id,
+        ...(account.label ? { label: account.label } : {}),
         family: typeof account.family === "string" ? account.family : "",
         usedPct,
         resetsAt: earliestResetOf([account], { now: nowMs }),
         state: accountExhausted(account, { exhaustedPct, now: nowMs })
           ? "exhausted"
-          : (usedPct ?? -1) >= warnPct
-            ? "warn"
-            : "ok",
+          : usedPct === null ? "unknown" : usedPct >= warnPct ? "warn" : "ok",
       };
     });
   const pools: QuotaPoolView[] = Object.entries(snapshotEntries(args.snapshot))

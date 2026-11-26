@@ -36,12 +36,14 @@ test("migration v1 to v2: workerDefault becomes workerPriority, sensitive from p
   // The migrated document satisfies the v2 schema and validation.
   const parsed = factoryConfigSettings.schema.parse(migrated);
   assert.deepEqual(validateFactorySettings(parsed), []);
-  assert.equal(factoryConfigSettings.version, 2);
+  assert.equal(factoryConfigSettings.version, 3);
 });
 
-test("migration leaves v2 and non-objects alone; defaults parse", () => {
+test("migration retains a v2 snapshot, leaves v3 and non-objects alone; defaults parse", () => {
   const v2 = { profiles: {}, workerPriority: ["x"] };
-  assert.equal(migrateFactoryConfig(v2, 2), v2);
+  const v3 = migrateFactoryConfig(v2, 2);
+  assert.deepEqual(v3.legacySnapshot, { version: 2, values: v2 });
+  assert.equal(migrateFactoryConfig(v3, 3), v3);
   assert.equal(migrateFactoryConfig(null, 1), null);
   const defaults = factoryConfigSettings.schema.parse({});
   assert.deepEqual(defaults.workerPriority, ["factory-default"]);
@@ -134,6 +136,20 @@ test("factory.models.list: priority rows with availability and selection", async
   assert.match(text, /sensitive/);
   await listModels({}, f.ctx, f.loader, f.hostSettings, Date.now, async () => null);
   assert.equal(f.calls(), 1, "catalog is cached for 60 s");
+});
+
+test("factory.models.list renders role preferences in their configured order", async () => {
+  const doc = v2doc();
+  doc.steerPriority = ["anti", "codex"];
+  doc.profiles.muse.advisor = true;
+  doc.advisorPriority = ["muse"];
+  const f = fixture(doc);
+  const list = await listModels({}, f.ctx, f.loader, f.hostSettings, Date.now, async () => null);
+  assert.deepEqual(list.steerPreferences.map((profile) => profile.profile), ["anti", "codex"]);
+  assert.deepEqual(list.advisorPreferences.map((profile) => profile.profile), ["muse"]);
+  const text = formatModelList("steer", list);
+  assert.match(text, /Steer priority:\n  1\.  ✓ anti[\s\S]*Advisor priority:\n  1\.  ✗ muse/);
+  assert.doesNotMatch(text, /Steer slots/);
 });
 
 test("factory.models.list: an exhausted ZeroSub family is not selected and shows the pick reason", async () => {

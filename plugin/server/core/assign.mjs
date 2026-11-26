@@ -4,7 +4,8 @@
 // switch, an assignment changes neither the active steer nor the epoch, and
 // sending only queues a message. Retired scopes refuse.
 import { CHECKPOINT_KEY, checkpointRules, formatCheckpointBlock, steerStatus } from './steer.mjs';
-import { liveSlotHolders } from './discovery.mjs';
+import { discoveredRepoPublic, liveSlotHolders } from './discovery.mjs';
+import { steerPrivacyAdmission } from './config.mjs';
 import { METADATA_KEY } from './paseo.mjs';
 import { withLock, workspaceLockName } from './lock.mjs';
 import { discoveryScopeAliases, guardScope } from './scope-guard.mjs';
@@ -26,7 +27,8 @@ const none = 'none recorded';
 /** Deterministic assignment packet (pass the same `now` so preview == delivery). */
 export function buildAssignment(status, { slot, steerId, epoch, task, tests, blockers, next, workerModel = null, config = null, quotaSnapshot = null, quotaWarnPct = QUOTA_DEFAULTS.warnPct, zerosub = null, reportTo = null, promptOptions, now = Date.now() }) {
   const findings = findingsPassage(promptOptions);
-  const quotaLine = formatQuotaLine(config, quotaSnapshot, { warnPct: quotaWarnPct, zerosub, now });
+  const target = liveSlotHolders(status.steers, slot).find((steer) => steer.id === steerId);
+  const quotaLine = target && formatQuotaLine(config, quotaSnapshot, { agent: target, warnPct: quotaWarnPct, zerosub, now });
   const lines = [
     `Assignment for ${status.repo} (epoch ${epoch}).`,
     `Active steer ${slot} (${steerId}): this assignment replaces the recorded checkpoint.`,
@@ -53,7 +55,7 @@ export function buildAssignment(status, { slot, steerId, epoch, task, tests, blo
  * --expect-epoch from the preview), write, read back, release; delivery
  * happens after the lock is released.
  */
-export async function assignScope({ client, discovery, task, tests = [], blockers = [], next = null, apply = false, send = true, expectEpoch, assignedBy = null, requester = null, reportTo = assignedBy, lock = withLock, now = () => new Date(), workerModel = null, config = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, zerosub = null, promptOptions }) {
+export async function assignScope({ client, discovery, task, tests = [], blockers = [], next = null, apply = false, send = true, expectEpoch, assignedBy = null, requester = null, reportTo = assignedBy, lock = withLock, now = () => new Date(), workerModel = null, config = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, zerosub = null, promptOptions, admitTarget = null }) {
   const status = steerStatus(discovery);
   if (!status.workspace || !status.state) throw new AssignRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
@@ -73,7 +75,7 @@ export async function assignScope({ client, discovery, task, tests = [], blocker
 
   const fields = { task: task.trim(), tests, blockers, next: next?.trim() || null };
   const report = typeof reportTo === 'string' && reportTo.trim() && reportTo.trim() !== target.id ? reportTo.trim() : null;
-  const packet = buildAssignment(status, { slot: target.slot, steerId: target.id, epoch: expected.epoch, workerModel, config, quotaSnapshot, quotaWarnPct, zerosub, reportTo: report, promptOptions, ...fields });
+  const packet = buildAssignment(status, { slot: target.slot, steerId: target.id, epoch: expected.epoch, workerModel, config, quotaSnapshot, quotaWarnPct, zerosub, reportTo: report, promptOptions, now: now().getTime(), ...fields });
   const result = {
     scope: status.repo, epoch: expected.epoch, slot: target.slot, steerId: target.id,
     domain: status.domain ?? null, domainChildren: [...(status.domainChildren ?? [])],
@@ -107,6 +109,12 @@ export async function assignScope({ client, discovery, task, tests = [], blocker
   result.applied = true;
   if (send) {
     try {
+      const live = (await client.agents.ref(target.id).refresh())?.agent;
+      if (live?.id !== target.id || live.workspaceId !== status.workspace.id || live.archivedAt || live.background === true) {
+        throw new AssignRefused('The assignment target is no longer available.');
+      }
+      const admission = admitTarget ? await admitTarget(live) : steerPrivacyAdmission(config, live, discoveredRepoPublic(discovery));
+      if (!admission.allowed) throw new AssignRefused(admission.reason);
       await client.agents.ref(target.id).send(packet);
       result.delivered = true;
     } catch (error) {

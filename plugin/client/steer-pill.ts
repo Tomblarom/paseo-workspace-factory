@@ -72,6 +72,7 @@ export interface SteerPillRow {
   liveStatus: string | null;
   advisor: boolean;
   active: boolean;
+  activationEpoch: number | null;
   permissionNeeded: boolean;
   stagedBrief: boolean;
   successor: string | null;
@@ -178,6 +179,7 @@ export function steerRowsOf(event: unknown): SteerPillRow[] {
       liveStatus: textOrNull(row.liveStatus),
       advisor: row.advisor === true,
       active: row.active === true,
+      activationEpoch: finiteOrNull(row.activationEpoch),
       permissionNeeded: row.permissionNeeded === true,
       stagedBrief: row.stagedBrief === true,
       successor: textOrNull(row.successor),

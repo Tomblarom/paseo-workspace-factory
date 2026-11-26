@@ -117,6 +117,14 @@ test("handover reasons cover active, advisor, retired and ambiguous rows", () =>
   for (const t of targets) assert.equal(t.eligible, false);
 });
 
+test("retired rows do not make a live destination ambiguous", () => {
+  const targets = menu.handoffTargets([
+    self(), row("old", { slot: "B", state: "retired" }), row("new", { slot: "B" }),
+  ], "steer-a");
+  assert.equal(targets.find((target) => target.agentId === "new").eligible, true);
+  assert.equal(targets.find((target) => target.agentId === "old").reason, "retired");
+});
+
 test("handover reasons cover busy targets and pending permissions", () => {
   const targets = menu.handoffTargets(
     [
@@ -260,22 +268,6 @@ test("the setting normalizes to send, composer or later (default composer)", () 
   assert.equal(menu.normalizeInitializeNewSteer("at-once"), "composer");
   assert.equal(menu.normalizeInitializeNewSteer(null), "composer");
   assert.equal(menu.INITIALIZE_NEW_STEER_DEFAULT, "composer");
-});
-
-test("each Initialize new steer option resolves, with a send fallback", () => {
-  // Send the brief at once: the server sends.
-  assert.equal(menu.resolveDelivery("send", { composerMounted: true }), "send");
-  assert.equal(menu.resolveDelivery("send", { composerMounted: false }), "send");
-  // Place the brief in the composer.
-  assert.equal(menu.resolveDelivery("composer", { composerMounted: true }), "composer");
-  // Without a mounted client the composer option falls back to sending.
-  assert.equal(menu.resolveDelivery("composer", { composerMounted: false }), "send");
-  // Leave the composer empty for the steer menu.
-  assert.equal(menu.resolveDelivery("later", { composerMounted: true }), "later");
-  assert.equal(menu.resolveDelivery("later", { composerMounted: false }), "later");
-  // Unknown values take the default (composer), including its fallback.
-  assert.equal(menu.resolveDelivery("at-once", { composerMounted: true }), "composer");
-  assert.equal(menu.resolveDelivery("at-once", { composerMounted: false }), "send");
 });
 
 test("composer staging replaces an empty prompt and appends to a draft", () => {
@@ -428,6 +420,26 @@ test("the menu lists actions with a handover submenu and a settings item", () =>
   assert.equal(settingsItem.title, "Change settings…");
 });
 
+test("activation offers the own standby at its observed epoch, and an active receipt offers retry", () => {
+  const standby = row("steer-b", { slot: "B", activationEpoch: 3 });
+  const activation = (own, others = []) => menu.describeSteerMenu(own, [own, ...others], {
+    keepChatHistory: false, observedChanged: false, revertAllowed: false,
+  }).find((entry) => entry.action === "activate");
+  assert.deepEqual(activation(standby, [self()]), {
+    kind: "item", id: "activate", title: "Activate Steer", icon: "ArrowRight", action: "activate", disabled: false, activationEpoch: 3,
+  });
+  assert.equal(activation(self(), [standby]), undefined);
+  assert.equal(activation({ ...standby, advisor: true }), undefined);
+  assert.equal(activation({ ...standby, state: "retired" }), undefined);
+  assert.equal(activation({ ...standby, scopeId: null }), undefined);
+  assert.equal(activation(standby, [row("duplicate-b", { slot: "B" })]).disabled, true);
+  assert.equal(activation({ ...standby, permissionNeeded: true }).disabled, true);
+  assert.equal(activation({ ...standby, active: true, state: "waiting" }).title, "Retry activation delivery");
+  assert.deepEqual(activation(standby, [self(), row("steer-c", { slot: "C" })]).activationAlternatives, [
+    { agentId: "steer-c", slot: "C" },
+  ]);
+});
+
 test("unavailable handover holders carry the short reason in the title", () => {
   const items = menu.describeSteerMenu(
     self(),
@@ -530,13 +542,17 @@ test("the menu calls the /factory preview/apply RPCs and stages efficiently", ()
     "deliver",
     "isExpiredPreviewError",
     "useComposers({ agentId:",
-    "setPrompt",
-    "insertText",
+    "transferStagedBrief(callBrief, target, composer, attempt, automatic)",
     "initialAction",
     "resumeRouteFor",
   ]) {
     assert.ok(menuSource.includes(token), `steer-menu-content.tsx contains ${token}`);
   }
+});
+
+test("waiting for a composer has no timer-driven delivery", () => {
+  assert.doesNotMatch(menuSource, /setTimeout/);
+  assert.match(menuSource, /pendingComposer && postStage && destComposer && !busy/);
 });
 
 test("the entry builds the native menu and opens the Factory panel on request", () => {

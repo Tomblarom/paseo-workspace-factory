@@ -86,6 +86,12 @@ test('resume read-only and --apply call factory.resume and factory.resume.apply'
   assert.deepEqual(briefRes.calls[0], { pluginId: 'workspace-factory', method: 'factory.resume', input: { agentId: 's1' } });
   assert.equal(JSON.parse(briefRes.stdout).brief, 'Brief text');
 
+  const addressed = await invoke(['resume', '--agent', 's2'], {
+    responses: { 'factory.resume': { scope: 'o/r', brief: 'Brief text' } },
+    env: { PASEO_AGENT_ID: 's1' },
+  });
+  assert.deepEqual(addressed.calls[0].input, { agentId: 's2', callerId: 's1' });
+
   const applied = await invoke(['resume', 'o/r', '--agent', 'w-1', '--apply'], {
     responses: {
       'factory.status': { workspace: { id: 'wks_1' }, workers: [{ id: 'w-1' }] },

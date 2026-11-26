@@ -111,8 +111,8 @@ function fakeClient(world, { sendFails = false } = {}) {
           const agent = findAgent(id);
           return agent ? { agent: structuredClone(agent) } : null;
         },
-        send: async (text) => {
-          world.calls.push(["agent.send", id, text]);
+        send: async (text, options) => {
+          world.calls.push(["agent.send", id, text, options]);
           if (sendFails) throw new Error("agent is closed");
         },
         setMetadata: async (patch) => {
@@ -143,6 +143,23 @@ function provisioned(world, { agents = {}, checkpoint = { task: "ship it", tests
   });
   return { ws, steer };
 }
+
+test("resume refuses a sensitive runtime before building or preparing context", async () => {
+  const world = makeWorld();
+  const { ws, steer } = provisioned(world);
+  steer.provider = "muse";
+  let built = 0, prepared = 0;
+  const result = await resumeApply.applyResume(fakeClient(world), { workspaceId: ws.id, agentId: steer.id }, {
+    lock: noLock, getScopePublic: async () => true,
+    buildBrief: async () => { built++; return "brief"; },
+    runCleanupFn: async () => { prepared++; },
+  });
+  assert.match(result.detail, /verified sanitized brief/);
+  assert.equal(result.status, "blocked");
+  assert.equal(built, 0);
+  assert.equal(prepared, 0);
+  assert.equal(sendsTo(world, steer.id).length, 0);
+});
 
 // ---------------------------------------------------------------------------
 // Contracts and settings.
@@ -289,7 +306,7 @@ test("applyResume guards workers and unknown agents, refuses running steers", as
   const paseo = fakeClient(world);
   await assert.rejects(
     resumeApply.applyResume(paseo, { workspaceId: ws.id, agentId: worker.id }, { lock: noLock }),
-    /steers and interrupted workers/,
+    /workers with interrupted or partial work/,
   );
   await assert.rejects(
     resumeApply.applyResume(paseo, { workspaceId: ws.id, agentId: "agent-gone" }, { lock: noLock }),
@@ -313,7 +330,8 @@ function interruptedWorker({ minutes = 8, tokens = 2000, native = false } = {}) 
   world.timelines[worker.id] = [{ item: { type: "assistant_message", text: CHECKPOINT_TEXT("PWM repair is ready") } }];
   ws.metadata[WORKERS_KEY] = { [worker.id]: { task: "Repair PWM", state: "interrupted", pendingWake: { state: "interrupted", queuedAt: stamp } } };
   ws.metadata[AGENTS_KEY] = { [worker.id]: { lastTurnEndedAt: stamp, interrupted: { at: stamp, outcome: "canceled" } } };
-  const discovery = () => ({ forkName: REPO, mainWorkspace: ws, steers: { labelled: [steer] }, workers: [worker], scope: { id: REPO } });
+  const discovery = () => ({ forkName: REPO, mainWorkspace: ws, steers: { labelled: [steer] }, workers: [worker], scope: { id: REPO },
+    providers: [{ provider: worker.provider, enabled: true, status: 'ready', models: [{ id: worker.model }] }] });
   return { world, ws, worker, discovery, paseo: fakeClient(world) };
 }
 
@@ -333,6 +351,69 @@ test("interrupted worker resume reuses a small, warm native worker and sends its
   assert.match(brief, /Next step: ship/);
   assert.doesNotMatch(brief, /ship it/);
   assert.equal(ws.metadata[CHECKPOINT_KEY].task, "ship it");
+});
+
+test("worker resume checks privacy after building a brief for direct delivery", async () => {
+  const { world, ws, worker, paseo } = interruptedWorker({ minutes: 1 });
+  const result = await resumeApply.applyResume(paseo, { workspaceId: ws.id, agentId: worker.id }, {
+    lock: noLock, now: () => at(NOW), getScopePublic: async () => true,
+    buildBrief: async () => { worker.provider = "muse"; return "private checkpoint"; },
+  });
+  assert.equal(result.status, "blocked");
+  assert.match(result.detail, /verified sanitized brief/);
+  assert.deepEqual(sendsTo(world, worker.id), []);
+  assert.ok(ws.metadata[AGENTS_KEY][worker.id].interrupted);
+});
+
+test("resume preserves a denied Fresh receipt and replays the exact request when eligible", async () => {
+  for (const kind of ["steer", "worker"]) {
+    const { world, ws, worker, paseo } = interruptedWorker();
+    const agent = kind === "worker" ? worker : world.agents.find((a) => a.labels[LABEL.role] === "steer");
+    const action = { kind: "fresh-delivery", phase: "uncertain", wakeId: "fresh-message", epoch: 3,
+      packet: "original Fresh brief", attemptedAt: at(NOW - MIN) };
+    const entries = ws.metadata[AGENTS_KEY];
+    entries[agent.id] = { ...entries[agent.id], action };
+    const input = { workspaceId: ws.id, agentId: agent.id };
+    const deps = { lock: noLock, getScopePublic: async () => false, buildBrief: async () => assert.fail("use the stored brief") };
+    agent.provider = "muse";
+    const denied = await resumeApply.applyResume(paseo, input, deps);
+    assert.equal(denied.status, "blocked");
+    assert.match(denied.detail, /public scope/);
+    assert.deepEqual(ws.metadata[AGENTS_KEY][agent.id].action, action);
+    assert.deepEqual(sendsTo(world, agent.id), []);
+    agent.provider = "claude";
+    const delivered = await resumeApply.applyResume(paseo, input, deps);
+    assert.equal(delivered.status, "sent");
+    assert.deepEqual(world.calls.filter(([call]) => call === "agent.send"), [
+      ["agent.send", agent.id, action.packet, { messageId: action.wakeId }],
+    ]);
+    assert.equal(ws.metadata[AGENTS_KEY][agent.id].action.phase, "done");
+    // A crash can leave the successful receipt recorded as sent but unsettled.
+    ws.metadata[AGENTS_KEY][agent.id].action.phase = "sent";
+    agent.provider = "muse";
+    const settled = await resumeApply.applyResume(paseo, input, deps);
+    assert.equal(settled.status, "sent");
+    assert.equal(ws.metadata[AGENTS_KEY][agent.id].action.phase, "done");
+    assert.equal(sendsTo(world, agent.id).length, 1);
+  }
+});
+
+test("explicit resume of a partial worker uses its checkpoint and rechecks it before sending", async () => {
+  const { world, ws, worker, paseo } = interruptedWorker({ minutes: 1 });
+  const record = ws.metadata[WORKERS_KEY][worker.id];
+  record.state = "partial";
+  const entry = ws.metadata[AGENTS_KEY][worker.id];
+  delete entry.interrupted;
+  entry.lastTurnId = "partial-turn";
+  const input = { workspaceId: ws.id, agentId: worker.id };
+  const deps = { lock: noLock, now: () => at(NOW), buildBrief: async () => "Finish PWM checks." };
+  assert.equal((await resumeApply.applyResume(paseo, input, deps)).status, "sent");
+  assert.match(sendsTo(world, worker.id)[0], /Finish PWM checks/);
+  const result = await resumeApply.applyResume(paseo, input, {
+    ...deps, buildBrief: async () => { record.state = "done"; return "Stale brief"; },
+  });
+  assert.equal(result.status, "blocked");
+  assert.equal(sendsTo(world, worker.id).length, 1);
 });
 
 test("cold and large interrupted workers use fresh --worker before receiving their brief", async () => {
@@ -571,12 +652,26 @@ test("applyResume clears claude through runCleanup and passes the F4 note", asyn
   assert.equal(calls[0][4].note, "wake: worker w-1 done");
 });
 
+test("resume checks the current privacy policy again at native clear dispatch", async () => {
+  const world = makeWorld();
+  const { ws, steer } = provisioned(world);
+  let sensitive = false;
+  const result = await resumeApply.applyResume(fakeClient(world), { workspaceId: ws.id, agentId: steer.id }, {
+    lock: noLock, getScopePublic: async () => true,
+    getConfig: async () => ({ profiles: { current: { provider: "claude", model: "m", sensitive } } }),
+    runCleanupFn: async (...args) => { sensitive = true; return sweep.runCleanup(...args); },
+  });
+  assert.equal(result.cleared, false);
+  assert.deepEqual(sendsTo(world, steer.id), []);
+  assert.equal(ws.metadata[AGENTS_KEY][steer.id].action.cleanup, undefined);
+});
+
 test("applyResume rewinds to the last brief before delivering for providers without clear", async () => {
   const world = makeWorld();
   const { ws, steer } = provisioned(world);
   steer.provider = "codex";
   world.workspaces[0].metadata[AGENTS_KEY] = {
-    [steer.id]: { needsResume: { reason: "limit", at: at(NOW - HOUR) }, action: { kind: "memory", wakeId: "context-facts", phase: "done", facts: { refreshed: { briefMessageId: "latest-brief" } } } },
+    [steer.id]: { needsResume: { reason: "failed", at: at(NOW - HOUR) }, action: { kind: "memory", wakeId: "context-facts", phase: "done", facts: { refreshed: { briefMessageId: "latest-brief" } } } },
   };
   const briefs = [];
   const result = await resumeApply.applyResume(
@@ -606,6 +701,22 @@ test("applyResume rewinds to the last brief before delivering for providers with
   assert.deepEqual(briefs, [[ws.id, steer.id]]);
   assert.deepEqual(sendsTo(world, steer.id), ["[Factory resume]\nResume brief body"]);
   assert.equal(world.workspaces[0].metadata[AGENTS_KEY][steer.id].needsResume, null);
+});
+
+test("explicit resume does not renew or send a known limited route", async () => {
+  const world = makeWorld();
+  const { ws, steer } = provisioned(world);
+  ws.metadata[AGENTS_KEY] = { [steer.id]: { needsResume: { reason: "limit", at: at(NOW - MIN) } } };
+  const result = await resumeApply.applyResume(fakeClient(world), { workspaceId: ws.id, agentId: steer.id }, {
+    lock: noLock, now: () => at(NOW), zerosub: null,
+    runCleanupFn: async () => { throw new Error("must not clear"); },
+    rewindClient: async () => { throw new Error("must not rewind"); },
+    buildBrief: async () => "brief",
+  });
+  assert.equal(result.status, "pending");
+  assert.match(result.detail, /provider limit/);
+  assert.deepEqual(sendsTo(world, steer.id), []);
+  assert.equal(ws.metadata[AGENTS_KEY][steer.id].action, undefined);
 });
 
 test("applyResume reports an uncertain clear and retains its intent", async () => {

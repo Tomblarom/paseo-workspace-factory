@@ -6,7 +6,14 @@ import { resolveGitHub, parseRepoInput } from './github.mjs';
 import { classifyCheckouts } from './local.mjs';
 import { LABEL, METADATA_KEY, PARENT_LABEL, parentOf } from './paseo.mjs';
 import { validScope } from './scope.mjs';
-import { continuedFromId, inheritContinuationLabels, resolveContinuations } from './zerosub.mjs';
+import { continuedFromId, continuationOrigin, inheritContinuationLabels, resolveContinuations } from './zerosub.mjs';
+import { isAdvisorSteer } from './config.mjs';
+
+/** GitHub's explicit visibility is the evidence for sensitive route admission. */
+export function discoveredRepoPublic(discovery) {
+  const privateRepo = discovery?.github?.fork?.repo?.private;
+  return privateRepo === false ? true : privateRepo === true ? false : null;
+}
 
 /**
  * Marker prefix on the active steer's tab title ("▷ Steer E"); the single
@@ -239,8 +246,8 @@ function allWorkers(paseo, steerIds, scopeId) {
  * every superseded origin in `list` is replaced by its live continuation,
  * which inherits the origin's factory labels (missing keys only) so slot
  * attribution and status display follow the live tab. Copies carry
- * `continuedFrom: <originId>`; an archived origin stays archived through
- * the copy, so it never resurfaces as a live steer. Results dedupe by id;
+ * `continuedFrom: <originId>`; archiving the origin leaves the live tab live.
+ * Results dedupe by id;
  * agents without a resolvable continuation pass through untouched.
  * `switches` carries timeline-derived { agentId, continuedIn } pairs.
  */
@@ -261,7 +268,6 @@ export function applyContinuations(list, agents, switches = []) {
         ...live,
         labels: inheritContinuationLabels(live, agent),
         continuedFrom: agent.id,
-        ...(agent.archivedAt && !live.archivedAt ? { archivedAt: agent.archivedAt } : {}),
       };
       if (!seen.has(copy.id)) {
         seen.add(copy.id);
@@ -272,7 +278,7 @@ export function applyContinuations(list, agents, switches = []) {
     const origin = continuedFromId(agent);
     if (origin && byId.has(origin) && !seen.has(agent.id)) {
       seen.add(agent.id);
-      out.push({ ...agent, continuedFrom: origin });
+      out.push({ ...agent, labels: inheritContinuationLabels(agent, continuationOrigin(agent, agents) ?? byId.get(origin)), continuedFrom: origin });
       continue;
     }
     if (!seen.has(agent.id)) {
@@ -283,62 +289,89 @@ export function applyContinuations(list, agents, switches = []) {
   return out;
 }
 
-/**
- * Creation timestamp of an agent snapshot (ms), or null when missing or
- * unparsable. Tolerates both `createdAt` and `created_at`.
- */
-function createdMs(agent) {
-  const value = agent?.createdAt ?? agent?.created_at ?? null;
-  if (typeof value !== 'string' || !value) return null;
-  const ms = Date.parse(value);
-  return Number.isFinite(ms) ? ms : null;
+/** Slot letter of a steer tab title ("Steer C", "▷ Steer C · kn"), or null for every other title. */
+export function steerTitleSlot(title) {
+  const match = STEER_TITLE.exec(typeof title === 'string' ? title.trim() : '');
+  return match ? match[1] : null;
 }
 
 /**
- * Same-slot newer-wins: while a refreshed slot holds two live agents (the
- * retired one not yet archived), the older holders are marked `superseded`
- * and the newest by creation stays the holder — no ambiguity error. Only
- * groups where every live holder carries a parseable creation timestamp
- * with a unique newest are marked; anything else (missing or tied
- * timestamps) passes through unmarked and keeps the ambiguity refusal.
- * Archived agents never participate. Returns a new array; marked holders
- * are copies with `superseded: true`, everything else passes through.
- * (Unrelated to ZeroSub continuation origins, which resolve to the live
- * tab in applyContinuations above instead of staying visible.)
+ * Resolve continuation tabs, then keep only tabs whose title names their slot.
+ * The title is the membership: a tab without a "Steer X" title is ignored,
+ * and two live tabs of one slot stay two holders (ambiguous, never ranked).
  */
-export function markSupersededSlotHolders(list) {
-  const agents = [...(list ?? [])];
-  const bySlot = new Map();
-  for (const agent of agents) {
-    if (!agent || agent.archivedAt) continue;
-    const slot = agent.labels?.[LABEL.slot];
-    if (typeof slot !== 'string' || !slot) continue;
-    if (!bySlot.has(slot)) bySlot.set(slot, []);
-    bySlot.get(slot).push(agent);
-  }
-  const superseded = new Set();
-  for (const holders of bySlot.values()) {
-    if (holders.length < 2) continue;
-    const stamps = holders.map((agent) => ({ agent, ms: createdMs(agent) }));
-    if (stamps.some((entry) => entry.ms === null)) continue;
-    const newest = Math.max(...stamps.map((entry) => entry.ms));
-    if (stamps.filter((entry) => entry.ms === newest).length !== 1) continue;
-    for (const entry of stamps) {
-      if (entry.ms !== newest) superseded.add(entry.agent.id);
+export function resolveSteerHolders(labelled, agents, switches = []) {
+  const byId = new Map((agents ?? labelled ?? []).map((agent) => [agent?.id, agent]));
+  const resolved = applyContinuations(labelled, agents, switches);
+  // Several live continuation tabs of one origin are several holders (ambiguous),
+  // not one picked by id order.
+  const present = new Set(resolved.map((agent) => agent?.id));
+  for (const origin of labelled ?? []) {
+    if (!origin?.id) continue;
+    const children = (agents ?? []).filter((agent) => agent && !agent.archivedAt && agent.id !== origin.id && continuedFromId(agent) === origin.id);
+    if (children.length < 2) continue;
+    for (const child of children) {
+      if (present.has(child.id)) continue;
+      present.add(child.id);
+      resolved.push({ ...child, labels: inheritContinuationLabels(child, origin), continuedFrom: origin.id });
     }
   }
-  if (!superseded.size) return agents;
-  return agents.map((agent) => (agent && superseded.has(agent.id) ? { ...agent, superseded: true } : agent));
+  return resolved.filter((agent) => {
+    if (!agent) return true;
+    const slot = agent.labels?.[LABEL.slot] ?? null;
+    // A ZeroSub continuation tab may carry its own title; the origin's title then speaks for it.
+    return steerTitleSlot(agent.title) === slot || (agent.continuedFrom && steerTitleSlot(byId.get(agent.continuedFrom)?.title) === slot);
+  });
 }
 
-/** Resolve continuation tabs and mark superseded same-slot holders consistently. */
-export function resolveSteerHolders(labelled, agents, switches = []) {
-  return markSupersededSlotHolders(applyContinuations(labelled, agents, switches));
+/**
+ * Factory labels each live, parentless tab of a scope's main workspace needs
+ * so its title stays authoritative: "Steer X" titles become steer X of that
+ * scope. Workers and tabs of other scopes are never relabelled; titles
+ * without a steer slot are left alone (readers ignore them). Pure.
+ */
+export function steerTitleLabelPatches(paseoState, config = null) {
+  const patches = [];
+  for (const workspace of paseoState?.workspaces ?? []) {
+    const state = workspace?.metadata?.[METADATA_KEY];
+    const scopeId = state?.scope?.id;
+    if (state?.main !== true || state.retired === true || typeof scopeId !== 'string' || !scopeId) continue;
+    for (const agent of paseoState?.agents ?? []) {
+      if (!agent || agent.workspaceId !== workspace.id || agent.archivedAt || agent.background === true || parentOf(agent)) continue;
+      const slot = steerTitleSlot(agent.title);
+      if (!slot) continue;
+      const labels = agent.labels ?? {};
+      if (labels[LABEL.role] && labels[LABEL.role] !== 'steer') continue;
+      const origin = continuationOrigin(agent, paseoState.agents);
+      if (origin && (origin.labels[LABEL.role] !== 'steer' ||
+          ![origin.labels[LABEL.repo], origin.labels[LABEL.scope]].includes(scopeId))) continue;
+      const foreign = labels[LABEL.scope] ?? labels[LABEL.repo];
+      if (foreign && foreign !== scopeId && labels[LABEL.repo] !== scopeId) continue;
+      const want = { [LABEL.role]: 'steer', [LABEL.slot]: slot, [LABEL.scope]: scopeId };
+      // Capture the previous holder role in the same native label update as a rename.
+      // Continuations take the origin's classification even when their own title differs.
+      if (config && labels[LABEL.steerRole] === undefined && agent.metadata?.[LABEL.steerRole] === undefined) {
+        const source = origin?.labels ?? labels;
+        const sourceSlot = source[LABEL.slot] ?? slot;
+        const stored = source[LABEL.steerRole] ?? origin?.metadata?.[LABEL.steerRole];
+        if (stored !== undefined || config.steers?.slots?.[sourceSlot] ||
+            config.legacyAdvisorSlots?.includes(sourceSlot)) {
+          want[LABEL.steerRole] = isAdvisorSteer(config, { ...source, [LABEL.slot]: sourceSlot, [LABEL.steerRole]: stored })
+            ? 'advisor' : 'coordinator';
+        }
+      }
+      if (!labels[LABEL.repo] && state.scope.kind === 'github') want[LABEL.repo] = scopeId;
+      const missing = Object.fromEntries(Object.entries(want).filter(([key, value]) => labels[key] !== value));
+      if (Object.keys(missing).length) patches.push({ agentId: agent.id, labels: missing });
+    }
+  }
+  return patches;
 }
 
 /**
  * Live holders of one slot from a resolved list: matching slot label, not
- * archived, not superseded, not retired unless `includeRetired`. Agents and
+ * archived, not a superseded continuation origin, not retired unless
+ * `includeRetired`. Agents and
  * status rows share this one selector.
  */
 export function liveSlotHolders(list, slot, { includeRetired = false } = {}) {
@@ -347,6 +380,26 @@ export function liveSlotHolders(list, slot, { includeRetired = false } = {}) {
     if (!entry || entry.archivedAt || entry.superseded === true) return false;
     if (!includeRetired && entry.retired === true) return false;
     return (entry.labels?.[LABEL.slot] ?? entry.slot ?? null) === slot;
+  });
+}
+
+/** References to assignments owned by this scope; receipts do not prove processing. */
+export function outgoingAssignmentRecords(workspaces, workspaceId, agentIds = []) {
+  if (!workspaceId) return [];
+  const ids = new Set(agentIds);
+  return (workspaces ?? []).flatMap((workspace) => {
+    const assignment = workspace?.metadata?.[`${METADATA_KEY}.assignment`];
+    if (!assignment || !(assignment.requesterWorkspaceId === workspaceId ||
+        (!assignment.requesterWorkspaceId && ids.has(assignment.by)))) return [];
+    return [{
+      workspaceId: workspace.id,
+      scopeId: workspace.metadata?.[METADATA_KEY]?.scope?.id ?? workspace.id,
+      task: workspace.metadata?.[`${METADATA_KEY}.checkpoint`]?.task ?? null,
+      reportText: assignment.reportText ?? null,
+      reportStatus: assignment.reportStatus ?? null,
+      reportedAt: assignment.reportedAt ?? null,
+      actionId: assignment.reportActionId ?? null,
+    }];
   });
 }
 
@@ -604,6 +657,7 @@ function buildWorktreeDiscovery(matched, { normalized, parentDir, checkouts, pas
     mainCandidates,
     otherLocalWorkspaces: [],
     mainWorkspace,
+    assignmentRecords: outgoingAssignmentRecords(paseo.workspaces, mainWorkspace?.id, labelled.map((agent) => agent.id)),
     steers: { labelled, legacy, digitCandidates, foreignWorkers, halfLabelled },
     workers,
     agents: paseo.agents,

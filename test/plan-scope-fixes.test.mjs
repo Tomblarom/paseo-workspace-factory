@@ -212,7 +212,10 @@ test('2: scope-id plans ignore titles and honor --slots; unknown ids still fail'
   const [narrowed] = await runnerFor(world).runPlans(['web'], { slots: ['A'] });
   assert.deepEqual(keys(narrowed), [], 'unlisted slot B is not planned');
   const [full] = await runnerFor(world).runPlans(['web']);
-  assert.deepEqual(keys(full), ['steer.B']);
+  assert.deepEqual(keys(full), []);
+  assert.equal(full.status, 'complete', JSON.stringify(full.conflicts));
+  const [legacy] = await runnerFor(world).runPlans(['web'], { slots: ['A', 'B'], legacyEnrollment: true });
+  assert.match(legacy.conflicts.find((c) => c.key === 'steer.B').reason, /scope publicity is unknown; public scope required/);
 
   await assert.rejects(() => runnerFor(world).runPlans(['no-such-scope']), /Not a GitHub repository/);
   const [missing] = await runnerFor(world).runPlans([{ workspace: 'wks_doesnotexist0001' }]);
@@ -252,7 +255,7 @@ test('3: candidates parented to another scope\'s steer are excluded with a worke
 
   webSteers.B.archivedAt = '2026-01-01';
   const [refused] = await runnerFor(world).runPlans([{ local: '/p/web' }], { adopt: { '*': { B: foreignLettered.id } } });
-  assert.match(refused.conflicts.find((c) => c.key === 'steer.B').reason, /Worker von other Steer A/);
+  assert.match(refused.conflicts.find((c) => c.key === 'steer.B').reason, /worker of other Steer A/);
   assert.match(refused.conflicts.find((c) => c.key === 'steer.B').reason, /cannot become steers/);
 });
 
@@ -299,7 +302,7 @@ test('4: half-labelled steers are conflicts; closed+labelled stays visible, arch
   assert.equal(p.status, 'conflict');
   assert.match(p.conflicts.find((c) => c.key === 'steer.C').reason, new RegExp(`Half-labelled Steer C ${half.id}`));
   assert.match(p.conflicts.find((c) => c.key === 'steer.C').reason, /without wsf\.scope\/wsf\.repo/);
-  assert.match(p.conflicts.find((c) => c.key === 'steer.F').reason, new RegExp(`Half-labelled Steer F ${closedScoped.id}`));
+  assert.ok(!p.conflicts.some((c) => c.reason.includes(closedScoped.id)), 'scope-only native labels are live membership');
   assert.match(p.conflicts.find((c) => c.key === `labels.half.${slotless.id}`).reason, /Half-labelled/);
   assert.ok(!p.conflicts.some((c) => c.key === 'steer.A'), 'closed fully-labelled Steer A counts as live');
   assert.ok(!keys(p).includes('steer.A'), 'no recreation of the closed Steer A');

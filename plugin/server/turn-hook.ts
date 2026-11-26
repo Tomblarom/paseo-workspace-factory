@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { dispatchAssignmentReport, finishSteerDelivery, pendingSteerDelivery, type SteerDeliveryDeps } from "./steer-delivery.js";
-import { METADATA_KEY, createPaseoCli, parentOf, readPaseoAgents, readPaseoState } from "./core/paseo.mjs";
+import { LABEL, METADATA_KEY, createPaseoCli, parentOf, readPaseoAgents, readPaseoState } from "./core/paseo.mjs";
+import { steerTitleSlot } from "./core/discovery.mjs";
+import { applySteerTitleLabels } from "./steer-title-labels.js";
 import { listScopes } from "./core/scope.mjs";
 import { guardScope } from "./core/scope-guard.mjs";
 import { continuedFromId, resolveFactoryLabels } from "./core/zerosub.mjs";
@@ -29,14 +31,16 @@ import { ASSIGNMENT_KEY } from "./core/assign.mjs";
 import { extractTurnUsage, mergeTurnUsage } from "./quota.js";
 import {
   retryOnLockBusy,
-  runFailoverCheck,
+  requestQuotaFailover,
 } from "./supervise.js";
-import { type ZerosubSource } from "./zerosub-runtime.js";
+import { resolveZerosub, type ZerosubSource } from "./zerosub-runtime.js";
+import { earliestResetOf } from "./core/quota.mjs";
 import {
   cleanupCommandKind,
   decideTurnUpdate,
   dropEntries,
   factoryIdentity,
+  openTurnOf,
   type CleanupEffect,
 } from "../shared/auto-checkpoint.js";
 
@@ -70,6 +74,7 @@ export interface TurnHookDeps extends ZerosubSource {
   /** Lock for metadata writes; tests only (defaults to the real one, always with LockBusy retry). */
   lock?: (name: string, fn: (held: { verify: () => void }) => Promise<any>) => Promise<any>;
   setContinuationLabels?: (agentId: string, labels: Record<string, string>) => Promise<void>;
+  setTitleLabels?: (agentId: string, labels: Record<string, string>) => Promise<void>;
 }
 
 /**
@@ -120,13 +125,23 @@ async function runTurnBefore(payload: TurnBeforePayload, paseo: any, deps: TurnH
   const snap: any = await paseo.agents.ref(agentId).refresh().catch(() => null);
   const agent: any = snap?.agent ?? null;
   if (!agent || agent.archivedAt) return;
+  let paseoState: any;
+  const titleSlot = steerTitleSlot(agent.title);
+  const needsRole = deps.getConfig && !agent.labels?.[LABEL.steerRole] && !agent.metadata?.[LABEL.steerRole];
+  if (!parentOf(agent) && titleSlot && (titleSlot !== agent.labels?.[LABEL.slot] || needsRole)) {
+    paseoState = await readPaseoState(paseo);
+    const config = await deps.getConfig?.().catch(() => null);
+    if ((!deps.getConfig || config) && await applySteerTitleLabels(paseoState, { agentId, config, write: deps.setTitleLabels })) {
+      agent.labels = paseoState.agents.find((entry: any) => entry?.id === agentId)?.labels ?? agent.labels;
+    }
+  }
   let identity = factoryIdentity(agent.labels ?? null);
   if (!identity && continuedFromId(agent)) {
     identity = factoryIdentity(resolveFactoryLabels(agent, await readPaseoAgents(paseo)));
   }
   identity ??= workerIdentityFromMetadata(agent);
   if (!identity) return;
-  const paseoState: any = await readPaseoState(paseo);
+  paseoState ??= await readPaseoState(paseo);
   const scope: any = listScopes(paseoState).find((s: any) => s.id === identity.scopeId) ?? null;
   if (!scope) return;
   const mainId: string = scope.workspaceId;
@@ -136,8 +151,12 @@ async function runTurnBefore(payload: TurnBeforePayload, paseo: any, deps: TurnH
   if (identity.role === "worker" && asRecord(asRecord(meta[AGENTS_KEY])?.[agentId])?.replacedBy) return;
   const now = deps.now ? deps.now() : new Date().toISOString();
   const update = updateAgentEntry as unknown as (args: any) => Promise<any>;
+  // turn.after may already have ended this turn (fast failures such as a
+  // provider limit); reopening it would leave the steer busy for good.
   await update({ client: paseo, workspaceId: mainId, agentId,
-    patch: { openTurnId: payload.turnId ?? null, turnStartedAt: now }, liveIds: null, lock: lockOf(deps) });
+    patch: (entry: any) => payload.turnId && entry?.lastTurnId === payload.turnId
+      ? null : { openTurnId: payload.turnId ?? null, turnStartedAt: now },
+    liveIds: null, lock: lockOf(deps) });
 }
 
 function failureText(outcome: TurnPayload["outcome"]): string | null {
@@ -413,15 +432,29 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
   // flags, a completed turn clears. Cleanup turns of our own never flag.
   let needsResumePatch: Record<string, unknown> | null = null;
   if (!isCleanupTurn && kind === "completed" && previous?.needsResume) {
-    needsResumePatch = { needsResume: null };
+    needsResumePatch = { needsResume: null, quotaLimit: null };
   } else if (!isCleanupTurn && kind === "failed") {
     const flagged = needsResumeForFailedTurn({
       role: identity.role,
       outcome: kind,
       error: failureText(payload.outcome),
-      at: new Date().toISOString(),
+      at: deps.now?.() ?? new Date().toISOString(),
     });
-    if (flagged) needsResumePatch = { needsResume: flagged };
+    if (flagged) {
+      needsResumePatch = { needsResume: flagged };
+      if (flagged.reason === "limit") {
+        const zerosub = await resolveZerosub(deps);
+        const accountId = zerosub?.pending?.[agentId] ?? zerosub?.agentAccount?.[agentId] ?? null;
+        const account = zerosub?.accounts.find((item) => item.id === accountId);
+        const fiveHour = /you(?:'|’)ve hit your 5[- ]hour limit/i.test(failureText(payload.outcome) ?? "");
+        const windows = fiveHour ? (account?.windows ?? []).filter((window: any) => /five.?hour|5.?h/i.test(`${window.id} ${window.label ?? ""}`)) : [];
+        needsResumePatch.quotaLimit = {
+          at: flagged.at, provider: agent.provider ?? null, model: agent.model ?? null,
+          accountId,
+          resetAt: earliestResetOf(windows.length ? [{ windows }] : [], { now: Date.parse(flagged.at), model: agent.model }),
+        };
+      }
+    }
   }
 
   // Step-4 settings baseline: the live provider/model/thinking/speed tuple
@@ -476,7 +509,7 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
     const currentCleanup = readCleanupAction(prev);
     if (decision.resolvePending && (currentCleanup?.at !== pending?.at ||
       currentCleanup?.messageId !== pending?.messageId || currentCleanup?.kind !== pending?.kind)) return;
-    const newerTurnOpen = prev.openTurnId && prev.openTurnId !== payload.turnId;
+    const newerTurnOpen = openTurnOf(prev) !== null && prev.openTurnId !== payload.turnId;
     const merged: Record<string, any> = {
       ...prev,
       ...(decision.entryUpdate ?? {}),
@@ -550,12 +583,13 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
         staleMinutes: 60,
         maxAutoResumes: 2,
       };
-      await runFailoverCheck(paseo, scope, {
+      await requestQuotaFailover(paseo, mainId, agentId, "provider limit on the active steer", agent.provider ?? "", {
         settings,
-        force: true,
+        zerosub: deps.zerosub,
+        getZerosub: deps.getZerosub,
         getConfig: deps.getConfig,
         delivery: deps.delivery,
-        failingPool: typeof agent.provider === "string" ? agent.provider : null,
+        lock: deps.lock,
       });
     } catch (error) {
       console.error(

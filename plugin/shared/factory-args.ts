@@ -85,19 +85,19 @@ export const FACTORY_COMMANDS: Record<string, CommandHelp> = {
     examples: ["/factory quota"],
   },
   plan: {
-    usage: "/factory plan [scope] [--slots A,B] [--adopt B=<agent-id>] [--local <path>] [--hub <path|workspace:id>] [--name <id>] [--main workspace:<id>] [--domain <id>] [--adopt-worker <agent-id>[@A]] [--detach]",
+    usage: "/factory plan [scope] [--slots B] [--adopt B=<agent-id>] [--local <path>] [--hub <path|workspace:id>] [--name <id>] [--main workspace:<id>] [--domain <id>] [--adopt-worker <agent-id>[@A]] [--detach]",
     summary: "Preview enrolling one existing workspace, or repairing it. Writes nothing.",
     details: [
       "Ends with a 16-character plan hash; run it with /factory apply <hash>.",
       "Plans exactly one workspace: open it natively first, then plan it by scope, workspace id or --local <path>.",
-      "--slots limits the plan to some steers.",
-      "--adopt B=<agent-id> takes over an existing tab as Steer B (repeatable, comma-separated).",
+      "--slots B selects the initial coordinator from live holders in the workspace.",
+      "--adopt B=<agent-id> takes over an existing tab titled Steer B in that workspace (repeatable, comma-separated).",
       "--local plans an existing folder without GitHub. --hub plans a hub-kind scope from a folder or worktree workspace.",
       "--name sets the scope id of a folder or workspace entry.",
       "--main adopts a worktree workspace as the main workspace of a github scope. --domain sets the domain pointer (--domain \"\" clears it).",
-      "--adopt-worker <agent-id>[@A] labels an agent as scope worker (repeatable, comma-separated). --detach plans a native detach for parented steer candidates.",
+      "--adopt-worker <agent-id>[@A] labels an agent as a worker of a live coordinator (defaults to the active steer). --detach plans a native detach for parented steer candidates.",
     ],
-    examples: ["/factory plan", "/factory plan me/my-repo", "/factory plan me/my-repo --slots A,B", "/factory plan --adopt B=01234567-89ab-cdef-0123-456789abcdef", "/factory plan me/my-repo --domain my-domain", "/factory plan --hub /data/hub"],
+    examples: ["/factory plan", "/factory plan me/my-repo", "/factory plan me/my-repo --slots B", "/factory plan --adopt B=01234567-89ab-cdef-0123-456789abcdef", "/factory plan me/my-repo --domain my-domain", "/factory plan --hub /data/hub"],
   },
   apply: {
     usage: "/factory apply <plan-hash>",
@@ -407,9 +407,13 @@ export interface PlanAdoptInput {
 }
 
 function parseAdoptPair(pair: string, into: PlanAdoptInput): void {
-  const legacy = pair.match(/^([A-Z])=([0-9a-f-]{8,})$/i);
-  if (legacy) {
-    into.adopt[legacy[1].toUpperCase()] = legacy[2];
+  const match = pair.match(/^([A-Z])=([0-9a-f-]{8,})$/i);
+  if (match) {
+    const [, rawSlot, id] = match;
+    const slot = rawSlot.toUpperCase();
+    if (into.adopt[slot]) throw new Error(`--adopt names Steer ${slot} more than once`);
+    if (Object.values(into.adopt).includes(id)) throw new Error(`--adopt names agent ${id} more than once`);
+    into.adopt[slot] = id;
     return;
   }
   if (/:/.test(pair)) {
@@ -599,12 +603,8 @@ export function parseFactoryArgs(args: string): FactoryCommand {
     const slotsRaw = flags.singles.get("slots");
     let slots: string[] | undefined;
     if (slotsRaw !== undefined) {
-      slots = slotsRaw
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean)
-        .map((s) => checkSlot(s, "--slots"));
-      if (new Set(slots).size !== slots.length) fail("--slots contains duplicates.");
+      if (slotsRaw.includes(",")) fail("--slots expects one live coordinator letter A-Z for initial enrollment.");
+      slots = [checkSlot(slotsRaw.trim(), "--slots")];
     }
     const local = flags.multis.get("local");
     const hub = flags.multis.get("hub");

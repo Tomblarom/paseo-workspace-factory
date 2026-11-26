@@ -2,6 +2,7 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { createConfigLoader } from "./server/config.js";
 import { registerPromptSettings } from "./server/prompt-settings.js";
 import {
+  activateSteer,
   applyAssign,
   applyFresh,
   applyPlan,
@@ -53,13 +54,15 @@ import {
   handleCreateAfter,
   handleWorkerTurnAfter,
   recordTakeoverDelivery,
+  requestQuotaFailover,
+  supervisionQuiet,
   readSupervisionSettings,
   startSupervisionTimer,
 } from "./server/supervise.js";
 import { startQuotaTimer } from "./server/quota.js";
 import { getQuota } from "./server/quota-rpc.js";
 import { readZerosubStateSafe } from "./server/zerosub-runtime.js";
-import { isAdvisorSlot } from "./server/core/config.mjs";
+import { isAdvisorSteer } from "./server/core/config.mjs";
 import { ROLE_RULES_ID, rolePromptForOpen, withFactoryCli, workerEnvAdditions } from "./server/core/role-prompts.mjs";
 import { readPaseoAgents } from "./server/core/paseo.mjs";
 import { continuedFromId, resolveFactoryLabels } from "./server/core/zerosub.mjs";
@@ -87,6 +90,7 @@ import {
   factoryScopes,
   factoryScopesCandidates,
   factoryStatus,
+  factorySteerActivate,
   factorySteerAdd,
   factorySteerAddPreview,
   factorySteerBrief,
@@ -124,8 +128,14 @@ export default function contribute(server: PluginServerContext) {
   const readQuotaSettings = () => readSupervisionSettings(supervisionSettings);
   const readResume = () => readResumeSettings(resumeSettings);
   const getZerosub = () => readZerosubStateSafe();
-  const buildResumeBrief = createResumeBriefBuilder(loader);
+  const buildResumeBrief = createResumeBriefBuilder(loader, { getZerosub });
   const delivery: SteerDeliveryDeps = {
+    getConfig: () => loader.loadEffectiveConfig(),
+    assignmentQuiet: (paseo, sourceIds, targetId) => supervisionQuiet(paseo, [...sourceIds, targetId]),
+    onQuotaBlocked: (paseo, workspaceId, agentId, reason, pool) =>
+      requestQuotaFailover(paseo, workspaceId, agentId, reason, pool, {
+        getSettings: readSupervision, getConfig: () => loader.loadEffectiveConfig(), delivery, getZerosub,
+      }),
     getCleanupSettings: readSettings,
     getResumeSettings: readResume,
     getZerosub,
@@ -183,10 +193,10 @@ export default function contribute(server: PluginServerContext) {
   server.handle(factoryCleanup, getCleanup);
   server.handle(factoryResume, (input, ctx) => {
     bootOnce(ctx.paseo);
-    return getResume(input, ctx, loader);
+    return getResume(input, ctx, loader, { getZerosub });
   });
-  server.handle(factoryFreshPreview, (input, ctx) => previewFresh(input, ctx, loader));
-  server.handle(factoryFresh, (input, ctx) => applyFresh(input, ctx, loader));
+  server.handle(factoryFreshPreview, (input, ctx) => previewFresh(input, ctx, loader, delivery));
+  server.handle(factoryFresh, (input, ctx) => applyFresh(input, ctx, loader, delivery));
   server.handle(factoryHistoryOpen, openHistory);
   server.handle(factoryWorkers, (input, ctx) => getWorkers(input, ctx, loader));
   server.handle(factoryModelsCatalog, getModelsCatalog);
@@ -200,7 +210,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(factoryModelsList, (input, ctx) => listModels(input, ctx, loader, hostSettings));
   server.handle(factoryModelsSet, (input, ctx) => setModels(input, ctx, loader, hostSettings));
   server.handle(factorySteerAddPreview, (input, ctx) => previewSteerAdd(input, ctx, loader, hostSettings));
-  server.handle(factorySteerAdd, (input, ctx) => applySteerAddRpc(input, ctx, loader));
+  server.handle(factorySteerAdd, (input, ctx) => applySteerAddRpc(input, ctx, loader, hostSettings));
   server.handle(factorySteerBrief, (input, ctx) => deliverSteerBriefRpc(input, ctx, delivery));
   const steerSettingsExtra = {
     getCleanupSettings: readSettings,
@@ -230,9 +240,17 @@ export default function contribute(server: PluginServerContext) {
   });
   // K10: lifecycle events push the shared feed projections immediately.
   const notifyFeeds = (): void => { notifySteerFeed(); notifyColdFeed(); };
+  server.handle(factorySteerActivate, async (input, ctx) => {
+    bootOnce(ctx.paseo);
+    try {
+      return await activateSteer(input, ctx, loader, delivery);
+    } finally {
+      notifyFeeds();
+    }
+  });
   const removeTurnBefore = server.addHook("agent.turn.before", async (payload, context) => {
     bootOnce(context.paseo);
-    await handleTurnBefore(payload, context);
+    await handleTurnBefore(payload, context, { getConfig: () => loader.loadEffectiveConfig() });
     notifyFeeds();
   });
   const removeTurnHook = server.addHook("agent.turn.after", async (payload, context) => {
@@ -270,8 +288,9 @@ export default function contribute(server: PluginServerContext) {
   const removeRoleHook = server.addHook("agent.open.before", async ({ request }, context) => {
     if (request.purpose !== "interactive") return;
     let labels = request.labels;
-    if (!factoryIdentity(labels) && labels?.["zerosub.continued-from"]) {
-      labels = {};
+    if (labels?.["zerosub.continued-from"] && (!factoryIdentity(labels) || (labels["wsf.role"] === "steer" && !labels["wsf.steer-role"]))) {
+      // An established continuation without recoverable role evidence stays read-only.
+      if (labels["wsf.role"] === "steer") labels = { ...labels, "wsf.steer-role": "advisor" };
       try {
         const agents = await readPaseoAgents(context.paseo);
         const current = agents.find((agent: any) => agent.id === request.agentId);
@@ -293,14 +312,14 @@ export default function contribute(server: PluginServerContext) {
       return { ...request, env: { ...request.env, ...additions } };
     }
     if (labels?.["wsf.role"] !== "steer") return;
-    let isAdvisor = false;
-    const slot = labels["wsf.slot"];
-    if (typeof slot === "string" && slot) {
+    const role = labels["wsf.steer-role"] ?? request.metadata?.["wsf.steer-role"];
+    let isAdvisor = role !== "coordinator";
+    if (role === undefined && labels["wsf.slot"]) {
       try {
         const config = await loader.loadEffectiveConfig();
-        isAdvisor = (isAdvisorSlot as unknown as (c: unknown, s: string) => boolean)(config, slot);
+        isAdvisor = isAdvisorSteer(config, labels);
       } catch {
-        isAdvisor = false;
+        isAdvisor = true;
       }
     }
     const text = (rolePromptForOpen as unknown as (args: { labels: unknown; purpose: unknown; isAdvisor: boolean }) => string | null)({

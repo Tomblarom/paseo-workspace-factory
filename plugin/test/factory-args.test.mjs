@@ -37,20 +37,20 @@ test("scopes and cleanup take no address", () => {
   assert.throws(() => parseFactoryArgs("cleanup --plan"), /Unknown flag/);
 });
 
-test("plan takes one repo and slots (K13: single-workspace enrollment)", () => {
-  assert.deepEqual(parseFactoryArgs("plan a/b --slots A,B"), {
+test("plan takes one workspace and one live coordinator letter", () => {
+  assert.deepEqual(parseFactoryArgs("plan a/b --slots Z"), {
     command: "plan",
     repos: ["a/b"],
-    slots: ["A", "B"],
+    slots: ["Z"],
   });
-  assert.deepEqual(parseFactoryArgs("plan a/b --slots=c,d"), {
+  assert.deepEqual(parseFactoryArgs("plan a/b --slots=c"), {
     command: "plan",
     repos: ["a/b"],
-    slots: ["C", "D"],
+    slots: ["C"],
   });
   assert.deepEqual(parseFactoryArgs("plan"), { command: "plan", repos: [] });
   assert.throws(() => parseFactoryArgs("plan a/b c/d"), /at most one workspace address/);
-  assert.throws(() => parseFactoryArgs("plan a/b --slots A,A"), /duplicates/);
+  assert.throws(() => parseFactoryArgs("plan a/b --slots A,B"), /one live coordinator/);
   assert.throws(() => parseFactoryArgs("plan a/b --slots AB"), /single slot letter/);
   assert.throws(() => parseFactoryArgs("plan a/b --to A"), /Unknown flag/);
 });
@@ -342,7 +342,7 @@ test("labels is no longer a subcommand", () => {
   assert.doesNotMatch(FACTORY_USAGE, /\/factory labels/);
 });
 
-test("plan --adopt takes legacy SLOT=<agent-id> pairs", () => {
+test("plan --adopt takes distinct SLOT=<agent-id> pairs", () => {
   const id = "01234567-89ab-cdef-0123-456789abcdef";
   assert.deepEqual(parseFactoryArgs(`plan --adopt B=${id}`), {
     command: "plan",
@@ -356,6 +356,8 @@ test("plan --adopt takes legacy SLOT=<agent-id> pairs", () => {
     D: "00112233",
   });
   assert.deepEqual(parseFactoryArgs(`plan a/b --adopt=B=${id}`).adopt, { B: id });
+  assert.throws(() => parseFactoryArgs(`plan --adopt b=${id},B=abcdef12`), /names Steer B more than once/);
+  assert.throws(() => parseFactoryArgs(`plan --adopt B=${id},Z=${id}`), /names agent .* more than once/);
   // Bad syntax and short ids fail with the CLI message.
   assert.throws(
     () => parseFactoryArgs("plan a/b --adopt BB=01234567"),

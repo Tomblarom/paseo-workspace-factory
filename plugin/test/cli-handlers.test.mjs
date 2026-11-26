@@ -10,10 +10,15 @@ import { join } from "node:path";
 register("./ts-resolve-hooks.mjs", import.meta.url);
 
 const handlers = await import("../server/handlers.ts");
+const { createConfigLoader } = await import("../server/config.ts");
+const { collectSteerStates } = await import("../server/steer-feed.ts");
 import { LABEL, METADATA_KEY, PARENT_LABEL } from "../server/core/paseo.mjs";
+import { AGENTS_KEY } from "../server/core/agent-state.mjs";
 import { formatStatus, scopeCandidates } from "../server/core/scopes-view.mjs";
 import { formatSlotProfileSuggestion, resolveWorkerPick, workerListRows } from "../server/core/models.mjs";
 import { formatWorkersPruneText, formatWorkersText, workersReport, WORKERS_KEY } from "../server/core/supervision.mjs";
+import { buildSteerCreate } from "../server/core/steer-create.mjs";
+import { steerAddFingerprint } from "../shared/preview.ts";
 
 const ROOT = mkdtempSync(join(tmpdir(), "k12b-handlers-"));
 test.after(() => rmSync(ROOT, { recursive: true, force: true }));
@@ -83,6 +88,7 @@ function fakePaseo(world) {
       },
       agents: {
         create: async (req) => {
+          if (world.createAgent) return world.createAgent(id, req);
           const created = {
             id: `w-created-${world.agents.length + 1}`,
             workspaceId: id,
@@ -146,6 +152,424 @@ const loader = {
   loadPromptOptions: async () => ({ findingsInPrompts: false, factoryRoot: null }),
 };
 
+test("plan RPC normalizes one live bootstrap letter without consulting configured slots", async () => {
+  const world = makeWorld();
+  const ws = world.workspaces[0];
+  delete ws.metadata[METADATA_KEY];
+  const steer = world.agents[0];
+  steer.title = "Steer Z";
+  steer.labels[LABEL.slot] = "Z";
+  const context = { paseo: fakePaseo(world) };
+  const entry = { local: [ws.workspaceDirectory] };
+  await assert.rejects(handlers.getPlan({ ...entry, slots: ["A", "Z"] }, context, loader), /one live coordinator/);
+  const { plans: [preview] } = await handlers.getPlan({ ...entry, slots: [" z "] }, context, loader);
+  assert.equal(preview.status, "pending", JSON.stringify(preview.conflicts));
+  assert.equal(preview.ops[0].params.metadata[METADATA_KEY].activeAgentId, steer.id);
+});
+
+function activationWorld() {
+  const world = makeWorld();
+  const [workspace] = world.workspaces;
+  const [active, target, worker] = world.agents;
+  target.status = "idle";
+  const alternative = { ...target, id: "steer-c", title: "Steer C", labels: { ...target.labels, [LABEL.slot]: "C" } };
+  world.agents.push(alternative);
+  const localLoader = { ...loader, loadEffectiveConfig: async () => ({ ...CONFIG, steers: { ...CONFIG.steers, activeMarker: "" } }) };
+  const paseo = fakePaseo(world);
+  const deps = { getZerosub: async () => null };
+  const activate = (agentId = target.id, epoch = 3, workspaceId = workspace.id, extra = {}) =>
+    handlers.activateSteer({ workspaceId, agentId, epoch }, { paseo }, localLoader, { ...deps, ...extra });
+  return { world, workspace, active, target, worker, alternative, paseo, activate };
+}
+
+test("own-tab activation retries a lost delivery receipt with the same target, epoch, packet and message ID", async () => {
+  const { world, workspace, active, target, paseo, activate } = activationWorld();
+  const meta = workspace.metadata;
+  meta[`${METADATA_KEY}.checkpoint`] = { task: "Latest stored checkpoint", tests: [], blockers: [], epoch: 3 };
+  meta[AGENTS_KEY] = { [active.id]: { quotaLimit: { provider: active.provider, model: active.model } } };
+  const childMetadata = {
+    [`${METADATA_KEY}.checkpoint`]: { task: "Delegated build" },
+    [`${METADATA_KEY}.assignment`]: { by: active.id, requesterWorkspaceId: workspace.id, reportActionId: "build-report" },
+  };
+  world.workspaces.push({ ...workspace, id: "wks_assignment", metadata: childMetadata });
+  const workers = structuredClone(meta[WORKERS_KEY]);
+  let previousTimelineReads = 0;
+  const sends = [];
+  const ref = paseo.agents.ref;
+  paseo.agents.ref = (id) => ({
+    ...ref(id),
+    ...(id === active.id ? { timeline: { refetch: async () => { previousTimelineReads++; throw new Error("unavailable"); } } } : {}),
+    async send(text, options) {
+      sends.push({ id, text, options });
+      if (sends.length === 1) throw new Error("lost receipt after enqueue");
+    },
+  });
+
+  assert.notEqual((await activate()).status, "sent");
+  const uncertain = meta[AGENTS_KEY][target.id].action;
+  assert.equal(uncertain.phase, "uncertain");
+  assert.equal(uncertain.kind, "activate");
+  assert.equal(meta[METADATA_KEY].activeAgentId, target.id);
+  assert.equal(meta[METADATA_KEY].epoch, 4);
+  const pendingRows = collectSteerStates(world, {});
+  assert.equal(pendingRows.find((row) => row.agentId === target.id).activationEpoch, 3);
+  assert.equal(pendingRows.find((row) => row.agentId === active.id).activationEpoch, 4);
+
+  // A different click at the new epoch must wait for the uncertain receipt.
+  await assert.rejects(activate(active.id, 4), /awaiting reconciliation/);
+  assert.equal((await activate()).status, "sent");
+  assert.equal((await activate()).status, "sent");
+  assert.equal(meta[METADATA_KEY].epoch, 4);
+  assert.equal(meta[AGENTS_KEY][target.id].action.phase, "done");
+  assert.deepEqual(meta[WORKERS_KEY], workers);
+  assert.equal(previousTimelineReads, 0);
+  assert.equal(sends.length, 2);
+  assert.deepEqual(sends[0], sends[1]);
+  assert.equal(sends[0].id, target.id);
+  assert.equal(sends[0].options.messageId, uncertain.wakeId);
+  assert.match(sends[0].text, /Latest stored checkpoint/);
+  assert.match(sends[0].text, /Check tests/);
+  assert.match(sends[0].text, /Delegated build/);
+  assert.equal(childMetadata[`${METADATA_KEY}.assignment`].reportActionId, "build-report");
+  assert.equal(collectSteerStates(world, {}).find((row) => row.agentId === target.id).activationEpoch, null);
+});
+
+test("activation prepares the selected cold tab while another standby is ready", async () => {
+  const { world, workspace, target, activate } = activationWorld();
+  workspace.metadata[AGENTS_KEY] = { [target.id]: { lastTurnEndedAt: "2026-10-01T08:00:00Z" } };
+  const prepared = [];
+  const result = await activate(target.id, 3, workspace.id, {
+    now: () => "2026-11-26T12:00:00Z",
+    runCleanupFn: async (_paseo, id, kind) => { prepared.push([id, kind]); },
+  });
+  assert.equal(result.status, "pending");
+  assert.deepEqual(prepared, [[target.id, "clear"]]);
+  assert.deepEqual(world.sent, []);
+  assert.equal(workspace.metadata[METADATA_KEY].activeAgentId, target.id);
+  assert.equal(workspace.metadata[AGENTS_KEY][target.id].action.routing.intent.agentId, target.id);
+});
+
+test("activation refuses stale epochs, other workspaces, and non-steer or ambiguous targets", async () => {
+  const { world, workspace, active, target, worker, alternative, activate } = activationWorld();
+  await assert.rejects(activate(target.id, 2), /authority changed/);
+  await assert.rejects(activate(target.id, 3, "wks_other"), /Unknown workspace/);
+  await assert.rejects(activate(worker.id), /no longer a live steer/);
+  await assert.rejects(activate(active.id), /already active/);
+  assert.equal((await activate(alternative.id)).status, "sent");
+  await assert.rejects(activate(target.id, 3), /authority changed/);
+  world.agents.push({ ...target, id: "duplicate-b" });
+  await assert.rejects(activate(target.id, 4), /Expected one .* Steer B, found 2/);
+  assert.equal(workspace.metadata[METADATA_KEY].activeAgentId, alternative.id);
+  assert.equal(workspace.metadata[METADATA_KEY].epoch, 4);
+  assert.deepEqual(world.sent.map(([id]) => id), [alternative.id]);
+});
+
+test("activation refuses a limited target and pending permissions before changing authority", async () => {
+  const { world, workspace, target, activate } = activationWorld();
+  workspace.metadata[AGENTS_KEY] = { [target.id]: { quotaLimit: { provider: target.provider, model: target.model } } };
+  await assert.rejects(activate(), /cannot be activated: provider limit/);
+  target.pendingPermissions = [{ id: "open" }];
+  await assert.rejects(activate(), /permission request/);
+  target.labels[LABEL.steerRole] = "advisor";
+  await assert.rejects(activate(), /Only a live coordinator steer/);
+  assert.equal(workspace.metadata[METADATA_KEY].epoch, 3);
+  assert.deepEqual(world.sent, []);
+});
+
+test("activation rechecks the scope epoch under the handover lock", async () => {
+  const { world, workspace, target, alternative, activate } = activationWorld();
+  const scope = workspace.metadata[METADATA_KEY];
+  await assert.rejects(activate(target.id, 3, workspace.id, { lock: async (_name, run) => {
+    Object.assign(scope, { activeSteer: "C", activeAgentId: alternative.id, epoch: 4 });
+    return run({ verify() {} });
+  } }), /Scope state changed since discovery/);
+  assert.equal(scope.epoch, 4);
+  assert.equal(scope.activeAgentId, alternative.id);
+  assert.deepEqual(world.sent, []);
+});
+
+test("resume inspection without a destination stays available; advisor CLI output cannot borrow a coordinator target", async () => {
+  const world = makeWorld();
+  const [active, advisor] = world.agents;
+  advisor.labels[LABEL.steerRole] = "advisor";
+  const [workspace] = world.workspaces;
+  workspace.metadata[`${METADATA_KEY}.checkpoint`] = { task: "SYNTHETIC_PRIVATE_CHECKPOINT" };
+  workspace.metadata[AGENTS_KEY] = { "w-live": { note: "SYNTHETIC_PRIVATE_LOG" } };
+  const paseo = fakePaseo(world);
+
+  const manual = await handlers.getResume({ workspaceId: MAIN }, { paseo }, loader, { getZerosub: async () => null });
+  assert.match(manual.brief, /SYNTHETIC_PRIVATE_CHECKPOINT/);
+  for (const provider of [advisor.provider, active.provider]) {
+    advisor.provider = provider;
+    for (const address of [{ agentId: advisor.id }, { agentId: active.id, callerId: advisor.id }]) {
+      await assert.rejects(handlers.getResume({ workspaceId: MAIN, ...address }, { paseo }, loader), (error) => {
+        assert.match(error.message, /advisor brief requires verified/);
+        assert.doesNotMatch(error.message, /SYNTHETIC_/);
+        return true;
+      });
+    }
+  }
+  const unclassified = { ...advisor, id: "native-advisor", title: "[Advisor] Technical question", labels: {} };
+  world.agents.push(unclassified);
+  await assert.rejects(handlers.getResume({ workspaceId: MAIN, agentId: active.id, callerId: unclassified.id },
+    { paseo }, loader), /recipient has no verified Factory identity/);
+
+  await assert.rejects(handlers.getResume({ workspaceId: MAIN, agentId: active.id }, { paseo }, {
+    ...loader,
+    loadPromptOptions: async () => {
+      active.labels[LABEL.steerRole] = "advisor";
+      return loader.loadPromptOptions();
+    },
+  }, { getZerosub: async () => null }), /advisor brief requires verified/);
+});
+
+test("Fresh RPC refuses a newly sensitive route immediately before rewind and restores the staged action", async () => {
+  const world = makeWorld();
+  const [ws] = world.workspaces;
+  const { id: agentId } = world.agents[0];
+  const stage = { kind: "stage", wakeId: "staged-id", phase: "staged", packet: "pending brief" };
+  ws.metadata[AGENTS_KEY] = { [agentId]: { action: stage } };
+  const paseo = fakePaseo(world);
+  const config = structuredClone(CONFIG);
+  const effectReads = [];
+  let pages = 0;
+  const deps = {
+    getScopePublic: async (current) => { effectReads.push(current.metadata.visibility); return current.metadata.visibility; },
+    rewindClient: async () => ({
+      fetchAgentTimeline: async () => {
+        if (++pages === 3) {
+          config.profiles.sol.sensitive = true;
+          ws.metadata.visibility = false;
+        }
+        return { entries: [{ item: { type: "user_message", messageId: "point" } }] };
+      },
+      rewindAgent: async () => assert.fail("rewind must be refused before dispatch"),
+      sendMessage: async () => assert.fail("brief must not be sent"),
+    }),
+  };
+  const liveLoader = { ...loader, loadEffectiveConfig: async () => structuredClone(config) };
+  const preview = await handlers.previewFresh({ workspaceId: MAIN }, { paseo }, liveLoader, deps);
+  assert.equal(preview.refreshMode, "rewind");
+  await assert.rejects(handlers.applyFresh({ workspaceId: MAIN, fingerprint: preview.fingerprint, deliver: "stage" },
+    { paseo }, liveLoader, deps), /sensitive runtime requires a public scope/);
+  assert.deepEqual(effectReads, [false]);
+  assert.deepEqual(ws.metadata[AGENTS_KEY][agentId].action, stage);
+  assert.equal(world.agents.length, 3);
+  assert.deepEqual(world.sent, []);
+});
+
+test("Fresh RPC rechecks runtime after a successful rewind before sending the brief", async () => {
+  const world = makeWorld();
+  const [active] = world.agents;
+  const paseo = fakePaseo(world);
+  let rewinds = 0;
+  const deps = {
+    getScopePublic: async () => true,
+    rewindClient: async () => ({
+      fetchAgentTimeline: async () => ({ entries: [{ item: { type: "user_message", messageId: "point" } }] }),
+      rewindAgent: async () => { rewinds++; active.provider = "muse"; },
+      sendMessage: async () => assert.fail("brief must not be sent to the new runtime"),
+    }),
+  };
+  const preview = await handlers.previewFresh({ workspaceId: MAIN }, { paseo }, loader, deps);
+  const result = await handlers.applyFresh({ workspaceId: MAIN, fingerprint: preview.fingerprint, deliver: "send" },
+    { paseo }, loader, deps);
+  assert.equal(rewinds, 1);
+  assert.equal(result.applied, true);
+  assert.equal(result.delivered, false);
+  assert.match(result.deliveryError, /verified sanitized brief/);
+  assert.equal(result.staged, false);
+  assert.equal(result.packet, "");
+  assert.equal(world.workspaces[0].metadata[AGENTS_KEY][active.id].action.phase, "staged");
+  assert.match(world.workspaces[0].metadata[AGENTS_KEY][active.id].action.packet, /Steer refresh/);
+  assert.equal(world.workspaces[0].metadata[METADATA_KEY].epoch, 3);
+  assert.deepEqual(world.sent, []);
+});
+
+test("steer creation preview binds discovery, preferences and revision to one settings state", async () => {
+  const world = makeWorld();
+  const paseo = fakePaseo(world);
+  const values = { profiles: structuredClone(CONFIG.profiles), slots: { ...CONFIG.steers.slots },
+    prepare: [...CONFIG.steers.prepare], initialActive: CONFIG.steers.initialActive,
+    workerPriority: [...CONFIG.workers.priority], githubOwner: "example", checkoutRoot: ROOT,
+    quota: { exhaustedPct: 90, warnPct: 70 } };
+  let reads = 0;
+  const settings = { read: async () => {
+    reads++;
+    const snapshot = structuredClone(values);
+    if (reads > 1) snapshot.profiles.sol.model = "changed-elsewhere";
+    return { status: "ready", revision: `r${reads}`, values: snapshot };
+  } };
+  const out = await handlers.previewSteerAdd({ repo: SCOPE, slot: "C", spec: "sol" },
+    { paseo }, createConfigLoader(settings), settings, async () => null);
+  assert.equal(reads, 1);
+  assert.equal(out.revision, "r1");
+  assert.equal(out.model, "gpt-6.2-sol");
+  assert.deepEqual(out.values, values, "a one-run creation returns the original host preferences");
+  assert.equal(out.values.slots.C, undefined);
+  await assert.rejects(handlers.applySteerAddRpc({ workspaceId: MAIN, slot: "C", spec: "sol",
+    fingerprint: out.fingerprint, revision: out.revision }, { paseo }, createConfigLoader(settings), settings), /settings changed/);
+  assert.equal(world.agents.length, 3, "preview creates no agent");
+  assert.equal(world.sent.length, 0);
+});
+
+test("steer creation preview and apply refuse a sensitive profile when scope visibility is unknown", async () => {
+  const world = makeWorld();
+  const paseo = fakePaseo(world);
+  const config = structuredClone(CONFIG);
+  config.profiles.sol.sensitive = true;
+  const values = { profiles: structuredClone(config.profiles), slots: { ...config.steers.slots },
+    prepare: [...config.steers.prepare], initialActive: config.steers.initialActive,
+    workerPriority: [...config.workers.priority], githubOwner: "example", checkoutRoot: ROOT,
+    quota: { exhaustedPct: 90, warnPct: 70 } };
+  const settings = { read: async () => ({ status: "ready", revision: "r1", values }) };
+  const preview = await handlers.previewSteerAdd({ repo: SCOPE, slot: "C", spec: "sol" },
+    { paseo }, createConfigLoader(settings), settings, async () => null);
+  assert.equal(preview.profile, null);
+  assert.equal(preview.fingerprint, null);
+  assert.match(preview.text, /scope publicity is unknown; public scope required/);
+
+  await assert.rejects(handlers.applySteerAddRpc({ repo: SCOPE, slot: "C", spec: "sol", fingerprint: "old" },
+    { paseo }, { loadEffectiveConfig: async () => config }), /public scope required/);
+  assert.equal(world.agents.length, 3);
+});
+
+test("steer add serializes competing confirmations and reuses an archived letter with a new key", async () => {
+  const world = makeWorld();
+  const paseo = fakePaseo(world);
+  world.agents[1].labels = {};
+  world.agents[1].status = "closed";
+  const values = { profiles: structuredClone(CONFIG.profiles), slots: { ...CONFIG.steers.slots, C: "sonnet" },
+    prepare: [...CONFIG.steers.prepare], initialActive: CONFIG.steers.initialActive,
+    workerPriority: [...CONFIG.workers.priority], githubOwner: "example", checkoutRoot: ROOT,
+    quota: { exhaustedPct: 90, warnPct: 70 } };
+  const original = structuredClone(values);
+  const settings = { read: async () => ({ status: "ready", revision: "r1", values }) };
+  const configLoader = createConfigLoader(settings);
+  const receipts = new Map();
+  const readZerosub = async () => null;
+  const lookupReceipt = async (_, key) => receipts.get(key) ?? null;
+  const deps = { lookupReceipt, readZerosub, getZerosub: readZerosub };
+  const preview = (spec) => handlers.previewSteerAdd(
+    { workspaceId: MAIN, spec }, { paseo }, configLoader, settings, readZerosub,
+  );
+  const apply = (spec, plan) => handlers.applySteerAddRpc(
+    { workspaceId: MAIN, slot: plan.slot, spec, fingerprint: plan.fingerprint, revision: plan.revision },
+    { paseo }, configLoader, settings, deps,
+  );
+  const firstPlan = await preview("sol");
+  const secondPlan = await preview("sonnet");
+  assert.equal(firstPlan.slot, "C");
+  assert.equal(secondPlan.slot, "C");
+  const entered = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const writes = [];
+  world.createAgent = async (workspaceId, req) => {
+    const existing = receipts.get(req.idempotencyKey);
+    if (existing) throw new Error("Live replay should use the receipt directly");
+    writes.push(req);
+    if (writes.length === 1) {
+      entered.resolve();
+      await release.promise;
+    }
+    const [provider, model] = req.config.provider.split("/");
+    const agent = { id: `steer-created-${writes.length}`, workspaceId, provider, model, title: req.title, labels: req.labels, metadata: req.metadata };
+    world.agents.push(agent);
+    receipts.set(req.idempotencyKey, { phase: "completed", idempotencyKey: req.idempotencyKey, agentId: agent.id });
+    if (writes.length === 1) {
+      throw new Error("Connection lost after native creation completed");
+    }
+    return { refresh: async () => ({ agent }) };
+  };
+
+  const running = apply("sol", firstPlan);
+  await Promise.race([entered.promise, running]);
+  try {
+    await assert.rejects(apply("sonnet", secondPlan), /lock .*held by another process/);
+  } finally {
+    release.resolve();
+  }
+  await assert.rejects(running, /Connection lost after native creation completed/);
+  const created = world.agents.at(-1);
+  assert.equal(world.workspaces[0].metadata[`${METADATA_KEY}.steer-add-pending`].key, writes[0].idempotencyKey);
+  const replay = await apply("sol", firstPlan);
+  assert.equal(replay.reused, true);
+  assert.equal(replay.agentId, created.id);
+  assert.equal(world.workspaces[0].metadata[`${METADATA_KEY}.steer-add-pending`], null);
+  await assert.rejects(apply("sonnet", secondPlan), /already occupied by live steer/);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].metadata[LABEL.steerRole], "coordinator");
+  assert.equal(writes[0].metadata["zerosub.account"], undefined);
+
+  created.archivedAt = "2026-11-26T20:00:00Z";
+  const replacement = await preview("sol");
+  assert.equal(replacement.slot, "C");
+  assert.notEqual(replacement.fingerprint, firstPlan.fingerprint);
+  await assert.rejects(apply("sol", firstPlan), /Something changed since the steer-add preview/);
+  const applied = await apply("sol", replacement);
+  assert.notEqual(applied.agentId, created.id);
+  assert.notEqual(writes[1].idempotencyKey, writes[0].idempotencyKey);
+  assert.deepEqual(values, original);
+  assert.equal(world.workspaces[0].metadata[METADATA_KEY].activeSteer, "A");
+  assert.equal(world.sent.length, 0);
+});
+
+test("steer add replays legacy pins and sends the recorded unpinned request for new receipts", async () => {
+  const world = makeWorld();
+  const paseo = fakePaseo(world);
+  const settings = { read: async () => ({ status: "ready", revision: "r1", values: {
+    profiles: CONFIG.profiles, slots: CONFIG.steers.slots, prepare: CONFIG.steers.prepare,
+    initialActive: CONFIG.steers.initialActive, workerPriority: CONFIG.workers.priority,
+    githubOwner: "example", checkoutRoot: ROOT, quota: { exhaustedPct: 90, warnPct: 70 },
+  } }) };
+  const configLoader = createConfigLoader(settings);
+  const readZerosub = async () => null;
+  const preview = await handlers.previewSteerAdd({ workspaceId: MAIN, spec: "sol" },
+    { paseo }, configLoader, settings, readZerosub);
+  const legacy = buildSteerCreate({
+    keyScope: preview.repo, repo: preview.repo, scopeId: preview.scope, slot: preview.slot,
+    workspaceId: MAIN, profile: CONFIG.profiles.sol, keyParts: ["steer", preview.slot, "g1"],
+  });
+  const oldFingerprint = steerAddFingerprint({
+    repo: preview.repo, scope: preview.scope, workspaceId: MAIN, slot: preview.slot, profile: "sol",
+    provider: preview.provider, model: preview.model, thinking: null, mode: "full-access", advisor: false,
+  });
+  const newKey = preview.text.match(/\[(wsf:[^\]]+)\]/)[1];
+  for (const [fingerprint, key, expectedMetadata] of [
+    [oldFingerprint, legacy.idempotencyKey, { "zerosub.account": "old-pin" }],
+    [preview.fingerprint, newKey, { [LABEL.steerRole]: "coordinator" }],
+  ]) {
+    // A completed receipt can be visible before the new tab appears in the list.
+    const agent = { id: "receipt-agent", workspaceId: MAIN, title: legacy.request.title, labels: legacy.request.labels,
+      provider: preview.provider, model: preview.model, metadata: { ...expectedMetadata, "zerosub.account": "old-pin" } };
+    const lookupReceipt = async (_, idempotencyKey) => idempotencyKey === key
+      ? { idempotencyKey, phase: "completed", agentId: agent.id, agent }
+      : null;
+    const writes = [];
+    world.createAgent = async (_, req) => {
+      writes.push(req);
+      assert.equal(req.idempotencyKey, key);
+      assert.deepEqual(req.metadata, expectedMetadata);
+      return { refresh: async () => ({ agent }) };
+    };
+    const result = await handlers.applySteerAddRpc({ workspaceId: MAIN, slot: preview.slot, spec: "sol", fingerprint,
+      revision: preview.revision }, { paseo }, configLoader, settings, { lookupReceipt, readZerosub });
+    assert.equal(result.reused, true);
+    assert.equal(result.agentId, agent.id);
+    assert.equal(writes.length, 1);
+  }
+});
+
+test("workspace status counts queued wakes from completed workers", async () => {
+  const world = makeWorld();
+  world.workspaces[0].metadata[WORKERS_KEY]["w-done"] = {
+    id: "w-done", state: "done", pendingWake: { state: "done", queuedAt: "2026-11-26T18:01:00Z" },
+  };
+  const status = await handlers.getStatus({ workspaceId: MAIN }, { paseo: fakePaseo(world) }, loader);
+  assert.equal(status.pendingWorkerWakeCount, 1);
+  assert.ok(status.openWorkers.every((worker) => worker.id !== "w-done"));
+});
+
 test("getStatus and getWorkers (list + prune) match core text formatting", async () => {
   const world = makeWorld();
   const paseo = fakePaseo(world);
@@ -169,17 +593,22 @@ test("getStatus and getWorkers (list + prune) match core text formatting", async
 
 test("getResume includes Worker model line and restartInterrupted metadata", async () => {
   const world = makeWorld();
-  const res = await handlers.getResume({ repo: SCOPE, agentId: "steer-a" }, { paseo: fakePaseo(world) }, loader);
+  const paseo = fakePaseo(world);
+  const quotaSource = { zerosub: { accounts: [{ id: "acc-live", family: "codex", maxUsedPct: 94 }], agentAccount: { "steer-a": "acc-live" }, pending: {} } };
+  const res = await handlers.getResume({ repo: SCOPE, agentId: "steer-a" }, { paseo }, loader, quotaSource);
   assert.match(res.brief, /Worker model: codex\/gpt-6\.2-sol/);
   assert.equal(res.openWorkers.length, 1);
   assert.equal(res.openWorkers[0].id, "w-live");
+  const line = /^Quota: codex \(acc-live\) 94% used$/m;
+  assert.match(res.brief, line);
+  assert.match(await handlers.createResumeBriefBuilder(loader, quotaSource)(paseo, MAIN, "steer-a"), line);
 });
 
 test("pickWorker, listWorkersModels and startWorkerRpc agree and record --failed", async () => {
   const world = makeWorld();
   const paseo = fakePaseo(world);
   // No live ZeroSub state: worker selection must be deterministic in tests.
-  const noZerosub = { getZerosub: async () => null, lookupReceipt: async () => null, reservePins: false };
+  const noZerosub = { getZerosub: async () => null, lookupReceipt: async () => null };
   const listBefore = await handlers.listWorkersModels({ cwd: world.workspaces[0].workspaceDirectory }, { paseo }, loader, noZerosub);
   const sel = resolveWorkerPick(CONFIG, world.providers, { repoPublic: listBefore.repoPublic, zerosub: null });
   assert.equal(listBefore.chosen, sel.profile.name);
@@ -234,4 +663,70 @@ test("core suggestion helpers default to /factory for removed CLI commands", () 
   assert.equal(formatSlotProfileSuggestion(CONFIG, "B", "codex", "gpt-6.2-sol"), '/factory steer set B "sol"');
   const candidates = scopeCandidates({ workspaces: [{ id: "wks_x", workspaceDirectory: "/tmp/x", metadata: {} }] });
   assert.equal(candidates[0].suggestedPlan, "/factory plan --local /tmp/x");
+});
+
+test("Fresh RPC binds the requested route and rechecks live options before creation", async () => {
+  const world = makeWorld();
+  const [source] = world.agents;
+  const paseo = fakePaseo(world);
+  const scope = { workspaceId: MAIN };
+  const input = { ...scope, provider: "claude", model: "claude-sonnet" };
+  let changed = false;
+  let lookups = 0;
+  const deps = {
+    zerosub: null,
+    rewindClient: async () => ({ fetchAgentTimeline: async () => ({ entries: [] }) }),
+    lookupFreshReceipt: async () => {
+      if (changed && ++lookups === 2) source.options = { service_tier: "fast" };
+      return null;
+    },
+    freshPaseoCli: () => assert.fail("the old tab must stay intact"),
+  };
+  const preview = await handlers.previewFresh(input, { paseo }, loader, deps);
+  assert.equal(preview.model, "claude-sonnet");
+  assert.equal(preview.refreshMode, "new-agent");
+  await assert.rejects(handlers.applyFresh({ ...scope, fingerprint: preview.fingerprint }, { paseo }, loader, deps), /Something changed/);
+  changed = true;
+  await assert.rejects(handlers.applyFresh({ ...input, fingerprint: preview.fingerprint }, { paseo }, loader, deps), /Something changed/);
+  assert.equal(world.agents.length, 3);
+  assert.equal(world.workspaces[0].metadata[METADATA_KEY].epoch, 3);
+  assert.equal(world.workspaces[0].metadata[AGENTS_KEY], undefined);
+});
+
+test("Fresh RPC confirms Worker replacement and carries the requested provider and model", async () => {
+  const world = makeWorld();
+  const worker = world.agents[2];
+  const paseo = fakePaseo(world);
+  const handle = paseo.workspaces.ref;
+  const created = [];
+  paseo.workspaces.ref = (id) => {
+    const ref = handle(id);
+    ref.agents.create = async (request) => {
+      created.push(request);
+      const [provider, model] = request.config.provider.split("/");
+      const agent = {
+        id: "worker-replaced", workspaceId: id, status: "idle", title: request.title,
+        provider, model, labels: { ...request.labels, [PARENT_LABEL]: request.parent },
+      };
+      world.agents.push(agent);
+      return { refresh: async () => ({ agent }) };
+    };
+    return ref;
+  };
+  const deps = {
+    zerosub: null,
+    rewindClient: async () => ({ fetchAgentTimeline: async () => ({ entries: [] }) }),
+    lookupFreshReceipt: async () => null,
+  };
+  const input = { workspaceId: MAIN, workerId: worker.id, provider: "claude", model: "claude-sonnet" };
+  const preview = await handlers.previewFresh(input, { paseo }, loader, deps);
+  const result = await handlers.applyFresh({ ...input, fingerprint: preview.fingerprint, notifyPrevious: false },
+    { paseo }, loader, deps);
+  assert.equal(result.applied, true);
+  assert.equal(result.to, "worker-replaced");
+  assert.equal(result.epoch, 3);
+  assert.equal(created.length, 1);
+  assert.equal(created[0].config.provider, "claude/claude-sonnet");
+  assert.equal(created[0].labels[LABEL.owner], "A");
+  assert.equal(created[0].parent, "steer-a");
 });

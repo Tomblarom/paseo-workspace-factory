@@ -26,6 +26,7 @@ const {
 // Shared modules import each other through `.js` specifiers, so
 // they must load dynamically after the resolve hook is registered.
 const { factoryResumeSettings } = await import("../shared/settings.ts");
+const { steerQuotaAdmission } = await import("../server/steer-admission.ts");
 import { LABEL, METADATA_KEY } from "../server/core/paseo.mjs";
 import { AGENTS_KEY } from "../server/core/agent-state.mjs";
 import { WORKERS_KEY } from "../server/core/supervision.mjs";
@@ -36,6 +37,19 @@ const NOW = new Date("2026-11-24T12:00:00.000Z").getTime();
 const at = (ms) => new Date(ms).toISOString();
 const MIN = 60_000;
 const HOUR = 3_600_000;
+
+test("recognizes Claude's confirmed five-hour limit wording", () => {
+  assert.equal(isLimitFailure("You've hit your 5-hour limit"), true);
+  assert.equal(isLimitFailure("You've hit your 5-hour goal"), false);
+});
+
+test("hard-limit evidence remains effective until its recorded reset", async () => {
+  const agent = { id: "steer", provider: "claude", model: "sonnet" };
+  const entry = { quotaLimit: { at: at(NOW - MIN), provider: "claude", model: "sonnet", accountId: "a", resetAt: at(NOW + MIN) } };
+  const zerosub = { accounts: [{ id: "a", sampledAt: at(NOW - 2 * MIN), windows: [{ usedPct: 5, resetsAt: at(NOW + MIN) }] }], agentAccount: { steer: "a" }, pending: {} };
+  assert.equal((await steerQuotaAdmission(agent, entry, { zerosub, now: () => at(NOW) })).allowed, false);
+  assert.equal((await steerQuotaAdmission(agent, entry, { zerosub, now: () => at(NOW + 2 * MIN) })).allowed, true);
+});
 
 function makeWorld() {
   return { workspaces: [], agents: [], timelines: {}, calls: [], seq: 0 };
@@ -789,8 +803,8 @@ test("quotaAvailableForCleanup checks the routed ZeroSub account before the pool
   const dangling = { ...zerosub, agentAccount: { ...zerosub.agentAccount, "steer-gone": "acc-missing" } };
   assert.equal(
     sweep.quotaAvailableForCleanup("claude", healthyPool, { agentId: "steer-gone", zerosub: dangling, nowMs }),
-    true,
-    "dangling route falls back to the pool",
+    null,
+    "the bound account has no quota evidence",
   );
   assert.equal(
     sweep.quotaAvailableForCleanup("claude", null, { agentId: "steer-full", zerosub, exhaustedPct: 100, nowMs }),

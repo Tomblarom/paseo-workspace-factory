@@ -2,9 +2,8 @@
 // Validation reuses validateProfilesAgainstCatalog() from config.mjs, the same
 // check the planner runs (live catalog shape plus known limits). Plans return
 // a new config object; the caller persists it in the plugin settings.
-import { isAdvisorProfile, isAdvisorSlot, isSensitiveProfile, slotOrder, validateConfig, validateProfilesAgainstCatalog, workerPriority } from './config.mjs';
+import { isAdvisorProfile, isAdvisorSlot, isSensitiveProfile, providerIsSensitive, slotOrder, validateConfig, validateProfilesAgainstCatalog, workerPriority } from './config.mjs';
 import { QUOTA_DEFAULTS, profileIsUnhealthy, quotaExhausted, profilePool, profileFamily, familyAccounts, familyExhausted, bestFamilyAccount, earliestFamilyReset, readProfileHealth } from './quota.mjs';
-import { suggestAccountPin } from './zerosub.mjs';
 
 /** Split "<provider>/<model>" (model may itself contain "/"). */
 export function parseProviderModel(spec) {
@@ -44,8 +43,9 @@ export function formatCatalog(providerEntries, { json = false } = {}) {
 }
 
 /**
- * Fallback order for steer slot S: its own profile first, then the profiles
- * of the following slots, then the previous ones (slot order, deduplicated).
+ * Legacy fallback order for callers awaiting the live-role cutover: own
+ * profile, following slots, preceding slots (deduplicated). New creation uses
+ * role priorities in resolveSteerAdd instead.
  */
 export function steerFallbackList(config, slot) {
   const order = slotOrder(config);
@@ -92,16 +92,6 @@ export function formatSlotProfileSuggestion(config, slot, provider, model, { fac
   return `${factoryCmd} steer set ${slot} ${provider}/${model}`;
 }
 
-/** First free steer slot letter (A-Z) in priority order, or null when all 26 are used. */
-export function nextFreeSlot(config) {
-  const slots = config?.steers?.slots ?? {};
-  for (let code = 65; code <= 90; code++) {
-    const letter = String.fromCharCode(code);
-    if (!slots[letter]) return letter;
-  }
-  return null;
-}
-
 /** Profile names whose provider/model match a live steer (fallback duplicate avoidance). */
 export function usedProfilesByLiveSteers(config, steers) {
   const byPair = new Map();
@@ -122,22 +112,22 @@ export function usedProfilesByLiveSteers(config, steers) {
 
 /**
  * First startable profile of `list` for `role`: passes the catalog check and
- * matches the role. Workers always skip advisor profiles, plus sensitive
- * profiles when the repo is not provably public (`repoPublic !== true`).
+ * matches the role. Workers always skip advisor profiles. Workers and steers
+ * skip sensitive profiles when the scope is not provably public.
  * Steers take only advisor profiles in advisor slots and only non-advisor
- * ones elsewhere; sensitive steer profiles are never blocked. Fallback
+ * ones elsewhere. Fallback
  * entries (past the first) already used by a live steer are skipped, so no
  * two steers share a model by accident. Returns
  * `{ profile: { name, ...settings } | null, skipped: [{ name, reason }],
- * zerosubAccount: <id|null>, zerosubPin: <pin|null> }`. With `zerosub`
+ * zerosubAccount: <id|null> }`. With `zerosub`
  * (normalized ZeroSub state), a profile whose family has accounts is judged
  * by those accounts instead of the usage snapshot: all accounts exhausted
  * skips it (reason names the earliest reset when known), otherwise the
- * roomiest account id is reported plus a `zerosubPin` suggestion
- * ({ pluginId, method, accountId, metadata }) for creation.
+ * roomiest account id is reported as quota evidence. ZeroSub chooses
+ * the actual account when opening the agent.
  * Accounts and pools use the same `quotaExhaustedPct`.
  */
-export function resolveProfile(config, providerEntries, list, { role = 'worker', advisorSlot = false, usedProfiles = [], repoPublic = null, quotaSnapshot = null, quotaExhaustedPct = config?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct, profileHealth = null, now = Date.now(), zerosub = null } = {}) {
+export function resolveProfile(config, providerEntries, list, { role = 'worker', advisorSlot = false, usedProfiles = [], repoPublic = /** @type {boolean | null} */ (null), quotaSnapshot = null, quotaExhaustedPct = config?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct, profileHealth = null, now = Date.now(), zerosub = null, liveProviderPrivacy = false } = {}) {
   const skipped = [];
   const used = new Set(usedProfiles ?? []);
   const names = Array.isArray(list) ? list : [];
@@ -170,8 +160,10 @@ export function resolveProfile(config, providerEntries, list, { role = 'worker',
       skipped.push({ name, reason: `profile "${name}" is tagged as advisor` });
       continue;
     }
-    if (role === 'worker' && repoPublic !== true && isSensitiveProfile(config, name)) {
-      skipped.push({ name, reason: `sensitive profile "${name}": private repo` });
+    if ((role === 'worker' || role === 'steer') && repoPublic !== true &&
+        (isSensitiveProfile(config, name) || (liveProviderPrivacy && providerIsSensitive(config, config.profiles[name].provider)))) {
+      const reason = role === 'worker' ? 'private repo' : (repoPublic === false ? 'scope is private; public scope required' : 'scope publicity is unknown; public scope required');
+      skipped.push({ name, reason: `sensitive profile "${name}": ${reason}` });
       continue;
     }
     if (role === 'steer') {
@@ -195,10 +187,9 @@ export function resolveProfile(config, providerEntries, list, { role = 'worker',
     }
     const pickModel = config.profiles[name].model ?? null;
     const account = zerosub ? bestFamilyAccount(zerosub, family, { exhaustedPct: quotaExhaustedPct, now, model: pickModel }) : null;
-    const pin = suggestAccountPin(zerosub, family, { exhaustedPct: quotaExhaustedPct, now, model: pickModel });
-    return { profile: { name, ...config.profiles[name] }, skipped, zerosubAccount: account ? account.id : null, zerosubPin: pin };
+    return { profile: { name, ...config.profiles[name] }, skipped, zerosubAccount: account ? account.id : null };
   }
-  return { profile: null, skipped, zerosubAccount: null, zerosubPin: null };
+  return { profile: null, skipped, zerosubAccount: null };
 }
 
 /**
@@ -241,80 +232,38 @@ export function workerListRows(config, providerEntries, selection) {
   });
 }
 
-/**
- * Pure model/account selection for a future `steer add`: validates or
- * suggests the slot, then picks the profile and ZeroSub account. `slot`
- * null/empty suggests the next free letter (slot priority, A first); an
- * occupied slot throws pointing at `steer set`/`fresh`, a gappy one throws (unless `allowGap`: the caller has already checked live occupancy)
- * with the next free letter. `profile` null tries all profiles in
- * slot-priority order (existing slots' profiles first, then unreferenced
- * ones); an explicit profile is tried alone and decides the advisor flag,
- * otherwise `advisorSlot` (default false) does. Eligibility reuses
- * resolveProfile (catalog, health, advisor, live-duplicate avoidance,
- * pools) with accounts judged against `quotaExhaustedPct`: exhausted or
- * limited accounts are skipped, the roomiest eligible account wins, and
- * when none fit each account skip names the earliest reset plus
- * `earliestReset` carries the earliest future reset across the
- * account-blocked families (null when picked or unknown). Pools without
- * ZeroSub accounts keep the exhausted threshold. Returns
- * `{ slot, advisorSlot, profile, skipped, zerosubAccount, zerosubPin,
- * earliestReset }`. Throws on a bad slot/profile, an occupied slot, a gap,
- * or a full A-Z.
- */
-export function resolveSteerAdd(config, providerEntries, { slot = null, profile = null, advisorSlot = null, usedProfiles = [], quotaSnapshot = null, quotaExhaustedPct = config?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct, profileHealth = null, now = Date.now(), zerosub = null, allowGap = false } = {}) {
-  const order = slotOrder(config);
-  const slots = config?.steers?.slots ?? {};
-  let target;
-  if (slot === null || slot === undefined || String(slot).trim() === '') {
-    target = nextFreeSlot(config);
-    if (!target) throw new Error('No free steer slot: all letters A-Z are defined in steers.slots');
-  } else {
-    const raw = String(slot).trim().toUpperCase();
-    if (!/^[A-Z]$/.test(raw)) throw new Error(`Steer slot must be a single capital letter A-Z, got ${JSON.stringify(slot)}`);
-    if (slots[raw]) throw new Error(`Slot ${raw} is already defined (profile "${slots[raw]}"); use steer set ${raw} <profile|provider/model> to replace it or fresh to refresh its steer`);
-    const max = order.length ? order[order.length - 1] : '@';
-    if (!allowGap && raw > String.fromCharCode(max.charCodeAt(0) + 1)) {
-      throw new Error(`Slot ${raw} would leave a gap (slots are ${order.join(', ') || 'none'}); use the next free letter ${nextFreeSlot(config)}`);
-    }
-    target = raw;
-  }
+/** Resolve a creation route from host priorities or one explicit profile. */
+export function resolveSteerAdd(config, providerEntries, {
+  profile = null, advisorSlot = false, legacyPriority = false, usedProfiles = [], repoPublic = null,
+  quotaSnapshot = null, quotaExhaustedPct = config?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct,
+  profileHealth = null, now = Date.now(), zerosub = null, liveProviderPrivacy = false,
+} = {}) {
   let names;
-  let advisor;
-  if (profile !== null && profile !== undefined) {
+  let advisor = advisorSlot;
+  if (profile !== null) {
     const name = String(profile).trim();
     if (!name) throw new Error('steer add needs a non-empty profile name');
     if (!config?.profiles?.[name]) throw new Error(`Unknown profile "${name}"`);
     names = [name];
     advisor = isAdvisorProfile(config, name);
   } else {
-    advisor = advisorSlot === true;
-    const seen = new Set();
-    names = [];
-    for (const s of order) {
-      const name = slots[s];
-      if (typeof name === 'string' && name && config?.profiles?.[name] && !seen.has(name)) {
-        seen.add(name);
-        names.push(name);
-      }
-    }
-    for (const name of Object.keys(config?.profiles ?? {})) {
-      if (!seen.has(name)) {
-        seen.add(name);
-        names.push(name);
-      }
-    }
+    const priority = advisor ? config?.advisors?.priority : config?.steers?.priority;
+    const fallback = Object.keys(config?.profiles ?? {});
+    const legacySlots = legacyPriority ? slotOrder(config).map((slot) => config.steers.slots[slot]) : [];
+    names = priority ?? [...new Set([...legacySlots, ...fallback])];
   }
-  const { profile: picked, skipped, zerosubAccount, zerosubPin } = resolveProfile(config, providerEntries, names, {
-    role: 'steer', advisorSlot: advisor, usedProfiles, quotaSnapshot, quotaExhaustedPct, profileHealth, now, zerosub,
+  const { profile: picked, skipped, zerosubAccount } = resolveProfile(config, providerEntries, names, {
+    role: 'steer', advisorSlot: advisor, usedProfiles, repoPublic, quotaSnapshot, quotaExhaustedPct, profileHealth, now, zerosub, liveProviderPrivacy,
   });
   let earliestReset = null;
   if (!picked && zerosub) {
     let bestMs = Infinity;
     for (const entry of skipped) {
       if (typeof entry?.reason !== 'string' || !entry.reason.startsWith('accounts exhausted')) continue;
-      const family = profileFamily(config?.profiles?.[entry.name]);
+      const candidate = config?.profiles?.[entry.name];
+      const family = profileFamily(candidate);
       if (!family) continue;
-      const reset = earliestFamilyReset(zerosub, family, { now });
+      const reset = earliestFamilyReset(zerosub, family, { now, model: candidate.model });
       const ms = reset ? Date.parse(reset) : NaN;
       if (Number.isFinite(ms) && ms > now && ms < bestMs) {
         bestMs = ms;
@@ -322,7 +271,7 @@ export function resolveSteerAdd(config, providerEntries, { slot = null, profile 
       }
     }
   }
-  return { slot: target, advisorSlot: advisor, profile: picked, skipped, zerosubAccount, zerosubPin, earliestReset };
+  return { advisorSlot: advisor, profile: picked, skipped, zerosubAccount, earliestReset };
 }
 
 /** `paseo run` flags for a resolved profile. */
@@ -705,6 +654,14 @@ export function planProfileTag(config, providerEntries, { flag, spec, on }) {
   }
   const beforeTag = next.profiles[profileName][flag] === true;
   next.profiles[profileName][flag] = on === true;
+  if (flag === 'advisor' && beforeTag !== (on === true)) {
+    const source = on === true ? next.steers : next.advisors;
+    if (Array.isArray(source?.priority) && source.priority.includes(profileName)) {
+      const target = on === true ? (next.advisors ??= {}) : (next.steers ??= {});
+      source.priority = source.priority.filter((name) => name !== profileName);
+      target.priority = [...(target.priority ?? []).filter((name) => name !== profileName), profileName];
+    }
+  }
   checkedConfig(next);
   const warnings = created ? startableWarnings(next, providerEntries, profileName) : [];
   return {

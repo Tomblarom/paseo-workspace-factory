@@ -62,7 +62,8 @@ export async function listModels(
   now: () => number = Date.now,
   readZerosub: () => Promise<any> = readZerosubStateSafe,
 ) {
-  const config = await loader.loadEffectiveConfig();
+  const state = hostSettings ? structuredClone(await hostSettings.read()) : undefined;
+  const config = await loader.loadEffectiveConfig(state);
   let entries: any[] = [];
   let catalogError: string | null = null;
   try {
@@ -70,7 +71,6 @@ export async function listModels(
   } catch (error) {
     catalogError = error instanceof Error ? error.message : String(error);
   }
-  const state = hostSettings ? await hostSettings.read() : null;
   // Sensitivity does not block "selected" here: the list assumes a public repo.
   // Quota uses the same ZeroSub snapshot as worker pick, so an exhausted
   // profile is never marked selected.
@@ -93,15 +93,19 @@ export async function listModels(
       const alt = resolveProfile(config, entries, steerFallbackList(config, slot), {
         role: "steer",
         advisorSlot: own.advisor,
+        repoPublic: true,
       });
       fallback = alt.profile && alt.profile.name !== name ? alt.profile.name : null;
     }
     return { ...own, slot, fallback };
   });
+  const roleRows = (priority: string[] | undefined) => priority?.map((name, index) => row(config, entries, name, index + 1));
   return {
     revision: state && state?.status === "ready" ? (state.revision ?? null) : null,
     workers,
     steers,
+    steerPreferences: roleRows(config.steers?.priority),
+    advisorPreferences: roleRows(config.advisors?.priority),
     selectedWorker: selectedName,
     catalogError,
   };
@@ -115,11 +119,11 @@ export async function setModels(
   now: () => number = Date.now,
 ) {
   if (!hostSettings) throw new Error("Factory settings are not available; open Factory settings and save them again");
-  const state = await hostSettings.read();
+  const state = structuredClone(await hostSettings.read());
   if (state.status !== "ready") {
     throw new Error(`Factory settings are ${state.status}: ${(state as any).error ?? "unreadable"}; open the settings page and save them again`);
   }
-  const config = await loader.loadEffectiveConfig();
+  const config = await loader.loadEffectiveConfig(state);
   // An unreadable catalog only skips the availability warnings.
   const entries = await loadCatalog(paseo, now).catch(() => []);
   const need = (value: string | undefined, what: string): string => {

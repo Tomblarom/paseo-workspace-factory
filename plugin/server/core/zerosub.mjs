@@ -7,7 +7,6 @@
 // the normaliser drops them. All reads fail soft (null) so callers fall back.
 import { LABEL, PARENT_LABEL, connectPluginRpc, paseoBinary, parentOf } from './paseo.mjs';
 import { runtime } from './runtime.mjs';
-import { QUOTA_DEFAULTS, bestFamilyAccount } from './quota.mjs';
 
 /** Statuses that mark an account as limited without consulting any threshold. */
 const LIMITED_STATUSES = new Set(['limited', 'exhausted', 'suspended', 'blocked']);
@@ -53,7 +52,7 @@ export function normalizeZerosubState(raw, { now = Date.now() } = {}) {
       if (!window || typeof window !== 'object') continue;
       const wid = asId(window.id) ?? asId(window.label);
       if (!wid) continue;
-      const used = Number(window.usedPercent);
+      const used = Number(window.usedPercent ?? NaN);
       const models = Array.isArray(window.models)
         ? window.models.filter((name) => typeof name === 'string' && name.trim()).map((name) => name.trim())
         : (typeof window.model === 'string' && window.model.trim() ? [window.model.trim()] : null);
@@ -80,6 +79,7 @@ export function normalizeZerosubState(raw, { now = Date.now() } = {}) {
       status,
       limitedUntil,
       windows,
+      ...(asId(entry.usage?.fetchedAt) ? { sampledAt: entry.usage.fetchedAt } : {}),
       maxUsedPct: pcts.length ? Math.max(...pcts) : null,
       exhausted: limitedByStatus(status) || (Number.isFinite(limitedMs) && limitedMs > now),
     });
@@ -123,10 +123,6 @@ export const SWITCH_ROW_TYPE = SWITCH_ROW_KIND;
 /** Creation metadata that pins a fresh agent to a ZeroSub account (Paseo 0.16+). */
 export const ACCOUNT_METADATA_KEY = 'zerosub.account';
 
-/** Plugin RPC that pins an agent to a ZeroSub account. */
-export const ACCOUNT_PIN_PLUGIN_ID = 'zerosub';
-export const ACCOUNT_PIN_METHOD = 'zerosub.agents.account';
-
 /** Source agent id of a continuation tab, or null without the label. */
 export function continuedFromId(agent) {
   const value = agent?.labels?.[CONTINUED_FROM_LABEL];
@@ -157,7 +153,14 @@ export function continuationOrigin(agent, agents) {
 export function resolveFactoryLabels(agent, agents = []) {
   const labels = agent?.labels ?? {};
   const role = labels[LABEL.role];
-  if ((role === 'steer' || role === 'worker') && (labels[LABEL.scope] || labels[LABEL.repo])) return labels;
+  if ((role === 'steer' || role === 'worker') && (labels[LABEL.scope] || labels[LABEL.repo])) {
+    if (role === 'steer' && continuedFromId(agent) && labels[LABEL.steerRole] === undefined) {
+      const origin = continuationOrigin(agent, agents);
+      const role = agent.metadata?.[LABEL.steerRole] ?? origin?.labels?.[LABEL.steerRole] ?? origin?.metadata?.[LABEL.steerRole];
+      if (role != null) return { ...labels, [LABEL.steerRole]: role };
+    }
+    return labels;
+  }
   const origin = continuationOrigin(agent, agents);
   if (!origin) return null;
   const inherited = inheritContinuationLabels(agent, origin);
@@ -307,29 +310,14 @@ export function resolveContinuations(agents, switches = []) {
  */
 export function inheritContinuationLabels(live, origin) {
   const labels = { ...(live?.labels ?? {}) };
-  for (const key of [LABEL.repo, LABEL.scope, LABEL.role, LABEL.slot, LABEL.owner, PARENT_LABEL]) {
+  for (const key of [LABEL.repo, LABEL.scope, LABEL.role, LABEL.steerRole, LABEL.slot, LABEL.owner, PARENT_LABEL]) {
     if (labels[key] === undefined && origin?.labels?.[key] !== undefined) labels[key] = origin.labels[key];
   }
+  if (labels[LABEL.role] === 'steer' && labels[LABEL.steerRole] === undefined) {
+    const role = live?.metadata?.[LABEL.steerRole] ?? origin?.metadata?.[LABEL.steerRole];
+    if (role !== undefined) labels[LABEL.steerRole] = role;
+  }
   return labels;
-}
-
-/**
- * Pure pin suggestion for a worker of `family`: the roomiest usable account
- * plus the creation metadata that pins the new agent to it
- * (`metadata: {"zerosub.account": id}`, Paseo 0.16+). Null without ZeroSub
- * state, without a family, or when every account is exhausted. No live call;
- * the caller passes `metadata` at creation (or pins via the RPC after).
- */
-export function suggestAccountPin(zerosub, family, { exhaustedPct = QUOTA_DEFAULTS.exhaustedPct, now = Date.now(), model = null } = {}) {
-  if (!zerosub || typeof family !== 'string' || !family) return null;
-  const best = bestFamilyAccount(zerosub, family, { exhaustedPct, now, model });
-  if (!best) return null;
-  return {
-    pluginId: ACCOUNT_PIN_PLUGIN_ID,
-    method: ACCOUNT_PIN_METHOD,
-    accountId: best.id,
-    metadata: { [ACCOUNT_METADATA_KEY]: best.id },
-  };
 }
 
 /**
@@ -357,4 +345,61 @@ export async function readZerosubState({ url = null, cliPath = null, createClien
 
 function defaultCreateClient(options) {
   return connectPluginRpc({ ...options, clientId: 'paseo-workspace-factory-zerosub' });
+}
+
+export const MOVE_BEFORE_LIMIT_RPC = 'zerosub.agents.move_before_limit';
+const MOVE_REASONS = new Set([
+  'busy_turn', 'background_work', 'auto_switch_off', 'not_open',
+  'unsupported_provider', 'ineligible_target', 'user_pinned', 'switch_guard',
+  'in_progress', 'reload_failed', 'landed_elsewhere',
+]);
+
+/**
+ * Thin 1.34.0 RPC adapter, not an account router. Call only after selecting a
+ * move and rechecking authority, settings and runtime/quota. Never modifies
+ * a user pin, stops background work, sends a follow-up or retries a move.
+ *
+ * An older installation's unknown-method rejection is `unsupported` (the
+ * other routes remain available). Transport errors and incomplete/legacy
+ * replies are `uncertain`: read state and the switch observation before any
+ * further effect. A legacy `waiting` reply may have queued a move. Even a
+ * valid `moved`/`already` reply needs a fresh runtime/account/quota admission
+ * before delivery; the reply alone never authorizes a send.
+ */
+export async function moveZerosubBeforeLimit({ agentId, accountId, url = null, cliPath = null, createClient = defaultCreateClient } = {}) {
+  if (!asId(agentId) || !asId(accountId)) throw new Error('Account move needs agentId and accountId');
+  let client = null;
+  let invoked = false;
+  const result = (outcome, reason, runtimeAccountId = null, retryable = false) =>
+    ({ outcome, reason, accountId: runtimeAccountId, retryable });
+  try {
+    client = await createClient({ url: url ?? runtime().paseo.url, cliPath: cliPath ?? paseoBinary() });
+    invoked = true;
+    const raw = await client.invokePluginRpc('zerosub', MOVE_BEFORE_LIMIT_RPC, { agentId, accountId, stopBackgroundWork: false });
+    if (!raw || typeof raw !== 'object' || typeof raw.retryable !== 'boolean' ||
+        !Object.hasOwn(raw, 'accountId') || !(raw.accountId === null || asId(raw.accountId))) {
+      return result('uncertain', 'incomplete_response');
+    }
+    const live = raw.accountId;
+    if (!['moved', 'already', 'waiting', 'refused', 'pending'].includes(raw.outcome)) return result('uncertain', 'unknown_outcome', live);
+    if (raw.reason !== null && !MOVE_REASONS.has(raw.reason)) {
+      // The published contract forbids retrying an unknown reason. A claimed
+      // refusal can fall back; other outcomes may already have caused effects.
+      return result(raw.outcome === 'refused' ? 'refused' : 'uncertain', 'unknown_reason', live);
+    }
+    if (raw.outcome === 'waiting' && (!['busy_turn', 'background_work'].includes(raw.reason) ||
+        raw.waitingFor !== (raw.reason === 'busy_turn' ? 'turn' : 'background'))) {
+      return result('uncertain', 'incomplete_response', live);
+    }
+    if (['moved', 'already'].includes(raw.outcome) && live !== accountId) return result('uncertain', 'account_mismatch', live);
+    return result(raw.outcome, raw.reason, live, raw.retryable);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '';
+    // Paseo's plugin process rejects a missing method with this exact text.
+    // Do not mistake an arbitrary network or handler failure for no effects.
+    if (invoked && message === `Unknown RPC method: ${MOVE_BEFORE_LIMIT_RPC}`) return result('unsupported', 'unknown_method');
+    return result(invoked ? 'uncertain' : 'unavailable', invoked ? 'reply_lost' : 'connection_failed');
+  } finally {
+    try { await client?.close?.(); } catch { /* cleanup cannot change the move outcome */ }
+  }
 }

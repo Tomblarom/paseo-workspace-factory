@@ -1,8 +1,8 @@
-import type { RpcOutput } from "@getpaseo/plugin";
+import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
 import type { PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
-import { useRpc, useSettings } from "@getpaseo/plugin/client";
-import { useMutation } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useRpc } from "@getpaseo/plugin/client";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import type { TextStyle, ViewStyle } from "react-native";
 import {
@@ -26,18 +26,16 @@ import {
   factorySwitch,
   factorySwitchPreview,
 } from "../shared/factory.js";
-import { factoryConfigSettings } from "../shared/settings.js";
-import type { FactorySettingsValues } from "../shared/settings-validate.js";
 import { factoryHelp } from "../shared/factory-args.js";
-import {
-  getFactoryResult,
-  setFactoryResult,
-  subscribeFactoryResult,
-  type AssignPreviewInputs,
-  type CheckpointPreviewInputs,
-  type FactoryPanelResult,
-  type SteerAddPreviewInputs,
+import type {
+  AssignPreviewInputs,
+  CheckpointPreviewInputs,
+  FactoryPanelResult,
+  FactoryResultStore,
+  SteerAddPreviewInputs,
 } from "./factory-store.js";
+import { record, type FactorySteerFeed } from "./factory-workspace-state.js";
+import { FactoryWorkspaceStatus } from "./factory-workspace-status.js";
 
 function text(value: unknown): string {
   if (value === null || value === undefined) return "-";
@@ -67,7 +65,11 @@ function formatAge(ageMs: unknown): string {
   return `${Math.floor(hours / 24)}d`;
 }
 
-export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePanelProps) {
+export function FactoryPanel(props: PluginWorkspacePanelProps & {
+  steerFeed: FactorySteerFeed;
+  results: FactoryResultStore;
+}) {
+  const { theme, layout, workspaceId, host, steerFeed, results } = props;
   const callStatus = useRpc(factoryStatus);
   const callPlan = useRpc(factoryPlan);
   const callApply = useRpc(factoryApply);
@@ -82,11 +84,25 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
   const callAssign = useRpc(factoryAssign);
   const callQuota = useRpc(factoryQuota);
   const callSteerAdd = useRpc(factorySteerAdd);
-  const callSteerAddPreview = useRpc(factorySteerAddPreview);
-  const configState = useSettings(factoryConfigSettings);
   const [repo, setRepo] = useState("");
-  const [result, setResult] = useState<FactoryPanelResult | null>(() => getFactoryResult());
-  useEffect(() => subscribeFactoryResult(() => setResult(getFactoryResult())), []);
+  const result = useSyncExternalStore(results.subscribe, results.getResult, results.getResult);
+  const setFactoryResult = results.setResult;
+  const scroll = useRef<ScrollView>(null);
+  useEffect(() => {
+    if (result) scroll.current?.scrollTo({ y: 0, animated: false });
+  }, [result]);
+
+  const workspaceStatus = useQuery({
+    queryKey: ["workspace-factory", "status", host.id, workspaceId],
+    queryFn: async () => {
+      const status = await callStatus({ workspaceId });
+      if (record(status.workspace)?.id !== workspaceId) throw new Error("Factory returned status for a different workspace.");
+      return status;
+    },
+    refetchOnMount: "always",
+    refetchOnWindowFocus: false,
+    retry: false,
+  });
 
   const styles = useMemo(
     () => ({
@@ -112,7 +128,7 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
         padding: 10,
         fontSize: 14,
       },
-      row: { flexDirection: "row" as const, gap: 8 },
+      row: { flexDirection: "row" as const, flexWrap: "wrap" as const, gap: 8 },
       button: {
         paddingVertical: 10,
         paddingHorizontal: 14,
@@ -152,12 +168,11 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
     onError: fail,
   });
   const planMutation = useMutation({
-    mutationFn: async (target: string) =>
-      target ? callPlan({ repos: [target] }) : callPlan({ workspaceId }),
-    onSuccess: (plan, target) =>
+    mutationFn: (input: RpcInput<typeof factoryPlan>) => callPlan(input),
+    onSuccess: (plan, input) =>
       setFactoryResult({
         kind: "plan",
-        repos: target ? [target] : [],
+        repos: [...(input.repos ?? []), ...(input.local ?? [])],
         at: new Date().toISOString(),
         plan,
       }),
@@ -194,8 +209,10 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
   });
   const applyMutation = useMutation({
     mutationFn: async (hash: string) => callApply({ hash }),
-    onSuccess: (applied) =>
-      setFactoryResult({ kind: "applied", at: new Date().toISOString(), applied }),
+    onSuccess: (applied) => {
+      setFactoryResult({ kind: "applied", at: new Date().toISOString(), applied });
+      void workspaceStatus.refetch();
+    },
     onError: fail,
   });
   const checkpointMutation = useMutation({
@@ -210,13 +227,15 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
         fingerprint: vars.fingerprint,
         ...vars.inputs,
       }),
-    onSuccess: (written, vars) =>
+    onSuccess: (written, vars) => {
       setFactoryResult({
         kind: "checkpointWritten",
         repo: vars.repo ?? "(current workspace)",
         at: new Date().toISOString(),
         written,
-      }),
+      });
+      if (!vars.repo) void workspaceStatus.refetch();
+    },
     onError: fail,
   });
   const switchMutation = useMutation({
@@ -300,30 +319,9 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
       workspaceId: string;
       fingerprint: string;
       inputs: SteerAddPreviewInputs;
+      revision: string;
     }) => {
-      if (configState.status !== "ready") {
-        throw new Error("Factory settings are not ready; open the settings page and save them again.");
-      }
-      const address = vars.repo ? { repo: vars.repo } : { workspaceId: vars.workspaceId };
-      const inputs = {
-        ...address,
-        // inputs.slot is the confirmed preview slot (confirmSteerAdd sets it),
-        // so the same slot is provisioned even when it was auto-suggested.
-        ...(vars.inputs.slot !== undefined ? { slot: vars.inputs.slot } : {}),
-        ...(vars.inputs.spec !== undefined ? { spec: vars.inputs.spec } : {}),
-        ...(vars.inputs.thinking !== undefined ? { thinking: vars.inputs.thinking } : {}),
-        ...(vars.inputs.mode !== undefined ? { mode: vars.inputs.mode } : {}),
-        ...(vars.inputs.profile !== undefined ? { profile: vars.inputs.profile } : {}),
-      };
-      const fresh = await callSteerAddPreview(inputs);
-      if (fresh.fingerprint !== vars.fingerprint) {
-        throw new Error("The steer-add preview changed. Run /factory steer add again and review the new preview.");
-      }
-      const saved = await configState.save(fresh.values as FactorySettingsValues, fresh.revision);
-      if (!saved) {
-        throw new Error(`Not saved: ${configState.saveError ?? "revision conflict"}. Run /factory steer add again.`);
-      }
-      return callSteerAdd({ ...inputs, fingerprint: vars.fingerprint });
+      return callSteerAdd({ ...vars.inputs, workspaceId: vars.workspaceId, fingerprint: vars.fingerprint, revision: vars.revision });
     },
     onSuccess: (added, vars) =>
       setFactoryResult({
@@ -397,19 +395,47 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
       repo: result.repo,
       workspaceId: result.workspaceId,
       fingerprint: result.preview.fingerprint,
-      // The confirmed preview slot: after the settings save the same slot
-      // must be provisioned even when it was auto-suggested.
+      revision: result.preview.revision,
       inputs: { ...result.inputs, slot: result.preview.slot },
     });
   };
 
   return (
-    <ScrollView style={styles.screen} contentContainerStyle={{ gap: styles.screen.gap }}>
-      <Text style={styles.title}>Factory</Text>
-      <Text style={styles.hint}>
-        Coordinate several steers per project: see who is in charge, save checkpoints and hand
-        over. Changes always show a preview with a confirm button first.
-      </Text>
+    <ScrollView ref={scroll} style={styles.screen} contentContainerStyle={{ gap: styles.screen.gap }}>
+      <Text accessibilityRole="header" style={styles.title}>Factory</Text>
+      {busy ? <Text style={styles.label}>Working…</Text> : null}
+      {result ? (
+        <ResultView
+          result={result}
+          styles={styles}
+          actions={{
+            busy,
+            apply: (hash: string) => applyMutation.mutate(hash),
+            confirmCheckpoint,
+            confirmSwitch,
+            confirmResume,
+            confirmFresh,
+            confirmAssign,
+            confirmSteerAdd,
+          }}
+        />
+      ) : null}
+      <FactoryWorkspaceStatus
+        workspaceId={workspaceId}
+        layout={layout}
+        host={host}
+        navigation={props.navigation}
+        feed={steerFeed}
+        styles={styles}
+        status={workspaceStatus.data}
+        statusUpdatedAt={workspaceStatus.dataUpdatedAt}
+        statusError={workspaceStatus.error}
+        statusFetching={workspaceStatus.isFetching}
+        refresh={() => { void workspaceStatus.refetch(); }}
+        setup={planMutation.mutate}
+        setupBusy={busy}
+      />
+      <Text accessibilityRole="header" style={styles.body}>Commands</Text>
       <Text style={styles.label}>
         Project (optional): owner/repo, scope id, workspace id (wks_…) or folder path. Leave empty for
         this workspace.
@@ -438,7 +464,7 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
           accessibilityLabel="Plan factory changes"
           style={styles.button}
           disabled={busy}
-          onPress={() => planMutation.mutate(repo.trim())}
+          onPress={() => planMutation.mutate(repo.trim() ? { repos: [repo.trim()] } : { workspaceId })}
         >
           <Text style={styles.buttonText}>Plan</Text>
         </Pressable>
@@ -501,21 +527,6 @@ export function FactoryPanel({ theme, layout, workspaceId }: PluginWorkspacePane
           <Text style={styles.buttonText}>Help</Text>
         </Pressable>
       </View>
-      {busy ? <Text style={styles.label}>Working…</Text> : null}
-      <ResultView
-        result={result}
-        styles={styles}
-        actions={{
-          busy,
-          apply: (hash: string) => applyMutation.mutate(hash),
-          confirmCheckpoint,
-          confirmSwitch,
-          confirmResume,
-          confirmFresh,
-          confirmAssign,
-          confirmSteerAdd,
-        }}
-      />
       <Text style={styles.hint}>
         Recommended tab order is read only: Steers A to Z first, then workers. Paseo owns tab
         order, so arrange tabs manually. This plugin never moves tabs.
@@ -937,7 +948,7 @@ function QuotaView({
       <Text style={styles.label}>
         {at} · sampled {quota.sampledAt ? text(quota.sampledAt) : "never"}
       </Text>
-      {pools.length === 0 ? (
+      {pools.length === 0 && !quota.accounts?.length ? (
         <Text style={styles.label}>
           No quota sample yet. The plugin samples in the background; try again in a minute.
         </Text>
@@ -947,6 +958,13 @@ function QuotaView({
           {text(pool.pool)} · session {pctText(pool.sessionPct)}
           {typeof pool.weeklyPct === "number" ? ` · week ${pctText(pool.weeklyPct)}` : ""}
           {pool.resetAt ? ` · resets ${text(pool.resetAt)}` : ""} · {text(pool.state)}
+        </Text>
+      ))}
+      {quota.accounts?.map((account) => (
+        <Text key={account.account} style={stateStyle(account.state)}>
+          {account.family} · {account.label || account.account} · {account.usedPct === null ? "Usage unavailable" : `${pctText(account.usedPct)} used`}
+          {account.state === "warn" || account.state === "exhausted" ? ` · ${account.state}` : ""}
+          {account.resetsAt ? ` · resets ${account.resetsAt}` : ""}
         </Text>
       ))}
       {quota.steers.map((steer) => (
@@ -1297,7 +1315,7 @@ function SteerAddPreviewView({
           disabled={actions.busy}
           onPress={actions.confirmSteerAdd}
         >
-          <Text style={styles.buttonText}>Save slot and create steer</Text>
+          <Text style={styles.buttonText}>Create steer</Text>
         </Pressable>
       )}
     </View>

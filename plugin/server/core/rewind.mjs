@@ -138,7 +138,7 @@ async function rewindOnClient(client, agentId, { previousBriefId = null, keepBri
   if (!messageId) return { status: 'no-op' };
   if (typeof client.rewindAgent !== 'function') return { status: 'unsupported', error: 'daemon has no rewindAgent' };
   try {
-    if (beforeRewind && !await beforeRewind()) return { status: 'deferred' };
+    if (beforeRewind && !await beforeRewind(messageId)) return { status: 'deferred' };
     await client.rewindAgent(agentId, messageId, 'conversation');
   } catch (error) {
     // The provider can commit a fork before returning an error, including an
@@ -154,11 +154,12 @@ async function rewindOnClient(client, agentId, { previousBriefId = null, keepBri
  * null on any failure (no daemon, no timeline, no user message). Never throws
  * for daemon failures; production callers treat null as "new agent".
  */
-export async function readRewindPoint(agentId, { url = null, cliPath = null, createClient = defaultCreateRewindClient, previousBriefId = null } = {}) {
+export async function readRewindPoint(agentId, { url = null, cliPath = null, createClient = defaultCreateRewindClient, previousBriefId = null, requireSupport = false } = {}) {
   if (typeof agentId !== 'string' || !agentId) return null;
   try {
     return (await useRewindClient({ url, cliPath, createClient },
-      (client) => findRewindPoint(client, agentId, previousBriefId)))?.messageId ?? null;
+      (client) => requireSupport && typeof client.rewindAgent !== 'function' ? null :
+        findRewindPoint(client, agentId, previousBriefId)))?.messageId ?? null;
   } catch {
     return null;
   }
@@ -210,7 +211,7 @@ export async function rewindSameTab(agentId, { url = null, cliPath = null, creat
  *   failed; nothing was sent, and the caller must abort without side effects
  *   (no record, no new agent).
  */
-export async function rewindAndBrief(agentId, briefText, { url = null, cliPath = null, createClient = defaultCreateRewindClient, messageId: briefId = null, previousBriefId = null, skipBrief = false, beforeRewind = null } = {}) {
+export async function rewindAndBrief(agentId, briefText, { url = null, cliPath = null, createClient = defaultCreateRewindClient, messageId: briefId = null, previousBriefId = null, skipBrief = false, beforeRewind = null, beforeBrief = null } = {}) {
   if (typeof agentId !== 'string' || !agentId) return { status: 'failed', error: 'missing agent id' };
   if (skipBrief !== true && (typeof briefText !== 'string' || !briefText.trim())) return { status: 'failed', error: 'missing brief text' };
   try {
@@ -227,6 +228,7 @@ export async function rewindAndBrief(agentId, briefText, { url = null, cliPath =
       try {
         // No sourceAgentId: with a caller id the brief would arrive as a
         // tool_call and the next refresh could not rewind to it.
+        if (beforeBrief) await beforeBrief();
         await send.call(client, agentId, briefText, { messageId: briefMessageId });
       } catch (error) {
         return { status: 'rewound', messageId, briefMessageId: null, sendError: error?.message ?? String(error) };
@@ -246,13 +248,14 @@ export async function rewindAndBrief(agentId, briefText, { url = null, cliPath =
  * back to the high-level send); connect and send failures throw, like a
  * direct send would.
  */
-export async function sendUserBrief(agentId, briefText, { url = null, cliPath = null, createClient = defaultCreateRewindClient, messageId = null } = {}) {
+export async function sendUserBrief(agentId, briefText, { url = null, cliPath = null, createClient = defaultCreateRewindClient, messageId = null, beforeSend = null } = {}) {
   if (typeof agentId !== 'string' || !agentId) throw new Error('sendUserBrief needs an agent id');
   if (typeof briefText !== 'string' || !briefText.trim()) throw new Error('sendUserBrief needs brief text');
   return useRewindClient({ url, cliPath, createClient }, async (client) => {
     const send = client.sendMessage ?? client.sendAgentMessage;
     if (typeof send !== 'function') return false;
     const options = typeof messageId === 'string' && messageId ? { messageId } : {};
+    if (beforeSend) await beforeSend();
     await send.call(client, agentId, briefText, options);
     return true;
   });

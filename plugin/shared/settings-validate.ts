@@ -12,17 +12,69 @@ export interface FactoryProfileValue {
   sensitive: boolean;
 }
 
+export interface LegacyFactoryConfig {
+  version: number;
+  values: {
+    profiles?: Record<string, {
+      provider: string;
+      model: string;
+      thinking?: string | null;
+      mode?: string | null;
+      advisor?: boolean;
+      sensitive?: boolean;
+      [key: string]: unknown;
+    }>;
+    slots?: Record<string, string>;
+    prepare?: string[];
+    initialActive?: string;
+    workerDefault?: string;
+    workerPriority?: string[];
+    quota?: { exhaustedPct?: number; warnPct?: number; [key: string]: unknown };
+    githubOwner?: string | null;
+    checkoutRoot?: string | null;
+    [key: string]: unknown;
+  };
+}
+
 export interface FactorySettingsValues {
   profiles: Record<string, FactoryProfileValue>;
   slots: Record<string, string>;
   prepare: string[];
   initialActive: string;
   workerPriority: string[];
+  steerPriority: string[];
+  advisorPriority: string[];
+  routingStrategy: "efficiency" | "balanced" | "preference";
+  legacySnapshot: LegacyFactoryConfig | null;
   quota: { exhaustedPct: number; warnPct: number };
   /** Null/empty means unset; both host fields are required to run. */
   githubOwner: string | null;
   /** Null/empty means unset; both host fields are required to run. */
   checkoutRoot: string | null;
+}
+
+/** Legacy slot order is the existing priority order; classifications are part of route identity. */
+export function prioritiesFromSlots(
+  slots: Record<string, string>,
+  profiles: Record<string, FactoryProfileValue>,
+): { steerPriority: string[]; advisorPriority: string[] } {
+  const result: { steerPriority: string[]; advisorPriority: string[] } = { steerPriority: [], advisorPriority: [] };
+  const seen = new Set<string>();
+  for (const slot of Object.keys(slots ?? {}).sort()) {
+    const name = slots[slot];
+    const p = profiles?.[name];
+    if (!p || typeof p.provider !== "string" || !p.provider || typeof p.model !== "string" || !p.model
+      || (p.advisor !== undefined && typeof p.advisor !== "boolean")
+      || (p.sensitive !== undefined && typeof p.sensitive !== "boolean")
+      || (p.thinking != null && typeof p.thinking !== "string")
+      || (p.mode != null && typeof p.mode !== "string")) continue;
+    const key = JSON.stringify([p.provider, p.model, p.thinking ?? null, p.mode ?? null,
+      p.advisor === true, p.sensitive ?? p.provider === "muse"]);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result[p.advisor === true ? "advisorPriority" : "steerPriority"].push(name);
+  }
+  return result;
 }
 
 /**
@@ -40,12 +92,25 @@ export function settingsFromConfig(config: any, current: FactorySettingsValues):
     : config.workers?.defaultProfile
       ? [config.workers.defaultProfile]
       : [];
-  const profiles: Record<string, FactoryProfileValue> = {};
+  const derived = prioritiesFromSlots(current.slots, current.profiles);
+  const steerPriority = config.steers?.priority !== undefined
+    ? config.steers.priority : current.steerPriority === undefined ? derived.steerPriority : current.steerPriority;
+  const advisorPriority = config.advisors?.priority !== undefined
+    ? config.advisors.priority : current.advisorPriority === undefined ? derived.advisorPriority : current.advisorPriority;
+  const profiles: Record<string, FactoryProfileValue> = { ...current.profiles };
   for (const [name, p] of Object.entries<any>(config.profiles ?? {})) {
     const stored = current.profiles?.[name];
-    const used = Object.values(slots).includes(name) || priority.includes(name);
-    const flagsChanged = stored && (stored.advisor === true) !== (p.advisor === true);
-    const sensChanged = stored && Boolean(stored.sensitive) !== Boolean(p.sensitive ?? p.provider === "muse");
+    const used = Object.values(slots).includes(name) || priority.includes(name)
+      || steerPriority.includes(name) || advisorPriority.includes(name);
+    for (const key of ["advisor", "sensitive"] as const) {
+      if (p[key] !== undefined && typeof p[key] !== "boolean") {
+        throw new Error(`profiles.${name}.${key} must be a boolean`);
+      }
+    }
+    const advisor = p.advisor ?? stored?.advisor ?? false;
+    const sensitive = p.sensitive ?? stored?.sensitive ?? (p.provider === "muse");
+    const flagsChanged = stored && stored.advisor !== advisor;
+    const sensChanged = stored && stored.sensitive !== sensitive;
     const different = stored && (stored.provider !== p.provider || stored.model !== p.model || (stored.thinking ?? null) !== (p.thinking ?? null) || (stored.mode ?? null) !== (p.mode ?? null));
     if (!stored && !used) continue;
     if (stored && !used && !flagsChanged && !sensChanged && !different) {
@@ -57,8 +122,8 @@ export function settingsFromConfig(config: any, current: FactorySettingsValues):
       model: p.model,
       thinking: p.thinking ?? null,
       mode: p.mode ?? null,
-      advisor: p.advisor === true,
-      sensitive: typeof p.sensitive === "boolean" ? p.sensitive : p.provider === "muse",
+      advisor,
+      sensitive,
     };
   }
   return {
@@ -67,6 +132,11 @@ export function settingsFromConfig(config: any, current: FactorySettingsValues):
     prepare: [...(config.steers?.prepare ?? current.prepare)],
     initialActive: config.steers?.initialActive ?? current.initialActive,
     workerPriority: priority,
+    steerPriority: [...steerPriority],
+    advisorPriority: [...advisorPriority],
+    routingStrategy: config.routing?.strategy !== undefined
+      ? config.routing.strategy : current.routingStrategy === undefined ? "efficiency" : current.routingStrategy,
+    legacySnapshot: current.legacySnapshot == null ? null : JSON.parse(JSON.stringify(current.legacySnapshot)),
     quota: current.quota ?? { exhaustedPct: QUOTA_DEFAULTS.exhaustedPct, warnPct: QUOTA_DEFAULTS.warnPct },
     githubOwner: current.githubOwner ?? null,
     checkoutRoot: current.checkoutRoot ?? null,
@@ -186,6 +256,7 @@ export function missingHostSettings(values: Pick<FactorySettingsValues, "githubO
  * blank values stay blank so validation fails clearly.
  */
 export function configFromSettings(settings: FactorySettingsValues): any {
+  const derived = prioritiesFromSlots(settings.slots, settings.profiles);
   return {
     version: 1,
     github: {
@@ -200,12 +271,18 @@ export function configFromSettings(settings: FactorySettingsValues): any {
       slots: { ...(settings.slots ?? {}) },
       prepare: [...(settings.prepare ?? [])],
       initialActive: settings.initialActive,
+      priority: [...(settings.steerPriority === undefined ? derived.steerPriority : settings.steerPriority)],
     },
+    legacyAdvisorSlots: Object.entries(settings.legacySnapshot?.values?.slots ?? {})
+      .filter(([, name]) => settings.legacySnapshot?.values.profiles?.[name]?.advisor === true)
+      .map(([slot]) => slot),
+    advisors: { priority: [...(settings.advisorPriority === undefined ? derived.advisorPriority : settings.advisorPriority)] },
     workers: {
       priority: [...(settings.workerPriority ?? [])],
       defaultProfile: settings.workerPriority?.[0],
     },
     quota: { ...(settings.quota ?? {}) },
+    routing: { strategy: settings.routingStrategy === undefined ? "efficiency" : settings.routingStrategy },
   };
 }
 
@@ -304,6 +381,26 @@ export function validateFactorySettings(values: FactorySettingsValues): string[]
     for (const key of ["advisor", "sensitive"] as const) {
       const flag: unknown = (p as Partial<FactoryProfileValue>)?.[key];
       if (flag !== undefined && typeof flag !== "boolean") errors.push(`profiles.${name}.${key} must be a boolean`);
+    }
+    for (const key of ["steerPriority", "advisorPriority"] as const) {
+      const list = values[key];
+      if (list === undefined) continue;
+      if (!Array.isArray(list)) {
+        errors.push(`${key} must be a list of profiles`);
+        continue;
+      }
+      for (const name of list) {
+        if (typeof name !== "string" || !name || !profiles[name]) {
+          errors.push(`${key} references unknown profile ${JSON.stringify(name)}`);
+        } else if (typeof profiles[name].advisor === "boolean"
+          && profiles[name].advisor !== (key === "advisorPriority")) {
+          errors.push(`${key} profile ${JSON.stringify(name)} has an incompatible advisor classification`);
+        }
+      }
+      if (new Set(list).size !== list.length) errors.push(`${key} contains duplicates`);
+    }
+    if (values.routingStrategy !== undefined && !["efficiency", "balanced", "preference"].includes(values.routingStrategy)) {
+      errors.push("routingStrategy must be efficiency, balanced, or preference");
     }
   }
   const isAdvisorSlot = (slot: string) => profiles[slots[slot]]?.advisor === true;

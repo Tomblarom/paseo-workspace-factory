@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { AGENTS_KEY } from '../plugin/server/core/agent-state.mjs';
 import { CHECKPOINT_KEY, freshSteer, switchSteer } from '../plugin/server/core/steer.mjs';
 import { withLock } from '../plugin/server/core/lock.mjs';
 import { LABEL, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
@@ -66,6 +67,14 @@ function discoveryOf(world, extra = {}) {
     agents: structuredClone(world.agents),
     providers: structuredClone(world.providers),
     ...extra,
+  };
+}
+
+function fakePaseoCli(world) {
+  return (args) => {
+    assert.deepEqual(args.slice(0, 2), ['agent', 'update']);
+    assert.equal(args[3], '--name');
+    world.agents.find((agent) => agent.id === args[2]).title = args[4];
   };
 }
 
@@ -209,6 +218,20 @@ test('switch with send:false applies without sending and returns the packet', as
   assert.equal(world.workspaces[0].metadata[METADATA_KEY].activeSteer, 'B');
 });
 
+test('switch returns the identity committed with the staged handoff', async () => {
+  const world = makeWorld();
+  const { steers } = provisioned(world);
+  const applied = await switchSteer({
+    client: fakeClient(world), discovery: discoveryOf(world), toSlot: 'B', apply: true,
+    stage: true, send: false, git: fakeGit(), lock: testLock, callerId: null, language: 'en', config: CONFIG,
+  });
+  const stage = world.workspaces[0].metadata[AGENTS_KEY][steers.B.id].action;
+  assert.equal(stage.phase, 'staged');
+  assert.equal(applied.stageId, stage.wakeId);
+  assert.equal(applied.epoch, stage.epoch);
+  assert.deepEqual(sendsTo(world, steers.B.id), []);
+});
+
 test('switch keeps the packet when the send fails (partial apply)', async () => {
   const world = makeWorld();
   const { steers } = provisioned(world);
@@ -230,7 +253,7 @@ test('switch keeps the packet when the send fails (partial apply)', async () => 
 test('fresh sends one brief to the new agent and none to the retired one when asked', async () => {
   const world = makeWorld();
   const { steers } = provisioned(world);
-  const applied = await freshSteer({
+  const applied = await freshSteer({ paseoCli: fakePaseoCli(world),
     client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, apply: true,
     notifyPrevious: false, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en',
   });
@@ -246,7 +269,7 @@ test('fresh sends one brief to the new agent and none to the retired one when as
 test('fresh keeps notifying the retired agent by default', async () => {
   const world = makeWorld();
   const { steers } = provisioned(world);
-  const applied = await freshSteer({
+  const applied = await freshSteer({ paseoCli: fakePaseoCli(world),
     client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, apply: true,
     git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en',
   });
@@ -257,7 +280,7 @@ test('fresh keeps notifying the retired agent by default', async () => {
 test('fresh with send:false creates without sending and returns the packet', async () => {
   const world = makeWorld();
   const { steers } = provisioned(world);
-  const applied = await freshSteer({
+  const applied = await freshSteer({ paseoCli: fakePaseoCli(world),
     client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, apply: true,
     send: false, notifyPrevious: false, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en',
   });
@@ -272,7 +295,7 @@ test('fresh with send:false creates without sending and returns the packet', asy
 test('fresh --slot honors send:false and notifyPrevious:false', async () => {
   const world = makeWorld();
   const { steers } = provisioned(world);
-  const applied = await freshSteer({
+  const applied = await freshSteer({ paseoCli: fakePaseoCli(world),
     client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true,
     send: false, notifyPrevious: false, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en',
   });
@@ -287,7 +310,7 @@ test('fresh keeps the packet when the send fails (partial apply)', async () => {
   const world = makeWorld();
   provisioned(world);
   world.sendFails = true;
-  const applied = await freshSteer({
+  const applied = await freshSteer({ paseoCli: fakePaseoCli(world),
     client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, apply: true,
     git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en',
   });
@@ -302,7 +325,7 @@ test('fresh keeps the packet when the send fails (partial apply)', async () => {
 test('fresh rewind with send:false rewinds without a brief send', async () => {
   const world = makeWorld();
   const { steers } = provisioned(world);
-  const applied = await freshSteer({
+  const applied = await freshSteer({ paseoCli: fakePaseoCli(world),
     client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, apply: true,
     send: false, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world),
     rewindClient: fakeRewindClient(world), language: 'en',
@@ -321,7 +344,7 @@ test('fresh rewind with send:false rewinds without a brief send', async () => {
 test('fresh rewind still briefs by default', async () => {
   const world = makeWorld();
   const { steers } = provisioned(world);
-  const applied = await freshSteer({
+  const applied = await freshSteer({ paseoCli: fakePaseoCli(world),
     client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, apply: true,
     git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world),
     rewindClient: fakeRewindClient(world), language: 'en',
@@ -346,7 +369,7 @@ test('dry runs carry the confirmation binding fields', async () => {
   assert.equal(dry.fromId, steers.A.id);
   assert.equal(dry.toId, steers.B.id);
   assert.equal(dry.checkpointAt, '2026-11-25T10:00:00.000Z');
-  const fresh = await freshSteer({
+  const fresh = await freshSteer({ paseoCli: fakePaseoCli(world),
     client, discovery: discoveryOf(world), config: CONFIG, git: fakeGit(), lock: testLock, language: 'en',
   });
   assert.equal(fresh.workspaceId, ws.id);

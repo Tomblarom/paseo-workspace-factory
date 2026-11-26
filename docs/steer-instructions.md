@@ -66,7 +66,7 @@ If a worker fails with a capacity/quota/limit error, record it with `paseo-facto
 
 ## Worker completion
 
-A worker without a CHECKPOINT block in its last answer, or with an interrupted record, is still unfinished. Run `paseo-factory resume <scope> --agent <worker-id> --apply` to deliver its own task and last CHECKPOINT through the plugin. Factory rewinds a cold or large context where possible and may create a replacement if rewind is unavailable. Verify the resulting worker's answer against the assignment.
+A worker without a CHECKPOINT block in its last answer still has unfinished work. Resume an interrupted worker or continue a partial CHECKPOINT with `paseo-factory resume <scope> --agent <worker-id> --apply`. The resume brief carries the worker's own task and latest checkpoint. It rewinds a cold or large context where possible and may create a replacement if rewind is unavailable. For an expanded assignment, include the new scope in the follow-up. A queued send acknowledges enqueueing. Use the recipient's timeline or active turn to confirm dispatch before reporting progress. Verify the result against the assignment before archiving the worker.
 
 ## Task template
 

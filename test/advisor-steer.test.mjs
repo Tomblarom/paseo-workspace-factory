@@ -130,9 +130,11 @@ test('switch --to an advisor slot is refused', async () => {
   await assert.rejects(
     switchSteer({ client: stubClient, discovery, toSlot: 'E', config: CONFIG, language: 'en' }),
     (error) => error instanceof SwitchRefused
-      && /Steer E is an advisor \(profile opus\); remove the advisor tag to make it a coordinator/.test(error.message),
+      && /Steer E is an advisor and cannot coordinate/.test(error.message),
   );
-  const ok = await switchSteer({ client: stubClient, discovery, toSlot: 'B', config: CONFIG, language: 'en' });
+  const open = structuredClone(CONFIG);
+  open.profiles.muse.sensitive = false;
+  const ok = await switchSteer({ client: stubClient, discovery, toSlot: 'B', config: open, language: 'en' });
   assert.equal(ok.to, 'B');
   assert.match(ok.packet, /Steer handoff/);
 });
@@ -145,7 +147,7 @@ test('fresh keeps the advisor status and falls back with a warning', async () =>
   const limited = { ...discovery, providers: PROVIDERS.filter((e) => e.provider !== 'claude') };
   await assert.rejects(
     freshSteer({ client: stubClient, discovery: limited, config: CONFIG, language: 'en' }),
-    /Profile "opus" for Steer E is not startable.*no fallback available/,
+    /Live route .* is not startable.*no fallback available/,
   );
   const config = structuredClone(CONFIG);
   config.profiles.opusBad = { provider: 'nosuch', model: 'x', advisor: true };
@@ -163,7 +165,7 @@ test('fresh keeps the advisor status and falls back with a warning', async () =>
   const fell = await freshSteer({ client: stubClient, discovery: twoAdvisors, config, language: 'en' });
   assert.equal(fell.profile, 'opusGood', 'advisor slot falls back to the next advisor profile');
   assert.equal(fell.fallbackFrom, 'opusBad');
-  assert.ok(fell.warnings.some((w) => /using fallback "opusGood"/.test(w)));
+  assert.ok(fell.warnings.some((w) => /Using fallback "opusGood"/.test(w)));
 });
 
 test('resume brief addresses advisor steers and carries the worker model', () => {
@@ -208,7 +210,9 @@ test('status tags advisor/sensitive steers; model drift is silent (K13)', () => 
   assert.match(text, /Steer E \[advisor\]  agent-e  claude\/claude-opus-5-5/);
   assert.match(text, /Steer B \[sensitive\]  agent-b  muse\/muse-spark-1\.3-contributor/);
   discovery.steers.labelled[0].model = 'other-model';
+  discovery.steers.labelled[0].provider = 'muse';
   const drifted = steerStatus(discovery, { config: CONFIG });
+  assert.equal(drifted.steers.find((s) => s.id === discovery.steers.labelled[0].id).sensitive, true);
   assert.deepEqual(drifted.warnings, [], 'K13: the live model is authoritative, no drift warning');
   const advised = steerStatus(steerDiscovery(CONFIG, { activeSteer: 'E' }), { config: CONFIG });
   assert.ok(advised.warnings.some((w) => /Active Steer E is an advisor.*advisors never coordinate/.test(w)));

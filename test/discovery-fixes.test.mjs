@@ -10,11 +10,37 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseRepoInput, GitHubNotFound } from '../plugin/server/core/github.mjs';
-import { STEER_TITLE, STEER_DIGIT_TITLE } from '../plugin/server/core/discovery.mjs';
+import { STEER_TITLE, STEER_DIGIT_TITLE, steerTitleSlot, steerTitleLabelPatches } from '../plugin/server/core/discovery.mjs';
 import { resolveScope, ScopeConflict } from '../plugin/server/core/scope.mjs';
 import { idempotencyKey } from '../plugin/server/core/planner.mjs';
 import { createRunner } from '../plugin/server/core/factory.mjs';
-import { LABEL, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
+import { LABEL, METADATA_KEY, PARENT_LABEL } from '../plugin/server/core/paseo.mjs';
+
+test('steerTitleSlot extracts only valid slot titles', () => {
+  for (const [title, slot] of [['Steer C', 'C'], ['▷ Steer c · note', 'C'], ['Steer B (continued)', 'B'], ['Retired C', null], ['Steer C copy', null], ['Steer 3', null], [null, null]]) {
+    assert.equal(steerTitleSlot(title), slot, String(title));
+  }
+});
+
+test('title labels apply only to eligible tabs of a live main scope', () => {
+  const workspace = { id: 'main', metadata: { [METADATA_KEY]: { main: true, scope: { id: 'o/r', kind: 'github' } } } };
+  const base = { workspaceId: 'main', title: 'Steer C', labels: {} };
+  const state = {
+    workspaces: [workspace, { id: 'other', metadata: {} }],
+    agents: [
+      { ...base, id: 'candidate' },
+      { ...base, id: 'worker', labels: { [LABEL.role]: 'worker' } },
+      { ...base, id: 'child', labels: { [PARENT_LABEL]: 'parent' } },
+      { ...base, id: 'foreign', labels: { [LABEL.scope]: 'other/repo' } },
+      { ...base, id: 'elsewhere', workspaceId: 'other' },
+      { ...base, id: 'archived', archivedAt: '2026-01-01' },
+      { ...base, id: 'background', background: true },
+      { ...base, id: 'other-title', title: 'Retired C' },
+      { ...base, id: 'labelled', labels: { [LABEL.scope]: 'o/r', [LABEL.repo]: 'o/r', [LABEL.role]: 'steer', [LABEL.slot]: 'C' } },
+    ],
+  };
+  assert.deepEqual(steerTitleLabelPatches(state), [{ agentId: 'candidate', labels: { [LABEL.role]: 'steer', [LABEL.slot]: 'C', [LABEL.scope]: 'o/r', [LABEL.repo]: 'o/r' } }]);
+});
 
 // ---------------------------------------------------------------- fixtures
 
@@ -344,7 +370,8 @@ test('#5: suffixed and lowercase legacy titles adopt without renaming', async ()
     const [adopted] = await plan(world, [FIRMWARE], { adopt: { '*': { A: agent.id } } });
     const op = adopted.ops.find((o) => o.key === 'steer.A');
     assert.equal(op.kind, 'paseo.agent.adopt', title);
-    assert.deepEqual(Object.keys(op.params).sort(), ['agentId', 'labels'], `${title}: adoption only labels`);
+    assert.equal(op.params.enrollmentGuard.slot, 'A', `${title}: adoption verifies the live title`);
+    assert.equal(op.params.title, undefined, `${title}: adoption only labels`);
     assert.equal(agent.title, title, `${title}: suffix/case kept`);
   }
 });
@@ -362,8 +389,8 @@ test('#5: "Steer 3" is only a digit candidate, never auto-assigned', async () =>
   assert.deepEqual(d.steers.digitCandidates.map((a) => a.title).sort(), ['Steer 3', 'Steer 4 [x]']);
   assert.ok(d.steers.digitCandidates.some((a) => a.id === agent.id));
   const [p] = await plan(world, [FIRMWARE]);
-  assert.equal(p.ops.find((o) => o.key === 'steer.A').kind, 'paseo.agent.create');
-  assert.equal(p.conflicts.some((c) => c.key === 'steer.A'), false);
+  assert.ok(!p.ops.some((o) => o.kind === 'paseo.agent.create'));
+  assert.equal(p.status, 'conflict');
 });
 
 // ------------------------------------------------- planner follow-up: digit notes + adopt
@@ -374,21 +401,21 @@ test('digit candidates get a plan note with the explicit --adopt form', async ()
   const note = p.notes.find((n) => n.includes(agent.id));
   assert.ok(note, p.notes.join('\n'));
   assert.match(note, /"Steer 3"/);
-  assert.match(note, /^Assign candidate /);
+  assert.match(note, /^Rename candidate /);
   assert.match(note, new RegExp(`--adopt <slot>=${agent.id}`));
 });
 
-test('digit candidate adopts into any slot via --adopt, parented needs --detach', async () => {
+test('historical digit adoptions retain their original labels and detach operations', async () => {
   const { world, agent } = legacyWorld('Steer 3');
-  const [adopted] = await plan(world, [FIRMWARE], { adopt: { '*': { B: agent.id } } });
+  const [adopted] = await plan(world, [FIRMWARE], { adopt: { '*': { B: agent.id } }, legacyEnrollment: true });
   assert.equal(adopted.ops.find((o) => o.key === 'steer.B').kind, 'paseo.agent.adopt');
   assert.equal(adopted.ops.find((o) => o.key === 'steer.B').params.agentId, agent.id);
 
   const parented = legacyWorld('Steer 9');
   parented.agent.labels = { 'paseo.parent-agent-id': 'agent-parent' };
-  const [refused] = await plan(parented.world, [FIRMWARE], { adopt: { '*': { A: parented.agent.id } } });
+  const [refused] = await plan(parented.world, [FIRMWARE], { adopt: { '*': { A: parented.agent.id } }, legacyEnrollment: true });
   assert.match(refused.conflicts.find((c) => c.key === 'steer.A').reason, /--detach/);
-  const [detached] = await plan(parented.world, [FIRMWARE], { adopt: { '*': { A: parented.agent.id } }, detach: true });
+  const [detached] = await plan(parented.world, [FIRMWARE], { adopt: { '*': { A: parented.agent.id } }, detach: true, legacyEnrollment: true });
   assert.equal(detached.ops.find((o) => o.key === 'steer.A.detach').kind, 'agent.detach');
   assert.equal(detached.ops.find((o) => o.key === 'steer.A').kind, 'paseo.agent.adopt');
 });

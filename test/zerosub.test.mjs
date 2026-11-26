@@ -89,7 +89,7 @@ test('normalizeZerosubState maps accounts, routes and pending moves', () => {
       { id: 'five_hour', usedPct: 20, resetsAt: FUTURE_5H },
       { id: 'seven_day', usedPct: 55, resetsAt: FUTURE_WEEK },
     ],
-    maxUsedPct: 55, exhausted: false,
+    sampledAt: '2026-11-24T11:59:00Z', maxUsedPct: 55, exhausted: false,
   });
   const full = state.accounts.find((account) => account.id === 'acc-full');
   assert.equal(full.maxUsedPct, 99);
@@ -212,7 +212,7 @@ test('all-exhausted families report the earliest resetsAt', () => {
   assert.equal(picked.skipped[0].reason, 'accounts exhausted, earliest reset 2026-11-24T14:00:00Z');
 });
 
-test('failoverChain excludes steers on the same exhausted account and prefers room', () => {
+test('failoverChain excludes the exhausted account and leaves ranking to route policy', () => {
   const zerosub = normalizeZerosubState(fakeRaw(), { now: NOW });
   const steers = [
     { id: 'steer-d', slot: 'D', provider: 'claude' },
@@ -222,16 +222,16 @@ test('failoverChain excludes steers on the same exhausted account and prefers ro
   const chain = failoverChain({ steers, activeSlot: 'D', zerosub, failingAccountId: 'acc-full', now: NOW });
   assert.deepEqual(chain.map((candidate) => candidate.steerId), ['steer-f']);
   // Without an exhausted failing account every steer stays a candidate,
-  // ordered by account room (roomy 55% before full 99%).
+  // in structural order; admission and the shared route policy decide next.
   const roomy = failoverChain({ steers, activeSlot: 'D', zerosub, failingAccountId: 'acc-roomy', now: NOW });
-  assert.deepEqual(roomy.map((candidate) => candidate.steerId), ['steer-f', 'steer-e']);
+  assert.deepEqual(roomy.map((candidate) => candidate.steerId), ['steer-e', 'steer-f']);
 });
 
 test('quota line uses real account percents with ZeroSub state', () => {
   const zerosub = normalizeZerosubState(fakeRaw(), { now: NOW });
   assert.equal(
-    formatQuotaLine(CONFIG, null, { currentPool: 'claude', zerosub, now: NOW }),
-    'Quota: claude 99% (5h) — prefer acc-roomy',
+    formatQuotaLine(CONFIG, null, { agent: { id: 'steer-d', provider: 'claude', model: 'sonnet' }, zerosub, now: NOW }),
+    'Quota: claude (acc-full) 99% used — prefer acc-roomy',
   );
   assert.equal(formatQuotaLine(CONFIG, null, { currentPool: 'codex', zerosub, now: NOW }), null);
 });

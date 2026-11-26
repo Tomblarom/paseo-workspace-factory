@@ -22,7 +22,7 @@ const CONFIG = {
   workspaceTitle: 'Main',
   profiles: {
     sol: { provider: 'codex', model: 'gpt-6.2-sol', thinking: 'high', mode: 'full-access' },
-    muse: { provider: 'muse', model: 'muse-spark-1.3-contributor', thinking: null, mode: 'allowAll' },
+    muse: { provider: 'muse', model: 'muse-spark-1.3-contributor', thinking: null, mode: 'allowAll', sensitive: false },
   },
   steers: { slots: { A: 'sol', B: 'muse' }, prepare: ['A', 'B'], initialActive: 'A' },
   workers: { defaultProfile: 'muse' },
@@ -274,7 +274,7 @@ test('fresh worktree plans only metadata adoption and steers', async () => {
   assert.equal(ghCalls(world).length, 0);
   assert.equal(p.repo, 'mainproj@feature-branch');
   assert.equal(p.status, 'pending');
-  assert.deepEqual(keys(p), ['workspace.main.adopt', 'steer.A', 'steer.B']);
+  assert.deepEqual(keys(p), ['steer.A', 'workspace.main.adopt']);
   const adopt = p.ops.find((op) => op.key === 'workspace.main.adopt');
   assert.equal(adopt.kind, 'paseo.workspace.metadata');
   assert.match(adopt.summary, /worktree workspace/);
@@ -294,7 +294,8 @@ test('adopt and slots work in worktree mode', async () => {
   const [adopted] = await runnerFor(world).runPlans([{ local: WT_DIR }], { adopt: { '*': { A: legacy.id } } });
   assert.equal(adopted.ops.find((o) => o.key === 'steer.A').kind, 'paseo.agent.adopt');
   const [slots] = await runnerFor(world).runPlans([{ local: WT_DIR }], { slots: ['B'] });
-  assert.deepEqual(keys(slots).filter((k) => k.startsWith('steer.')), ['steer.B']);
+  assert.match(slots.conflicts.find((c) => c.key === 'workspace.main').reason, /use switch to change it/);
+  assert.deepEqual(keys(slots).filter((k) => k.startsWith('steer.')), []);
   assert.equal(ghCalls(world).length, 0);
 });
 
@@ -338,7 +339,7 @@ test('status, checkpoint and switch resolve via folder name and workspace id', a
   assert.equal(status.worktree.workspaceId, wt.id);
   const cp = await writeCheckpoint({ client: fakeClient(world), discovery: byFolder, task: 'Worktree task', lock: noLock });
   assert.equal(cp.task, 'Worktree task');
-  const switched = await switchSteer({ client: fakeClient(world), discovery: byId, toSlot: 'B', git: fakeGit(world), lock: noLock });
+  const switched = await switchSteer({ client: fakeClient(world), discovery: byId, config: CONFIG, toSlot: 'B', git: fakeGit(world), lock: noLock });
   assert.equal(switched.to, 'B');
   assert.match(switched.packet, /mainproj@feature-branch/);
   assert.equal(ghCalls(world).length, 0);
@@ -385,7 +386,7 @@ test('normal local discovery is unchanged when worktrees do not match', async ()
   addPlainWorkspace(world, { path: '/p/demo' });
   const [p] = await runnerFor(world).runPlans([{ local: '/p/demo' }]);
   assert.equal(p.repo, 'demo');
-  assert.deepEqual(keys(p), ['workspace.main.adopt', 'steer.A', 'steer.B']);
+  assert.deepEqual(keys(p), ['steer.A', 'workspace.main.adopt']);
   const [d] = await runnerFor(world).discoverAll(['local/demo']);
   assert.equal(d.worktree ?? null, null);
   assert.ok(d.mainWorkspace, 'the plain workspace is the main');
@@ -416,7 +417,7 @@ test('apply adopts the worktree with fakes and creates no project or workspace',
     authorization, config: CONFIG, confirm: authorization.hash,
     lookupReceipt: fakeLookup(world),
     runPlans: (list, options) => runner.runPlans(list, options),
-    execute: createExecutors({ client: fakeClient(world), gh: strictGh(world), git: fakeGit(world), paseoCli: fakePaseoCli(world), sleep: async () => {} }),
+    execute: createExecutors({ client: fakeClient(world), gh: strictGh(world), git: fakeGit(world), paseoCli: fakePaseoCli(world), lock: (_name, fn) => fn({ verify() {} }) }),
   });
   assert.equal(result.report[0].status, 'complete', result.report[0].error);
   assert.equal(ghCalls(world).length, 0);
@@ -530,7 +531,7 @@ test('--main: plan writes github metadata on the worktree, no duplicate project/
   const [p] = await runnerForGithub(world).runPlans([{ repo: MOBILE, main: wt.id }]);
   assert.equal(p.repo, MOBILE);
   assert.equal(p.status, 'pending');
-  assert.deepEqual(keys(p), ['workspace.main.adopt', 'steer.A', 'steer.B']);
+  assert.deepEqual(keys(p), ['steer.A', 'workspace.main.adopt']);
   const adopt = p.ops.find((op) => op.key === 'workspace.main.adopt');
   assert.equal(adopt.kind, 'paseo.workspace.metadata');
   assert.equal(adopt.params.workspaceId, wt.id);
@@ -567,7 +568,7 @@ test('--main: apply adopts the worktree with fakes and creates nothing', async (
     authorization, config: CONFIG, confirm: authorization.hash,
     lookupReceipt: fakeLookup(world),
     runPlans: (list, options) => runner.runPlans(list, options),
-    execute: createExecutors({ client: fakeClient(world), gh: fakeGhOwned(world), git: fakeGit(world), paseoCli: fakePaseoCli(world), sleep: async () => {} }),
+    execute: createExecutors({ client: fakeClient(world), gh: fakeGhOwned(world), git: fakeGit(world), paseoCli: fakePaseoCli(world), lock: (_name, fn) => fn({ verify() {} }) }),
   });
   assert.equal(result.report[0].status, 'complete', result.report[0].error);
   assert.equal(world.workspaces.length, 1, 'no duplicate workspace');
@@ -595,7 +596,7 @@ test('--main: plan and status find the adopted worktree main without the flag', 
   const wt = addWorktree(world, { mainPath: '/p/mobile' });
   const runner = runnerForGithub(world);
   const [planned] = await runner.runPlans([{ repo: MOBILE, main: wt.id }]);
-  assert.deepEqual(keys(planned), ['workspace.main.adopt', 'steer.A', 'steer.B']);
+  assert.deepEqual(keys(planned), ['steer.A', 'workspace.main.adopt']);
   const authorization = createAuthorization(planned ? [planned] : [], CONFIG, { entries: [{ repo: MOBILE, main: wt.id }], allowFork: false, adopt: {} });
   const result = await applyPlans({
     authorization, config: CONFIG, confirm: authorization.hash,

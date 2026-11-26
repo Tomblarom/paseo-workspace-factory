@@ -57,6 +57,7 @@ export const RESUME_LIMIT_PATTERNS: readonly RegExp[] = [
   /too many requests/i,
   /\bquota\b/i,
   /\blimit\s*(reached|exceeded|reset|hit)\b/i,
+  /\byou(?:'|’)ve hit your \d+[- ]hour limit\b/i,
   /http\s*429\b/i,
 ];
 

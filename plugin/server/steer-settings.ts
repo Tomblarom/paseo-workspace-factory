@@ -8,10 +8,11 @@ import { withLock, workspaceLockName } from "./core/lock.mjs";
 import { METADATA_KEY, paseoBinary, readPaseoState } from "./core/paseo.mjs";
 import { runtime } from "./core/runtime.mjs";
 import { listScopes } from "./core/scope.mjs";
-import { buildRewindRecord, freshRewindIdempotent } from "./core/steer.mjs";
+import { buildRewindRecord, freshRewindIdempotent, requireFreshPrivacy, SwitchRefused } from "./core/steer.mjs";
 import { actionFact } from "./core/action-facts.mjs";
 import { defaultCreateRewindClient, rewindAndBrief, sendUserBrief } from "./core/rewind.mjs";
 import { cleanupIdentity } from "../shared/idle-cleanup.js";
+import { openTurnOf } from "../shared/auto-checkpoint.js";
 import { settingsFingerprint } from "../shared/preview.js";
 import { resolveQuota } from "../shared/steer-state.js";
 import {
@@ -32,6 +33,7 @@ import {
 } from "../shared/steer-settings.js";
 import { collectSteerStates } from "./steer-feed.js";
 import { stageSteerBrief } from "./steer-brief.js";
+import { readPrivacyAdmission } from "./steer-admission.js";
 
 const updateEntry = updateAgentEntry as unknown as (args: any) => Promise<any>;
 
@@ -394,6 +396,7 @@ async function sendBriefAsUser(
   agentId: string,
   brief: string,
   deps: SteerSettingsDeps,
+  beforeSend: () => Promise<void>,
 ): Promise<void> {
   // Prefer the rewind transport so the brief arrives as a user message (the
   // next refresh rewinds to exactly that brief); without a rewind client,
@@ -403,15 +406,17 @@ async function sendBriefAsUser(
     const sendBrief = sendUserBrief as unknown as (
       agentId: string,
       brief: string,
-      opts: { url: string; cliPath: string; createClient: (args: { url: string; cliPath: string }) => Promise<any> },
+      opts: { url: string; cliPath: string; createClient: (args: { url: string; cliPath: string }) => Promise<any>; beforeSend: () => Promise<void> },
     ) => Promise<boolean>;
     const sent = await sendBrief(agentId, brief, {
       url: factoryRuntime().paseo.url,
       cliPath: paseoBin(),
       createClient: deps.rewindClient,
+      beforeSend,
     });
     if (sent) return;
   }
+  await beforeSend();
   await paseo.agents.ref(agentId).send(brief);
 }
 
@@ -501,7 +506,7 @@ export async function applySteerSettings(
     }
     const entries = asRecord(metadata[AGENTS_KEY]) ?? {};
     const entry = asRecord(entries[agentId]);
-    if (entry?.openTurnId !== null && entry?.openTurnId !== undefined) {
+    if (openTurnOf(entry) !== null) {
       throw new Error("This steer is running. Wait for the turn to end, then change settings.");
     }
     if (Array.isArray(live.pendingPermissions) && live.pendingPermissions.length > 0) {
@@ -615,8 +620,23 @@ export async function applySteerSettings(
 
   // Refresh route: bound rewind (no silent fallback), then apply and
   // verify, then deliver or stage the brief. Any failure keeps the brief.
+  const checkPrivacy = () => requireFreshPrivacy({ client: paseo, workspaceId: preview.workspaceId,
+    scopeId: null, epoch: preview.epoch, agentId,
+    admitTarget: (agent: any) => readPrivacyAdmission(agent, { ...deps, paseo }, preview.workspaceId),
+  });
+  await checkPrivacy();
   if (!deps.buildBrief) throw new Error("Settings refresh needs a brief builder (server misconfiguration).");
   const brief = await deps.buildBrief(paseo, preview.workspaceId, agentId);
+  const stage = async () => {
+    const identity = await stageSteerBrief(paseo, { workspaceId: preview.workspaceId, agentId, packet: brief, kind: "settings", epoch: preview.epoch }, { lock });
+    try {
+      await checkPrivacy();
+      return { ...identity, packet: brief, packetChars: brief.length };
+    } catch (error) {
+      if (!(error instanceof SwitchRefused)) throw error;
+      return {};
+    }
+  };
   const previousBriefId = typeof asRecord(actionFact(checked.entry, "refreshed"))?.briefMessageId === "string"
     ? (asRecord(actionFact(checked.entry, "refreshed"))?.briefMessageId as string)
     : null;
@@ -624,12 +644,13 @@ export async function applySteerSettings(
     createClient: deps.rewindClient ?? defaultClientFactory,
     previousBriefId,
     skipBrief: true,
+    beforeRewind: async () => { await checkPrivacy(); return true; },
   });
   if (outcome?.status !== "rewound") {
     const status = typeof outcome?.status === "string" ? outcome.status : "failed";
     const reason = typeof outcome?.error === "string" && outcome.error ? `: ${outcome.error}` : "";
     try {
-      await stageSteerBrief(paseo, { workspaceId: preview.workspaceId, agentId, packet: brief, kind: "settings" }, { ...(deps.lock ? { lock: deps.lock } : {}) });
+      await stage();
     } catch {
       // Staging is best-effort; the message below still keeps the brief.
     }
@@ -680,11 +701,7 @@ export async function applySteerSettings(
     lock,
   });
   if (!verified) {
-    try {
-      await stageSteerBrief(paseo, { workspaceId: preview.workspaceId, agentId, packet: brief, kind: "settings" }, { ...(deps.lock ? { lock: deps.lock } : {}) });
-    } catch {
-      // Best-effort; the detail below still keeps the brief.
-    }
+    const stagedPacket = await stage().catch(() => ({}));
     const { applied, missing } = describeWrites(writes, actual, preview.requested);
     const firstError = writes.find((write) => write.error)?.error ?? "the provider refused the write";
     return {
@@ -697,8 +714,7 @@ export async function applySteerSettings(
       delivered: false,
       staged: true,
       stagedTo: agentId,
-      packet: brief,
-      packetChars: brief.length,
+      ...stagedPacket,
       deliveryError: firstError,
       detail: applied.length
         ? `Chat rewound, but settings partly applied (${applied.join(", ")}). Missing: ${missing.join(", ")} (${firstError}). The brief is staged; retry settings, then initialize.`
@@ -706,7 +722,7 @@ export async function applySteerSettings(
     };
   }
   if (input.deliver === "stage") {
-    await stageSteerBrief(paseo, { workspaceId: preview.workspaceId, agentId, packet: brief, kind: "settings" }, { ...(deps.lock ? { lock: deps.lock } : {}) });
+    const stagedPacket = await stage();
     return {
       workspaceId: preview.workspaceId,
       agentId,
@@ -717,20 +733,15 @@ export async function applySteerSettings(
       delivered: false,
       staged: true,
       stagedTo: agentId,
-      packet: brief,
-      packetChars: brief.length,
+      ...stagedPacket,
       detail: "Chat rewound and settings applied. The brief is staged.",
     };
   }
   try {
-    await sendBriefAsUser(paseo, agentId, brief, deps);
+    await sendBriefAsUser(paseo, agentId, brief, deps, checkPrivacy);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    try {
-      await stageSteerBrief(paseo, { workspaceId: preview.workspaceId, agentId, packet: brief, kind: "settings" }, { ...(deps.lock ? { lock: deps.lock } : {}) });
-    } catch {
-      // Best-effort; the detail below still keeps the brief.
-    }
+    const stagedPacket = await stage().catch(() => ({}));
     return {
       workspaceId: preview.workspaceId,
       agentId,
@@ -741,8 +752,7 @@ export async function applySteerSettings(
       delivered: false,
       staged: true,
       stagedTo: agentId,
-      packet: brief,
-      packetChars: brief.length,
+      ...stagedPacket,
       deliveryError: message,
       detail: `Chat rewound and settings applied, but the brief did not go out (${message}). It is staged; retry the delivery.`,
     };

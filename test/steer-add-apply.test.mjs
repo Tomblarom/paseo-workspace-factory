@@ -10,6 +10,7 @@ import {
   SteerAddRecovery,
   SteerAddStale,
 } from '../plugin/server/core/steer-add.mjs';
+import { buildSteerCreate } from '../plugin/server/core/steer-create.mjs';
 import { normalizeZerosubState } from '../plugin/server/core/zerosub.mjs';
 
 const NOW = Date.parse('2026-11-24T12:00:00Z');
@@ -35,7 +36,7 @@ const PROVIDERS = [
 
 const SCOPE = 'Test/scope';
 const WORKSPACE = 'wks_test123';
-const BASE = { scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW };
+const BASE = { scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW, slot: 'C', epoch: 3 };
 
 // Stable test fingerprint: any input change alters the string.
 const fp = (value) => `fp:${JSON.stringify(value)}`;
@@ -49,13 +50,17 @@ function liveSteer(slot, { id = `agent-${slot}`, provider = 'fake-x', model = 'x
   };
 }
 
+const LIVE = [liveSteer('A'), liveSteer('B')];
+
 function executor(agentId = 'agent-C-new') {
   const calls = [];
-  const execute = async (op) => {
+  const configs = [];
+  const execute = async (op, config) => {
     calls.push(op);
+    configs.push(config);
     return { agentId };
   };
-  return { calls, execute };
+  return { calls, configs, execute };
 }
 
 function acc(id, family, pct, { resetsAt = RESET_5H } = {}) {
@@ -72,9 +77,9 @@ function acc(id, family, pct, { resetsAt = RESET_5H } = {}) {
 }
 
 test('apply creates the planned steer and reports it', async () => {
-  const plan = planSteerAdd(CONFIG, PROVIDERS, [], BASE);
-  const { calls, execute } = executor();
-  const result = await applySteerAdd(CONFIG, PROVIDERS, [], {
+  const plan = planSteerAdd(CONFIG, PROVIDERS, LIVE, BASE);
+  const { calls, configs, execute } = executor();
+  const result = await applySteerAdd(CONFIG, PROVIDERS, LIVE, {
     ...BASE, fingerprint: fp(plan.fingerprintInput), fingerprintOf: fp,
     lookupReceipt: noReceipt, execute,
   });
@@ -85,26 +90,54 @@ test('apply creates the planned steer and reports it', async () => {
   assert.equal(result.reused, false);
   assert.match(result.text, /Steer C created: agent agent-C-new/);
   assert.equal(calls.length, 1);
+  assert.equal(configs[0], CONFIG);
   assert.equal(calls[0].params.idempotencyKey, plan.op.params.idempotencyKey);
   assert.deepEqual(calls[0].params.labels, plan.op.params.labels);
 });
 
-test('apply after the settings save provisions with the same key', async () => {
-  const plan = planSteerAdd(CONFIG, PROVIDERS, [], BASE);
+test('apply rechecks public evidence after preview and keeps the receipt key', async () => {
+  const config = structuredClone(CONFIG);
+  config.profiles.alpha.sensitive = true;
+  const plan = planSteerAdd(config, PROVIDERS, LIVE, { ...BASE, spec: 'alpha', repoPublic: true });
+  const fingerprint = fp(plan.fingerprintInput);
+  for (const repoPublic of [false, null, undefined]) {
+    const { calls, execute } = executor();
+    await assert.rejects(applySteerAdd(config, PROVIDERS, LIVE, {
+      ...BASE, spec: 'alpha', repoPublic, fingerprint, fingerprintOf: fp, lookupReceipt: noReceipt, execute,
+    }), /public scope required/);
+    assert.equal(calls.length, 0);
+  }
   const { calls, execute } = executor();
-  const result = await applySteerAdd(plan.config, PROVIDERS, [], {
-    ...BASE, slot: 'C', fingerprint: fp(plan.fingerprintInput), fingerprintOf: fp,
-    lookupReceipt: noReceipt, execute,
+  const receipt = { idempotencyKey: plan.op.params.idempotencyKey, phase: 'completed', agentId: 'agent-C-new' };
+  const recovered = await applySteerAdd(config, PROVIDERS, LIVE, {
+    ...BASE, spec: 'alpha', repoPublic: true, fingerprint, fingerprintOf: fp,
+    lookupReceipt: async () => receipt, execute,
   });
+  assert.equal(recovered.reused, true);
+  assert.equal(calls[0].params.idempotencyKey, receipt.idempotencyKey);
+});
+
+test('an earlier confirmation cannot create in a released generation', async () => {
+  const first = planSteerAdd(CONFIG, PROVIDERS, LIVE, BASE);
+  const old = { ...liveSteer('C'), archivedAt: '2026-11-24T10:00:00Z' };
+  const agents = [...LIVE, old];
+  const next = planSteerAdd(CONFIG, PROVIDERS, agents, BASE);
+  const { calls, execute } = executor();
+  const args = { ...BASE, fingerprintOf: fp, lookupReceipt: noReceipt, execute };
+  await assert.rejects(applySteerAdd(CONFIG, PROVIDERS, agents, {
+    ...args, fingerprint: fp(first.fingerprintInput),
+  }), SteerAddStale);
+  assert.equal(calls.length, 0);
+  const result = await applySteerAdd(CONFIG, PROVIDERS, agents, { ...args, fingerprint: fp(next.fingerprintInput) });
   assert.equal(result.agentId, 'agent-C-new');
-  assert.equal(calls[0].params.idempotencyKey, plan.op.params.idempotencyKey);
+  assert.notEqual(first.op.params.idempotencyKey, calls[0].params.idempotencyKey);
 });
 
 test('apply refuses a tampered fingerprint as stale', async () => {
-  const plan = planSteerAdd(CONFIG, PROVIDERS, [], BASE);
+  const plan = planSteerAdd(CONFIG, PROVIDERS, LIVE, BASE);
   const { execute } = executor();
   await assert.rejects(
-    applySteerAdd(CONFIG, PROVIDERS, [], {
+    applySteerAdd(CONFIG, PROVIDERS, LIVE, {
       ...BASE, fingerprint: 'fp:tampered', fingerprintOf: fp,
       lookupReceipt: noReceipt, execute,
     }),
@@ -115,7 +148,7 @@ test('apply refuses a tampered fingerprint as stale', async () => {
     },
   );
   await assert.rejects(
-    applySteerAdd(CONFIG, PROVIDERS, [], {
+    applySteerAdd(CONFIG, PROVIDERS, LIVE, {
       ...BASE, fingerprint: null, fingerprintOf: fp,
       lookupReceipt: noReceipt, execute,
     }),
@@ -124,73 +157,46 @@ test('apply refuses a tampered fingerprint as stale', async () => {
 });
 
 test('apply detects configuration changes as stale', async () => {
-  const plan = planSteerAdd(CONFIG, PROVIDERS, [], BASE);
+  const plan = planSteerAdd(CONFIG, PROVIDERS, LIVE, BASE);
   const fingerprint = fp(plan.fingerprintInput);
   const { execute } = executor();
   // The picked profile now names another offered model.
   const edited = structuredClone(CONFIG);
   edited.profiles.alpha.model = 'x2';
   await assert.rejects(
-    applySteerAdd(edited, PROVIDERS, [], {
+    applySteerAdd(edited, PROVIDERS, LIVE, {
       ...BASE, fingerprint, fingerprintOf: fp,
       lookupReceipt: noReceipt, execute,
     }),
     SteerAddStale,
   );
-  // Someone else configured slot C with another profile meanwhile.
-  const taken = structuredClone(CONFIG);
-  taken.steers.slots.C = 'beta';
-  taken.steers.prepare.push('C');
   await assert.rejects(
-    applySteerAdd(taken, PROVIDERS, [], {
-      ...BASE, slot: 'C', fingerprint, fingerprintOf: fp,
+    applySteerAdd(CONFIG, PROVIDERS, LIVE, {
+      ...BASE, epoch: BASE.epoch + 1, fingerprint, fingerprintOf: fp,
       lookupReceipt: noReceipt, execute,
     }),
     SteerAddStale,
   );
 });
 
-test('apply refuses a live slot from another request as conflict', async () => {
-  const plan = planSteerAdd(CONFIG, PROVIDERS, [], BASE);
-  const fingerprint = fp(plan.fingerprintInput);
+test('apply refuses a live slot from another request even when the model matches', async () => {
+  const plan = planSteerAdd(CONFIG, PROVIDERS, LIVE, BASE);
+  const foreign = liveSteer('C', { id: 'agent-foreign' });
   const { calls, execute } = executor();
-  const foreign = liveSteer('C', { id: 'agent-foreign', provider: 'fake-y', model: 'y1' });
-  await assert.rejects(
-    applySteerAdd(CONFIG, PROVIDERS, [foreign], {
-      ...BASE, slot: 'C', fingerprint, fingerprintOf: fp,
-      lookupReceipt: noReceipt, execute,
-    }),
-    (error) => {
-      assert.ok(error instanceof SteerAddConflict);
-      assert.match(error.message, /already occupied by live steer agent-foreign/);
-      assert.match(error.message, /without a configured slot/);
-      return true;
-    },
-  );
-  assert.equal(calls.length, 0, 'no creation on conflict');
-  // A configured slot with a foreign live steer points at steer set/fresh.
-  const { calls: calls2, execute: execute2 } = executor();
-  await assert.rejects(
-    applySteerAdd(plan.config, PROVIDERS, [foreign], {
-      ...BASE, slot: 'C', fingerprint, fingerprintOf: fp,
-      lookupReceipt: noReceipt, execute: execute2,
-    }),
-    (error) => {
-      assert.ok(error instanceof SteerAddConflict);
-      assert.match(error.message, /already occupied by live steer agent-foreign/);
-      assert.match(error.message, /steer set C .* or fresh/);
-      return true;
-    },
-  );
-  assert.equal(calls2.length, 0, 'no creation on conflict');
+  const args = {
+    ...BASE, fingerprint: fp(plan.fingerprintInput), fingerprintOf: fp, lookupReceipt: noReceipt, execute,
+  };
+  await assert.rejects(applySteerAdd(CONFIG, PROVIDERS, [...LIVE, foreign], args), SteerAddConflict);
+  await assert.rejects(applySteerAdd(CONFIG, PROVIDERS, [...LIVE, foreign, liveSteer('C')], args), /Several live agents/);
+  assert.equal(calls.length, 0);
 });
 
 test('apply reuses a completed receipt instead of creating again', async () => {
-  const plan = planSteerAdd(CONFIG, PROVIDERS, [], BASE);
+  const plan = planSteerAdd(CONFIG, PROVIDERS, LIVE, BASE);
   const key = plan.op.params.idempotencyKey;
   const receipt = { idempotencyKey: key, phase: 'completed', agentId: 'agent-C-new' };
-  const { calls, execute } = executor('agent-C-new');
-  const result = await applySteerAdd(CONFIG, PROVIDERS, [], {
+  const { calls, configs, execute } = executor('agent-C-new');
+  const result = await applySteerAdd(CONFIG, PROVIDERS, LIVE, {
     ...BASE, fingerprint: fp(plan.fingerprintInput), fingerprintOf: fp,
     lookupReceipt: async () => receipt, execute,
   });
@@ -198,38 +204,50 @@ test('apply reuses a completed receipt instead of creating again', async () => {
   assert.equal(result.reused, true);
   assert.match(result.text, /reused after receipt/);
   assert.equal(calls.length, 1, 'the identical request is re-sent once');
+  assert.equal(configs[0], CONFIG);
   assert.equal(calls[0].params.idempotencyKey, key);
 });
 
 test('apply after the creation returns the matching live steer', async () => {
-  const plan = planSteerAdd(CONFIG, PROVIDERS, [], BASE);
+  const plan = planSteerAdd(CONFIG, PROVIDERS, LIVE, BASE);
   const fingerprint = fp(plan.fingerprintInput);
   const key = plan.op.params.idempotencyKey;
   const live = liveSteer('C', { id: 'agent-C-new' });
-  const savedConfig = plan.config;
   // With a receipt naming the live agent: reused, no new creation.
   const { calls, execute } = executor('agent-C-new');
   const receipt = { idempotencyKey: key, phase: 'completed', agentId: 'agent-C-new' };
-  const viaReceipt = await applySteerAdd(savedConfig, PROVIDERS, [live], {
+  const viaReceipt = await applySteerAdd(CONFIG, PROVIDERS, [...LIVE, live], {
     ...BASE, slot: 'C', fingerprint, fingerprintOf: fp,
     lookupReceipt: async () => receipt, execute,
   });
   assert.equal(viaReceipt.agentId, 'agent-C-new');
   assert.equal(viaReceipt.reused, true);
   assert.equal(calls.length, 0);
-  // Without a receipt the exact label/model match still converges.
-  const { calls: calls2, execute: execute2 } = executor();
-  const viaLive = await applySteerAdd(savedConfig, PROVIDERS, [live], {
-    ...BASE, slot: 'C', fingerprint, fingerprintOf: fp,
-    lookupReceipt: noReceipt, execute: execute2,
+});
+
+test('legacy preview can replay a completed g1 receipt and cannot start creation', async () => {
+  const spec = 'beta';
+  const plan = planSteerAdd(CONFIG, PROVIDERS, LIVE, { ...BASE, spec });
+  const { generation, epoch, settingsRevision, ...legacyIdentity } = plan.fingerprintInput;
+  const { idempotencyKey } = buildSteerCreate({
+    keyScope: SCOPE, repo: SCOPE, scopeId: SCOPE, slot: 'C', workspaceId: WORKSPACE,
+    profile: plan.profile, keyParts: ['steer', 'C', 'g1'],
   });
-  assert.equal(viaLive.agentId, 'agent-C-new');
-  assert.match(viaLive.text, /already provisioned/);
-  assert.equal(calls2.length, 0);
+  const receipt = { idempotencyKey, phase: 'completed', agentId: 'agent-C-new' };
+  const { calls, execute } = executor();
+  const args = { ...BASE, spec, fingerprint: fp(legacyIdentity), fingerprintOf: fp, execute };
+  await assert.rejects(applySteerAdd(CONFIG, PROVIDERS, LIVE, { ...args, lookupReceipt: noReceipt }), SteerAddStale);
+  assert.equal(calls.length, 0);
+  const lookupReceipt = async (_, key) => key === idempotencyKey ? receipt : null;
+  const result = await applySteerAdd(CONFIG, PROVIDERS, LIVE, { ...args, lookupReceipt });
+  assert.equal(result.reused, true);
+  assert.equal(calls[0].params.idempotencyKey, idempotencyKey);
+  const archived = { ...liveSteer('C', { id: receipt.agentId, provider: 'fake-y', model: 'y1' }), archivedAt: '2026-11-24T10:00:00Z' };
+  await assert.rejects(applySteerAdd(CONFIG, PROVIDERS, [...LIVE, archived], { ...args, lookupReceipt }), /is archived/);
 });
 
 test('apply stops recovery on ambiguous or failed receipts', async () => {
-  const plan = planSteerAdd(CONFIG, PROVIDERS, [], BASE);
+  const plan = planSteerAdd(CONFIG, PROVIDERS, LIVE, BASE);
   const fingerprint = fp(plan.fingerprintInput);
   const key = plan.op.params.idempotencyKey;
   const { execute } = executor();
@@ -241,7 +259,7 @@ test('apply stops recovery on ambiguous or failed receipts', async () => {
   ];
   for (const [receipt, match] of cases) {
     await assert.rejects(
-      applySteerAdd(CONFIG, PROVIDERS, [], {
+      applySteerAdd(CONFIG, PROVIDERS, LIVE, {
         ...BASE, fingerprint, fingerprintOf: fp,
         lookupReceipt: async () => receipt, execute,
       }),
@@ -256,7 +274,7 @@ test('apply stops recovery on ambiguous or failed receipts', async () => {
   const receipt = { idempotencyKey: key, phase: 'completed', agentId: 'agent-C-new' };
   const { execute: wrong } = executor('agent-other');
   await assert.rejects(
-    applySteerAdd(CONFIG, PROVIDERS, [], {
+    applySteerAdd(CONFIG, PROVIDERS, LIVE, {
       ...BASE, fingerprint, fingerprintOf: fp,
       lookupReceipt: async () => receipt, execute: wrong,
     }),
@@ -266,11 +284,11 @@ test('apply stops recovery on ambiguous or failed receipts', async () => {
   const live = liveSteer('C', { id: 'agent-C-live' });
   const { execute: execute2 } = executor();
   await assert.rejects(
-    applySteerAdd(plan.config, PROVIDERS, [live], {
+    applySteerAdd(CONFIG, PROVIDERS, [...LIVE, live], {
       ...BASE, slot: 'C', fingerprint, fingerprintOf: fp,
       lookupReceipt: async () => receipt, execute: execute2,
     }),
-    /receipt names agent-C-new but agent-C-live is live/,
+    /already occupied by live steer agent-C-live/,
   );
 });
 
@@ -281,7 +299,7 @@ test('apply reports a blocked plan with the earliest reset', async () => {
   );
   const { execute } = executor();
   await assert.rejects(
-    applySteerAdd(CONFIG, PROVIDERS, [], {
+    applySteerAdd(CONFIG, PROVIDERS, LIVE, {
       ...BASE, zerosub, fingerprint: 'fp:any', fingerprintOf: fp,
       lookupReceipt: noReceipt, execute,
     }),
@@ -295,15 +313,15 @@ test('apply reports a blocked plan with the earliest reset', async () => {
 });
 
 test('apply refuses to create without receipt lookup or executor', async () => {
-  const plan = planSteerAdd(CONFIG, PROVIDERS, [], BASE);
+  const plan = planSteerAdd(CONFIG, PROVIDERS, LIVE, BASE);
   const fingerprint = fp(plan.fingerprintInput);
   const { execute } = executor();
   await assert.rejects(
-    applySteerAdd(CONFIG, PROVIDERS, [], { ...BASE, fingerprint, fingerprintOf: fp, execute }),
-    /needs a receipt lookup and an executor/,
+    applySteerAdd(CONFIG, PROVIDERS, LIVE, { ...BASE, fingerprint, fingerprintOf: fp, execute }),
+    /a receipt lookup and an executor are required/,
   );
   await assert.rejects(
-    applySteerAdd(CONFIG, PROVIDERS, [], { ...BASE, fingerprint, fingerprintOf: fp, lookupReceipt: noReceipt }),
-    /needs a receipt lookup and an executor/,
+    applySteerAdd(CONFIG, PROVIDERS, LIVE, { ...BASE, fingerprint, fingerprintOf: fp, lookupReceipt: noReceipt }),
+    /a receipt lookup and an executor are required/,
   );
 });

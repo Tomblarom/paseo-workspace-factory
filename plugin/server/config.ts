@@ -12,6 +12,8 @@ export interface HostSettingsReader {
   read(): Promise<{ status: string; revision?: string; values?: unknown; error?: string }>;
 }
 
+export type HostSettingsState = Awaited<ReturnType<HostSettingsReader["read"]>>;
+
 function hostFieldLabel(field: string): string {
   return field === "githubOwner" ? "GitHub owner" : "checkout root";
 }
@@ -25,11 +27,13 @@ export function createConfigLoader(
   hostSettings: HostSettingsReader | null,
   loadPromptOptions: PromptOptionsReader = async () => ({ findingsInPrompts: true, factoryRoot: null, pluginDir: null }),
 ) {
-  async function loadEffectiveConfig(): Promise<any> {
+  async function loadEffectiveConfig(observed?: HostSettingsState): Promise<any> {
     if (!hostSettings) {
       throw new Error("Factory settings are not available; open Factory settings and save them again");
     }
-    const state = await hostSettings.read();
+    // Revisioned plans pass the exact state they read. A second read could
+    // bind a newer config to an older revision (or the other way around).
+    const state = structuredClone(observed ?? await hostSettings.read());
     if (state.status !== "ready") {
       throw new Error(
         `Factory settings are ${state.status}: ${state.error ?? "unreadable"}; open the Factory settings and save them again`,

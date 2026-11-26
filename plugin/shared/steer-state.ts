@@ -477,7 +477,7 @@ export function resolveQuota(input: QuotaInput): QuotaResult {
   // usage sample. An explicit future limitUntil holds; threshold percents
   // need a fresh sample; an ordinary resetsAt never holds by itself.
   const pool = typeof input.pool === "string" && input.pool ? input.pool : null;
-  const entry = pool ? (input.quotaSnapshot?.[pool] ?? null) : null;
+  const entry = pool && !empty.accountId ? (input.quotaSnapshot?.[pool] ?? null) : null;
   if (pool && entry && typeof entry === "object") {
     const stale = isStale(input.poolSampledAtMs);
     const session = entryPct(entry);

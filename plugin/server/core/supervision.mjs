@@ -5,7 +5,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import { liveSlotHolders } from './discovery.mjs';
 import { LABEL, METADATA_KEY } from './paseo.mjs';
-import { QUOTA_DEFAULTS, accountExhausted, allAccountsExhausted, earliestFamilyReset, earliestReset, familyExhausted, freshMaxUsedPct } from './quota.mjs';
+import { QUOTA_DEFAULTS, accountExhausted, allAccountsExhausted, earliestFamilyReset, earliestReset, familyExhausted } from './quota.mjs';
 import { withLock, workspaceLockName } from './lock.mjs';
 
 export const WORKERS_KEY = `${METADATA_KEY}.workers`;
@@ -368,8 +368,9 @@ export function isStaleWake(wakeEpoch, currentEpoch) {
  * hub steer. Domain/hub entries are { steerId, scopeId } or null when absent;
  * an advisor on domain or hub level is skipped like any advisor id. With
  * `zerosub` (normalized ZeroSub state), candidates on the exhausted failing
- * account are dropped and the rest prefer the account with the most room;
- * without it the order is unchanged. Continuation tabs count as the same
+ * account are dropped. The shared route policy compares the remaining
+ * admitted candidates; quota percentages do not rank unlike routes here.
+ * Continuation tabs count as the same
  * slot: a slot appears once (its first entry in the final order), so no
  * duplicate candidate is asked twice.
  */
@@ -398,13 +399,6 @@ export function failoverChain({ steers = [], activeSlot = null, retiredIds = [],
     if (failing && accountExhausted(failing, { exhaustedPct, now })) {
       kept = ordered.filter((candidate) => accountOf(candidate) !== failingAccountId);
     }
-    const room = (candidate) => {
-      const pct = freshMaxUsedPct(byId.get(accountOf(candidate)), now);
-      return pct !== null ? pct : Infinity;
-    };
-    kept = kept.map((candidate, index) => [candidate, index])
-      .sort((a, b) => room(a[0]) - room(b[0]) || a[1] - b[1])
-      .map(([candidate]) => candidate);
     ordered.splice(0, ordered.length, ...kept);
   }
   const chain = [];

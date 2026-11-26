@@ -26,7 +26,7 @@ function setup() {
   return {
     requests, state,
     options: {
-      client: { workspaces: { ref: () => workspace }, agents: { list: async () => ({ entries: [{ id: parentId, workspaceId, labels: { [LABEL.scope]: scope, [LABEL.role]: 'steer', [LABEL.slot]: 'B' } }], pageInfo: { hasMore: false } }) } },
+      client: { workspaces: { ref: () => workspace }, agents: { list: async () => ({ entries: [{ id: parentId, title: 'Steer B', workspaceId, labels: { [LABEL.scope]: scope, [LABEL.role]: 'steer', [LABEL.slot]: 'B' } }], pageInfo: { hasMore: false } }) } },
       status: { state: structuredClone(state), workspace: { id: workspaceId }, repo: scope,
         steers: [{ id: parentId, slot: 'B', workspaceId }] },
       callerId: parentId,
@@ -36,7 +36,7 @@ function setup() {
   };
 }
 
-test('worker start previews without changes and pins the account at native creation', async () => {
+test('worker start previews quota evidence and leaves native creation unpinned', async () => {
   const { options, requests } = setup();
   const preview = await startScopedWorker(options);
   assert.equal(preview.accountId, 'example-account');
@@ -48,7 +48,7 @@ test('worker start previews without changes and pins the account at native creat
   assert.deepEqual(request.labels, {
     [LABEL.scope]: 'example/project', [LABEL.role]: 'worker', [LABEL.owner]: 'B',
   });
-  assert.deepEqual(request.metadata, { 'zerosub.account': 'example-account' });
+  assert.equal(request.metadata, undefined);
   assert.equal(request.config.modeId, 'full-access');
   assert.ok(request.prompt.startsWith(`${options.prompt}\n\n`));
   assert.match(request.prompt, /FINDINGS\.md/);
@@ -57,15 +57,25 @@ test('worker start previews without changes and pins the account at native creat
   assert.equal(requests[1].idempotencyKey, request.idempotencyKey);
 });
 
-test('worker start uses the live account instead of the preview account', async () => {
+test('worker start uses live quota without sending a planned or live pin', async () => {
   const { options, requests } = setup();
   const execute = createExecutors({
     client: options.client,
     getZerosub: async () => ({ accounts: [{ id: 'live-account', family: 'codex', exhausted: false, windows: [], maxUsedPct: 10 }] }),
   });
   const result = await startScopedWorker({ ...options, apply: true, execute });
-  assert.equal(requests[0].metadata['zerosub.account'], 'live-account');
-  assert.equal(result.accountId, 'live-account');
+  assert.equal(requests[0].metadata, undefined);
+  assert.equal(result.accountId, null);
+});
+
+test('worker start uses the configured quota threshold at execution', async () => {
+  const { options, requests } = setup();
+  const execute = createExecutors({
+    client: options.client,
+    getZerosub: async () => ({ accounts: [{ id: 'near', family: 'codex', windows: [], maxUsedPct: 92 }] }),
+  });
+  await assert.rejects(startScopedWorker({ ...options, apply: true, execute, config: { quota: { exhaustedPct: 90 } } }), /All codex accounts are exhausted/);
+  assert.deepEqual(requests, []);
 });
 
 test('worker start appends only the role block when findings are disabled', async () => {

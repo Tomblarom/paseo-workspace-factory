@@ -4,6 +4,9 @@
 // which plain node:test cannot import). Planning and apply stay server-side
 // in the /factory RPCs, the menu only calls them. All UI text is English.
 // State words are lowercase, the way Paseo writes them.
+import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
+import type { PluginComposer } from "@getpaseo/plugin/client";
+import type { factorySteerBrief } from "../shared/factory.js";
 import { STEER_STATE_LABELS, type SteerFaceState } from "../shared/steer-state.js";
 import type { SteerPillRow } from "./steer-pill.js";
 
@@ -13,6 +16,8 @@ import type { SteerPillRow } from "./steer-pill.js";
 
 export const STEER_MENU_LABELS = {
   create: "Create steer…",
+  activate: "Activate Steer",
+  retryActivation: "Retry activation delivery",
   handover: "Hand over to…",
   changeSettings: "Change settings…",
   revertSettings: "Revert settings",
@@ -59,21 +64,6 @@ export function normalizeInitializeNewSteer(value: unknown): InitializeNewSteer 
     : INITIALIZE_NEW_STEER_DEFAULT;
 }
 
-export type DeliveryMode = "send" | "composer" | "later";
-
-/**
- * Delivery for a staged packet. "composer" needs a mounted client for the
- * destination tab; without one it falls back to sending the brief.
- */
-export function resolveDelivery(
-  setting: unknown,
-  opts: { composerMounted: boolean },
-): DeliveryMode {
-  const want = normalizeInitializeNewSteer(setting);
-  if (want === "composer" && !opts.composerMounted) return "send";
-  return want;
-}
-
 /**
  * How the packet enters the destination composer: a fresh composer takes the
  * whole prompt, a composer with a draft gets the brief appended at the cursor.
@@ -84,6 +74,42 @@ export function stageComposerText(
 ): { method: "setPrompt" | "insertText"; text: string } {
   if (currentPrompt.trim() === "") return { method: "setPrompt", text: packet };
   return { method: "insertText", text: `\n\n${packet}` };
+}
+
+type BriefInput = RpcInput<typeof factorySteerBrief>;
+export type BriefRpc = (input: BriefInput) => Promise<RpcOutput<typeof factorySteerBrief>>;
+export type BriefTarget = Omit<Extract<BriefInput, { action: "send" | "dismiss" }>, "action">;
+export interface ComposerTransferAttempt { claimId: string; placed: boolean; uncertain?: boolean }
+
+export async function transferStagedBrief(
+  callBrief: BriefRpc,
+  target: BriefTarget,
+  composer: () => Pick<PluginComposer, "prompt" | "setPrompt" | "insertText"> | undefined,
+  attempt: ComposerTransferAttempt,
+  automatic = false,
+): Promise<void> {
+  const input = { ...target, claimId: attempt.claimId };
+  if (attempt.uncertain) throw new Error("The composer update could not be confirmed. Reopen the staged brief menu and check the draft.");
+  if (!attempt.placed) {
+    const unavailable = "The destination composer is unavailable. The brief is still staged.";
+    if (!composer()) throw new Error(unavailable);
+    const brief = await callBrief({ ...input, action: "composer", automatic });
+    if (!brief.packet) throw new Error(brief.detail);
+    const dest = composer();
+    if (!dest) {
+      await callBrief({ ...input, action: "composer-release" });
+      throw new Error(unavailable);
+    }
+    if (!dest.prompt.includes(brief.packet)) {
+      const { method, text } = stageComposerText(dest.prompt, brief.packet);
+      attempt.uncertain = true;
+      dest[method](text);
+      attempt.uncertain = false;
+    }
+    attempt.placed = true;
+  }
+  const result = await callBrief({ ...input, action: "composer-complete" });
+  if (!result.transferred) throw new Error(result.detail);
 }
 
 // ---------------------------------------------------------------------------
@@ -159,7 +185,9 @@ export function handoffTargets(
         (a.slot as string).localeCompare(b.slot as string) || a.agentId.localeCompare(b.agentId),
     );
   const perSlot = new Map<string, number>();
-  for (const row of holders) perSlot.set(row.slot as string, (perSlot.get(row.slot as string) ?? 0) + 1);
+  for (const row of holders) {
+    if (row.state !== "retired") perSlot.set(row.slot as string, (perSlot.get(row.slot as string) ?? 0) + 1);
+  }
   return holders.map((row) => {
     const slot = row.slot as string;
     const verdict = handoverReason(row, { ambiguousSlot: (perSlot.get(slot) ?? 0) > 1 });
@@ -297,6 +325,7 @@ export function steerResultKey(hostId: string, agentId: string): string {
 
 export type SteerMenuAction =
   | "create"
+  | "activate"
   | "handover-target"
   | "refresh"
   | "settings"
@@ -317,6 +346,8 @@ export type SteerMenuEntryDescriptor =
     action: SteerMenuAction;
     targetSlot?: string;
     targetAgentId?: string;
+    activationEpoch?: number;
+    activationAlternatives?: { agentId: string; slot: string }[];
     submenu?: SteerMenuEntryDescriptor[];
   };
 
@@ -396,6 +427,17 @@ export function describeSteerMenu(
   items.push({ kind: "item", id: "create", title: STEER_MENU_LABELS.create, icon: "Plus", action: "create" });
 
   const targets = handoffTargets(rows, self.agentId);
+  if (self.slot && self.scopeId && !self.advisor && self.state !== "retired" && self.activationEpoch != null) {
+    const target = targets.find((entry) => entry.agentId === self.agentId);
+    const disabled = !self.active && target?.eligible !== true;
+    const label = self.active ? STEER_MENU_LABELS.retryActivation : STEER_MENU_LABELS.activate;
+    const alternatives = targets.filter((entry) => entry.eligible && entry.agentId !== self.agentId)
+      .map(({ agentId, slot }) => ({ agentId, slot }));
+    items.push({ kind: "item", id: "activate", title: disabled ? `${label} (${target?.reason ?? "unavailable"})` : label,
+      icon: "ArrowRight", action: "activate", disabled, activationEpoch: self.activationEpoch,
+      ...(alternatives.length ? { activationAlternatives: alternatives } : {}) });
+  }
+
   if (targets.length === 0) {
     items.push({
       kind: "item",

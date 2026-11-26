@@ -7,9 +7,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  ACCOUNT_METADATA_KEY, ACCOUNT_PIN_METHOD, ACCOUNT_PIN_PLUGIN_ID, CONTINUED_FROM_LABEL,
+  CONTINUED_FROM_LABEL,
   continuedFromId, inheritContinuationLabels, normalizeZerosubState,
-  resolveContinuations, suggestAccountPin, switchesFromTimeline, latestSwitchRow, parseSwitchData,
+  resolveContinuations, switchesFromTimeline, latestSwitchRow, parseSwitchData,
 } from '../plugin/server/core/zerosub.mjs';
 import { applyContinuations, discoverRepository, remapWorkerParents } from '../plugin/server/core/discovery.mjs';
 import { resolveProfile } from '../plugin/server/core/models.mjs';
@@ -101,31 +101,6 @@ test('inheritContinuationLabels fills missing keys, live labels win', () => {
     [LABEL.repo]: 'proj', [LABEL.scope]: 'proj', [LABEL.role]: 'steer', [PARENT_LABEL]: 'p',
   });
   assert.deepEqual(inheritContinuationLabels(null, null), {});
-});
-
-test('suggestAccountPin names the roomiest account with creation metadata', () => {
-  const zerosub = normalizeZerosubState({
-    accounts: [
-      { id: 'acc-full', family: 'claude', status: 'limited', usage: { windows: [{ id: 'five_hour', usedPercent: 99, resetsAt: FUTURE_5H }] } },
-      { id: 'acc-roomy', family: 'claude', status: 'active', usage: { windows: [{ id: 'five_hour', usedPercent: 20, resetsAt: FUTURE_5H }] } },
-    ],
-    agents: [],
-  }, { now: NOW });
-  assert.deepEqual(suggestAccountPin(zerosub, 'claude', { now: NOW }), {
-    pluginId: 'zerosub', method: 'zerosub.agents.account', accountId: 'acc-roomy',
-    metadata: { 'zerosub.account': 'acc-roomy' },
-  });
-  assert.equal(ACCOUNT_PIN_PLUGIN_ID, 'zerosub');
-  assert.equal(ACCOUNT_PIN_METHOD, 'zerosub.agents.account');
-  assert.equal(ACCOUNT_METADATA_KEY, 'zerosub.account');
-  assert.equal(suggestAccountPin(null, 'claude'), null);
-  assert.equal(suggestAccountPin(zerosub, ''), null);
-  assert.equal(suggestAccountPin(zerosub, 'codex', { now: NOW }), null);
-  const exhausted = normalizeZerosubState({
-    accounts: [{ id: 'acc-full', family: 'claude', status: 'limited', usage: { windows: [{ id: 'five_hour', usedPercent: 99, resetsAt: FUTURE_5H }] } }],
-    agents: [],
-  }, { now: NOW });
-  assert.equal(suggestAccountPin(exhausted, 'claude', { now: NOW }), null);
 });
 
 // ---------------------------------------------------------------- discovery mapping
@@ -267,22 +242,16 @@ function pickZerosub() {
   }, { now: NOW });
 }
 
-test('resolveProfile exposes the pin suggestion for the roomiest account', () => {
+test('resolveProfile reports quota evidence for the roomiest account', () => {
   const picked = resolveProfile(PICK_CONFIG, PICK_PROVIDERS, ['sonnet', 'opus'], { role: 'worker', repoPublic: true, zerosub: pickZerosub(), now: NOW });
   assert.equal(picked.profile.name, 'sonnet');
   assert.equal(picked.zerosubAccount, 'acc-roomy');
-  assert.deepEqual(picked.zerosubPin, {
-    pluginId: 'zerosub', method: 'zerosub.agents.account', accountId: 'acc-roomy',
-    metadata: { 'zerosub.account': 'acc-roomy' },
-  });
   const legacy = resolveProfile(PICK_CONFIG, PICK_PROVIDERS, ['sonnet'], { role: 'worker', repoPublic: true });
   assert.equal(legacy.zerosubAccount, null);
-  assert.equal(legacy.zerosubPin, null);
   const exhausted = normalizeZerosubState({
     accounts: [{ id: 'acc-full', family: 'claude', status: 'limited', usage: { windows: [{ id: 'five_hour', usedPercent: 99, resetsAt: FUTURE_5H }] } }],
     agents: [],
   }, { now: NOW });
   const skipped = resolveProfile(PICK_CONFIG, PICK_PROVIDERS, ['sonnet'], { role: 'worker', repoPublic: true, zerosub: exhausted, now: NOW });
   assert.equal(skipped.profile, null);
-  assert.equal(skipped.zerosubPin, null);
 });

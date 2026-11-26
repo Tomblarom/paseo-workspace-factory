@@ -137,6 +137,17 @@ export interface TurnDecision {
 }
 
 /**
+ * The turn recorded by turn.before that turn.after has not ended yet, or null.
+ * Paseo runs both hooks concurrently, so a slow turn.before can write the id
+ * of a turn that turn.after already recorded as lastTurnId; that turn is over.
+ * Every busy check reads the open turn through this function.
+ */
+export function openTurnOf(entry: { openTurnId?: unknown; lastTurnId?: unknown } | null | undefined): string | null {
+  const id = entry?.openTurnId;
+  return typeof id === "string" && id && id !== entry?.lastTurnId ? id : null;
+}
+
+/**
  * One C2 table row per turn. The caller merges entryUpdate onto the freshly
  * read entry under the workspace lock (so concurrent fields such as a new
  * pendingAction survive), clears pendingAction when resolvePending is set,

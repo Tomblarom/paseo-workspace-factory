@@ -10,6 +10,7 @@ import { pathToFileURL } from 'node:url';
 export const LABEL = {
   repo: 'wsf.repo',
   role: 'wsf.role',
+  steerRole: 'wsf.steer-role',
   slot: 'wsf.slot',
   scope: 'wsf.scope',
   owner: 'wsf.owner',
@@ -76,12 +77,16 @@ export async function readPaseoAgents(client) {
   return agents.map((entry) => entry.agent ?? entry);
 }
 
+export async function readPaseoWorkspaces(client) {
+  return collectPages((cursor) => client.workspaces.list({ includeBackground: true, filter: { includeBackground: true }, page: { limit: 200, ...(cursor ? { cursor } : {}) } }));
+}
+
 /** Complete, read-only picture of the daemon state the planner needs. */
 export async function readPaseoState(client) {
   const page = (cursor) => ({ limit: 200, ...(cursor ? { cursor } : {}) });
   const [projects, workspaces, agentEntries, providers] = await Promise.all([
     client.projects.list().then((result) => result.projects ?? []),
-    collectPages((cursor) => client.workspaces.list({ includeBackground: true, filter: { includeBackground: true }, page: page(cursor) })),
+    readPaseoWorkspaces(client),
     collectPages((cursor) => client.agents.list({ includeBackground: true, filter: { includeArchived: true, includeBackground: true }, page: page(cursor) })),
     client.providers.snapshot().then((result) => result.entries ?? []),
   ]);

@@ -1,15 +1,8 @@
-// Steer-add core planning (plugin/server/core/steer-add.mjs): slot classification with exact
-// label IDs/roles, free-slot suggestion across config+live, pure preview (no
-// live config writes), retryable create op with stable idempotency key and
-// ZeroSub pin metadata. Offline only: fake config, catalog, live steers and
-// ZeroSub state, no live RPC.
+// Steer-add previews from offline workspace, catalog and quota fixtures.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  classifySteerSlot,
   formatSteerAddPreview,
-  liveSteerForSlot,
-  nextFreeSlotForAdd,
   planSteerAdd,
 } from '../plugin/server/core/steer-add.mjs';
 import { normalizeZerosubState } from '../plugin/server/core/zerosub.mjs';
@@ -40,6 +33,7 @@ const PROVIDERS = [
 
 const SCOPE = 'Test/scope';
 const WORKSPACE = 'wks_test123';
+const BASE = { scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW };
 
 function liveSteer(slot, { id = `agent-${slot}`, scope = SCOPE, role = 'steer', archivedAt = null, provider = 'fake-x', model = 'x1', title = `Steer ${slot}` } = {}) {
   return {
@@ -65,101 +59,57 @@ function state(accounts) {
   return normalizeZerosubState({ accounts, agents: [] }, { now: NOW });
 }
 
-test('liveSteerForSlot uses exact labels and ignores titles, archived and foreign scopes', () => {
-  const agents = [
-    liveSteer('C', { id: 'agent-live' }),
-    liveSteer('C', { id: 'agent-archived', archivedAt: '2026-11-24T10:00:00Z' }),
-    liveSteer('C', { id: 'agent-worker', role: 'worker' }),
-    liveSteer('C', { id: 'agent-foreign', scope: 'Other/scope' }),
-    { id: 'agent-title-only', archivedAt: null, title: 'Steer C', labels: {}, provider: 'fake-x', model: 'x1' },
-  ];
-  const found = liveSteerForSlot(agents, 'C', SCOPE);
-  assert.equal(found?.id, 'agent-live');
-  assert.equal(liveSteerForSlot(agents, 'D', SCOPE), null);
-  assert.equal(liveSteerForSlot(agents, 'c', SCOPE), null, 'slot match is exact uppercase');
+test('allocation uses first free live workspace title, including unlabelled and closed holders', () => {
+  const renamed = liveSteer('B', { title: 'Research notes' });
+  const closed = { ...liveSteer('C', { title: '▷ Steer C · runtime' }), labels: {}, status: 'closed' };
+  const elsewhere = { ...liveSteer('A'), id: 'other-workspace-a', workspaceId: 'another-workspace' };
+  const child = { ...liveSteer('A'), id: 'worker-a', labels: { 'paseo.parent-agent-id': 'parent-id' } };
+  assert.equal(planSteerAdd(CONFIG, PROVIDERS, [renamed, closed, elsewhere, child], BASE).slot, 'A');
+  assert.equal(planSteerAdd(CONFIG, PROVIDERS, [liveSteer('A'), renamed, closed], BASE).slot, 'B');
+  assert.equal(planSteerAdd(CONFIG, PROVIDERS, [liveSteer('A'), liveSteer('B'), closed], BASE).slot, 'D');
 });
 
-test('classifySteerSlot distinguishes free, configured-unprovisioned, live-occupied and drift', () => {
-  assert.equal(classifySteerSlot(CONFIG, [], 'C', SCOPE).state, 'free');
-  assert.equal(classifySteerSlot(CONFIG, [], 'A', SCOPE).state, 'configured-unprovisioned');
-  assert.equal(classifySteerSlot(CONFIG, [liveSteer('A')], 'A', SCOPE).state, 'live-occupied');
-  assert.equal(classifySteerSlot(CONFIG, [liveSteer('C')], 'C', SCOPE).state, 'live-unconfigured');
-  const classified = classifySteerSlot(CONFIG, [liveSteer('A')], 'A', SCOPE);
-  assert.equal(classified.configuredProfile, 'alpha');
-  assert.equal(classified.live?.id, 'agent-A');
+test('allocation refuses duplicate titles and honors a resolved continuation', () => {
+  const origin = liveSteer('A');
+  const duplicate = { ...liveSteer('A', { id: 'duplicate' }), labels: {} };
+  assert.throws(() => planSteerAdd(CONFIG, PROVIDERS, [origin, duplicate], BASE), /Several live agents are titled Steer A/);
+  const continuation = { ...liveSteer('A', { id: 'continuation', title: 'Continuation' }), continuedFrom: origin.id };
+  assert.equal(planSteerAdd(CONFIG, PROVIDERS, [origin, continuation], { ...BASE, resolvedSteers: [continuation] }).slot, 'B');
 });
 
-test('nextFreeSlotForAdd skips configured and live-occupied letters', () => {
-  assert.equal(nextFreeSlotForAdd(CONFIG, [], SCOPE), 'C');
-  assert.equal(nextFreeSlotForAdd(CONFIG, [liveSteer('C')], SCOPE), 'D');
-  assert.equal(nextFreeSlotForAdd({ steers: { slots: {} } }, [liveSteer('A'), liveSteer('B')], SCOPE), 'C');
-  const full = {};
-  for (let i = 0; i < 26; i++) full[String.fromCharCode(65 + i)] = 'alpha';
-  assert.equal(nextFreeSlotForAdd({ ...CONFIG, steers: { slots: full, prepare: ['A'], initialActive: 'A' } }, [], SCOPE), null);
-});
-
-test('planSteerAdd auto slot and profile leaves the input config untouched', () => {
-  const before = structuredClone(CONFIG);
-  const plan = planSteerAdd(CONFIG, PROVIDERS, [], { scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW });
-  assert.deepEqual(CONFIG, before, 'preview writes no live config');
-  assert.equal(plan.slot, 'C');
-  assert.equal(plan.profileName, 'alpha');
-  assert.equal(plan.isNewSlot, true);
-  assert.equal(plan.isNewProfile, false);
-  assert.deepEqual(plan.config.steers.slots.C, 'alpha');
-  assert.deepEqual(plan.config.steers.prepare, CONFIG.steers.prepare, 'adding a steer to this scope does not change the default slots for other scopes');
-  assert.equal(plan.config.steers.initialActive, 'A', 'activation stays with switch/resume');
+test('plan uses role priority and leaves host preferences untouched', () => {
+  const config = structuredClone(CONFIG);
+  config.steers.priority = ['gamma', 'alpha'];
+  const before = structuredClone(config);
+  const plan = planSteerAdd(config, PROVIDERS, [], BASE);
+  assert.deepEqual(config, before);
+  assert.equal(plan.slot, 'A');
+  assert.equal(plan.profileName, 'gamma');
+  assert.equal(plan.config, undefined);
   assert.equal(plan.op.kind, 'paseo.agent.create');
   assert.equal(plan.op.params.workspaceId, WORKSPACE);
-  assert.equal(plan.op.params.title, 'Steer C');
-  assert.deepEqual(plan.op.params.labels, { 'wsf.repo': SCOPE, 'wsf.role': 'steer', 'wsf.slot': 'C', 'wsf.scope': SCOPE });
+  assert.equal(plan.op.params.title, 'Steer A');
+  assert.deepEqual(plan.op.params.labels, { 'wsf.repo': SCOPE, 'wsf.role': 'steer', 'wsf.slot': 'A', 'wsf.scope': SCOPE });
   assert.match(plan.op.params.idempotencyKey, /^wsf:/);
-  assert.equal(plan.op.params.metadata, undefined, 'no ZeroSub pin without state');
-  assert.ok(plan.fingerprintInput);
-  assert.equal(plan.fingerprintInput.slot, 'C');
+  assert.deepEqual(plan.op.params.metadata, { 'wsf.steer-role': 'coordinator' });
+  assert.equal(plan.fingerprintInput.slot, 'A');
 });
 
-test('planSteerAdd refuses live-occupied slots and allows configured-unprovisioned retries', () => {
-  assert.throws(
-    () => planSteerAdd(CONFIG, PROVIDERS, [liveSteer('A', { id: 'agent-live-a' })], { slot: 'A', scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW }),
-    /Slot A is already occupied by live steer agent-live-a.*steer set A .* or fresh/,
-  );
-  assert.throws(
-    () => planSteerAdd(CONFIG, PROVIDERS, [liveSteer('C')], { slot: 'C', scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW }),
-    /already occupied by live steer/,
-  );
-  const retry = planSteerAdd(CONFIG, PROVIDERS, [], { slot: 'A', scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW });
-  assert.equal(retry.slot, 'A');
-  assert.equal(retry.profileName, 'alpha');
-  assert.match(retry.notes.join('; '), /configured but has no live steer/);
-  assert.equal(retry.isNewSlot, false);
-});
-
-test('planSteerAdd validates slots: normalization, gaps, invalid and full', () => {
-  assert.equal(planSteerAdd(CONFIG, PROVIDERS, [], { slot: 'c', scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW }).slot, 'C');
-  assert.throws(
-    () => planSteerAdd(CONFIG, PROVIDERS, [], { slot: 'D', scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW }),
-    /would leave a gap.*next free letter C/,
-  );
-  // Live unconfigured steers occupy their letters: the suggested next free letter is accepted.
-  const live = [liveSteer('C')];
-  assert.equal(planSteerAdd(CONFIG, PROVIDERS, live, { slot: 'D', scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW }).slot, 'D');
-  assert.throws(
-    () => planSteerAdd(CONFIG, PROVIDERS, live, { slot: 'E', scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW }),
-    /would leave a gap.*next free letter D/,
-  );
+test('plan validates slot normalization, gaps, vacancy, occupied and full', () => {
+  assert.equal(planSteerAdd(CONFIG, PROVIDERS, [], { ...BASE, slot: 'a' }).slot, 'A');
+  assert.throws(() => planSteerAdd(CONFIG, PROVIDERS, [], { ...BASE, slot: 'B' }), /next free letter A/);
+  assert.throws(() => planSteerAdd(CONFIG, PROVIDERS, [], { ...BASE, activeSlot: 'A' }), /Active Steer A has no live holder/);
+  assert.throws(() => planSteerAdd(CONFIG, PROVIDERS, [liveSteer('A')], { ...BASE, slot: 'A' }), /already occupied by live steer/);
   for (const bad of ['AA', '1']) {
-    assert.throws(() => planSteerAdd(CONFIG, PROVIDERS, [], { slot: bad, scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW }), /single capital letter A-Z/, String(bad));
+    assert.throws(() => planSteerAdd(CONFIG, PROVIDERS, [], { ...BASE, slot: bad }), /single capital letter A-Z/);
   }
-  const full = {};
-  for (let i = 0; i < 26; i++) full[String.fromCharCode(65 + i)] = 'alpha';
-  const fullConfig = { ...CONFIG, steers: { slots: full, prepare: ['A'], initialActive: 'A' } };
-  assert.throws(() => planSteerAdd(fullConfig, PROVIDERS, [], { scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW }), /all letters A-Z are defined or occupied/);
+  const full = [...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'].map((slot) => liveSteer(slot));
+  assert.throws(() => planSteerAdd(CONFIG, PROVIDERS, full, BASE), /all letters A-Z are occupied/);
 });
 
 test('planSteerAdd with an explicit profile tries it alone and infers advisor', () => {
   const plan = planSteerAdd(CONFIG, PROVIDERS, [], { spec: 'beta', scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW });
-  assert.equal(plan.slot, 'C');
+  assert.equal(plan.slot, 'A');
   assert.equal(plan.profileName, 'beta');
   assert.equal(plan.advisorSlot, false);
   const tagged = structuredClone(CONFIG);
@@ -167,8 +117,36 @@ test('planSteerAdd with an explicit profile tries it alone and infers advisor', 
   const advisor = planSteerAdd(tagged, PROVIDERS, [], { spec: 'gamma', scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW });
   assert.equal(advisor.profileName, 'gamma');
   assert.equal(advisor.advisorSlot, true);
+  assert.equal(advisor.op.params.steerRole, 'advisor', 'creation persists the role without a host slot binding');
   assert.match(advisor.notes.join('; '), /advisor, never active/);
   assert.throws(() => planSteerAdd(CONFIG, PROVIDERS, [], { spec: 'missing', scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW }), /Unknown profile "missing"/);
+});
+
+test('steer-add preview checks privacy for automatic, explicit and provider/model requests', () => {
+  const config = structuredClone(CONFIG);
+  config.profiles.alpha.sensitive = true;
+  config.steers.priority = ['alpha'];
+  const base = { scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW };
+  for (const repoPublic of [false, null, undefined]) {
+    for (const selection of [{ slot: 'A' }, { spec: 'alpha' }, { slot: 'A', spec: 'fake-x/x1' }]) {
+      const plan = planSteerAdd(config, PROVIDERS, [], { ...base, ...selection, repoPublic });
+      assert.equal(plan.profile, null);
+      assert.equal(plan.op, null);
+      assert.match(plan.skipped[0].reason, /public scope required/);
+    }
+  }
+  assert.equal(planSteerAdd(config, PROVIDERS, [], { ...base, spec: 'alpha', repoPublic: true }).profile.name, 'alpha');
+});
+
+test('new muse provider/model does not reuse an explicitly non-sensitive profile', () => {
+  const config = structuredClone(CONFIG);
+  config.profiles.optedOut = { provider: 'muse', model: 'm', sensitive: false };
+  const providers = [...PROVIDERS, { provider: 'muse', enabled: true, status: 'ready', models: [{ id: 'm' }] }];
+  const blocked = planSteerAdd(config, providers, [], { spec: 'muse/m' });
+  assert.equal(blocked.profile, null);
+  assert.match(blocked.skipped[0].reason, /public scope required/);
+  const publicPlan = planSteerAdd(config, providers, [], { spec: 'muse/m', repoPublic: true });
+  assert.equal(publicPlan.profileName, 'muse-m');
 });
 
 test('planSteerAdd with provider/model creates, reuses and blocks on catalog', () => {
@@ -178,12 +156,11 @@ test('planSteerAdd with provider/model creates, reuses and blocks on catalog', (
   ];
   const created = planSteerAdd(CONFIG, extended, [], { spec: 'fake-x/x9', scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW });
   assert.equal(created.profileName, 'fake-x-x9');
-  assert.equal(created.isNewProfile, true);
-  assert.equal(created.config.profiles['fake-x-x9'].model, 'x9');
+  assert.equal(created.op.params.config.provider, 'fake-x/x9');
+  assert.equal(CONFIG.profiles['fake-x-x9'], undefined);
   const reused = planSteerAdd(CONFIG, PROVIDERS, [], { spec: 'fake-x/x1', scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW });
   assert.equal(reused.profileName, 'alpha');
-  assert.equal(reused.isNewProfile, false);
-  assert.match(reused.notes.join('; '), /Reusing existing profile "alpha"/);
+  assert.match(reused.notes.join('; '), /Using matching profile "alpha"/);
   const blocked = planSteerAdd(CONFIG, PROVIDERS, [], { spec: 'fake-x/missing', scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW });
   assert.equal(blocked.profile, null);
   assert.equal(blocked.op, null);
@@ -197,24 +174,23 @@ test('planSteerAdd model override drops mode/thinking the new provider does not 
     { provider: 'fake-x', enabled: true, status: 'ready', models: [{ id: 'x1', thinkingOptions: [{ id: 'high' }] }], modes: [{ id: 'full-access' }] },
     { provider: 'fake-y', enabled: true, status: 'ready', models: [{ id: 'y1' }, { id: 'y2', thinkingOptions: [{ id: 'max' }] }], modes: [{ id: 'bypassPermissions' }] },
   ];
-  // Slot A is configured with alpha but has no live steer: the override
-  // rewrites alpha in place for fake-y.
-  const plan = planSteerAdd(config, providers, [], { slot: 'A', spec: 'fake-y/y2', scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW });
+  const plan = planSteerAdd(config, providers, [], { slot: 'A', spec: 'fake-y/y2', profile: 'alpha', scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW });
   assert.equal(plan.profileName, 'alpha');
-  assert.deepEqual(plan.config.profiles.alpha, { provider: 'fake-y', model: 'y2', thinking: null });
+  assert.equal(plan.op.params.config.provider, 'fake-y/y2');
+  assert.equal(config.profiles.alpha.provider, 'fake-x');
   assert.equal(plan.profile.mode ?? null, null);
   assert.match(plan.notes.join('; '), /Mode "full-access" of profile "alpha" not carried over to fake-y/);
   assert.match(plan.notes.join('; '), /Thinking "high" of profile "alpha" not carried over/);
   assert.equal(plan.op.params.config.modeId, undefined);
   // An explicit --mode wins; the same provider keeps a still valid mode.
-  const explicit = planSteerAdd(config, providers, [], { slot: 'A', spec: 'fake-y/y2', mode: 'bypassPermissions', scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW });
+  const explicit = planSteerAdd(config, providers, [], { slot: 'A', spec: 'fake-y/y2', profile: 'alpha', mode: 'bypassPermissions', scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW });
   assert.equal(explicit.op.params.config.modeId, 'bypassPermissions');
   const sameProvider = buildCandidate(config.profiles.alpha, 'fake-x', 'x1', undefined, undefined, { providerEntries: providers, notes: [] });
   assert.equal(sameProvider.mode, 'full-access');
   assert.equal(sameProvider.thinking, 'high');
 });
 
-test('planSteerAdd pins the roomiest eligible ZeroSub account as creation metadata', () => {
+test('planSteerAdd uses the roomiest account as quota evidence without pinning', () => {
   const zerosub = state([
     acc('acc-roomy', 'fake-x', 20),
     acc('acc-full', 'fake-x', 10, { status: 'limited', limitedUntil: RESET_5H }),
@@ -222,7 +198,7 @@ test('planSteerAdd pins the roomiest eligible ZeroSub account as creation metada
   ]);
   const plan = planSteerAdd(CONFIG, PROVIDERS, [], { spec: 'alpha', zerosub, scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW });
   assert.equal(plan.zerosubAccount, 'acc-roomy');
-  assert.deepEqual(plan.op.params.metadata, { 'zerosub.account': 'acc-roomy' });
+  assert.equal(plan.op.params.metadata['zerosub.account'], undefined);
   const changed = planSteerAdd(CONFIG, PROVIDERS, [], {
     spec: 'alpha', zerosub: state([acc('another-account', 'fake-x', 10)]),
     scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW,
@@ -239,7 +215,7 @@ test('planSteerAdd uses exhaustion, not warning, for all profile selection paths
       const plan = planSteerAdd(CONFIG, PROVIDERS, [], {
         spec, slot: 'A', zerosub, scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW,
       });
-      assert.equal(plan.profile !== null, eligible, `${spec}: ${pct}%`);
+      assert.equal(plan.profile?.name === 'alpha', eligible, `${spec}: ${pct}%`);
       if (eligible) assert.equal(plan.zerosubAccount, 'acc-x');
     }
   }
@@ -262,23 +238,24 @@ test('planSteerAdd reports all accounts exhausted with the earliest reset', () =
   assert.equal(bare.earliestReset, null);
 });
 
-test('planSteerAdd is retryable: same inputs reuse the idempotency key across the config save', () => {
-  const first = planSteerAdd(CONFIG, PROVIDERS, [], { scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW });
-  const second = planSteerAdd(CONFIG, PROVIDERS, [], { scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW });
-  assert.equal(first.op.params.idempotencyKey, second.op.params.idempotencyKey);
-  const afterSave = planSteerAdd(first.config, PROVIDERS, [], { slot: 'C', scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW });
-  assert.equal(afterSave.slot, 'C');
-  assert.equal(afterSave.op.params.idempotencyKey, first.op.params.idempotencyKey, 'configured-unprovisioned retry reuses the key');
+test('a newly archived holder releases its letter and changes the generation', () => {
+  const first = planSteerAdd(CONFIG, PROVIDERS, [], BASE);
+  const old = { ...liveSteer('A'), archivedAt: '2026-11-24T10:00:00Z' };
+  const second = planSteerAdd(CONFIG, PROVIDERS, [old], BASE);
+  assert.equal(second.slot, first.slot);
+  assert.notEqual(second.fingerprintInput.generation, first.fingerprintInput.generation);
+  assert.notEqual(second.op.params.idempotencyKey, first.op.params.idempotencyKey);
+  assert.equal(planSteerAdd(CONFIG, PROVIDERS, [old, old], BASE).op.params.idempotencyKey, second.op.params.idempotencyKey);
 });
 
 test('formatSteerAddPreview names slot, profile, account, skips and the op', () => {
   const plan = planSteerAdd(CONFIG, PROVIDERS, [], { scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW });
   const text = formatSteerAddPreview(plan, { scopeId: SCOPE });
-  assert.match(text, /Steer add C for Test\/scope/);
+  assert.match(text, /Steer add A for Test\/scope/);
   assert.match(text, /profile "alpha"/);
-  assert.match(text, /steer slots:/);
+  assert.match(text, /Create Steer A/);
   assert.match(text, new RegExp(plan.op.params.idempotencyKey));
-  assert.match(text, /Nothing written/);
+  assert.match(text, /Confirm to create the standby/);
   const zerosub = state([acc('acc-x', 'fake-x', 95, { resetsAt: RESET_5H })]);
   const blocked = planSteerAdd(CONFIG, PROVIDERS, [], { spec: 'alpha', zerosub, scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW });
   const blockedText = formatSteerAddPreview(blocked, { scopeId: SCOPE });

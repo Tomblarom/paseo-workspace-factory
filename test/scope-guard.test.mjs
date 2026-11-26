@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { guardScope, scopeHolder } from '../plugin/server/core/scope-guard.mjs';
-import { LABEL, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
+import { LABEL, METADATA_KEY, PARENT_LABEL } from '../plugin/server/core/paseo.mjs';
 import { CONTINUED_FROM_LABEL } from '../plugin/server/core/zerosub.mjs';
 
 const scopeId = 'example/repo';
 const workspaceId = 'wks_1';
-const agent = (id, slot, extra = {}) => ({ id, workspaceId, labels: { [LABEL.scope]: scopeId, [LABEL.role]: 'steer', [LABEL.slot]: slot }, ...extra });
+const agent = (id, slot, extra = {}) => ({ id, title: `Steer ${slot}`, workspaceId, labels: { [LABEL.scope]: scopeId, [LABEL.role]: 'steer', [LABEL.slot]: slot }, ...extra });
 const page = (entries) => ({ entries, pageInfo: { hasMore: false } });
 function fixture() {
   const state = { activeSteer: 'A', epoch: 1, scope: { id: scopeId } };
@@ -42,29 +42,64 @@ test('guard rejects an advisor configured as active holder', async () => {
   await assert.rejects(guardScope({ ...args, config }), /advisor steer/);
 });
 
-test('holder applies newer-wins and fails closed on ties', () => {
-  const old = agent('old', 'A', { createdAt: '2026-01-01T00:00:00Z' });
-  const current = agent('new', 'A', { createdAt: '2026-01-02T00:00:00Z' });
-  assert.equal(scopeHolder({ agents: [old, current], workspaceId, scopeId, slot: 'A' }).id, 'new');
-  assert.throws(() => scopeHolder({ agents: [old, { ...current, createdAt: old.createdAt }], workspaceId, scopeId, slot: 'A' }), /one active/);
+test('guard enforces the role of the live holder even without host settings', async () => {
+  const args = fixture();
+  args.agents[0].metadata = { [LABEL.steerRole]: 'advisor' };
+  await assert.rejects(guardScope(args), /advisor steer/);
+  args.agents[0].metadata[LABEL.steerRole] = 'coordinator';
+  const config = { steers: { slots: { A: 'review' } }, profiles: { review: { advisor: true } } };
+  assert.equal((await guardScope({ ...args, config })).holder.id, 'a');
 });
 
-test('an unregistered fresh candidate cannot become the holder', async () => {
+test('same-slot titles remain ambiguous regardless of creation time', () => {
+  const old = agent('old', 'A', { createdAt: '2026-01-01T00:00:00Z' });
+  const current = agent('new', 'A', { createdAt: '2026-01-02T00:00:00Z' });
+  assert.throws(() => scopeHolder({ agents: [old, current], workspaceId, scopeId, slot: 'A' }), /found 2/);
+  assert.equal(scopeHolder({ agents: [old, { ...current, title: 'Retired A' }], workspaceId, scopeId, slot: 'A' }).id, 'old');
+  assert.equal(scopeHolder({ agents: [{ ...old, archivedAt: '2026-01-03' }, current], workspaceId, scopeId, slot: 'A' }).id, 'new');
+});
+
+test('only parentless tabs in the main workspace participate in a slot', () => {
+  const holder = agent('holder', 'A');
+  const foreignWorkspace = agent('elsewhere', 'A', { workspaceId: 'wks_other' });
+  const child = agent('child', 'A', { labels: { ...holder.labels, [PARENT_LABEL]: 'parent' } });
+  assert.equal(scopeHolder({ agents: [holder, foreignWorkspace, child], workspaceId, scopeId, slot: 'A' }).id, holder.id);
+});
+
+test('a same-slot candidate remains ambiguous even with a recorded owner', async () => {
   const args = fixture();
   args.agents[0].createdAt = '2026-01-01T00:00:00Z';
   args.agents.push(agent('candidate', 'A', { createdAt: '2026-01-02T00:00:00Z' }));
-  await assert.rejects(guardScope(args), /ambiguous legacy/);
+  await assert.rejects(guardScope(args), /found 2/);
   args.state.activeAgentId = 'a';
-  assert.equal((await guardScope(args)).holder.id, 'a');
-  await assert.rejects(guardScope({ ...args, agentId: 'candidate' }), /Active steer changed/);
+  await assert.rejects(guardScope(args), /found 2/);
 });
 
-test('recorded owner resolves to its live continuation', async () => {
+test('a continuation inherits membership from its origin or its own title', async () => {
   const args = fixture();
   args.state.activeAgentId = 'a';
   args.agents.push({ id: 'continued', workspaceId, labels: { [CONTINUED_FROM_LABEL]: 'a' } });
   assert.equal((await guardScope({ ...args, agentId: 'continued' })).holder.id, 'continued');
   await assert.rejects(guardScope(args), /Active steer changed/);
+  args.agents[0].title = 'Retired A';
+  args.agents[2].title = '▷ Steer A · continuation';
+  assert.equal((await guardScope({ ...args, agentId: 'continued' })).holder.id, 'continued');
+});
+
+test('two live continuation tabs of one origin remain ambiguous', () => {
+  const origin = agent('origin', 'A');
+  const agents = [
+    origin,
+    { id: 'continued-1', title: 'Steer A', workspaceId, labels: { [CONTINUED_FROM_LABEL]: origin.id } },
+    { id: 'continued-2', title: 'Steer A', workspaceId, labels: { [CONTINUED_FROM_LABEL]: origin.id } },
+  ];
+  assert.throws(() => scopeHolder({ agents, workspaceId, scopeId, slot: 'A' }), /found 2/);
+});
+
+test('an archived origin does not archive its live continuation', () => {
+  const origin = agent('origin', 'A', { archivedAt: '2026-01-01' });
+  const continued = { id: 'continued', title: 'Steer A', workspaceId, labels: { [CONTINUED_FROM_LABEL]: origin.id } };
+  assert.equal(scopeHolder({ agents: [origin, continued], workspaceId, scopeId, slot: 'A' }).id, continued.id);
 });
 
 test('an errored origin cannot regain authority when its continuation is archived', async () => {

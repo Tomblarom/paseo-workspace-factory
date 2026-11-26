@@ -212,7 +212,8 @@ test('status carries retired state and null active steer stays robust', async ()
   const nulled = makeWorld();
   provisioned(nulled);
   nulled.workspaces[0].metadata[METADATA_KEY].activeSteer = null;
-  const preview = await switchSteer({ client: fakeClient(nulled), discovery: discoveryOf(nulled), toSlot: 'B', lock: testLock, language: 'en' });
+  const open = { ...CONFIG, profiles: { ...CONFIG.profiles, cheap: { ...CONFIG.profiles.cheap, sensitive: false } } };
+  const preview = await switchSteer({ client: fakeClient(nulled), discovery: discoveryOf(nulled), config: open, toSlot: 'B', lock: testLock, language: 'en' });
   assert.equal(preview.to, 'B');
   assert.equal(preview.applied, false);
 });

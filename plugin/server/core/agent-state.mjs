@@ -6,7 +6,9 @@
 //
 // Data model per entry:
 //   lastTurnId, lastTurnEndedAt, outcome,
-//   openTurnId, turnStartedAt,      // set on agent.turn.before, cleared (null) on turn.after
+//   openTurnId, turnStartedAt,      // set on agent.turn.before, cleared (null) on turn.after;
+//                                   // the hooks run concurrently, so an id equal to lastTurnId
+//                                   // is an ended turn (read via openTurnOf, shared/auto-checkpoint)
 //   contextTokens, note, noteAt,
 //   interrupted: { at, outcome, error, excerpt, git, reason } | null,
 //   action: one live operation per target (steer-action.mjs) with facts

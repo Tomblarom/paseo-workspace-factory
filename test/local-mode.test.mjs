@@ -16,7 +16,7 @@ const CONFIG = {
   workspaceTitle: 'Main',
   profiles: {
     sol: { provider: 'codex', model: 'gpt-6.2-sol', thinking: 'high', mode: 'full-access' },
-    muse: { provider: 'muse', model: 'muse-spark-1.3-contributor', thinking: null, mode: 'allowAll' },
+    muse: { provider: 'muse', model: 'muse-spark-1.3-contributor', thinking: null, mode: 'allowAll', sensitive: false },
   },
   steers: { slots: { A: 'sol', B: 'muse' }, prepare: ['A', 'B'], initialActive: 'A' },
   workers: { defaultProfile: 'muse' },
@@ -226,7 +226,7 @@ test('local enrollment adopts the existing workspace and plans steers (K13: no p
   assert.equal(ghCalls(world).length, 0);
   assert.equal(p.repo, 'demo');
   assert.equal(p.status, 'pending');
-  assert.deepEqual(keys(p), ['workspace.main.adopt', 'steer.A', 'steer.B']);
+  assert.deepEqual(keys(p), ['steer.A', 'workspace.main.adopt']);
   assert.ok(!keys(p).some((k) => k.startsWith('github.') || k.startsWith('checkout.')));
   const steer = p.ops.find((op) => op.key === 'steer.A').params;
   assert.equal(steer.labels[LABEL.repo], 'demo');
@@ -263,7 +263,8 @@ test('adopt and slots work in local mode', async () => {
   const [adopted] = await runnerFor(world).runPlans([{ local: '/p/demo' }], { adopt: { '*': { A: legacy.id } } });
   assert.equal(adopted.ops.find((o) => o.key === 'steer.A').kind, 'paseo.agent.adopt');
   const [slots] = await runnerFor(world).runPlans([{ local: '/p/demo' }], { slots: ['B'] });
-  assert.deepEqual(keys(slots).filter((k) => k.startsWith('steer.')), ['steer.B']);
+  assert.match(slots.conflicts.find((c) => c.key === 'workspace.main').reason, /use switch to change it/);
+  assert.deepEqual(keys(slots).filter((k) => k.startsWith('steer.')), []);
   assert.equal(ghCalls(world).length, 0);
 });
 
@@ -280,7 +281,7 @@ test('status, checkpoint and switch work with the local/<folder> name', async ()
   assert.deepEqual(status.steers.map((s) => s.slot), ['A', 'B']);
   const cp = await writeCheckpoint({ client: fakeClient(world), discovery: named, task: 'Local task', lock: noLock });
   assert.equal(cp.task, 'Local task');
-  const switched = await switchSteer({ client: fakeClient(world), discovery: named, toSlot: 'B', git: fakeGit(world), lock: noLock });
+  const switched = await switchSteer({ client: fakeClient(world), discovery: named, config: CONFIG, toSlot: 'B', git: fakeGit(world), lock: noLock });
   assert.equal(switched.to, 'B');
   assert.match(switched.packet, /Steer handoff for demo:/);
   assert.equal(ghCalls(world).length, 0);
@@ -299,7 +300,7 @@ test('apply runs without gh and stores the local authorization', async () => {
     authorization, config: CONFIG, confirm: authorization.hash,
     lookupReceipt: fakeLookup(world),
     runPlans: (list, options) => runner.runPlans(list, options),
-    execute: createExecutors({ client: fakeClient(world), paseoCli: fakePaseoCli(world) }),
+    execute: createExecutors({ client: fakeClient(world), paseoCli: fakePaseoCli(world), lock: (_name, fn) => fn({ verify() {} }) }),
   });
   assert.equal(result.report[0].status, 'complete', result.report[0].error);
   assert.equal(ghCalls(world).length, 0);

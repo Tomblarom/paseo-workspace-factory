@@ -75,6 +75,7 @@ export interface FreshPreviewIdentity {
   refreshMode: string | null;
   provider: string | null;
   model: string | null;
+  routeBinding?: unknown;
   checkpointAt: string | null;
 }
 
@@ -117,8 +118,11 @@ export interface SteerAddPreviewIdentity {
   model: string;
   thinking: string | null;
   mode: string | null;
-  account: string | null;
   advisor: boolean;
+  account?: string | null;
+  generation?: string;
+  epoch?: number | null;
+  settingsRevision?: string | null;
 }
 
 export function steerAddFingerprint(identity: SteerAddPreviewIdentity): string {

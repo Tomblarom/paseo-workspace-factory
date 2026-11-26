@@ -38,6 +38,7 @@ export function profileAgentConfig(profile) {
     provider: `${profile.provider}/${profile.model}`,
     ...(profile.mode ? { modeId: profile.mode } : {}),
     ...(profile.thinking ? { thinkingOptionId: profile.thinking } : {}),
+    ...(profile.options ? { options: profile.options } : {}),
   };
 }
 

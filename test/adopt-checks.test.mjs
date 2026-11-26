@@ -139,12 +139,12 @@ function runnerFor(world, config = CONFIG) {
 
 test('(a) plan lists unlabelled candidates of slots outside the plan', async () => {
   const { world, agents } = githubWorld();
-  const [p] = await runnerFor(world).runPlans([WEB]);
+  const [p] = await runnerFor(world).runPlans([WEB], { slots: ['A'] });
   assert.match(p.conflicts.find((c) => c.key === 'steer.A').reason, new RegExp(`--adopt A=${agents.candA.id}`));
   const notes = p.notes.join('\n');
-  assert.match(notes, new RegExp(`Unlabelled candidate "Steer B \\[fp\\]" ${agents.candB.id}.*outside this plan's slots \\(A\\); adopt with --adopt B=${agents.candB.id} or add the slot via --slots`));
+  assert.match(notes, new RegExp(`Unlabelled candidate "Steer B \\[fp\\]" ${agents.candB.id}.*--adopt B=${agents.candB.id}`));
   assert.match(notes, new RegExp(`Unlabelled candidate "Steer C \\[fp\\]" ${agents.candC.id}.*--adopt C=${agents.candC.id}`));
-  assert.match(notes, new RegExp(`Unlabelled candidate "Steer Z" ${agents.candZ.id}.*slot Z, which is not defined in steers\\.slots`));
+  assert.match(notes, new RegExp(`Unlabelled candidate "Steer Z" ${agents.candZ.id}.*--adopt Z=${agents.candZ.id}`));
   assert.ok(!notes.includes('"Steer A"'), 'planned slots conflict above, never in the notes');
 });
 
@@ -168,7 +168,7 @@ test('(b) restricted-provider mismatch on a private repo is a conflict', async (
   const { world, agents } = githubWorld({ repoPrivate: true });
   const [p] = await runnerFor(world).runPlans([WEB], { adopt: { '*': { C: agents.candC.id } } });
   assert.match(p.conflicts.find((c) => c.key === 'steer.C').reason,
-    /Cannot adopt .* \(muse\/muse-spark-1\.3-contributor\) as Steer C: muse agents are restricted to public code, but example\/web is private/);
+    /Cannot adopt .* as Steer C: muse agents are restricted to public code; scope visibility is private/);
   assert.ok(!p.ops.some((o) => o.key === 'steer.C'));
 });
 
@@ -191,7 +191,7 @@ test('(b) unknown publicity (local scope) is a conflict; other mismatches adopt 
   world.workspaces.push(ws);
   const muse = addAgent(world, { title: 'Steer A', provider: 'muse', model: 'muse-spark-1.3-contributor', workspaceId: ws.id });
   const [p] = await runnerFor(world).runPlans([{ local: '/p/notes' }], { adopt: { '*': { A: muse.id } } });
-  assert.match(p.conflicts.find((c) => c.key === 'steer.A').reason, /restricted to public code, but notes is of unknown publicity/);
+  assert.match(p.conflicts.find((c) => c.key === 'steer.A').reason, /restricted to public code; scope visibility is unknown/);
 
   const pub = githubWorld({ repoPrivate: true });
   const [q] = await runnerFor(pub.world).runPlans([WEB], { adopt: { '*': { B: pub.agents.candB.id } } });
@@ -199,11 +199,20 @@ test('(b) unknown publicity (local scope) is a conflict; other mismatches adopt 
   assert.ok(!q.notes.join('\n').includes('Adopted Steer B runs'), 'K13 keeps the live model without a drift note');
 });
 
-test('(b) matching restricted adoption on a private repo is allowed', async () => {
+test('(b) matching restricted adoption on a private repo is refused', async () => {
   const { world, agents } = githubWorld({ repoPrivate: true });
-  const [p] = await runnerFor(world).runPlans([WEB], { adopt: { '*': { B: agents.digit.id } } });
-  assert.equal(p.ops.find((o) => o.key === 'steer.B').kind, 'paseo.agent.adopt');
-  assert.ok(!p.conflicts.some((c) => c.key === 'steer.B'));
+  agents.candB.provider = 'muse';
+  agents.candB.model = 'muse-spark-1.3-contributor';
+  const [p] = await runnerFor(world).runPlans([WEB], { adopt: { '*': { B: agents.candB.id } } });
+  assert.ok(!p.ops.some((o) => o.key === 'steer.B'));
+  assert.match(p.conflicts.find((c) => c.key === 'steer.B').reason, /restricted to public code/);
+});
+
+test('a digit title must be renamed before it can become a live holder', async () => {
+  const { world, agents } = githubWorld();
+  const [p] = await runnerFor(world).runPlans([WEB], { adopt: { '*': { X: agents.digit.id } } });
+  assert.match(p.conflicts.find((c) => c.key === 'steer.X').reason, /tab titled Steer X/);
+  assert.match(p.notes.join('\n'), /Rename candidate "Steer 3"/);
 });
 
 // ------------------------------------------------------------------ (c) context
@@ -224,13 +233,13 @@ test('(e) live steers outside prepare block creates, pointing at --slots', async
   world.workspaces.push(ws);
   const d = addAgent(world, { title: 'Steer D', provider: 'codex', model: 'gpt-6.2-sol', workspaceId: ws.id, labels: { [LABEL.repo]: 'demo', [LABEL.role]: 'steer', [LABEL.slot]: 'D', [LABEL.scope]: 'demo' } });
   const e = addAgent(world, { title: 'Steer E', provider: 'muse', model: 'muse-spark-1.3-contributor', workspaceId: ws.id, labels: { [LABEL.repo]: 'demo', [LABEL.role]: 'steer', [LABEL.slot]: 'E', [LABEL.scope]: 'demo' } });
-  const [p] = await runnerFor(world, configAC).runPlans([{ local: '/p/demo' }]);
+  const [p] = await runnerFor(world, configAC).runPlans([{ local: '/p/demo' }], { slots: ['A', 'C'], legacyEnrollment: true });
   assert.ok(!p.ops.some((o) => o.kind === 'paseo.agent.create'), 'no create ops');
   for (const slot of ['A', 'C']) {
     assert.match(p.conflicts.find((c) => c.key === `steer.${slot}`).reason,
       new RegExp(`Steer ${slot} has no live agent, but live steers D \\(${d.id}\\), E \\(${e.id}\\) run in slots outside prepare \\(A, C\\); refusing to create another steer — re-run with --slots A,C,D,E`));
   }
-  const [covered] = await runnerFor(world, configAC).runPlans([{ local: '/p/demo' }], { slots: ['A', 'C', 'D', 'E'] });
+  const [covered] = await runnerFor(world, configAC).runPlans([{ local: '/p/demo' }], { slots: ['A', 'C', 'D', 'E'], legacyEnrollment: true });
   assert.ok(covered.ops.some((o) => o.key === 'steer.A' && o.kind === 'paseo.agent.create'), 'covering --slots unblocks');
   assert.ok(!covered.conflicts.some((c) => c.key === 'steer.A'));
 });
@@ -252,7 +261,7 @@ test('(e) covered runners without creates are noted, not conflicted', async () =
   for (const [slot, provider, model] of [['A', 'codex', 'gpt-6.2-sol'], ['C', 'copilot', 'claude-sonnet-4.5'], ['D', 'codex', 'gpt-6.2-sol']]) {
     addAgent(world, { title: `Steer ${slot}`, provider, model, workspaceId: ws.id, labels: { [LABEL.repo]: 'demo', [LABEL.role]: 'steer', [LABEL.slot]: slot, [LABEL.scope]: 'demo' } });
   }
-  const [p] = await runnerFor(world, configAC).runPlans([{ local: '/p/demo' }]);
+  const [p] = await runnerFor(world, configAC).runPlans([{ local: '/p/demo' }], { slots: ['A', 'C'], legacyEnrollment: true });
   assert.equal(p.status, 'complete');
   assert.match(p.notes.join('\n'), /Live steers D \(agent-\d+\) run in slots outside prepare \(A, C\) and are left untouched; cover them with --slots A,C,D to include them/);
 });

@@ -24,6 +24,7 @@ import {
   isAbsolutePath,
   validateFactorySettings,
   validateProfilesAgainstCatalogLocal,
+  prioritiesFromSlots,
   type FactoryProfileValue,
   type FactorySettingsValues,
   type ProviderEntry,
@@ -32,32 +33,24 @@ import { setCheckpointInChat } from "./checkpoint-display.js";
 import { AutosaveInput, SettingsSaveError, useAutosave } from "./settings-autosave.js";
 import { commaSeparated, percentage, type SettingsEdit } from "./settings-edit.js";
 
-const STEERS_INFO =
-  "One steer coordinates a project at a time. Set up multiple slots to hand over with /factory switch.";
-
 const WORKERS_INFO =
   "The factory starts workers using the first available profile in this order.";
 
 const EFFECTIVE_INFO =
-  "The factory uses the effective lists below. This page is the only source of the factory configuration: steer slots, worker order and profiles.";
+  "The factory uses the saved profiles and role priorities below. Running agents keep their native model settings.";
 
 const HOST_INFO =
   "Both fields are required. Fill in the GitHub owner and the checkout root to run the factory on this host.";
 
 const PROFILES_INFO =
-  "A profile is a named choice of provider, model, thinking level and permission mode. Steers and workers refer to profiles by name, so you change a model in one place.";
+  "A profile is a named choice of provider, model, thinking level and permission mode. Creation and routing priorities refer to these profiles by name.";
 
 const QUOTA_INFO =
   "View sampled usage with /factory quota. Warnings favor other pools and exhausted pools are skipped.";
 
 function usedProfileNames(values: FactorySettingsValues): string[] {
-  return [...new Set([...Object.values(values.slots), ...values.workerPriority])];
-}
-
-/** Profile a new steer slot starts on: the first non-advisor profile (worker priority first). */
-function coordinatorProfile(draft: FactorySettingsValues): string {
-  const names = [...draft.workerPriority, ...Object.keys(draft.profiles).sort()];
-  return names.find((name) => draft.profiles[name] && !draft.profiles[name].advisor) ?? names[0];
+  return [...new Set([...Object.values(values.slots), ...values.workerPriority,
+    ...(values.steerPriority ?? []), ...(values.advisorPriority ?? [])])];
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -111,12 +104,10 @@ function FactoryConfigSections({ theme, layout }: PluginSurfaceProps) {
   const paseo = usePaseo();
   const { state: configState, change, errors: saveErrors } = useAutosave(factoryConfigSettings);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string | null>>({});
-  const [newSlot, setNewSlot] = useState("");
   const [newProfile, setNewProfile] = useState("");
   const [catalog, setCatalog] = useState<CatalogState>({ state: "loading" });
   const callModels = useRpc(factoryModelsList);
   const [effective, setEffective] = useState<{ text: string } | { error: string } | null>(null);
-  const newSlotRef = useRef<SettingsInputHandle | null>(null);
   const newProfileRef = useRef<SettingsInputHandle | null>(null);
 
   useEffect(() => {
@@ -220,17 +211,11 @@ function FactoryConfigSections({ theme, layout }: PluginSurfaceProps) {
 
   const catalogProblems = catalogIssues(draft);
   const profileNames = Object.keys(draft.profiles).sort();
-  const slotNames = Object.keys(draft.slots).sort();
   const providerNames =
     catalog.state === "ready" ? catalog.entries.map((e) => e.provider).sort() : [];
   const entryFor = (provider: string) =>
     catalog.state === "ready" ? catalog.entries.find((e) => e.provider === provider) : undefined;
 
-  const slotName = newSlot.trim().toUpperCase();
-  const slotNameError = slotName && (
-    !/^[A-Z]$/.test(slotName) ? "Enter one letter from A to Z."
-      : Object.hasOwn(draft.slots, slotName) ? "This steer slot already exists." : null
-  );
   const profileName = newProfile.trim();
   const profileNameError = profileName && (
     Object.hasOwn(draft.profiles, profileName) ? "This profile already exists."
@@ -244,13 +229,23 @@ function FactoryConfigSections({ theme, layout }: PluginSurfaceProps) {
   ) {
     return update("Profiles", `${name}.${field}`, (current) => {
       if (!Object.hasOwn(current.profiles, name)) return "This profile was removed.";
-      return { ...current, profiles: { ...current.profiles, [name]: edit(current.profiles[name]) } };
+      const profile = edit(current.profiles[name]);
+      const next = { ...current, profiles: { ...current.profiles, [name]: profile } };
+      if (field === "advisor" && profile.advisor !== current.profiles[name].advisor) {
+        const source = profile.advisor ? current.steerPriority : current.advisorPriority;
+        if (source?.includes(name)) {
+          next.steerPriority = (current.steerPriority ?? []).filter((p) => p !== name);
+          next.advisorPriority = (current.advisorPriority ?? []).filter((p) => p !== name);
+          (profile.advisor ? next.advisorPriority : next.steerPriority).push(name);
+        }
+      }
+      return next;
     });
   }
 
   return (
     <View style={styles.screen}>
-      <SettingsSection title="In use now" info={EFFECTIVE_INFO}>
+      <SettingsSection title="Configured routes" info={EFFECTIVE_INFO}>
         <SettingsCard>
           <SettingsRow label="Steers and workers">
             {effective === null ? (
@@ -294,115 +289,34 @@ function FactoryConfigSections({ theme, layout }: PluginSurfaceProps) {
         </SettingsCard>
       </SettingsSection>
 
-      <SettingsSection title="Steers" info={STEERS_INFO}>
+      <SettingsSection title="Models & routing" info="Priorities choose future model routes. Changing a running agent uses its native model controls.">
         <SettingsCard>
-          {slotNames.map((slot) => {
-            const current = draft.slots[slot];
-            const options = (
-              profileNames.includes(current) ? profileNames : [...profileNames, current]
-            ).map((name) => ({ label: name, value: name }));
-            return (
-              <SettingsSelect
-                key={slot}
-                label={`${slotNames.indexOf(slot) + 1}. Steer ${slot}${profileBadges(draft.profiles[current] ?? { advisor: false, sensitive: false })}`}
-                hint="Creation tries slots in letter order."
-                error={fieldErrors[`slot-${slot}`]}
-                value={current}
-                options={options}
-                onValueChange={(value) =>
-                  void update("Steers", `slot-${slot}`, (latest) => {
-                    if (!Object.hasOwn(latest.slots, slot)) return "This steer slot was removed.";
-                    return { ...latest, slots: { ...latest.slots, [slot]: value } };
-                  })
-                }
-              />
-            );
-          })}
-          <SettingsInput
-            label="Add a steer"
-            hint="Choose a free letter, A to Z."
-            placeholder="B"
-            ref={newSlotRef}
-            error={slotNameError || fieldErrors.addSlot}
-            onChangeText={(text) => {
-              setNewSlot(text);
-              setFieldErrors((current) => ({ ...current, addSlot: null }));
-            }}
-          />
-          <SettingsAction
-            label="Add steer"
-            actionLabel="Add"
-            disabled={!slotName || Boolean(slotNameError)}
-            onPress={() => void update("Steers", "addSlot", (current) => {
-              if (Object.hasOwn(current.slots, slotName)) return "This steer slot already exists.";
-              return {
-                ...current,
-                slots: { ...current.slots, [slotName]: coordinatorProfile(current) },
-                prepare: [...current.prepare, slotName],
-              };
-            }).then((saved) => {
-              if (saved && newSlotRef.current?.getText() === newSlot) {
-                setNewSlot("");
-                newSlotRef.current?.replaceText("");
-              }
-            })}
-          />
-          {slotNames.length > 1
-            ? slotNames.map((slot) => (
-                <SettingsAction
-                  key={`rm-${slot}`}
-                  label={`Remove Steer ${slot}`}
-                  hint="Removes the slot from future plans."
-                  error={fieldErrors[`remove-slot-${slot}`]}
-                  actionLabel="Remove"
-                  onPress={() => void update("Steers", `remove-slot-${slot}`, (current) => {
-                    const slots = { ...current.slots };
-                    delete slots[slot];
-                    const eligible = Object.keys(slots).sort().find((name) => !current.profiles[slots[name]]?.advisor);
-                    if (!eligible) return "Keep at least one coordinating steer slot.";
-                    const prepare = current.prepare.filter((name) => name !== slot);
-                    const initialActive = prepare.includes(current.initialActive)
-                      ? current.initialActive
-                      : prepare.find((name) => !current.profiles[slots[name]]?.advisor) ?? eligible;
-                    if (!prepare.includes(initialActive)) prepare.push(initialActive);
-                    return { ...current, slots, prepare, initialActive };
-                  })}
-                />
-              ))
-            : null}
-          <AutosaveInput
-            label="Steers to create"
-            hint="Comma-separated slot letters for /factory plan. If you remove the initial steer, the first eligible slot takes over."
-            stored={draft.prepare.join(",")}
-            save={change("Steers")}
-            edit={(text) => {
-              const prepare = commaSeparated(text).map((slot) => slot.toUpperCase());
-              if (!prepare.length) return "Enter at least one steer slot.";
-              if (new Set(prepare).size !== prepare.length) return "List each steer slot only once.";
-              const editPrepare = validated((current) => {
-                const unknownSlot = prepare.find((slot) => !Object.hasOwn(current.slots, slot));
-                if (unknownSlot) return `Steer slot ${unknownSlot} does not exist.`;
-                const canCoordinate = (slot: string) => current.profiles[current.slots[slot]]?.advisor === false;
-                const initialActive = prepare.includes(current.initialActive) && canCoordinate(current.initialActive)
-                  ? current.initialActive
-                  : prepare.find(canCoordinate);
-                if (!initialActive) return "Include a steer slot whose profile can coordinate.";
-                return { ...current, prepare, initialActive };
-              });
-              const preview = editPrepare(draft);
-              return typeof preview === "string" ? preview : editPrepare;
-            }}
-          />
           <SettingsSelect
-            label="Initial coordinating steer"
-            value={draft.initialActive}
-            error={fieldErrors.initialActive}
-            options={draft.prepare
-              .filter((slot) => draft.profiles[draft.slots[slot]]?.advisor !== true)
-              .map((slot) => ({ label: `Steer ${slot}`, value: slot }))}
-            onValueChange={(initialActive) => void update("Steers", "initialActive", (current) => ({ ...current, initialActive }))}
+            label="Routing strategy"
+            value={draft.routingStrategy ?? "efficiency"}
+            options={[
+              { label: "Efficiency", value: "efficiency" },
+              { label: "Balanced", value: "balanced" },
+              { label: "Preference", value: "preference" },
+            ]}
+            onValueChange={(value) => void update("Routing", "strategy", (current) => ({
+              ...current, routingStrategy: value as FactorySettingsValues["routingStrategy"],
+            }))}
           />
-          <SettingsSaveError error={saveErrors.Steers} />
+          {(["steerPriority", "advisorPriority"] as const).map((key) => (
+            <AutosaveInput
+              key={key}
+              label={key === "steerPriority" ? "Steer priority" : "Advisor priority"}
+              hint="Profile names in priority order, separated by commas."
+              stored={(draft[key] ?? prioritiesFromSlots(draft.slots, draft.profiles)[key]).join(", ")}
+              save={change("Routing")}
+              edit={(text) => {
+                const names = commaSeparated(text);
+                return validated((current) => ({ ...current, [key]: names }));
+              }}
+            />
+          ))}
+          <SettingsSaveError error={saveErrors.Routing} />
         </SettingsCard>
       </SettingsSection>
 

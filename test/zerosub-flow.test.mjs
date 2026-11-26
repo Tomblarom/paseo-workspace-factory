@@ -46,10 +46,12 @@ const PROVIDERS = [
   { provider: 'codex', enabled: true, status: 'ready', models: [{ id: 'codex' }] },
 ];
 
+const activeSteer = { slot: 'D', id: 'steer-d', provider: 'claude', model: 'sonnet' };
+
 function briefStatus() {
   return {
     repo: 'example/repo', state: { epoch: 1, activeSteer: 'D' },
-    steers: [{ slot: 'D', id: 'steer-d' }], workers: [], openWorkers: [],
+    steers: [activeSteer], workers: [], openWorkers: [],
     checkpoint: null, workspace: { id: 'w', directory: '/tmp' },
   };
 }
@@ -82,12 +84,12 @@ test('pending move: failover waits until the route shows the new account', () =>
   // steer-e still runs on the exhausted old account, so it is excluded with it.
   const waiting = failoverChain({ steers, activeSlot: 'D', zerosub, failingAccountId: 'acc-old', now: NOW });
   assert.deepEqual(waiting.map((candidate) => candidate.steerId), ['steer-f']);
-  // …and when the new account fails it is still ordered by the old 99%,
-  // after the steer that already runs on the roomy account.
+  // Structural order carries no quota score; admission checks the actual
+  // runtime and pending move before a candidate can receive work.
   const healthy = failoverChain({ steers, activeSlot: 'D', zerosub, failingAccountId: 'acc-new', now: NOW });
-  assert.deepEqual(healthy.map((candidate) => candidate.steerId), ['steer-f', 'steer-e']);
+  assert.deepEqual(healthy.map((candidate) => candidate.steerId), ['steer-e', 'steer-f']);
   // Completed move (route shows the new account, nothing pending): steer-e
-  // survives the old account failing and sorts by the new 20%.
+  // survives the old account failing, in structural order.
   const moved = normalizeZerosubState({
     accounts: [account('acc-old', 99), account('acc-new', 20)],
     agents: [
@@ -122,8 +124,9 @@ test('continuation tabs count as the same slot: no duplicate failover candidate'
     ],
   }, { now: NOW });
   const chain = failoverChain({ steers, activeSlot: 'D', zerosub, now: NOW });
-  assert.deepEqual(chain.map((candidate) => candidate.steerId), ['steer-f', 'steer-e']);
-  // When the tab runs on the roomier account, it carries the slot's candidate.
+  assert.deepEqual(chain.map((candidate) => candidate.steerId), ['steer-e', 'steer-f']);
+  // Quota cannot choose which duplicate tab owns a slot. Live holder
+  // resolution happens before this structural chain is built.
   const split = normalizeZerosubState({
     accounts: [account('acc-a', 80), account('acc-b', 30)],
     agents: [
@@ -134,7 +137,7 @@ test('continuation tabs count as the same slot: no duplicate failover candidate'
     ],
   }, { now: NOW });
   const roomy = failoverChain({ steers, activeSlot: 'D', zerosub: split, now: NOW });
-  assert.deepEqual(roomy.map((candidate) => candidate.steerId), ['steer-e-tab', 'steer-f']);
+  assert.deepEqual(roomy.map((candidate) => candidate.steerId), ['steer-e', 'steer-f']);
 });
 
 test('below warnPct: no quota line', () => {
@@ -142,16 +145,16 @@ test('below warnPct: no quota line', () => {
     accounts: [account('acc-a', 92), account('acc-b', 40)],
     agents: [route('steer-d', 'acc-a')],
   }, { now: NOW });
-  assert.equal(formatQuotaLine(CONFIG, null, { currentPool: 'claude', zerosub, now: NOW }), null);
+  assert.equal(formatQuotaLine(CONFIG, null, { agent: activeSteer, zerosub, now: NOW }), null);
   assert.equal(
-    formatQuotaLine(CONFIG, null, { currentPool: 'claude', warnPct: 95, zerosub, now: NOW }),
+    formatQuotaLine(CONFIG, null, { agent: activeSteer, warnPct: 95, zerosub, now: NOW }),
     null,
   );
   const tight = normalizeZerosubState({
     accounts: [account('acc-a', 79), account('acc-b', 40)],
     agents: [route('steer-d', 'acc-a')],
   }, { now: NOW });
-  assert.equal(formatQuotaLine(CONFIG, null, { currentPool: 'claude', warnPct: 80, zerosub: tight, now: NOW }), null);
+  assert.equal(formatQuotaLine(CONFIG, null, { agent: activeSteer, warnPct: 80, zerosub: tight, now: NOW }), null);
   assert.equal(buildResumeBrief(briefStatus(), { config: CONFIG, zerosub, now: () => NOW }).includes('Quota:'), false);
   // Picking a profile for a new worker still prefers the roomiest account;
   // the informative quota line is gated by warnPct.
@@ -167,8 +170,8 @@ test('at warnPct and above: quota line, chain and pick prefer the roomiest accou
       agents: [route('steer-d', 'acc-a'), route('steer-e', 'acc-b')],
     }, { now: NOW });
     assert.equal(
-      formatQuotaLine(CONFIG, null, { currentPool: 'claude', zerosub, now: NOW }),
-      `Quota: claude ${pct}% (5h) — prefer acc-b`,
+      formatQuotaLine(CONFIG, null, { agent: activeSteer, zerosub, now: NOW }),
+      `Quota: claude (acc-a) ${pct}% used — prefer acc-b`,
     );
     const chain = failoverChain({
       steers: [
@@ -180,14 +183,14 @@ test('at warnPct and above: quota line, chain and pick prefer the roomiest accou
     assert.deepEqual(chain.map((candidate) => candidate.steerId), ['steer-e']);
     const picked = resolveProfile(CONFIG, PROVIDERS, ['sonnet', 'codex'], { role: 'worker', repoPublic: true, zerosub, now: NOW });
     assert.equal(picked.zerosubAccount, 'acc-b');
-    assert.match(buildResumeBrief(briefStatus(), { config: CONFIG, zerosub, now: () => NOW }), new RegExp(`Quota: claude ${pct}% \\(5h\\) — prefer acc-b`));
+    assert.ok(buildResumeBrief(briefStatus(), { config: CONFIG, zerosub, now: () => NOW }).includes(`Quota: claude (acc-a) ${pct}% used — prefer acc-b`));
   }
   const custom = normalizeZerosubState({
     accounts: [account('acc-a', 80), account('acc-b', 40)],
     agents: [route('steer-d', 'acc-a')],
   }, { now: NOW });
   assert.equal(
-    formatQuotaLine(CONFIG, null, { currentPool: 'claude', warnPct: 80, zerosub: custom, now: NOW }),
-    'Quota: claude 80% (5h) — prefer acc-b',
+    formatQuotaLine(CONFIG, null, { agent: activeSteer, warnPct: 80, zerosub: custom, now: NOW }),
+    'Quota: claude (acc-a) 80% used — prefer acc-b',
   );
 });

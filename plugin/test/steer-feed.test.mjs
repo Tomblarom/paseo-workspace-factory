@@ -8,6 +8,7 @@ import { register } from "node:module";
 register("./ts-resolve-hooks.mjs", import.meta.url);
 
 const { collectSteerStates } = await import("../server/steer-feed.ts");
+const { applySteerTitleLabels } = await import("../server/steer-title-labels.ts");
 const { CLEANUP_DEFAULTS } = await import("../shared/idle-cleanup.ts");
 
 const NOW = Date.parse("2026-11-25T12:00:00.000Z");
@@ -19,7 +20,7 @@ const MAIN = "wks_main";
 function agent(id, over = {}) {
   return {
     id,
-    title: `Steer ${id}`,
+    title: `Steer ${over.labels?.["wsf.slot"] ?? "A"}`,
     provider: "codex",
     model: "gpt-6.2-sol",
     status: "idle",
@@ -55,6 +56,38 @@ function feed(state, over = {}) {
 
 const TURN = { lastTurnEndedAt: iso(NOW - 5 * MIN) };
 
+test("title labels use the injected writer and update only the selected snapshot agent", async () => {
+  const state = paseoState([
+    agent("candidate", { title: "Steer C", labels: { other: "kept" } }),
+    agent("other", { title: "Steer B", labels: {} }),
+  ], { wsf: { main: true } });
+  const writes = [];
+  const applied = await applySteerTitleLabels(state, {
+    agentId: "candidate",
+    write: async (id, labels) => { writes.push([id, labels]); },
+  });
+  const labels = { "wsf.role": "steer", "wsf.slot": "C", "wsf.scope": SCOPE, "wsf.repo": SCOPE };
+  assert.equal(applied, 1);
+  assert.deepEqual(writes, [["candidate", labels]]);
+  assert.deepEqual(state.agents[0].labels, { other: "kept", ...labels });
+  assert.deepEqual(state.agents[1].labels, {});
+});
+
+test("renaming a legacy advisor preserves its role through a model change and a second feed pass", async () => {
+  const config = { profiles: { lead: {}, review: { advisor: true } }, steers: { slots: { A: "review", B: "lead" } } };
+  const state = paseoState([agent("reviewer", { title: "Steer B" })], { wsf: { main: true } });
+  const writes = [];
+  const write = async (id, patch) => { writes.push({ id, patch }); };
+  await applySteerTitleLabels(state, { config, write });
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].patch["wsf.slot"], "B");
+  assert.equal(writes[0].patch["wsf.steer-role"], "advisor");
+  state.agents[0].model = "new-model";
+  config.profiles.review.advisor = false;
+  assert.equal(feed(state, { config })[0].advisor, true);
+  assert.equal(await applySteerTitleLabels(state, { config, write }), 0);
+});
+
 test("a live steer projects a warm row with identity and flags", () => {
   const rows = feed(paseoState([agent("steer-a")], { entries: { "steer-a": { ...TURN } } }));
   assert.equal(rows.length, 1);
@@ -63,12 +96,13 @@ test("a live steer projects a warm row with identity and flags", () => {
     workspaceId: MAIN,
     agentId: "steer-a",
     slot: "A",
-    title: "Steer steer-a",
+    title: "Steer A",
     provider: "codex",
     model: "gpt-6.2-sol",
     liveStatus: "idle",
     advisor: false,
     active: true,
+    activationEpoch: null,
     permissionNeeded: false,
     stagedBrief: false,
     successor: null,
@@ -109,35 +143,34 @@ test("retired scopes and replaced holders project Retired", () => {
   assert.deepEqual(replaced.map((row) => [row.slot, row.state]), [["A", "retired"], ["B", "warm"]]);
 });
 
-test("a continuation origin retires with the live tab as successor", () => {
+test("a continuation origin gets no row; the live tab holds the slot", () => {
   const origin = agent("steer-old");
   const live = agent("cont-1", { labels: { "zerosub.continued-from": "steer-old" }, lastUsage: null });
   const rows = feed(paseoState([origin, live], { entries: { "steer-old": { ...TURN } } }));
   const byId = Object.fromEntries(rows.map((row) => [row.agentId, row]));
-  assert.equal(byId["steer-old"].state, "retired");
-  assert.equal(byId["steer-old"].successor, "cont-1");
-  assert.equal(byId["steer-old"].slot, "A");
+  assert.equal(byId["steer-old"], undefined);
   // The live continuation inherits the slot and projects its own state.
   assert.equal(byId["cont-1"].slot, "A");
   assert.equal(byId["cont-1"].state, "ready");
 });
 
-test("same-slot newer-wins retires the older holder", () => {
+test("same-slot holders remain ambiguous regardless of creation time", () => {
   const old = agent("steer-old", { createdAt: iso(NOW - 120 * MIN) });
   const current = agent("steer-new", { createdAt: iso(NOW - MIN) });
   const rows = feed(paseoState([old, current], { entries: { "steer-old": { ...TURN }, "steer-new": { ...TURN } } }));
   const byId = Object.fromEntries(rows.map((row) => [row.agentId, row]));
-  assert.equal(byId["steer-old"].state, "retired");
-  assert.equal(byId["steer-old"].successor, "steer-new");
-  assert.equal(byId["steer-new"].state, "warm");
-});
-
-test("holders without a unique newest stay ambiguous", () => {
-  const rows = feed(
-    paseoState([agent("steer-a"), agent("steer-b")], { entries: { "steer-a": { ...TURN }, "steer-b": { ...TURN } } }),
-  );
   assert.deepEqual(rows.map((row) => row.state), ["unknown", "unknown"]);
   assert.match(rows[0].detail, /ambiguous/);
+  assert.equal(byId["steer-old"].successor, null);
+  assert.equal(byId["steer-new"].successor, null);
+});
+
+test("archived tabs get no row and do not or make the live holder ambiguous", () => {
+  const rows = feed(paseoState([agent("old", { archivedAt: iso(NOW - MIN) }), agent("live")]));
+  const byId = Object.fromEntries(rows.map((row) => [row.agentId, row]));
+  assert.equal(byId.old, undefined);
+  assert.equal(byId.live.active, true);
+  assert.notEqual(byId.live.state, "unknown");
 });
 
 test("recovery flags, operations and open turns map to faces", () => {

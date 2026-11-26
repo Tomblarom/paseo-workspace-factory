@@ -3,15 +3,14 @@ import type {
   PluginButtonRegistration,
   PluginClientContext,
 } from "@getpaseo/plugin/client";
-import { useMemo, useState } from "react";
-import { useEffect } from "react";
+import { useMemo, useSyncExternalStore } from "react";
 import { ScrollView, Text, View } from "react-native";
 import {
   ResultView,
   type FactoryResultActions,
   type FactoryResultStyles,
 } from "./factory-panel.js";
-import { getFactoryResult, subscribeFactoryResult } from "./factory-store.js";
+import type { FactoryResultStore } from "./factory-store.js";
 import { resultPillId } from "./steer-pill.js";
 
 const RESULT_PILL_TTL_MS = 60_000;
@@ -32,9 +31,8 @@ export const READONLY_FACTORY_RESULT_ACTIONS: FactoryResultActions = {
  * setFactoryResult content as the panel, read-only: anything with a confirm
  * button opens the panel instead, so the pill never needs working actions.
  */
-export function FactoryResultPillContent({ theme, layout }: PluginButtonContentProps) {
-  const [result, setResult] = useState(() => getFactoryResult());
-  useEffect(() => subscribeFactoryResult(() => setResult(getFactoryResult())), []);
+function FactoryResultPillContent({ theme, layout, results }: PluginButtonContentProps & { results: FactoryResultStore }) {
+  const result = useSyncExternalStore(results.subscribe, results.getResult, results.getResult);
   const styles = useMemo<FactoryResultStyles>(
     () => ({
       label: { color: theme.colors.foregroundMuted, fontSize: 13 },
@@ -107,7 +105,7 @@ export function dismissFactoryResultPill(): void {
  */
 export function showFactoryResultPill(
   client: PluginClientContext,
-  input: { workspaceId: string; agentId: string; summary: string },
+  input: { workspaceId: string; agentId: string; summary: string; results: FactoryResultStore },
 ): void {
   clearCurrent();
   try {
@@ -119,7 +117,7 @@ export function showFactoryResultPill(
         title: "Factory",
         label: `Factory: ${input.summary}`,
         icon: "Factory",
-        behavior: { kind: "popover", Content: FactoryResultPillContent },
+        behavior: { kind: "popover", Content: (props) => <FactoryResultPillContent {...props} results={input.results} /> },
       },
     });
   } catch {

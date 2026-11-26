@@ -24,12 +24,13 @@ import {
 } from "../shared/factory.js";
 import { factoryHelp, parseFactoryArgs } from "../shared/factory-args.js";
 import { formatModelChange, formatModelList } from "../shared/models-format.js";
-import { setFactoryResult } from "./factory-store.js";
+import type { FactoryResultStore } from "./factory-store.js";
 
 interface SubmitContext {
   rpc: PluginAgentCommandContext["rpc"];
   workspaceId: string;
   agentId?: string;
+  setFactoryResult: FactoryResultStore["setResult"];
 }
 
 const CURRENT_WORKSPACE = "(current workspace)";
@@ -63,6 +64,7 @@ export async function submitFactoryCommand(
   args: string,
   ctx: SubmitContext,
 ): Promise<FactorySubmitOutcome> {
+  const { setFactoryResult } = ctx;
   const parsed = parseFactoryArgs(args);
   const at = new Date().toISOString();
   if (parsed.command === "help") {
@@ -89,11 +91,10 @@ export async function submitFactoryCommand(
       setFactoryResult({ kind: "info", at, text: preview.text });
       return pill("Steer add");
     }
-    // The preview stays on screen until the panel button confirms it; the
-    // confirm saves the slot/profile settings first, then creates the steer.
+    // Confirm creation in the workspace resolved by the preview.
     setFactoryResult({
       kind: "steerAddPreview",
-      workspaceId: ctx.workspaceId,
+      workspaceId: preview.workspaceId,
       at,
       inputs,
       preview,
@@ -269,11 +270,12 @@ async function submitModels(
   ctx: SubmitContext,
   at: string,
 ): Promise<FactorySubmitOutcome> {
+  const { setFactoryResult } = ctx;
   if (parsed.command !== "model" && parsed.action === "list") {
     const list = await ctx.rpc(factoryModelsList, {});
     const text = formatModelList(parsed.command, list as any);
     setFactoryResult({ kind: "info", at, text });
-    return pill(parsed.command === "worker" ? "Worker models" : "Steer slots");
+    return pill(parsed.command === "worker" ? "Worker models" : "Steer priorities");
   }
   if (parsed.command === "worker" && parsed.action === "pick") {
     const pick = await ctx.rpc(

@@ -5,7 +5,8 @@ import { resolveProfile } from '../plugin/server/core/models.mjs';
 import { failoverChain } from '../plugin/server/core/supervision.mjs';
 import { buildAssignment } from '../plugin/server/core/assign.mjs';
 import { buildResumeBrief } from '../plugin/server/core/steer.mjs';
-import { accountExhausted, formatQuotaLine, freshMaxUsedPct, parseUsageJson, profilePool, quotaExhausted } from '../plugin/server/core/quota.mjs';
+import { accountExhausted, formatQuotaLine, freshMaxUsedPct, liveAgentPool, parseUsageJson, profilePool, quotaEntry, quotaExhausted } from '../plugin/server/core/quota.mjs';
+import { normalizeZerosubState } from '../plugin/server/core/zerosub.mjs';
 
 const config = {
   version: 1, github: { owner: 'Test', cloneProtocol: 'https', upstreamRemote: 'upstream' },
@@ -25,6 +26,15 @@ test('profile pools default to provider and accept an explicit pool', () => {
   const bad = structuredClone(config);
   bad.profiles.a.pool = '';
   assert.ok(validateConfig(bad).some((error) => error.includes('pool must be a non-empty string')));
+});
+
+test('live quota uses the current model after a native change in the same slot', () => {
+  const agent = { provider: 'claude', model: 'a' };
+  assert.equal(liveAgentPool(agent, config), 'shared');
+  assert.equal(liveAgentPool({ ...agent, model: 'unconfigured' }, config), 'claude');
+  assert.equal(liveAgentPool({ provider: 'codex', model: 'b' }, config), 'codex');
+  const ambiguous = { ...config, profiles: { ...config.profiles, other: { ...config.profiles.a, pool: 'other' } } };
+  assert.equal(liveAgentPool(agent, ambiguous), 'claude');
 });
 
 test('resolveProfile skips an exhausted quota pool', () => {
@@ -54,15 +64,58 @@ test('failoverChain prefers another pool when requested', () => {
 test('quota warning is included in briefs and assignments only above threshold', () => {
   const status = {
     repo: 'example/repo', state: { epoch: 1, activeSteer: 'A' },
-    steers: [{ slot: 'A', id: 'a' }], workers: [], openWorkers: [],
+    steers: [{ slot: 'A', id: 'a', provider: 'claude', model: 'a' }], workers: [], openWorkers: [],
     checkpoint: null, workspace: { id: 'w', directory: '/tmp' },
   };
   const snapshot = { shared: { sessionPct: 93 } };
-  const line = 'Quota: shared 93% (5h) — prefer codex';
   assert.match(buildResumeBrief(status, { config, quotaSnapshot: snapshot }), /Quota: shared 93% \(5h\) — prefer codex/);
   assert.match(buildAssignment(status, { slot: 'A', steerId: 'a', epoch: 1, task: 't', tests: [], blockers: [], next: null, config, quotaSnapshot: snapshot }), /Quota: shared 93%/);
   assert.equal(formatQuotaLine(config, { shared: { sessionPct: 92 } }), null);
-  assert.ok(line.includes('prefer codex'));
+});
+
+test('resume and assignment quota follows the live holder, model and account', () => {
+  const now = Date.parse('2026-11-24T12:00:00Z');
+  const holder = { slot: 'A', id: 'live', provider: 'codex', model: 'b', workspaceId: 'w' };
+  const status = {
+    repo: 'example/repo', state: { epoch: 1, activeSteer: 'A' },
+    steers: [
+      { ...holder, id: 'origin', superseded: true },
+      { ...holder, id: 'retired', retired: true },
+      holder,
+    ],
+    workers: [], checkpoint: null, workspace: { id: 'w', directory: '/tmp' },
+  };
+  const quotaSnapshot = { shared: { sessionPct: 100 }, codex: { sessionPct: 99 } };
+  const activeAccount = { id: 'acc-live', family: 'codex', usage: { windows: [
+    { id: 'weekly', models: ['b'], usedPercent: 94 },
+    { id: 'other-weekly', models: ['other'], usedPercent: 98 },
+  ] } };
+  const otherAccount = { id: 'acc-other', family: 'codex', usage: { windows: [{ id: '5h', usedPercent: 100 }] } };
+  const zerosub = normalizeZerosubState({ accounts: [activeAccount, otherAccount], agents: [
+    { agentId: 'origin', accountId: 'acc-other' },
+    { agentId: 'live', accountId: 'acc-live' },
+  ] }, { now });
+  const options = { config, quotaSnapshot, zerosub };
+  const brief = (sources = {}, rows = status.steers) => buildResumeBrief({ ...status, steers: rows }, { ...options, ...sources, agentId: holder.id, now: () => now });
+  const assignment = (sources = {}) => buildAssignment(status, { ...options, ...sources, slot: 'A', steerId: holder.id, epoch: 1, task: 't', now });
+  const expectedLine = /^Quota: codex \(acc-live\) 94% used$/m;
+  assert.match(brief(), /active steer A \(live\)/);
+  assert.match(brief(), expectedLine);
+  assert.match(assignment(), expectedLine);
+  assert.doesNotMatch(brief({}, [...status.steers, { ...holder, id: 'duplicate' }]), /^Quota:/m);
+
+  for (const accounts of [[otherAccount], [otherAccount, { ...activeAccount, usage: { windows: [{ id: '5h', usedPercent: null }] } }]]) {
+    const state = normalizeZerosubState({ accounts, agents: [{ agentId: 'live', accountId: 'acc-live' }] }, { now });
+    const unknown = { zerosub: state, quotaWarnPct: 0 };
+    assert.doesNotMatch(brief(unknown), /^Quota:/m);
+    assert.doesNotMatch(assignment(unknown), /^Quota:/m);
+  }
+
+  const pending = { ...zerosub, pending: { live: 'acc-live' }, agentAccount: { live: 'acc-other' } };
+  assert.match(brief({ zerosub: pending }), expectedLine);
+  const unbound = { zerosub: { ...zerosub, agentAccount: {} } };
+  assert.match(brief(unbound), /^Quota: codex 99% \(5h\)/m);
+  assert.match(assignment(unbound), /^Quota: codex 99% \(5h\)/m);
 });
 
 test('account exhaustion ignores ordinary resets and expired windows', () => {
@@ -110,6 +163,24 @@ test('usage JSON parsing is fail-soft and extracts the 5h window', () => {
   assert.deepEqual(parseUsageJson(null), {});
 });
 
+test('usage reports for distinct accounts leave shared pool evidence unknown in either order', () => {
+  const record = (id, sourceId, windows) => ({
+    id, sourceId, account: { label: 'Synthetic' }, report: { status: 'available', windows },
+  });
+  const full = record('usage-1', 'codex', [{ id: '5h', usedPct: 99 }, { id: 'weekly', usedPct: 98 }]);
+  const other = record('usage-2', 'codex', [{ id: '5h', usedPct: 16 }]);
+  const noQuota = { ...other, report: { status: 'error', error: 'synthetic quota failure' } };
+  const claude = record('usage-3', 'claude', [{ id: '5h', usedPct: null, remainingPct: 22 }, { id: 'weekly', usedPct: 80 }]);
+  for (const pair of [[full, other], [other, full], [full, noQuota], [noQuota, full]]) {
+    const snapshot = parseUsageJson({ sources: [...pair, claude] });
+    assert.deepEqual(snapshot, { claude: { sessionPct: 78, weeklyPct: 80 } });
+    assert.equal(quotaEntry(snapshot, 'codex'), null);
+    assert.equal(quotaExhausted(snapshot, 'codex'), false);
+    assert.equal(formatQuotaLine(config, snapshot, { currentPool: 'codex' }), null);
+  }
+  assert.deepEqual(parseUsageJson([full]), { codex: { sessionPct: 99, weeklyPct: 98 } });
+});
+
 
 test('model-scoped quota windows only count for their model family', async () => {
   const { accountExhausted, freshMaxUsedPct, earliestResetOf, windowAppliesToModel } = await import('../plugin/server/core/quota.mjs');
@@ -124,4 +195,8 @@ test('model-scoped quota windows only count for their model family', async () =>
   assert.equal(accountExhausted(account, { now, model: 'claude-sonnet-4-6' }), true);
   assert.equal(accountExhausted(account, { now }), true, 'without a model every window counts');
   assert.equal(windowAppliesToModel({ id: 'session-5h' }, 'gemini-4-hydrogen'), true, 'unscoped windows apply to all models');
+  const scoped = { maxUsedPct: 100, windows: [{ id: 'session', models: ['model-a'], usedPct: 100, resetsAt: '2026-12-01T08:59:32Z' }] };
+  assert.equal(freshMaxUsedPct(scoped, now, 'model-b'), null);
+  assert.equal(accountExhausted(scoped, { now, model: 'model-b' }), false);
+  assert.equal(accountExhausted(scoped, { now, model: 'model-a' }), true);
 });

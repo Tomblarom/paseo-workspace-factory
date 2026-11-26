@@ -12,6 +12,13 @@
 // file with type stripping (see plugin/test/ts-resolve-hooks.mjs).
 import { deliverSteer, dispatchAssignmentReport, finishSteerDelivery, pendingSteerDelivery, type EventBatch, type SteerDeliveryDeps } from "./steer-delivery.js";
 import { ASSIGNMENT_KEY } from "./core/assign.mjs";
+import { scopeHolder } from "./core/scope-guard.mjs";
+import { isAdvisorSteer } from "./core/config.mjs";
+import { resolveSteerHolders } from "./core/discovery.mjs";
+import { readSteerAction } from "./core/steer-action.mjs";
+import { quotaAdmission } from "./steer-admission.js";
+import { readRoutingSnapshot, routingProjection, steerRouteCandidate, planSteerRoutes } from "./steer-routing.js";
+import { hasActiveAgentWork } from "./agent-context.js";
 import { canMarkWorkerStale, filterStaleWorkerEvents } from "./worker-wakes.js";
 import * as paseoCore from "./core/paseo.mjs";
 import { setTimeout as delay } from "node:timers/promises";
@@ -60,9 +67,8 @@ const {
 } = S;
 const { AGENTS_KEY } = AS;
 const { lastAssistantText, parseCheckpointBlock } = ST;
-const { QUOTA_DEFAULTS, accountForAgent, formatQuotaLine, profilePool, quotaExhausted } = Q;
-import { factoryIdentity } from "../shared/auto-checkpoint.js";
-import { getQuotaSnapshot } from "./quota.js";
+const { QUOTA_DEFAULTS, accountForAgent, formatQuotaLine, liveAgentPool, quotaExhausted } = Q;
+import { factoryIdentity, openTurnOf } from "../shared/auto-checkpoint.js";
 import {
   findZerosubSwitch,
   futureWakeAtMs,
@@ -120,11 +126,14 @@ export interface SuperviseDeps extends SettingsSource, ZerosubSource {
   force?: boolean;
   failingPool?: string | null;
   failoverReason?: string;
+  failingAgentId?: string;
+  quotaTrigger?: { accountId?: string | null };
 }
 
 export interface WakeEvent {
   workerId: string;
   state: string;
+  queuedAt?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -138,7 +147,7 @@ let supervisionPaseo: any = null;
 let bootCheckDone = false;
 let draining = false;
 let lastWatchdogScanMs = 0;
-const failoverAsked = new Map<string, { activeSlot: string | null; asked: string[]; updatedAt: string }>();
+const failoverAsked = new Map<string, { epoch: number | null; activeSlot: string | null; asked: string[]; updatedAt: string }>();
 const sendingScopeWakes = new Set<string>();
 /** First sighting (epoch ms) of each agent's current ZeroSub pending move. */
 const zerosubPendingSince = new Map<string, number>();
@@ -304,9 +313,43 @@ function deliveryDeps(deps: SuperviseDeps): SteerDeliveryDeps {
     ...deps.delivery,
     lock: lockOf(deps),
     now: () => stampsOf(deps).nowIso,
+    getConfig: deps.delivery?.getConfig ?? deps.getConfig,
+    getZerosub: deps.delivery?.getZerosub ?? deps.getZerosub,
+    zerosub: deps.delivery?.zerosub === undefined ? deps.zerosub : deps.delivery.zerosub,
     buildBrief: deps.delivery?.buildBrief ?? deps.buildBrief,
+    assignmentQuiet: (paseo, sourceIds, targetId) => supervisionQuiet(paseo, [...sourceIds, targetId], deps),
     onTakeoverDelivered: (paseo, batch, agentId) => recordTakeoverDelivery(paseo, batch, agentId, deps).then(() => {}),
+    onQuotaBlocked: (paseo, workspaceId, agentId, reason, pool) =>
+      requestQuotaFailover(paseo, workspaceId, agentId, reason, pool, deps),
   };
+}
+
+export async function supervisionQuiet(paseo: any, workspaceIds: string[], deps: SuperviseDeps = {}): Promise<string | null> {
+  if (!(deps.bootCheckDone ?? isBootCheckDone())) return "boot";
+  if (deps.draining ?? isDraining()) return "drain";
+  const { nowMs } = stampsOf(deps);
+  for (const id of new Set(workspaceIds)) {
+    const meta = await refreshWorkspaceMeta(paseo, id);
+    if (isDrainMarkerActive(meta[DRAIN_METADATA_KEY], nowMs)) return "drain";
+  }
+  return null;
+}
+
+export async function requestQuotaFailover(
+  paseo: any, workspaceId: string, agentId: string, reason: string, pool: string, deps: SuperviseDeps,
+): Promise<void> {
+  const state = await readPaseoState(paseo);
+  const scope = listScopes(state).find((candidate: any) => candidate.workspaceId === workspaceId);
+  const wsf = scope?.workspace?.metadata?.[METADATA_KEY];
+  if (!scope || !wsf) return;
+  try {
+    const holder = scopeHolder({ agents: state.agents, workspaceId, scopeId: scope.id, slot: wsf.activeSteer });
+    if (holder.id !== agentId) return;
+  } catch {
+    return;
+  }
+  await runFailoverCheck(paseo, scope, { ...deps, state, force: true, failingPool: pool, failingAgentId: agentId,
+    failoverReason: reason, quotaTrigger: {} });
 }
 
 /**
@@ -320,25 +363,39 @@ function steerRows(
   wsf: Record<string, any> | null,
   agentState: Record<string, unknown>,
   config: any = null,
-): { slot: string | null; id: string; archivedAt: unknown; retired: boolean; status: unknown; background: unknown; interrupted: unknown; pool?: string | null; advisor?: boolean }[] {
+): { slot: string | null; id: string; archivedAt: unknown; retired: boolean; superseded: boolean; status: unknown; background: unknown; interrupted: unknown; pool?: string | null; advisor?: boolean }[] {
   const retired = retiredAgentId(wsf);
-  const rows: { slot: string | null; id: string; archivedAt: unknown; retired: boolean; status: unknown; background: unknown; interrupted: unknown; pool?: string | null; advisor?: boolean }[] = [];
-  for (const agent of paseoState?.agents ?? []) {
+  const rows: { slot: string | null; id: string; archivedAt: unknown; retired: boolean; superseded: boolean; status: unknown; background: unknown; interrupted: unknown; pool?: string | null; advisor?: boolean }[] = [];
+  const labelled = (paseoState?.agents ?? []).filter((agent: any) => {
+    const identity = factoryIdentity(agent?.labels ?? null);
+    return identity?.role === "steer" && sameScopeId(identity.scopeId, scopeId);
+  });
+  for (const agent of resolveSteerHolders(labelled, paseoState?.agents ?? [])) {
     const identity = factoryIdentity(agent?.labels ?? null);
     if (!identity || identity.role !== "steer" || !sameScopeId(identity.scopeId, scopeId)) continue;
     rows.push({
       slot: identity.slot,
       id: agent.id,
       archivedAt: agent.archivedAt ?? null,
+      superseded: agent.superseded === true,
       retired: retired !== null && agent.id === retired,
       status: agent.status ?? null,
       background: agent.background ?? null,
       interrupted: (asRecord(agentState[agent.id])?.interrupted ?? null) as unknown,
-      pool: identity.slot ? profilePool(config?.profiles?.[config?.steers?.slots?.[identity.slot]]) : null,
-      advisor: identity.slot ? config?.profiles?.[config?.steers?.slots?.[identity.slot]]?.advisor === true : false,
+      pool: liveAgentPool(agent, config) || null,
+      advisor: isAdvisorSteer(config, agent.labels, agent.metadata),
     });
   }
   return rows;
+}
+
+function activeHolder(state: any, scope: any, wsf: any): string | null {
+  try {
+    return scopeHolder({ agents: state.agents, workspaceId: scope.workspaceId, scopeId: scope.id,
+      slot: wsf.activeSteer }).id;
+  } catch {
+    return null;
+  }
 }
 
 /** Labelled workers of a scope (role worker, scope id match). */
@@ -359,13 +416,16 @@ function domainHubSteers(
   scopes: any[],
   scope: any,
   wsf: Record<string, any> | null,
+  config: any,
 ): { domainSteer: { steerId: string; scopeId: string } | null; hubSteer: { steerId: string; scopeId: string } | null } {
   const holderOf = (target: any): string | null => {
     if (!target) return null;
     const targetWsf = wsfOf(target.workspace?.metadata ?? {});
     if (!targetWsf) return null;
     const entries = asRecord(target.workspace?.metadata?.[AGENTS_KEY]) ?? {};
-    return resolveWakeTarget(targetWsf, steerRows(paseoState, target.id, targetWsf, entries));
+    const rows = steerRows(paseoState, target.id, targetWsf, entries, config);
+    const id = resolveWakeTarget(targetWsf, rows);
+    return rows.find((row) => row.id === id)?.advisor ? null : id;
   };
   const stored = asRecord(wsf?.scope);
   const domainId =
@@ -516,6 +576,7 @@ export async function handleCreateAfter(
 export interface SendWakeResult {
   sent: boolean;
   reason?: string;
+  detail?: string;
   target?: string | null;
   events?: number;
   /** True when the wake was delivered as an F4 automatic resume. */
@@ -531,6 +592,7 @@ interface ScopeWakeInput {
   state?: any;
   factoryCmd?: string;
   zerosubNote?: string | null;
+  zerosub?: ZerosubSource["zerosub"];
 }
 
 /** Sends queued events to the live active steer, with one delivery in flight per scope. */
@@ -553,14 +615,24 @@ async function deliverScopeWake(paseo: any, args: ScopeWakeInput, deps: Supervis
   const freshWsf = wsfOf(freshMeta);
   if (!freshWsf) return { sent: false, reason: "no-wsf" };
   const register = readWorkers(freshMeta);
-  const events = await filterStaleWorkerEvents<WakeEvent>(paseo, freshMeta, args.events ?? collectPendingWakes(register));
-  if (!events.length) return { sent: false, reason: "no-events" };
-  const paseoState = args.state ?? ((await readPaseoState(paseo)) as any);
   const agentState = asRecord(freshMeta[AGENTS_KEY]) ?? {};
+  const heldEvents = Object.values(agentState).flatMap((entry) => {
+    const action = pendingSteerDelivery(entry);
+    const batch = action?.batch;
+    if (!batch || batch.takeover || batch.workspaceId !== mainId || (batch.epoch ?? action.epoch) === freshWsf.epoch) return [];
+    return batch.events;
+  });
+  const pendingEvents: WakeEvent[] = args.events ?? collectPendingWakes(register);
+  const available = pendingEvents.filter((event) => !heldEvents.some((held) =>
+    held.workerId === event.workerId && held.state === event.state &&
+    (held.queuedAt == null || event.queuedAt == null || held.queuedAt === event.queuedAt)));
+  const events = await filterStaleWorkerEvents<WakeEvent>(paseo, freshMeta, available);
+  if (!events.length) return { sent: false, reason: pendingEvents.length && !available.length ? "held-receipts" : "no-events" };
+  const paseoState = args.state ?? ((await readPaseoState(paseo)) as any);
   const settings = await resolveSettings(deps);
   const config = deps.getConfig ? await deps.getConfig().catch(() => null) : null;
   const rows = steerRows(paseoState, scope.id, freshWsf, agentState, config);
-  const target = resolveWakeTarget(freshWsf, rows);
+  const target = activeHolder(paseoState, scope, freshWsf);
   if (!target) {
     log(`[factory] supervise: no live holder of ${scope.id} active steer; wake queued`);
     return { sent: false, reason: "no-target", target: null };
@@ -574,23 +646,23 @@ async function deliverScopeWake(paseo: any, args: ScopeWakeInput, deps: Supervis
   }
   const active = typeof freshWsf.activeSteer === "string" ? freshWsf.activeSteer : null;
   const activeRow = rows.find((row: any) => row.id === target) ?? null;
-  const activeProfile = active && config?.profiles?.[config?.steers?.slots?.[active]];
-  const activePool = activeProfile ? profilePool(activeProfile) : null;
   const exhaustedPct = config?.quota?.exhaustedPct ?? settings?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct;
-  const exhausted = activePool && quotaExhausted(
-    getQuotaSnapshot(),
-    activePool,
-    exhaustedPct,
-  );
-  const zerosub = await resolveZerosub(deps);
-  if ((activeRow?.advisor === true || exhausted) && active) {
+  const zerosub = args.zerosub === undefined ? await resolveZerosub({ ...deps.delivery, ...deps }) : args.zerosub;
+  const wakeState = { ...paseoState, workspaces: paseoState.workspaces.map((workspace: any) =>
+    workspace.id === mainId ? { ...workspace, metadata: freshMeta } : workspace) };
+  const wakeRouting = await readRoutingSnapshot({ ...deliveryDeps(deps), zerosub, paseo,
+    getConfig: async () => config }, wakeState.workspaces, [targetAgent], wakeState.agents);
+  const admission = quotaAdmission(targetAgent, agentState[target], wakeRouting, agentState);
+  const privacy = steerRouteCandidate({ agent: targetAgent, entry: agentState[target], entries: agentState, snapshot: wakeRouting }).privacy;
+  if ((activeRow?.advisor === true || !admission.allowed || !privacy.allowed) && active) {
     const takeover = await runFailoverCheck(paseo, scope, {
       ...deps,
-      zerosub,
       state: paseoState,
       force: true,
-      failingPool: activePool,
-      failoverReason: activeRow?.advisor === true ? "active steer is advisor-flagged" : `quota exhausted for pool ${activePool}`,
+      quotaTrigger: !activeRow?.advisor && privacy.allowed ? { accountId: admission.accountId } : undefined,
+      failingPool: admission.pool,
+      failingAgentId: target,
+      failoverReason: activeRow?.advisor === true ? "active steer is advisor-flagged" : privacy.reason ?? `${admission.reason} for ${admission.accountId ? "bound account" : "pool"} (${admission.pool})`,
     });
     if (takeover.action === "failover") {
       return { sent: true, target: takeover.to?.steerId ?? null, events: events.length };
@@ -621,13 +693,13 @@ async function deliverScopeWake(paseo: any, args: ScopeWakeInput, deps: Supervis
       events,
       factoryCmd: args.factoryCmd ?? deps.factoryCmd ?? FACTORY_CMD,
     }) ?? "",
-    selectDoneIds(register),
+    selectDoneIds(register).filter((id) => !register[id]?.pendingWake || events.some((event) => event.workerId === id)),
   );
-  const quotaLine = formatQuotaLine(config, getQuotaSnapshot(), {
-    currentPool: activeProfile ? profilePool(activeProfile) : null,
+  const quotaLine = formatQuotaLine(config, wakeRouting.quota, {
+    agent: targetAgent,
     warnPct: config?.quota?.warnPct ?? settings?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct,
-    zerosub,
-    now: stampsOf(deps).nowMs,
+    zerosub: wakeRouting.zerosub,
+    now: wakeRouting.nowMs,
   });
   if (quotaLine) text = `${text}\n${quotaLine}`;
   if (args.zerosubNote) text = `${text}\n${args.zerosubNote}`;
@@ -644,7 +716,7 @@ async function deliverScopeWake(paseo: any, args: ScopeWakeInput, deps: Supervis
     batch: { workspaceId: mainId, epoch: freshWsf.epoch ?? null, events },
   }, deliveryDeps(deps));
   if (delivery.status !== "sent") {
-    return { sent: false, reason: delivery.status === "blocked" ? "resume-refused" : "brief-pending", target };
+    return { sent: false, reason: delivery.status === "blocked" ? "resume-refused" : "brief-pending", detail: delivery.detail, target };
   }
   return { sent: true, target, events: events.length, ...(delivery.renewed ? { resumed: true } : {}) };
 }
@@ -819,7 +891,7 @@ export async function runWorkerTurnAfter(
   // in continuedIn): no factory follow-up of our own (the transition above is
   // still recorded). A pending in-place move instead defers the wake via
   // planWake; the next turn end reports.
-  const zerosub = await resolveZerosub(deps);
+  const zerosub = await resolveZerosub({ ...deps.delivery, ...deps });
   const switchRow = findZerosubSwitch(entries);
   if (zerosubSwitchFollowup(switchRow).decision === "suppress") {
     log(`[factory] supervise: no follow-up for ${agentId} (ZeroSub continued it)`);
@@ -859,8 +931,8 @@ export async function runWorkerTurnAfter(
   try {
     sent = await sendScopeWake(
       paseo,
-      { scope, state, zerosubNote },
-      { ...deps, zerosub },
+      { scope, state, zerosubNote, zerosub },
+      deps,
     );
   } catch (error) {
     log(`[factory] supervise: wake for ${scope.id} failed (${error instanceof Error ? error.message : String(error)}); wake queued`);
@@ -930,6 +1002,7 @@ export interface RetryWakeBriefResult {
   attempted: boolean;
   delivered: boolean;
   reason?: string;
+  detail?: string;
   target?: string | null;
   events?: number;
 }
@@ -941,7 +1014,8 @@ export async function retryPendingWakeBrief(
 ): Promise<RetryWakeBriefResult> {
   const mainId: string = scope.workspaceId;
   const meta = await refreshWorkspaceMeta(paseo, mainId);
-  if (!wsfOf(meta)) return { attempted: false, delivered: false, reason: "no-wsf" };
+  const wsf = wsfOf(meta);
+  if (!wsf) return { attempted: false, delivered: false, reason: "no-wsf" };
   const entries = asRecord(meta[AGENTS_KEY]) ?? {};
   const candidates = Object.entries(entries)
     .flatMap(([agentId, entry]) => {
@@ -956,9 +1030,12 @@ export async function retryPendingWakeBrief(
     const batch = pending.batch;
     const events = batch?.workspaceId === mainId && !batch.takeover ? batch.events.length : 0;
     if (result.status === "sent") return { attempted: true, delivered: true, target: agentId, events };
-    if (events) waiting = {
+    // Keep the unresolved receipt for recovery. An older authority epoch
+    // cannot hold the current controller's independent wake queue.
+    const receiptEpoch = batch?.epoch ?? pending.epoch;
+    if (events && (receiptEpoch == null || receiptEpoch === wsf.epoch)) waiting = {
       attempted: false, delivered: false, reason: result.status === "blocked" ? "resume-refused" : "brief-pending",
-      target: agentId, events,
+      detail: result.detail, target: agentId, events,
     };
   }
   return waiting ?? { attempted: false, delivered: false, reason: "none" };
@@ -971,6 +1048,7 @@ export async function retryPendingWakeBrief(
 export interface FlushResult {
   flushed: boolean;
   reason?: string;
+  detail?: string;
   target?: string | null;
   events?: number;
 }
@@ -993,7 +1071,7 @@ export async function flushScope(
     return { flushed: true, target: retry.target ?? null, events: retry.events };
   }
   if (retry.reason !== "none" && retry.reason !== "no-wsf" && retry.reason !== "target-gone" && retry.reason !== "epoch-moved") {
-    return { flushed: false, reason: retry.reason ?? "brief-pending", target: retry.target ?? null, events: retry.events };
+    return { flushed: false, reason: retry.reason ?? "brief-pending", detail: retry.detail, target: retry.target ?? null, events: retry.events };
   }
   if (!settings?.enabled) return { flushed: false, reason: "disabled" };
   const register = readWorkers(await refreshWorkspaceMeta(paseo, scope.workspaceId));
@@ -1012,10 +1090,10 @@ export async function flushScope(
     { scope, state: deps.state },
     deps,
   );
-  return { flushed: sent.sent, reason: sent.sent ? undefined : (sent.reason ?? "send-failed"), target: sent.target ?? null, events: sent.events };
+  return { flushed: sent.sent, reason: sent.sent ? undefined : (sent.reason ?? "send-failed"), detail: sent.detail, target: sent.target ?? null, events: sent.events };
 }
 
-export async function flushAllScopes(paseo: any, deps: SuperviseDeps & { state?: any }): Promise<FlushResult[]> {
+export async function flushAllScopes(paseo: any, deps: SuperviseDeps & { state?: any; onFlush?: (scopeId: string, result: FlushResult) => void }): Promise<FlushResult[]> {
   const settings = await resolveSettings(deps);
   if (!settings?.enabled && !deps.delivery) return [];
   const paseoState = deps.state ?? ((await readPaseoState(paseo)) as any);
@@ -1036,7 +1114,9 @@ export async function flushAllScopes(paseo: any, deps: SuperviseDeps & { state?:
     });
     if (!hasBrief && !(settings?.enabled && collectPendingWakes(readWorkers(meta)).length)) continue;
     try {
-      out.push(await flushScope(paseo, scope, { ...deps, settings, state: paseoState }));
+      const result = await flushScope(paseo, scope, { ...deps, settings, state: paseoState });
+      out.push(result);
+      deps.onFlush?.(scope.id, result);
     } catch (error) {
       logOf(deps)(`[factory] supervise: flush of ${scope?.id ?? "?"} failed (${error instanceof Error ? error.message : String(error)})`);
     }
@@ -1245,8 +1325,9 @@ export async function recordTakeoverDelivery(
     previousSteer: request.activeSlot, reason: request.reason, observedAt: request.observedAt,
   }, deps);
   const previous = failoverAsked.get(request.scopeId);
-  const asked = previous?.activeSlot === request.activeSlot ? previous.asked : [];
+  const asked = previous?.epoch === batch.epoch && previous?.activeSlot === request.activeSlot ? previous.asked : [];
   failoverAsked.set(request.scopeId, {
+    epoch: batch.epoch,
     activeSlot: request.activeSlot,
     asked: [...new Set([...asked, agentId])],
     updatedAt: request.observedAt ?? stampsOf(deps).nowIso,
@@ -1261,7 +1342,7 @@ export async function recordTakeoverDelivery(
  * nor still runs one (busy), the next chain candidate (next slot, then domain,
  * then hub) gets a takeover request, logged as checkpoint source failover.
  * Each candidate gets a full answer window; an empty chain cycles. Quiet
- * periods skip (the caller checks); an epoch move aborts.
+ * periods skip; an epoch move aborts.
  */
 export async function runFailoverCheck(
   paseo: any,
@@ -1276,6 +1357,8 @@ export async function runFailoverCheck(
   const meta = await refreshWorkspaceMeta(paseo, mainId);
   const wsf = wsfOf(meta);
   if (!wsf) return { action: "clear", reason: "no-wsf" };
+  const quiet = await supervisionQuiet(paseo, [mainId], deps);
+  if (quiet) return { action: "wait", reason: quiet };
   const register = readWorkers(meta);
   const eligible = await filterStaleWorkerEvents(paseo, meta,
     workersReport(register).map((entry: any) => ({ ...entry, workerId: entry.id })));
@@ -1296,10 +1379,15 @@ export async function runFailoverCheck(
   const activeSlot = typeof wsf.activeSteer === "string" ? wsf.activeSteer : null;
   const paseoState = deps.state ?? ((await readPaseoState(paseo)) as any);
   const agentState = asRecord(meta[AGENTS_KEY]) ?? {};
-  const config = deps.getConfig ? await deps.getConfig().catch(() => null) : null;
+  const routingState = { ...paseoState, workspaces: paseoState.workspaces.map((workspace: any) =>
+    workspace.id === mainId ? { ...workspace, metadata: meta } : workspace) };
+  const routing = await readRoutingSnapshot({ ...deliveryDeps(deps), ...deps, paseo,
+    now: () => nowIso }, routingState.workspaces, routingState.agents);
+  const config = routing.config;
   const rows = steerRows(paseoState, scope.id, wsf, agentState, config);
-  const holder = resolveWakeTarget(wsf, rows);
-  const zerosub = await resolveZerosub(deps);
+  const holder = activeHolder(paseoState, scope, wsf);
+  if (deps.failingAgentId && holder !== deps.failingAgentId) return { action: "clear", reason: "holder-changed" };
+  const zerosub = routing.zerosub;
   let holderRow: ZerosubSwitchRow | null = null;
   let holderSwitchWakeAt: string | null = null;
   let reason: string;
@@ -1357,8 +1445,8 @@ export async function runFailoverCheck(
     retiredIds: retired ? [retired] : [],
     interruptedIds: rows.filter((r) => r.interrupted).map((r) => r.id),
     advisorIds: rows.filter((r) => r.advisor).map((r) => r.id),
-    ...domainHubSteers(paseoState, scopes, scope, wsf),
-    failingPool: deps.failingPool ?? (activeSlot ? profilePool(config?.profiles?.[config?.steers?.slots?.[activeSlot]]) : null),
+    ...domainHubSteers(paseoState, scopes, scope, wsf, config),
+    failingPool: deps.failingPool ?? (config ? rows.find((row) => row.id === holder)?.pool ?? null : null),
     zerosub,
     failingAccountId: holder && zerosub ? (zerosub.agentAccount?.[holder] ?? null) : null,
     exhaustedPct,
@@ -1368,11 +1456,41 @@ export async function runFailoverCheck(
     const wakeAt = waitResetWakeAt({ zerosub, targetId: holder, switchWakeAt: holderSwitchWakeAt, nowMs, exhaustedPct });
     return wakeAt ? { action: "wait", reason: "wait-reset", wakeAt } : null;
   };
-  const stored = failoverAsked.get(scope.id);
-  if (stored?.activeSlot === activeSlot && nowMs - Date.parse(stored.updatedAt) < settings.answerMinutes * 60_000) {
+  let stored = failoverAsked.get(scope.id);
+  if (!stored || stored.epoch !== wsf.epoch || stored.activeSlot !== activeSlot) {
+    // Rebuild the answer window from confirmed K7 actions after a restart.
+    const asked = new Set<string>();
+    let updatedAt = "";
+    for (const workspace of paseoState.workspaces ?? []) {
+      const entries = (workspace.id === mainId ? reMeta : workspace.metadata)?.[AGENTS_KEY] ?? {};
+      for (const [agentId, entry] of Object.entries(entries)) {
+        const action = readSteerAction(entry);
+        const batch = action?.batch;
+        if (!["sent", "done"].includes(action?.phase) || !batch?.takeover ||
+            batch.workspaceId !== mainId || batch.epoch !== wsf.epoch || batch.takeover.activeSlot !== activeSlot) continue;
+        const at = action.observedAt ?? action.queuedAt;
+        if (!Number.isFinite(Date.parse(at))) continue;
+        asked.add(agentId);
+        if (!updatedAt || Date.parse(at) > Date.parse(updatedAt)) updatedAt = at;
+      }
+    }
+    stored = asked.size ? { epoch: wsf.epoch, activeSlot, asked: [...asked], updatedAt } : undefined;
+  }
+  if (stored && nowMs - Date.parse(stored.updatedAt) < settings.answerMinutes * 60_000) {
     return { action: "wait", reason: "takeover-answer-window" };
   }
-  let asked = stored && stored.activeSlot === activeSlot ? [...stored.asked] : [];
+  // The durable K7 operation owns this route until it settles. A different
+  // warm candidate must not race a renewal, uncertain send or reserved report.
+  for (const workspace of routingState.workspaces) {
+    for (const entry of Object.values(workspace.metadata?.[AGENTS_KEY] ?? {})) {
+      const pending = pendingSteerDelivery(entry);
+      if (pending && pending.phase !== "sent" && pending.batch?.workspaceId === mainId && pending.batch.epoch === wsf.epoch &&
+          pending.batch.takeover?.activeSlot === activeSlot) {
+        return { action: "wait", reason: pending.phase === "blocked" ? "resume-refused" : "brief-pending" };
+      }
+    }
+  }
+  let asked = stored ? [...stored.asked] : [];
   let next = chain.find((c: any) => c && !asked.includes(c.steerId)) ?? null;
   if (!next) {
     if (!chain.length) return waitReset() ?? { action: "none", reason: "no-candidates" };
@@ -1380,12 +1498,40 @@ export async function runFailoverCheck(
     next = chain[0];
   }
   const byId = new Map<string, any>((paseoState.agents ?? []).map((a: any) => [a?.id, a]));
-  while (next) {
-    const candidate = byId.get(next.steerId) ?? null;
-    if (candidate && !candidate.archivedAt && candidate.background !== true && canWakeAgent(candidate)) break;
-    asked.push(next.steerId);
-    next = chain.find((c: any) => c && !asked.includes(c.steerId)) ?? null;
+  const holderAgent = holder ? byId.get(holder) : null;
+  const holderAdmission = holderAgent && holder ? quotaAdmission(holderAgent, agentState[holder], routing, agentState) : null;
+  // A quota-triggered wake can race an account change, reset or loss of telemetry.
+  // The second routing observation must still justify a takeover of this holder.
+  if (deps.quotaTrigger && (!holderAdmission || holderAdmission.allowed || holderAdmission.pendingMove ||
+      (deps.quotaTrigger.accountId && deps.quotaTrigger.accountId !== holderAdmission.accountId))) {
+    return { action: "wait", reason: "quota-limit-unconfirmed" };
   }
+  const projections = routingProjection(routingState, routing);
+  const alternatives = chain.filter((item: any) => !asked.includes(item.steerId)).map((item: any, index: number) => {
+    const candidate = byId.get(item.steerId) ?? null;
+    const candidateWorkspace = routingState.workspaces?.find((workspace: any) => workspace.id === candidate?.workspaceId);
+    const candidateEntry = candidateWorkspace?.metadata?.[AGENTS_KEY]?.[candidate?.id];
+    const candidateAdmission = candidate ? quotaAdmission(candidate, candidateEntry, routing, candidateWorkspace?.metadata?.[AGENTS_KEY]) : null;
+    const sameLimitedAccount = holderAdmission?.reason === "provider limit" && holderAdmission.accountId &&
+      candidateAdmission?.accountId === holderAdmission.accountId && candidate?.provider === holderAgent?.provider &&
+      candidate?.model === holderAgent?.model;
+    const eligible = !!candidate && !candidate.archivedAt && candidate.background !== true && canWakeAgent(candidate) &&
+      !hasActiveAgentWork(candidate, candidateEntry) && !pendingSteerDelivery(candidateEntry) &&
+      candidateAdmission?.allowed && !sameLimitedAccount;
+    return { ...steerRouteCandidate({ agent: candidate ?? { id: item.steerId }, entry: candidateEntry,
+      entries: candidateWorkspace?.metadata?.[AGENTS_KEY], row: projections.find((row) => row.agentId === item.steerId),
+      snapshot: routing, kind: "handover", eligible, preferenceRank: index,
+      reason: sameLimitedAccount ? "same limited account and model" : candidateAdmission?.reason ?? "target ineligible" }),
+      target: item, escalation: item.kind === "steer" ? 0 : item.kind === "domain" ? 1 : 2 };
+  });
+  // Domain and hub are escalation boundaries, not cheaper substitutes for an
+  // eligible scope member. Compare preparation within the first viable tier.
+  const tier = Math.min(...alternatives.filter((candidate: any) => candidate.eligible).map((candidate: any) => candidate.escalation));
+  const route = planSteerRoutes(routing, alternatives.map((candidate: any) => candidate.escalation === tier
+    ? candidate : { ...candidate, eligible: false, reason: candidate.reason === "eligible" ? "earlier escalation tier available" : candidate.reason }), {
+    observation: { epoch: wsf.epoch, holderId: holder, accountId: holderAdmission?.accountId ?? null },
+  });
+  next = route.selected?.target ?? null;
   if (!next) return waitReset() ?? { action: "none", reason: "candidates-ineligible" };
   const factoryCmd = deps.factoryCmd ?? FACTORY_CMD;
   const summary: { id: string; state: string }[] = open.map((entry: any) => ({ id: entry.id, state: entry.state }));
@@ -1506,7 +1652,7 @@ export async function watchdogScan(paseo: any, deps: SuperviseDeps & { state?: a
         const agentEntry = asRecord(agentState[id]);
         const busy =
           (agent && (isBusyStatus(agent.status) || agent.activeTurn !== null && agent.activeTurn !== undefined)) ||
-          (agentEntry?.openTurnId !== null && agentEntry?.openTurnId !== undefined);
+          openTurnOf(agentEntry) !== null;
         if ((typed.state === "running" || typed.state === "stale") && !busy) {
           const interrupted = asRecord(agentEntry?.interrupted);
           const reason = typeof interrupted?.reason === "string" ? (interrupted.reason as string) : null;
@@ -1604,6 +1750,7 @@ export function startSupervisionTimer({
 }: SupervisionTimerDeps): () => void {
   let stopped = false;
   let checking = false;
+  let lastDeferred = new Map<string, string>();
   const timer = setInterval(() => {
     if (stopped || checking || !supervisionPaseo) return;
     checking = true;
@@ -1624,7 +1771,17 @@ export function startSupervisionTimer({
           ...(getZerosub ? { getZerosub } : {}),
           ...(buildBrief ? { buildBrief } : {}),
         };
-        await flushAllScopes(paseo, deps);
+        const deferred = new Map<string, string>();
+        await flushAllScopes(paseo, {
+          ...deps,
+          onFlush(scopeId, result) {
+            if (result.flushed || !result.reason || result.reason === "none") return;
+            const reason = result.detail ?? result.reason;
+            deferred.set(scopeId, reason);
+            if (lastDeferred.get(scopeId) !== reason) log(`[factory] supervise: pending delivery for ${scopeId} waits (${reason})`);
+          },
+        });
+        lastDeferred = deferred;
         if (settings?.enabled && nowMs - lastWatchdogScanMs >= settings.watchdogMinutes * 60_000) {
           lastWatchdogScanMs = nowMs;
           await watchdogScan(paseo, deps);

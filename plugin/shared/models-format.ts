@@ -32,16 +32,22 @@ function mark(row: ListRow): string {
   return row.available ? "✓" : "✗";
 }
 
-export function formatModelList(kind: "worker" | "steer", list: { workers: ListRow[]; steers: ListRow[]; selectedWorker: string | null; catalogError: string | null }): string {
-  const rows = kind === "worker" ? list.workers : list.steers;
-  const lines = [kind === "worker" ? "Worker models (priority, highest first):" : "Steer slots (slot order = priority):"];
-  if (!rows.length) lines.push("  (none)");
-  for (const row of rows) {
-    const head = kind === "steer" ? `${row.position}. Steer ${row.slot}` : `${row.position}.`;
-    const flags = [row.selected ? "→ selected" : null, row.fallback ? `fallback: ${row.fallback}` : null].filter(Boolean);
-    lines.push(`  ${head}  ${mark(row)} ${describe(row)}${flags.length ? `  ${flags.join(", ")}` : ""}`);
-    if (!row.available) for (const reason of row.reasons) lines.push(`        ${reason}`);
-    else if (row.skipReason && !row.selected) lines.push(`        skipped: ${row.skipReason}`);
+export function formatModelList(kind: "worker" | "steer", list: { workers: ListRow[]; steers: ListRow[]; steerPreferences?: ListRow[]; advisorPreferences?: ListRow[]; catalogError: string | null }): string {
+  const groups: [string, ListRow[]][] = kind === "worker" ? [["Worker models (priority, highest first):", list.workers]]
+    : list.steerPreferences ? [["Steer priority:", list.steerPreferences], ["Advisor priority:", list.advisorPreferences ?? []]]
+    : [["Steer slots (legacy settings):", list.steers]];
+  const lines: string[] = [];
+  for (const [heading, rows] of groups) {
+    if (lines.length) lines.push("");
+    lines.push(heading);
+    if (!rows.length) lines.push("  (none)");
+    for (const row of rows) {
+      const head = row.slot ? `${row.position}. Steer ${row.slot}` : `${row.position}.`;
+      const flags = [row.selected ? "→ selected" : null, row.fallback ? `fallback: ${row.fallback}` : null].filter(Boolean);
+      lines.push(`  ${head}  ${mark(row)} ${describe(row)}${flags.length ? `  ${flags.join(", ")}` : ""}`);
+      if (!row.available) for (const reason of row.reasons) lines.push(`        ${reason}`);
+      else if (row.skipReason && !row.selected) lines.push(`        skipped: ${row.skipReason}`);
+    }
   }
   if (list.catalogError) lines.push("", `Availability unknown: ${list.catalogError}`);
   lines.push("", "✓ available, ✗ not available now (kept in the list, skipped when starting).");

@@ -3,22 +3,27 @@
 // K13: single-workspace enrollment + repair only. No fork/clone/project or
 // workspace provisioning, no retitle/rename, no title templates, no multi-repo.
 import { createHash } from 'node:crypto';
-import { isAdvisorSlot, providerIsSensitive, slotProfile, configWarnings } from './config.mjs';
+import { isAdvisorSlot, isAdvisorSteer, providerIsSensitive, slotOrder, slotProfile, configWarnings } from './config.mjs';
 import { resolveProfile, steerFallbackList, usedProfilesByLiveSteers } from './models.mjs';
 import { LABEL, METADATA_KEY, describeParent, parentOf, agentUsage } from './paseo.mjs';
-import { STEER_TITLE, STEER_DIGIT_TITLE, liveSlotHolders } from './discovery.mjs';
-import { validScope } from './scope.mjs';
+import { STEER_TITLE, STEER_DIGIT_TITLE, discoveredRepoPublic, liveSlotHolders, resolveSteerHolders, steerTitleSlot } from './discovery.mjs';
+import { sameScopeId, validScope } from './scope.mjs';
 import { buildSteerCreate, idempotencyKey, requestDigest, steerCreateLabels } from './steer-create.mjs';
+import { resolveContinuations, resolveFactoryLabels } from './zerosub.mjs';
 
 // Kept for old stored plans only: new plans never emit it (enrollment needs
 // an existing main workspace, so steer creates always carry a real id).
 export const WORKSPACE_REF = { ref: 'main-workspace' };
 export { idempotencyKey, requestDigest };
 
-export function planRepository(discovery, config, { adopt = {}, slots, adoptWorker = {}, detach = false, zerosub = null } = {}) {
+export function planRepository(discovery, config, { adopt = {}, slots, adoptWorker = {}, detach = false, zerosub = null, legacyEnrollment = false, enrollmentVersion } = {}) {
   const ops = [];
   const conflicts = [];
   const notes = [...(discovery.github?.notes ?? [])];
+  const currentEnrollment = !legacyEnrollment && enrollmentVersion !== 'live';
+  const oldLiveEnrollment = !legacyEnrollment && !currentEnrollment;
+  const liveEnrollment = currentEnrollment || oldLiveEnrollment;
+  const complete = () => finish(discovery, config, ops, conflicts, notes, currentEnrollment ? 'live-v2' : oldLiveEnrollment ? 'live' : null);
   const add = (key, kind, summary, params = {}) => ops.push({ key, kind, summary, params });
   const conflict = (key, reason) => conflicts.push({ key, reason });
   const { github, forkName } = discovery;
@@ -26,9 +31,9 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
   const isWorktree = Boolean(discovery.worktree);
 
   // Per-run slot selection (--slots overrides prepare; subset of defined slots).
-  let effectivePrepare = config.steers.prepare;
-  let effectiveInitialActive = config.steers.initialActive;
-  if (slots !== undefined) {
+  let effectivePrepare = liveEnrollment ? [] : config.steers.prepare;
+  let effectiveInitialActive = liveEnrollment ? null : config.steers.initialActive;
+  if (!liveEnrollment && slots !== undefined) {
     for (const slot of slots) {
       if (!config.steers.slots[slot]) conflict(`steer.${slot}`, `--slots names slot ${slot}, which is not defined in steers.slots`);
     }
@@ -40,7 +45,7 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
 
   // Adopting a defined slot outside prepare plans only the adopted slots,
   // not the whole prepare list; the active steer must be one of them.
-  const definedAdopts = Object.keys(adopt).filter((s) => config.steers.slots[s]);
+  const definedAdopts = liveEnrollment ? [] : Object.keys(adopt).filter((s) => config.steers.slots[s]);
   const adoptOutside = definedAdopts.some((s) => !effectivePrepare.includes(s));
   const slotsToPlan = adoptOutside ? definedAdopts : effectivePrepare;
   if (slotsToPlan.length && !slotsToPlan.includes(effectiveInitialActive)) effectiveInitialActive = slotsToPlan[0];
@@ -53,19 +58,19 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
       conflict('github.fork', `Fork ${github.fork.planned} does not exist; create it natively, open the workspace in Paseo, then enroll that workspace`);
     } else if (github.fork.repo.archived) conflict('github.fork', `${forkName} is archived on GitHub`);
   }
-  if (!forkName) return finish(discovery, config, ops, conflicts, notes);
+  if (!forkName) return complete();
 
   // 2. Checkout and project: enrollment needs both to exist already (created
   // natively in Paseo). Nothing is cloned or registered here.
   for (const issue of discovery.checkoutIssues) conflict('checkout', issue);
-  if (discovery.checkoutIssues.length) return finish(discovery, config, ops, conflicts, notes);
+  if (discovery.checkoutIssues.length) return complete();
   if (isLocal && !discovery.checkout) {
     conflict('checkout', `Local path ${discovery.expectedPath} is not available; it must exist as a directory`);
-    return finish(discovery, config, ops, conflicts, notes);
+    return complete();
   }
   if (!isLocal && !discovery.checkout && !isWorktree) {
     conflict('checkout', `No checkout with origin ${forkName}; clone it natively, open the workspace in Paseo, then enroll that workspace`);
-    return finish(discovery, config, ops, conflicts, notes);
+    return complete();
   }
   for (const related of discovery.relatedCheckouts) {
     notes.push(`Related checkout left untouched: ${related.path} (${Object.entries(related.remotes).map(([n, u]) => `${n}=${u}`).join(', ')})`);
@@ -89,7 +94,6 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
   let main = discovery.mainWorkspace;
   const stored = main && validScope(main.metadata?.[METADATA_KEY]?.scope) ? main.metadata[METADATA_KEY].scope : null;
   // Scope ids are case-insensitive (the stored/live spelling is canonical for display).
-  const sameScopeId = (a, b) => typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
   const convertingToHub = plannedScope?.kind === 'hub' && (!stored || stored.kind !== 'hub' || !sameScopeId(stored.id, plannedScope.id));
   if (plannedScope && stored && !sameScopeId(stored.id, plannedScope.id) && !convertingToHub) {
     conflict('workspace.main.scope', `Workspace ${main.id} is scoped ${JSON.stringify(stored.id)} (${stored.kind}), but this entry plans scope ${JSON.stringify(plannedScope.id)}; adopt it under its own address instead`);
@@ -134,6 +138,83 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
   // Labels and metadata use the stored id when one exists, else the planned one;
   // a hub conversion already labels new steers with the planned hub id.
   const effScopeId = convertingToHub ? plannedScope.id : (stored?.id ?? plannedScope?.id ?? forkName);
+  const stateNow = main?.metadata?.[METADATA_KEY];
+  const repoPublic = discoveredRepoPublic(discovery);
+  const scopeId = stored?.id ?? effScopeId;
+  const expectWorktree = discovery.requestedMain && main ? { directory: main.workspaceDirectory } : null;
+  const archiveHistory = liveEnrollment ? (discovery.agents ?? []).filter((agent) =>
+    agent.archivedAt && agent.workspaceId === main?.id && agent.labels?.[LABEL.role] === 'steer' &&
+    sameScopeId(agent.labels[LABEL.scope] ?? agent.labels[LABEL.repo], effScopeId)) : [];
+  const historicalSteers = [...discovery.steers.labelled, ...archiveHistory];
+
+  const planCreate = (slot, profile) => {
+    const matching = historicalSteers.filter((a) => a.labels[LABEL.slot] === slot);
+    const generation = (liveEnrollment ? new Set(matching.map((a) => a.id)).size : matching.length) + 1;
+    const { request, idempotencyKey: createKey } = buildSteerCreate({
+      keyScope: forkName, repo: effScopeId, scopeId: effScopeId, slot, workspaceId: main.id, profile,
+      keyParts: ['steer', slot, `g${generation}`],
+    });
+    const key = `steer.${slot}`;
+    add(key, 'paseo.agent.create', `Create top-level Steer ${slot} (${profile.provider}/${profile.model}) without prompt`, {
+      ...request, idempotencyKey: createKey,
+      ...(liveEnrollment ? { steerRole: 'coordinator', requireEmptyWorkspace: true, ...(expectWorktree ? { expectWorktree } : {}) } : {}),
+    });
+    return key;
+  };
+
+  let activeAgentId;
+  let holderScopeId;
+  let enrollment;
+  if (currentEnrollment && main && !stateNow?.retired) {
+    enrollment = planLiveEnrollment({ discovery, config, adopt, slots, adoptWorker, detach, zerosub, add, conflict, notes,
+      scopeId, effScopeId, stateNow, repoPublic, expectWorktree, planCreate });
+    ({ activeAgentId, holderScopeId, activeSlot: effectiveInitialActive } = enrollment);
+  }
+  if (oldLiveEnrollment && main && !stateNow?.retired) {
+    const { coordinators, occupied } = enrollmentHolders(discovery, config, scopeId, conflict);
+    const eligible = (agent) => {
+      if (agent.provider && (repoPublic || !providerIsSensitive(config, agent.provider))) return true;
+      const slot = agent.labels[LABEL.slot];
+      conflict(`steer.${slot}`, `Steer ${slot} (${agent.id}) ${agent.provider ? 'requires a public scope for its sensitive runtime' : 'has an unknown runtime provider'}`);
+      return false;
+    };
+    if (stateNow) {
+      const active = coordinators.find((agent) => agent.labels[LABEL.slot] === stateNow.activeSteer);
+      if (active) {
+        if (eligible(active) && stateNow.activeAgentId && stateNow.activeAgentId !== active.id && stateNow.activeAgentId !== active.continuedFrom) {
+          conflict('workspace.main', `Steer ${stateNow.activeSteer} no longer resolves to the controlling agent ${stateNow.activeAgentId}`);
+        }
+      } else if (!conflicts.length) {
+        conflict('workspace.main', `The existing scope has no eligible holder for active Steer ${stateNow.activeSteer}; resolve the current authority in Paseo`);
+      }
+    } else if (!conflicts.length) {
+      if (coordinators.length === 1) {
+        const [holder] = coordinators;
+        if (eligible(holder)) {
+          effectiveInitialActive = holder.labels[LABEL.slot];
+          activeAgentId = holder.id;
+          holderScopeId = holder.labels[LABEL.scope] ?? holder.labels[LABEL.repo];
+        }
+      } else if (coordinators.length > 1) {
+        conflict('workspace.main', `Several live coordinators (${coordinators.map((a) => `Steer ${a.labels[LABEL.slot]}`).join(', ')}); select the initial controller explicitly with --slots`);
+      } else if (occupied) {
+        conflict('workspace.main', 'The workspace has live agents but no coordinating steer; enroll a coordinator explicitly');
+      } else {
+        // Host settings already migrate legacy bindings into role priorities.
+        // The fallback also accepts older in-memory configs from direct callers.
+        const priority = config.steers.priority ?? [...new Set(slotOrder(config).map((slot) => config.steers.slots[slot]))];
+        const { profile, skipped } = resolveProfile(config, discovery.providers, priority, { role: 'steer', repoPublic, zerosub, liveProviderPrivacy: true });
+        if (!profile) {
+          conflict('steer.A', `No coordinator profile is startable (tried ${skipped.map(({ name, reason }) => `"${name}" (${reason})`).join('; ') || 'no profiles configured'})`);
+        } else {
+          effectiveInitialActive = 'A';
+          activeAgentId = { ref: planCreate(effectiveInitialActive, profile) };
+          holderScopeId = effScopeId;
+          for (const { name, reason } of skipped) notes.push(`Skipped coordinator profile "${name}": ${reason}`);
+        }
+      }
+    }
+  }
 
   // 3. Main workspace: enrollment adopts one existing workspace. Nothing is
   // created here — open the workspace natively in Paseo first.
@@ -141,13 +222,14 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
   const initial = plannedScope
     ? { main: true, activeSteer: effectiveInitialActive, epoch: 1, scope: { id: plannedScope.id, kind: plannedScope.kind, locator: plannedScope.locator, ...(plannedScope.parent !== undefined ? { parent: plannedScope.parent } : {}), ...(initialDomain ? { domain: initialDomain } : {}) } }
     : { main: true, activeSteer: effectiveInitialActive, epoch: 1 };
+  if (activeAgentId) initial.activeAgentId = activeAgentId;
   if (discovery.mainCandidates.length > 1 && !main) {
     conflict('workspace.main', `Several main workspaces use ${checkoutPath}: ${discovery.mainCandidates.map((w) => `${w.id} "${w.title ?? w.name}"`).join(', ')}`);
   } else if (!main) {
     conflict('workspace.main', `No factory main workspace for ${checkoutPath ?? forkName}; open or create the Paseo workspace natively, then enroll it (plan workspace:<id> or --local <path>)`);
   } else {
     const state = main.metadata?.[METADATA_KEY];
-    if (!state) {
+    if (!state && effectiveInitialActive && (!currentEnrollment || activeAgentId)) {
       const summary = isWorktree
         ? `Adopt worktree workspace ${main.id} "${main.title ?? main.name}" as factory main workspace (no new project or workspace)`
         : `Mark existing workspace ${main.id} "${main.title ?? main.name}" as factory main workspace`;
@@ -155,11 +237,13 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
       // workspace is still that worktree before writing the github metadata.
       add('workspace.main.adopt', 'paseo.workspace.metadata', summary, {
         workspaceId: main.id, metadata: { [METADATA_KEY]: initial },
-        ...(discovery.requestedMain ? { expectWorktree: { directory: main.workspaceDirectory } } : {}),
+        ...(holderScopeId ? { holderScopeId, repoPublic } : {}),
+        ...(currentEnrollment ? { liveHolder: true, ...(enrollment?.activeRuntime ? { holderRuntime: enrollment.activeRuntime } : {}) } : {}),
+        ...(expectWorktree ? { expectWorktree } : {}),
       });
-    } else if (state.retired === true) {
+    } else if (state?.retired === true) {
       conflict('workspace.main', `Scope in workspace ${main.id} is retired, movedTo ${state.movedTo ?? '(unknown)'}; use the successor scope instead of planning here`);
-    } else if (!config.steers.slots[state.activeSteer]) {
+    } else if (!liveEnrollment && state && !config.steers.slots[state.activeSteer]) {
       conflict('workspace.main', `Workspace ${main.id} names unknown active steer "${state.activeSteer}"`);
     }
   }
@@ -170,7 +254,6 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
 
   // 3c. Scope supplement: an existing main workspace without a scope field gets
   // a non-destructive top-up (other metadata untouched, verified after write).
-  const stateNow = main?.metadata?.[METADATA_KEY];
   if (main && plannedScope && stateNow && !validScope(stateNow.scope) && plannedScope.kind !== 'hub') {
     add('workspace.main.scope', 'paseo.workspace.scope', `Record scope ${JSON.stringify(plannedScope.id)} (${plannedScope.kind}) on workspace ${main.id} (other metadata untouched)`, {
       workspaceId: main.id, scope: initial.scope,
@@ -210,22 +293,23 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
     }
   }
 
+  if (enrollment) enrollment.planWorkers();
+
   // 4. Steer slots
-  for (const slot of Object.keys(adopt)) {
+  for (const slot of liveEnrollment ? [] : Object.keys(adopt)) {
     if (!config.steers.slots[slot]) conflict(`steer.${slot}`, `--adopt names slot ${slot}, which is not defined in steers.slots`);
   }
   // Profiles already used by live steers of this scope: fallback entries never
   // pick them (no duplicate models), the slot's own profile stays exempt.
-  const usedProfiles = usedProfilesByLiveSteers(config, (discovery.steers.labelled ?? []).filter((a) => !a.archivedAt));
+  const usedProfiles = liveEnrollment ? null : usedProfilesByLiveSteers(config, (discovery.steers.labelled ?? []).filter((a) => !a.archivedAt));
   // Shared adoption tail for lettered and digit-titled candidates: the privacy
-  // rule first (a sensitive provider with a profile mismatch only runs on
+  // rule first (a sensitive provider only runs on
   // provably public code — unknown counts as private), then detach/adopt, then
   // the context note. The live model is kept as-is (no drift reconciliation).
-  const repoPublic = discovery.github?.fork?.repo?.private === false;
   const repoPublicity = discovery.github?.fork?.repo?.private === true ? 'is private' : 'is of unknown publicity (no GitHub repo info)';
   const planAdoption = (slot, key, candidate, profile) => {
-    const mismatch = candidate.provider !== profile.provider || candidate.model !== profile.model;
-    if (mismatch && providerIsSensitive(config, candidate.provider) && !repoPublic) {
+    const sensitive = providerIsSensitive(config, candidate.provider);
+    if (sensitive && !repoPublic) {
       conflict(key, `Cannot adopt ${candidate.id} (${candidate.provider}/${candidate.model}) as Steer ${slot}: ${candidate.provider} agents are restricted to public code, but ${forkName} ${repoPublicity} (profile "${profile.name}" names ${profile.provider}/${profile.model})`);
       return;
     }
@@ -237,7 +321,7 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
     if (currentParent) {
       add(`${key}.detach`, 'agent.detach', `Detach candidate ${candidate.id} from ${describeParent(candidate)} (native agent detach, verified after)`, { agentId: candidate.id, parent: currentParent });
     }
-    add(key, 'paseo.agent.adopt', `Label confirmed agent ${candidate.id} as Steer ${slot} (title and model unchanged)`, { agentId: candidate.id, labels: steerCreateLabels(effScopeId, effScopeId, slot) });
+    add(key, 'paseo.agent.adopt', `Label confirmed agent ${candidate.id} as Steer ${slot} (title and model unchanged)`, { agentId: candidate.id, ...(sensitive ? { repoPublic: true } : {}), labels: steerCreateLabels(effScopeId, effScopeId, slot) });
     if (profile.advisor === true) {
       notes.push(`Steer ${slot} uses advisor profile "${profile.name}" (advisor, never active)`);
     }
@@ -257,7 +341,7 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
   // instead. Covering the runners with --slots acknowledges them (no block),
   // and prepared slots stay plannable in any per-run narrowing — so small
   // --slots rollouts and adoptions never trip over their own running steers.
-  const liveOutsidePrepare = (discovery.steers.labelled ?? [])
+  const liveOutsidePrepare = (liveEnrollment ? [] : discovery.steers.labelled ?? [])
     .filter((a) => !a.archivedAt && typeof a.labels?.[LABEL.slot] === 'string' && !prepared.has(a.labels[LABEL.slot]) && !plannedSlots.has(a.labels[LABEL.slot]));
   const outsideLetters = [...new Set(liveOutsidePrepare.map((a) => a.labels[LABEL.slot]))].sort();
   const outsideSlotsFlag = [...effectivePrepare, ...outsideLetters.filter((s) => config.steers.slots[s] && !prepared.has(s))].join(',');
@@ -268,13 +352,10 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
     const key = `steer.${slot}`;
     const profile = slotProfile(config, slot);
     const labelled = discovery.steers.labelled.filter((a) => a.labels[LABEL.slot] === slot);
-    const live = labelled.filter((a) => !a.archivedAt);
     const legacy = discovery.steers.legacy.filter((a) => (a.title ?? '').trim().match(STEER_TITLE)[1] === slot);
 
-    // Same-slot newer-wins: superseded older holders stay visible but never
-    // block the plan; only several live holders conflict.
+    // Several live tabs titled for one slot conflict (never ranked).
     const holders = liveSlotHolders(labelled, slot);
-    const extra = live.filter((a) => a.superseded === true);
     if (holders.length > 1) {
       conflict(key, `Several agents are labelled as Steer ${slot}: ${holders.map((a) => a.id).join(', ')}`);
       continue;
@@ -282,7 +363,6 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
     if (holders.length === 1) {
       const existing = holders[0];
       const parent = parentOf(existing);
-      if (extra.length) notes.push(`Steer ${slot} has superseded agent(s) ${extra.map((a) => a.id).join(', ')}; newest ${existing.id} wins (archive the superseded ones in Paseo)`);
       if (adopt[slot] && adopt[slot] !== existing.id) conflict(key, `--adopt ${slot}=${adopt[slot]} conflicts with the already labelled Steer ${slot} ${existing.id}`);
       else if (parent) conflict(key, `Steer ${slot} (${existing.id}) has ${describeParent(existing)}; detach it in Paseo or archive it before the factory can use the slot`);
       else if (main && existing.workspaceId !== main.id) conflict(key, `Steer ${slot} (${existing.id}) lives in workspace ${existing.workspaceId}, not in main workspace ${main.id}`);
@@ -337,8 +417,8 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
       conflict(key, `Steer ${slot} has no live agent and there is no main workspace to create it in; enroll the workspace first`);
       continue;
     }
-    const { profile: resolved, skipped, zerosubPin } = resolveProfile(config, discovery.providers, steerFallbackList(config, slot), {
-      role: 'steer', advisorSlot, usedProfiles, zerosub,
+    const { profile: resolved, skipped } = resolveProfile(config, discovery.providers, steerFallbackList(config, slot), {
+      role: 'steer', advisorSlot, usedProfiles, repoPublic, zerosub,
     });
     if (!resolved) {
       const tried = skipped.length
@@ -353,16 +433,7 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
     if (advisorSlot) {
       notes.push(`Steer ${slot} uses advisor profile "${profile.name}" (advisor, never active)`);
     }
-    const effective = { name: resolved.name, provider: resolved.provider, model: resolved.model, thinking: resolved.thinking ?? null, mode: resolved.mode ?? null };
-    const generation = labelled.length + 1; // archived steers of this slot get a fresh key
-    const { request, idempotencyKey: createKey } = buildSteerCreate({
-      keyScope: forkName, repo: effScopeId, scopeId: effScopeId, slot, workspaceId, profile: effective,
-      keyParts: ['steer', slot, `g${generation}`],
-      metadata: zerosubPin?.metadata ?? null,
-    });
-    add(key, 'paseo.agent.create', `Create top-level Steer ${slot} (${effective.provider}/${effective.model}) without prompt`, {
-      ...request, idempotencyKey: createKey,
-    });
+    planCreate(slot, resolved);
   }
 
   // Digit-titled candidates are never auto-assigned; each gets a plan note with
@@ -371,7 +442,9 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
   for (const candidate of discovery.steers.digitCandidates ?? []) {
     const title = (candidate.title ?? '').trim();
     const digit = title.match(STEER_DIGIT_TITLE)?.[1] ?? '?';
-    notes.push(`Assign candidate "Steer ${digit}" ${candidate.id} (${candidate.provider}/${candidate.model}, ${candidate.status}) to a slot with --adopt <slot>=${candidate.id}.`);
+    notes.push(currentEnrollment
+      ? `Rename candidate "Steer ${digit}" ${candidate.id} to a free Steer letter in Paseo, then use --adopt <slot>=${candidate.id}.`
+      : `Assign candidate "Steer ${digit}" ${candidate.id} (${candidate.provider}/${candidate.model}, ${candidate.status}) to a slot with --adopt <slot>=${candidate.id}.`);
   }
 
   // Workers of other scopes' steers are never steer candidates; each keeps its
@@ -390,7 +463,7 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
   // Unlabelled "Steer X" candidates for slots outside this plan stay visible:
   // adopting one needs an explicit --adopt (plus --slots when its slot is not
   // prepared). Planned slots already conflict or plan above, never here.
-  for (const candidate of discovery.steers.legacy ?? []) {
+  for (const candidate of liveEnrollment ? [] : discovery.steers.legacy ?? []) {
     const letter = (candidate.title ?? '').trim().match(STEER_TITLE)?.[1] ?? null;
     if (!letter || plannedSlots.has(letter)) continue;
     const describe = `${candidate.id} (${candidate.provider}/${candidate.model}, ${candidate.status})`;
@@ -406,6 +479,7 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
   // with a hint: archive the agent in Paseo or complete its labels. Archived
   // and scope-less closed agents are already ignored by discovery.
   for (const agent of discovery.steers.halfLabelled ?? []) {
+    if (currentEnrollment && labelledScope(agent)) continue; // A scope-only label is a native scope projection.
     const rawSlot = agent.labels?.[LABEL.slot] ?? null;
     const slot = typeof rawSlot === 'string' && /^[A-Za-z]$/.test(rawSlot) ? rawSlot.toUpperCase() : null;
     conflict(slot ? `steer.${slot}` : `labels.half.${agent.id}`,
@@ -415,8 +489,8 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
   // 4b. Worker adoption (--adopt-worker <id>[@<slot>]): label only, the agent
   // stays in its workspace (possibly a foreign one). Already-adopted workers
   // are reported; anything else labelled is a conflict, never reassigned.
-  const defaultOwner = main?.metadata?.[METADATA_KEY]?.activeSteer ?? effectiveInitialActive;
-  for (const [agentId, slot] of Object.entries(adoptWorker)) {
+  const defaultOwner = stateNow?.activeSteer ?? effectiveInitialActive;
+  for (const [agentId, slot] of currentEnrollment ? [] : Object.entries(adoptWorker)) {
     const key = `worker.${agentId}`;
     const agent = (discovery.agents ?? []).find((a) => a.id === agentId) ?? null;
     if (!agent) {
@@ -432,6 +506,7 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
       continue;
     }
     const owner = slot ?? defaultOwner;
+    if (!owner) continue; // Workspace enrollment already reported why it has no controller.
     const want = { [LABEL.scope]: effScopeId, [LABEL.role]: 'worker', [LABEL.owner]: owner };
     const role = agent.labels?.[LABEL.role];
     if (role === 'worker' && agent.labels?.[LABEL.scope] === effScopeId && agent.labels?.[LABEL.owner] === owner) {
@@ -455,27 +530,303 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
   if (isWorktree && (discovery.worktreeAgents ?? []).length) {
     notes.push(`Existing worktree agents kept as they are (reuse by id, not renamed or archived): ${discovery.worktreeAgents.map((a) => `${a.id} "${a.title}" (${a.provider}/${a.model}, ${a.status})`).join(', ')}`);
   }
-  return finish(discovery, config, ops, conflicts, notes);
+  return complete();
 }
 
-function finish(discovery, config, ops, conflicts, notes) {
+/** Live enrollment uses a tab's durable role or its running model on first adoption. */
+export function enrollmentRole(config, agent) {
+  const evidence = [agent.labels?.[LABEL.steerRole], agent.metadata?.[LABEL.steerRole]].filter((value) => value !== undefined);
+  if (evidence.length) return evidence.every((role) => role === 'coordinator') ? 'coordinator' : 'advisor';
+  if (agent.labels?.[LABEL.role] === 'steer' && config.legacyAdvisorSlots?.includes(agent.labels[LABEL.slot])) return 'advisor';
+  return Object.values(config.profiles ?? {}).some((p) => p.advisor === true && p.provider === agent.provider && p.model === agent.model)
+    ? 'advisor' : 'coordinator';
+}
+
+export function enrollmentRuntime(agent) {
+  return { provider: agent.provider ?? null, model: agent.model ?? null };
+}
+
+export function enrollmentState(state) {
+  return state ? { scopeId: state.scope?.id ?? null, epoch: state.epoch ?? null, activeSlot: state.activeSteer ?? null,
+    persistedHolderId: state.activeAgentId ?? null } : null;
+}
+
+const labelledScope = (agent) => agent.labels?.[LABEL.scope] ?? agent.labels?.[LABEL.repo];
+const matchesScope = (agent, scopeId, aliases) => [scopeId, ...aliases].some((id) => sameScopeId(labelledScope(agent), id));
+
+/** Index titled tabs and valid continuations of this exact workspace. */
+export function enrollmentTabs(agents, workspaceId, scopeId, aliases = []) {
+  const local = agents.filter((a) => a.workspaceId === workspaceId);
+  const origins = local.filter((a) => a.labels?.[LABEL.role] === 'steer' && matchesScope(a, scopeId, aliases));
+  const resolved = resolveSteerHolders(origins, local).filter((a) => !a.archivedAt);
+  const superseded = new Set(resolveContinuations(local).superseded);
+  const tabs = new Map();
+  for (const agent of local) {
+    if (agent.archivedAt || agent.background === true || agent.superseded || superseded.has(agent.id)) continue;
+    const labels = resolveFactoryLabels(agent, local) ?? agent.labels;
+    if (labels?.[LABEL.role] && labels[LABEL.role] !== 'steer') continue;
+    if (enrollmentForeignParent(agent, agents, scopeId, aliases)) continue;
+    const slot = steerTitleSlot(agent.title);
+    if (slot) tabs.set(agent.id, { slot, agent, registered: false });
+  }
+  for (const agent of resolved) {
+    if (agent.background === true || agent.superseded || superseded.has(agent.id)) continue;
+    const labels = resolveFactoryLabels(local.find((a) => a.id === agent.id), local);
+    if (labels?.[LABEL.role] !== 'steer' || !matchesScope({ labels }, scopeId, aliases)) continue;
+    tabs.set(agent.id, { slot: agent.labels[LABEL.slot], agent, registered: true });
+  }
+  return Map.groupBy(tabs.values(), ({ slot }) => slot);
+}
+
+export function enrollmentHolder(tabs, slot, config, repoPublic) {
+  const entries = tabs.get(slot) ?? [];
+  if (entries.length !== 1 || !entries[0].registered) return null;
+  const agent = entries[0].agent;
+  return !parentOf(agent) && enrollmentRole(config, agent) === 'coordinator' && agent.provider &&
+    (!providerIsSensitive(config, agent.provider) || repoPublic === true) ? agent : null;
+}
+
+export function enrollmentAdoptionProblem({ agent, agents, tabs, workspaceId, scopeId, aliases, slot, config, repoPublic }) {
+  if (!agent || agent.archivedAt || agent.workspaceId !== workspaceId || agent.background === true) {
+    return 'must name a live foreground tab in the main workspace';
+  }
+  const foreignParent = enrollmentForeignParent(agent, agents, scopeId, aliases);
+  if (foreignParent) return `is a worker of ${foreignParent} (${describeParent(agent)}); workers of other scopes cannot become steers`;
+  if (resolveFactoryLabels(agent, agents)?.[LABEL.role] || agent.labels?.[LABEL.role] ||
+      [LABEL.scope, LABEL.repo].some((label) => agent.labels?.[label] &&
+        ![scopeId, ...aliases].some((id) => sameScopeId(agent.labels[label], id)))) {
+    return 'already has a Factory role or belongs to another scope';
+  }
+  const entries = tabs.get(slot) ?? [];
+  if (entries.length > 1) return `several live agents are titled Steer ${slot}: ${entries.map(({ agent: rival }) => rival.id).join(', ')}`;
+  if (entries.length !== 1 || entries[0].agent.id !== agent.id || entries[0].registered) {
+    return `must name the unique unregistered tab titled Steer ${slot} in the main workspace`;
+  }
+  if (!agent.provider) return 'has an unknown runtime provider';
+  if (providerIsSensitive(config, agent.provider) && repoPublic !== true) {
+    return `${agent.provider} agents are restricted to public code; scope visibility is ${repoPublic === false ? 'private' : 'unknown'}`;
+  }
+  return null;
+}
+
+function enrollmentForeignParent(agent, agents, scopeId, aliases) {
+  const parentId = parentOf(agent);
+  if (!parentId) return null;
+  const parent = agents.find((item) => item.id === parentId);
+  const labels = resolveFactoryLabels(parent, agents) ?? parent?.labels;
+  const id = labelledScope({ labels });
+  return labels?.[LABEL.role] === 'steer' && id && !matchesScope({ labels }, scopeId, aliases)
+    ? `${id} Steer ${labels[LABEL.slot] ?? '?'}` : null;
+}
+
+function planLiveEnrollment({ discovery, config, adopt, slots, adoptWorker, detach, zerosub, add, conflict, notes,
+  scopeId, effScopeId, stateNow, repoPublic, expectWorktree, planCreate }) {
+  const workspaceId = discovery.mainWorkspace.id;
+  const agents = discovery.agents ?? discovery.steers.labelled;
+  const aliases = [...new Set(discovery.steers.labelled.filter((a) => a.workspaceId === workspaceId && sameScopeId(labelledScope(a), a.labels?.[LABEL.repo]))
+    .map(labelledScope).filter((id) => !sameScopeId(id, scopeId)))].sort();
+  const tabs = enrollmentTabs(agents, workspaceId, scopeId, aliases);
+  const projected = new Map(tabs);
+  const expectedState = enrollmentState(stateNow);
+  const adoptions = [];
+  const requestedIds = new Set();
+  const requestedInitial = slots?.[0];
+  if (slots !== undefined && (slots.length !== 1 || !/^[A-Z]$/.test(requestedInitial))) {
+    conflict('workspace.main', '--slots expects one live coordinator letter A-Z for initial enrollment');
+  } else if (requestedInitial && stateNow && stateNow.activeSteer !== requestedInitial) {
+    conflict('workspace.main', `Scope already has active Steer ${stateNow.activeSteer}; use switch to change it`);
+  }
+
+  for (const [slot, id] of Object.entries(adopt)) {
+    const key = `steer.${slot}`;
+    const candidate = agents.find((agent) => agent.id === id);
+    if (!/^[A-Z]$/.test(slot) || requestedIds.has(id)) {
+      conflict(key, `--adopt ${slot}=${id} must assign one distinct tab per letter A-Z`);
+      continue;
+    }
+    requestedIds.add(id);
+    const entries = tabs.get(slot) ?? [];
+    if (entries.length === 1 && entries[0].registered && entries[0].agent.id === id && !parentOf(entries[0].agent)) continue;
+    const problem = enrollmentAdoptionProblem({ agent: candidate, agents, tabs, workspaceId, scopeId, aliases, slot, config, repoPublic });
+    if (problem) {
+      conflict(key, `Cannot adopt ${id} as Steer ${slot}: ${problem}`);
+      continue;
+    }
+    const parent = parentOf(candidate);
+    if (parent && !detach) {
+      conflict(key, `Candidate ${id} has ${describeParent(candidate)}; confirm with --detach to plan a native detach first`);
+      continue;
+    }
+    const role = enrollmentRole(config, candidate);
+    const labels = { ...steerCreateLabels(effScopeId, effScopeId, slot), [LABEL.steerRole]: role };
+    projected.set(slot, [{ slot, registered: true, agent: { ...candidate, labels, parent: null } }]);
+    adoptions.push({ slot, candidate, labels, parent });
+  }
+
+  for (const [slot, entries] of tabs) {
+    const key = `steer.${slot}`;
+    if (entries.length > 1) {
+      if (!adopt[slot]) conflict(key, `Several live agents are titled Steer ${slot}: ${entries.map(({ agent }) => agent.id).join(', ')}; resolve the ambiguity in Paseo`);
+    } else if (!adopt[slot]) {
+      const [{ agent, registered }] = entries;
+      const parent = parentOf(agent);
+      if (registered) {
+        if (parent) conflict(key, `Steer ${slot} (${agent.id}) must be top-level; it has ${describeParent(agent)}`);
+        continue;
+      }
+      if (agent.labels?.[LABEL.role] || enrollmentForeignParent(agent, agents, scopeId, aliases)) continue;
+      const hint = `Unlabelled candidate "${agent.title}" ${agent.id}${parent ? ` has ${describeParent(agent)}` : ''}; confirm with --adopt ${slot}=${agent.id}${parent ? ' --detach' : ''} or rename/archive it`;
+      if (!stateNow || stateNow.activeSteer === slot) conflict(key, hint);
+      else notes.push(hint);
+    }
+  }
+
+  const coordinator = (slot) => enrollmentHolder(projected, slot, config, repoPublic);
+  const coordinators = [...projected.keys()].filter(coordinator);
+  let activeSlot = stateNow?.activeSteer ?? requestedInitial ?? Object.keys(adopt).find(coordinator) ?? null;
+  let active = activeSlot ? coordinator(activeSlot) : null;
+  let activeAgentId = active?.id;
+  let holderScopeId = active ? labelledScope(active) : undefined;
+  if (stateNow) {
+    if (active && stateNow.activeAgentId && stateNow.activeAgentId !== active.id && stateNow.activeAgentId !== active.continuedFrom) {
+      conflict('workspace.main', `Steer ${activeSlot} no longer resolves to the controlling agent ${stateNow.activeAgentId}`);
+    } else if (!active) {
+      conflict('workspace.main', `The existing scope has no eligible holder for active Steer ${activeSlot} in the main workspace; resolve the current authority in Paseo`);
+    }
+  } else if (activeSlot && !active) {
+    conflict('workspace.main', `Steer ${activeSlot} must be one live eligible coordinator in the main workspace`);
+  } else if (!active && coordinators.length === 1) {
+    [activeSlot] = coordinators;
+    active = coordinator(activeSlot);
+    activeAgentId = active.id;
+    holderScopeId = labelledScope(active);
+  } else if (!active && coordinators.length > 1) {
+    conflict('workspace.main', `Several live coordinators (${coordinators.map((slot) => `Steer ${slot}`).join(', ')}); select one with --slots <letter>`);
+  } else if (!active && agents.some((agent) => agent.workspaceId === workspaceId && !agent.archivedAt)) {
+    conflict('workspace.main', 'The workspace has live agents but no coordinating steer; enroll a coordinator explicitly');
+  } else if (!active && !Object.keys(adopt).length && slots === undefined) {
+    const { profile, skipped } = resolveProfile(config, discovery.providers, enrollmentPriority(config), { role: 'steer', repoPublic, zerosub, liveProviderPrivacy: true });
+    if (!profile) {
+      conflict('steer.A', `No coordinator profile is startable (tried ${skipped.map(({ name, reason }) => `"${name}" (${reason})`).join('; ') || 'no profiles configured'})`);
+    } else {
+      activeSlot = 'A';
+      activeAgentId = { ref: planCreate(activeSlot, profile) };
+      holderScopeId = effScopeId;
+      for (const { name, reason } of skipped) notes.push(`Skipped coordinator profile "${name}": ${reason}`);
+    }
+  }
+
+  // Repair the active tab before touching standby tabs. No scope metadata is
+  // written until the planned holder can be read back as a live coordinator.
+  adoptions.sort((a, b) => Number(b.slot === activeSlot) - Number(a.slot === activeSlot));
+  const guard = { workspaceId, scopeId, aliases, expectedState, ...(expectWorktree ? { expectWorktree } : {}), repoPublic,
+    activeSlot, activeHolderId: activeAgentId ?? null };
+  for (const { slot, candidate, labels, parent } of adoptions) {
+    const key = `steer.${slot}`;
+    const enrollmentGuard = { ...guard, slot, runtime: enrollmentRuntime(candidate), role: labels[LABEL.steerRole] };
+    if (parent) add(`${key}.detach`, 'agent.detach', `Detach candidate ${candidate.id} from ${describeParent(candidate)}`, { agentId: candidate.id, parent, enrollmentGuard });
+    add(key, 'paseo.agent.adopt', `Adopt ${candidate.id} (${candidate.provider}/${candidate.model}) as Steer ${slot} (${labels[LABEL.steerRole]})`, {
+      agentId: candidate.id, labels, enrollmentGuard,
+    });
+    const usage = agentUsage(candidate);
+    const warn = config.usage?.warnContextTokens;
+    if (warn > 0 && usage?.usedTokens >= warn) notes.push(`Adopted Steer ${slot} context ${usage.usedTokens}/${usage.maxTokens} tokens reaches usage.warnContextTokens=${warn}; consider fresh after the takeover (docs/saving-context.md)`);
+  }
+
+  return { activeSlot, activeAgentId, holderScopeId,
+    activeRuntime: active && (requestedInitial || adopt[activeSlot]) ? enrollmentRuntime(active) : null,
+    planWorkers() {
+      for (const [agentId, slot] of Object.entries(adoptWorker)) {
+        const key = `worker.${agentId}`;
+        const agent = agents.find((a) => a.id === agentId);
+        const owner = slot ?? activeSlot;
+        const role = resolveFactoryLabels(agent, agents)?.[LABEL.role] ?? agent?.labels?.[LABEL.role];
+        const labels = { [LABEL.scope]: effScopeId, [LABEL.role]: 'worker', [LABEL.owner]: owner };
+        const holderId = coordinator(owner)?.id ?? (owner === activeSlot ? activeAgentId : null);
+        if (!agent?.workspaceId || agent.archivedAt) {
+          conflict(key, `--adopt-worker ${agentId}: ${agent ? 'agent is archived or has no workspace' : 'agent not found'}`);
+        } else if (role !== 'worker' && (role || requestedIds.has(agentId) || labelledScope(agent) || steerTitleSlot(agent.title))) {
+          conflict(key, `--adopt-worker ${agentId}: agent ${role ? `is already labelled ${role}` : 'has steer or scope membership'}`);
+        } else if (!holderId || holderId === agentId) {
+          conflict(key, `--adopt-worker ${agentId}: owner Steer ${owner ?? '?'} must be one live eligible coordinator in the main workspace`);
+        } else if (role === 'worker') {
+          if (Object.entries(labels).every(([k, value]) => agent.labels?.[k] === value)) notes.push(`Worker ${agentId} "${agent.title}" is already adopted for Steer ${owner} (kept)`);
+          else conflict(key, `--adopt-worker ${agentId}: agent is already labelled worker; reassignment is not automatic`);
+        } else {
+          const workerState = expectedState ? { ...expectedState, scopeId: effScopeId } :
+            { scopeId: effScopeId, epoch: 1, activeSlot, persistedHolderId: activeAgentId };
+          add(key, 'paseo.agent.worker', `Adopt ${agentId} as worker of Steer ${owner} (${typeof holderId === 'string' ? holderId : 'planned creation'})`, {
+            agentId, workspaceId: agent.workspaceId, labels,
+            enrollmentGuard: { ...guard, scopeId: effScopeId, expectedState: workerState, activeHolderId: activeAgentId, ownerHolderId: holderId },
+          });
+        }
+      }
+    },
+  };
+}
+
+function enrollmentHolders(discovery, config, scopeId, conflict) {
+  const { labelled, legacy = [], digitCandidates = [], halfLabelled = [] } = discovery.steers;
+  const workspaceId = discovery.mainWorkspace.id;
+  // Discovery has already matched repo labels (including legacy aliases).
+  const members = labelled.filter((agent) => !agent.labels[LABEL.scope] || sameScopeId(agent.labels[LABEL.scope], scopeId) ||
+    sameScopeId(agent.labels[LABEL.scope], agent.labels[LABEL.repo]));
+  const memberIds = new Set(members.flatMap((a) => [a.id, a.continuedFrom]));
+  const candidates = Map.groupBy(legacy.filter((a) => !a.archivedAt && !memberIds.has(a.id)), (agent) => steerTitleSlot(agent.title));
+  const slots = new Set([...members.map((a) => a.labels[LABEL.slot]), ...candidates.keys()]);
+  const coordinators = [];
+  for (const slot of slots) {
+    const holders = liveSlotHolders(members, slot);
+    const unlabelled = candidates.get(slot) ?? [];
+    const count = holders.length + unlabelled.length;
+    const key = `steer.${slot}`;
+    if (count > 1) {
+      conflict(key, `Several live agents are titled Steer ${slot}: ${[...holders, ...unlabelled].map((a) => a.id).join(', ')}; resolve the ambiguity in Paseo`);
+    } else if (unlabelled.length) {
+      const [candidate] = unlabelled;
+      const parent = parentOf(candidate);
+      conflict(key, `Unlabelled candidate "Steer ${slot}" ${candidate.id}${parent ? ` has ${describeParent(candidate)}; detach first or use --detach` : ''}; confirm with --adopt ${slot}=${candidate.id} or rename/archive it`);
+    } else if (holders.length) {
+      const [holder] = holders;
+      if (holder.workspaceId !== workspaceId || holder.background === true || parentOf(holder)) {
+        conflict(key, `Steer ${slot} (${holder.id}) must be a top-level tab in the main workspace${parentOf(holder) ? `; it has ${describeParent(holder)}` : ''}`);
+      } else if (!isAdvisorSteer(config, holder.labels, holder.metadata)) {
+        coordinators.push(holder);
+      }
+    }
+  }
+  const occupied = [...(discovery.agents ?? []), ...labelled, ...legacy, ...digitCandidates, ...halfLabelled]
+    .some((agent) => agent.workspaceId === workspaceId && !agent.archivedAt);
+  return { coordinators, occupied };
+}
+
+function finish(discovery, config, ops, conflicts, notes, enrollment) {
   notes = [...notes, ...configWarnings(config)];
   const status = conflicts.length ? 'conflict' : ops.length ? 'pending' : 'complete';
   const main = discovery.mainWorkspace;
   // Observation only (not hashed): lets apply reconcile an attempted agent
   // create it could not record (old plans also observed workspaces).
-  const steers = Object.fromEntries((discovery.steers?.labelled ?? []).filter((a) => !a.archivedAt).map((a) => [a.labels[LABEL.slot], a.id]));
+  const labelled = discovery.steers?.labelled ?? [];
+  const steers = Object.fromEntries(labelled.filter((a) => !a.archivedAt && (enrollment !== 'live-v2' || a.workspaceId === main?.id))
+    .map((a) => [a.labels[LABEL.slot], a.id]));
   const observed = { mainWorkspace: main ? { id: main.id, directory: main.workspaceDirectory, title: main.title ?? main.name, metadata: main.metadata ?? {}, createdAt: main.createdAt ?? null } : null, steers };
-  return { repo: discovery.forkName ?? discovery.input, input: discovery.input, status, ops, conflicts, notes, observed };
+  return { repo: discovery.forkName ?? discovery.input, input: discovery.input, status, ops, conflicts, notes, observed, ...(enrollment ? { enrollment } : {}) };
 }
 
 /** Hash over everything apply would do; the dry-run prints it, apply must quote it. */
 export function planHash(plans, config) {
+  const current = plans.every((plan) => plan.enrollment === 'live-v2') && plans.length > 0;
+  const steers = current ? { priority: enrollmentPriority(config) } : config.steers;
   const material = {
     // K13: only the owner still matters (scope identity + visibility); the
     // retired clone/title knobs are ignored so old configs keep hashing.
-    config: { github: { owner: config?.github?.owner }, checkoutRoot: config.checkoutRoot, profiles: config.profiles, steers: config.steers },
-    plans: plans.map((p) => ({ repo: p.repo, status: p.status, ops: p.ops.map(({ key, kind, params, implies }) => ({ key, kind, params, implies: implies ?? [] })), conflicts: p.conflicts })),
+    config: { github: { owner: config?.github?.owner }, checkoutRoot: config.checkoutRoot, profiles: config.profiles, steers,
+      ...(current ? { legacyAdvisorSlots: config.legacyAdvisorSlots ?? [], exhaustedPct: config.quota?.exhaustedPct ?? null } : {}) },
+    plans: plans.map((p) => ({ repo: p.repo, status: p.status, ops: p.ops.map(({ key, kind, params, implies }) => ({ key, kind, params, implies: implies ?? [] })), conflicts: p.conflicts, ...(p.enrollment ? { enrollment: p.enrollment } : {}) })),
   };
   return createHash('sha256').update(JSON.stringify(material)).digest('hex').slice(0, 16);
+}
+
+function enrollmentPriority(config) {
+  return config.steers.priority ?? [...new Set(slotOrder(config).map((slot) => config.steers.slots[slot]))];
 }

@@ -1,9 +1,7 @@
-// Pure steer-add selection (plugin/server/core/models.mjs): slot suggestion, slot-priority
-// profile order, catalog/health/quota eligibility and account
-// choice. Offline only: fake config, catalog and ZeroSub state, no live RPC.
+// Steer creation route selection from host priorities, catalog, health and quota.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { nextFreeSlot, resolveProfile, resolveSteerAdd } from '../plugin/server/core/models.mjs';
+import { resolveProfile, resolveSteerAdd } from '../plugin/server/core/models.mjs';
 import { normalizeZerosubState } from '../plugin/server/core/zerosub.mjs';
 
 const NOW = Date.parse('2026-11-24T12:00:00Z');
@@ -22,7 +20,7 @@ const CONFIG = {
     beta: { provider: 'fake-y', model: 'y1' },
     gamma: { provider: 'fake-x', model: 'x2' },
   },
-  steers: { slots: { A: 'alpha', B: 'beta' }, prepare: ['A', 'B'], initialActive: 'A' },
+  steers: { slots: { A: 'alpha', B: 'beta' }, prepare: ['A', 'B'], initialActive: 'A', priority: ['alpha', 'beta', 'gamma'] },
 };
 
 const PROVIDERS = [
@@ -47,40 +45,8 @@ function state(accounts) {
   return normalizeZerosubState({ accounts, agents: [] }, { now: NOW });
 }
 
-test('nextFreeSlot returns the first free letter in priority order', () => {
-  assert.equal(nextFreeSlot(CONFIG), 'C');
-  assert.equal(nextFreeSlot({ steers: { slots: {} } }), 'A');
-  assert.equal(nextFreeSlot({ steers: { slots: { A: 'x', C: 'y' } } }), 'B');
-  const full = {};
-  for (let i = 0; i < 26; i++) full[String.fromCharCode(65 + i)] = 'alpha';
-  assert.equal(nextFreeSlot({ steers: { slots: full } }), null);
-});
-
-test('resolveSteerAdd suggests the next free slot and normalizes an explicit one', () => {
-  assert.equal(resolveSteerAdd(CONFIG, PROVIDERS, {}).slot, 'C');
-  assert.equal(resolveSteerAdd(CONFIG, PROVIDERS, { slot: null }).slot, 'C');
-  assert.equal(resolveSteerAdd(CONFIG, PROVIDERS, { slot: '' }).slot, 'C');
-  assert.equal(resolveSteerAdd(CONFIG, PROVIDERS, { slot: 'c' }).slot, 'C');
-  assert.equal(resolveSteerAdd(CONFIG, PROVIDERS, { slot: ' C ' }).slot, 'C');
-  assert.equal(resolveSteerAdd({ steers: { slots: {} }, profiles: CONFIG.profiles }, PROVIDERS, {}).slot, 'A');
-});
-
-test('resolveSteerAdd refuses occupied, gappy, invalid and full slots', () => {
-  assert.throws(() => resolveSteerAdd(CONFIG, PROVIDERS, { slot: 'B' }), /Slot B is already defined \(profile "beta"\); use steer set B .* or fresh/);
-  assert.throws(() => resolveSteerAdd(CONFIG, PROVIDERS, { slot: 'b' }), /already defined/);
-  assert.throws(() => resolveSteerAdd(CONFIG, PROVIDERS, { slot: 'D' }), /would leave a gap \(slots are A, B\); use the next free letter C/);
-  for (const bad of ['AA', '1', 'a1']) {
-    assert.throws(() => resolveSteerAdd(CONFIG, PROVIDERS, { slot: bad }), /single capital letter A-Z/, String(bad));
-  }
-  const full = {};
-  for (let i = 0; i < 26; i++) full[String.fromCharCode(65 + i)] = 'alpha';
-  const fullConfig = { ...CONFIG, steers: { slots: full, prepare: ['A'], initialActive: 'A' } };
-  assert.throws(() => resolveSteerAdd(fullConfig, PROVIDERS, {}), /all letters A-Z are defined/);
-});
-
 test('resolveSteerAdd with an explicit profile tries it alone and infers the advisor flag', () => {
   const picked = resolveSteerAdd(CONFIG, PROVIDERS, { profile: 'beta', now: NOW });
-  assert.equal(picked.slot, 'C');
   assert.equal(picked.profile.name, 'beta');
   assert.equal(picked.advisorSlot, false);
   assert.deepEqual(picked.skipped, []);
@@ -93,11 +59,11 @@ test('resolveSteerAdd with an explicit profile tries it alone and infers the adv
   assert.throws(() => resolveSteerAdd(CONFIG, PROVIDERS, { profile: '  ' }), /non-empty profile name/);
 });
 
-test('resolveSteerAdd without a profile tries slot-priority order and reports skips', () => {
+test('resolveSteerAdd without a profile uses coordinator priority and reports skips', () => {
   const picked = resolveSteerAdd(CONFIG, PROVIDERS, { now: NOW });
   assert.equal(picked.profile.name, 'alpha');
   assert.deepEqual(picked.skipped, []);
-  // Unhealthy first entry falls through to the next slot profile.
+  // Unhealthy first entry falls through to the next profile.
   const health = { alpha: { class: 'capacity', unhealthyUntil: new Date(NOW + 5 * 60_000).toISOString() } };
   const fell = resolveSteerAdd(CONFIG, PROVIDERS, { profileHealth: health, now: NOW });
   assert.equal(fell.profile.name, 'beta');
@@ -107,7 +73,7 @@ test('resolveSteerAdd without a profile tries slot-priority order and reports sk
   const catalog = resolveSteerAdd(CONFIG, down, { now: NOW });
   assert.equal(catalog.profile.name, 'beta');
   assert.match(catalog.skipped[0].reason, /model "x1" is not offered/);
-  // Unreferenced profiles are tried after the slot-ordered ones.
+  // Presets absent from the priority are ignored.
   const extra = structuredClone(CONFIG);
   extra.profiles.delta = { provider: 'fake-y', model: 'y1' };
   const gone = [
@@ -133,6 +99,24 @@ test('resolveSteerAdd keeps advisor profiles for advisor slots only', () => {
   assert.ok(noAdvisor.skipped.every((s) => /not tagged as advisor/.test(s.reason)));
 });
 
+test('resolveSteerAdd applies privacy to automatic and explicit advisor choices', () => {
+  const config = structuredClone(CONFIG);
+  config.profiles.alpha.sensitive = true;
+  config.profiles.gamma.advisor = true;
+  config.profiles.gamma.sensitive = true;
+  for (const repoPublic of [false, null, undefined]) {
+    const automatic = resolveSteerAdd(config, PROVIDERS, { repoPublic });
+    assert.equal(automatic.profile.name, 'beta');
+    assert.match(automatic.skipped[0].reason, /public scope required/);
+    for (const options of [{ profile: 'alpha' }, { profile: 'gamma' }, { advisorSlot: true }]) {
+      const selected = resolveSteerAdd(config, PROVIDERS, { ...options, repoPublic });
+      assert.equal(selected.profile, null);
+      assert.ok(selected.skipped.some((s) => /public scope required/.test(s.reason)));
+    }
+  }
+  assert.equal(resolveSteerAdd(config, PROVIDERS, { profile: 'gamma', repoPublic: true }).profile.name, 'gamma');
+});
+
 test('resolveSteerAdd reuses live-duplicate avoidance with the first entry exempt', () => {
   const dup = resolveSteerAdd(CONFIG, PROVIDERS, { usedProfiles: ['alpha'], now: NOW });
   assert.equal(dup.profile.name, 'alpha', 'explicit-first entry stays eligible like the slot profile');
@@ -152,8 +136,6 @@ test('resolveSteerAdd skips limited accounts and picks the roomiest', () => {
   const picked = resolveSteerAdd(CONFIG, PROVIDERS, { profile: 'alpha', zerosub, now: NOW });
   assert.equal(picked.profile.name, 'alpha');
   assert.equal(picked.zerosubAccount, 'acc-roomy');
-  assert.equal(picked.zerosubPin.accountId, 'acc-roomy');
-  assert.deepEqual(picked.zerosubPin.metadata, { 'zerosub.account': 'acc-roomy' });
   assert.equal(picked.earliestReset, null);
 });
 
@@ -172,7 +154,6 @@ test('resolveSteerAdd keeps warned accounts eligible and excludes exhausted acco
   assert.equal(none.skipped[0].reason, `accounts exhausted, earliest reset ${RESET_5H}`);
   assert.equal(none.earliestReset, RESET_5H);
   assert.equal(none.zerosubAccount, null);
-  assert.equal(none.zerosubPin, null);
   // Headroom order: lowest percent wins, unknown usage last, ties by id.
   const room = state([acc('acc-b', 'fake-x', 30), acc('acc-a', 'fake-x', 30), acc('acc-low', 'fake-x', 10)]);
   assert.equal(resolveSteerAdd(CONFIG, PROVIDERS, { profile: 'alpha', zerosub: room, now: NOW }).zerosubAccount, 'acc-low');

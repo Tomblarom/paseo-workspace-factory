@@ -104,7 +104,7 @@ function fakeClient(world) {
   return {
     projects: { list: async () => ({ projects: structuredClone(world.projects) }) },
     workspaces: { ref: workspaceHandle },
-    agents: { ref: agentHandle },
+    agents: { ref: agentHandle, list: async () => ({ entries: structuredClone(world.agents), pageInfo: { hasMore: false } }) },
   };
 }
 function fakePaseoCli(world) {
@@ -197,7 +197,7 @@ test('adopted workers may live in a foreign workspace and stay there', async () 
   assert.equal(row.owner, 'A');
 });
 
-test('adopt-worker conflicts: unknown, archived, labelled, undefined slot', async () => {
+test('adopt-worker conflicts: unknown agent, archived agent, labelled agent or absent owner', async () => {
   const world = makeWorld();
   world.checkouts['/p/demo'] = { remotes: {} };
   const ws = addMain(world, {});
@@ -209,7 +209,7 @@ test('adopt-worker conflicts: unknown, archived, labelled, undefined slot', asyn
   assert.match((await planFor({ 'agent-missing': 'A' })).conflicts[0].reason, /not found/);
   assert.match((await planFor({ [gone.id]: 'A' })).conflicts.find((c) => c.key === `worker.${gone.id}`).reason, /archived/);
   assert.match((await planFor({ [steer.id]: 'A' })).conflicts.find((c) => c.key === `worker.${steer.id}`).reason, /already labelled steer/);
-  assert.match((await planFor({ [cand.id]: 'Z' })).conflicts.find((c) => c.key === `worker.${cand.id}`).reason, /not defined in steers.slots/);
+  assert.match((await planFor({ [cand.id]: 'Z' })).conflicts.find((c) => c.key === `worker.${cand.id}`).reason, /owner Steer Z must be one live eligible coordinator/);
 });
 
 test('missing @slot defaults to the active steer', async () => {
@@ -220,6 +220,64 @@ test('missing @slot defaults to the active steer', async () => {
   const cand = addAgent(world, { title: 'x', provider: 'codex', model: 'm', workspaceId: ws.id });
   const [p] = await runnerFor(world).runPlans([{ local: '/p/demo' }], { adoptWorker: { [cand.id]: null } });
   assert.equal(p.ops.find((o) => o.key === `worker.${cand.id}`).params.labels[LABEL.owner], 'A');
+});
+
+test('worker owner is an exact live coordinator, including at an unconfigured letter', async () => {
+  const world = makeWorld();
+  world.checkouts['/p/demo'] = { remotes: {} };
+  const ws = addMain(world);
+  addSteer(world, ws);
+  const owner = addSteer(world, ws, 'Z');
+  const candidate = addAgent(world, { title: 'Feature work', workspaceId: ws.id });
+  const options = { adoptWorker: { [candidate.id]: 'Z' } };
+  const runner = runnerFor(world);
+  const [good] = await runner.runPlans([{ local: '/p/demo' }], options);
+  assert.equal(good.status, 'pending', JSON.stringify(good.conflicts));
+  assert.equal(good.ops[0].params.enrollmentGuard.ownerHolderId, owner.id);
+  const execute = createExecutors({ client: fakeClient(world), paseoCli: fakePaseoCli(world) });
+  const foreign = addMain(world, { path: '/p/other', scope: { id: 'other', kind: 'dir', locator: '/p/other' } });
+  const other = addSteer(world, foreign, 'Z');
+  const [stillGood] = await runner.runPlans([{ local: '/p/demo' }], options);
+  assert.equal(stillGood.ops[0].params.enrollmentGuard.ownerHolderId, owner.id);
+  for (const [changes, expected] of [
+    [{ archivedAt: 'then' }, /Worker owner changed/],
+    [{ background: true }, /Worker owner changed/],
+    [{ labels: { ...owner.labels, [LABEL.steerRole]: 'advisor' } }, /Worker owner changed/],
+    [{ workspaceId: foreign.id }, /Worker owner changed/],
+  ]) {
+    const before = { ...owner };
+    Object.assign(owner, changes);
+    const [blocked] = await runner.runPlans([{ local: '/p/demo' }], options);
+    assert.match(blocked.conflicts.find((c) => c.key === `worker.${candidate.id}`).reason, /one live eligible coordinator/);
+    await assert.rejects(execute(good.ops[0], CONFIG), expected);
+    Object.assign(owner, before);
+    owner.background = false;
+  }
+  other.workspaceId = ws.id;
+  await assert.rejects(execute(good.ops[0], CONFIG), /Worker owner changed/);
+  other.workspaceId = foreign.id;
+  await execute(good.ops[0], CONFIG);
+  assert.equal(candidate.labels[LABEL.owner], 'Z');
+});
+
+test('worker adoption references a verified initial coordinator creation', async () => {
+  const world = makeWorld();
+  world.checkouts['/p/demo'] = { remotes: {} };
+  const ws = addMain(world);
+  ws.metadata = {};
+  const foreign = addMain(world, { path: '/p/other', scope: { id: 'other', kind: 'dir', locator: '/p/other' } });
+  const candidate = addAgent(world, { title: 'Feature work', workspaceId: foreign.id });
+  const entries = [{ local: '/p/demo' }];
+  const options = { adoptWorker: { [candidate.id]: null } };
+  const runner = runnerFor(world);
+  const [preview] = await runner.runPlans(entries, options);
+  assert.deepEqual(preview.ops.map((op) => op.kind), ['paseo.agent.create', 'paseo.workspace.metadata', 'paseo.agent.worker']);
+  assert.deepEqual(preview.ops[2].params.enrollmentGuard.ownerHolderId, { ref: 'steer.A' });
+  const authorization = createAuthorization([preview], CONFIG, { entries, ...options });
+  const { report } = await applyPlans({ authorization, config: CONFIG, confirm: authorization.hash, runPlans: runner.runPlans,
+    execute: createExecutors({ client: fakeClient(world), paseoCli: fakePaseoCli(world) }) });
+  assert.equal(report[0].status, 'complete', report[0].error);
+  assert.equal(candidate.labels[LABEL.owner], 'A');
 });
 
 // ------------------------------------------------------------------ detach

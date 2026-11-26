@@ -1,5 +1,6 @@
-import { readSteerAction, readCleanupAction } from "./core/steer-action.mjs";
+import { readSteerAction, readCleanupAction, unsettledAccountMove } from "./core/steer-action.mjs";
 import { actionFact } from "./core/action-facts.mjs";
+import { openTurnOf } from "../shared/auto-checkpoint.js";
 import { cacheTtlForAgent } from "../shared/cache-profiles.js";
 import { type CleanupSettings } from "../shared/idle-cleanup.js";
 import { normalizeModel, normalizeProvider, normalizeThinking, speedOfLiveOptions, tupleFromLive, tuplesEqual } from "../shared/steer-settings.js";
@@ -26,8 +27,8 @@ function contextUsageOf(agent: any) {
 
 /** Snapshot checks complement turn hooks, which run asynchronously. */
 export function hasActiveAgentWork(agent: any, entry?: any): boolean {
-  return Boolean(agent?.activeTurn || agent?.status === "running" || agent?.status === "initializing" ||
-    agent?.pendingPermissions?.length || (agent?.status !== "closed" && entry?.openTurnId));
+  return Boolean(unsettledAccountMove(readSteerAction(entry)) || agent?.activeTurn || agent?.status === "running" || agent?.status === "initializing" ||
+    agent?.pendingPermissions?.length || (agent?.status !== "closed" && openTurnOf(entry)));
 }
 
 export class AgentBusyError extends Error {}
@@ -45,10 +46,11 @@ export function agentContextInputs(
   const deliveryPhase = pendingDelivery?.phase ??
     (pendingDelivery ? readCleanupAction(entry) ? "renewing" : actionFact(entry, "actionVerified") === true ? "ready" : "blocked" : null);
   const cleanup = readCleanupAction(entry);
-  const pendingOperation = cleanup != null ||
+  const pendingMove = unsettledAccountMove(pendingDelivery);
+  const pendingOperation = pendingMove || cleanup != null ||
     deliveryPhase === "renewing" || deliveryPhase === "rewinding" || deliveryPhase === "ready" || deliveryPhase === "sent" || deliveryPhase === "uncertain" || deliveryPhase === "reserved";
   const uncertainCleanup = deliveryPhase === "renewing" && asRecord(cleanup)?.uncertain === true;
-  const resumeFallback = deliveryPhase === "blocked" || deliveryPhase === "uncertain" || deliveryPhase === "rewinding" || uncertainCleanup
+  const resumeFallback = pendingMove ? "Account move is awaiting confirmation." : deliveryPhase === "blocked" || deliveryPhase === "uncertain" || deliveryPhase === "rewinding" || uncertainCleanup
     ? typeof pendingDelivery?.lastError === "string" ? pendingDelivery.lastError
     : typeof asRecord(cleanup)?.error === "string" ? `Cleanup outcome is uncertain (${asRecord(cleanup)?.error}). Inspect the agent before recovery.`
     : "Context renewal needs attention."

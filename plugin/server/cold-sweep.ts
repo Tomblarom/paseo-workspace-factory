@@ -1,5 +1,5 @@
 import { AGENTS_KEY, currentFreshHint, updateAgentEntry } from "./core/agent-state.mjs";
-import { isAdvisorSlot } from "./core/config.mjs";
+import { isAdvisorSteer } from "./core/config.mjs";
 import { METADATA_KEY, readPaseoState } from "./core/paseo.mjs";
 import { QUOTA_DEFAULTS, accountExhausted, freshMaxUsedPct, quotaEntry, quotaExhausted, quotaPct } from "./core/quota.mjs";
 import { listScopes } from "./core/scope.mjs";
@@ -119,16 +119,6 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-/** Advisor flag for the attention row; unknown config means not advisor. */
-function isAdvisorSlotOf(config: unknown, slot: string): boolean {
-  if (!config || typeof config !== "object") return false;
-  try {
-    return (isAdvisorSlot as unknown as (c: unknown, s: string) => boolean)(config, slot);
-  } catch {
-    return false;
-  }
-}
-
 interface ScopeLookup {
   scopes: any[];
   byId: Map<string, any>;
@@ -240,7 +230,8 @@ export function quotaAvailableForCleanup(
       typeof liveId === "string" && liveId
         ? ((zerosub.accounts ?? []).find((entry: any) => entry?.id === liveId) ?? null)
         : null;
-    if (account) {
+    if (liveId) {
+      if (!account) return null;
       if (accountExhausted(account, { exhaustedPct, now: nowMs })) return false;
       return freshMaxUsedPct(account, nowMs) !== null ? true : null;
     }
@@ -903,7 +894,7 @@ export async function collectColdAgents(
       freshHint: fresh,
       slot,
       activeSteer,
-      advisor: slot !== null && isAdvisorSlotOf(config, slot),
+      advisor: slot !== null && isAdvisorSteer(config, agent.labels, agent.metadata),
     });
   }
   return cold;

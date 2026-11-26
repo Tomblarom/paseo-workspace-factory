@@ -11,8 +11,23 @@ Factory settings govern creation. Both the plugin and the shell CLI use the plug
 | File config | `src/config.mjs` loads the JSON file, validates `profiles`, `steers.slots`, `steers.prepare`, `steers.initialActive` and `workers.priority`, and supports `workers.defaultProfile` as a legacy worker fallback. Its helpers resolve role, sensitivity and profile by slot. |
 | Model selection | `src/models.mjs` derives a steer slot's fallback order from surrounding configured slots. It also implements slot/profile and worker-priority edits that the CLI can write to the file. `src/steer-add.mjs` checks both configured and live occupancy, selects a startable profile, and prepares a slot/profile config edit alongside creation. |
 | Provisioning | `src/planner.mjs` plans `prepare` or `--slots`, derives the active letter from `initialActive`, and checks adoption and live agents against the configured set. `src/apply.mjs` stores those options in the authorization, re-plans under lock, and reconciles creation through idempotency keys and receipts. |
-| Live state | `src/discovery.mjs` finds labelled steers and candidates, resolves ZeroSub continuations and marks older same-letter holders superseded when creation times identify a unique newest agent. `src/steer.mjs` switches among discovered holders but reads advisor, sensitivity, quota pool and expected model from slot profiles. Fresh starts from the slot profile and its configured fallbacks. `plugin/server/supervise.ts` uses slot profiles for advisor and pool checks. `src/supervision.mjs` builds the failover chain from live rows, with slot order and quota/account adjustments. |
+| Live state | `src/discovery.mjs` finds labelled steers and candidates, resolves ZeroSub continuations and keeps only tabs whose live title names their slot (see the decision below). `src/steer.mjs` switches among discovered holders but reads advisor, sensitivity, quota pool and expected model from slot profiles. Fresh starts from the slot profile and its configured fallbacks. `plugin/server/supervise.ts` uses slot profiles for advisor and pool checks. `src/supervision.mjs` builds the failover chain from live rows, with slot order and quota/account adjustments. |
 | Plugin settings | `plugin/shared/settings.ts` defines host `factory-config` v2 with `profiles`, `slots`, `prepare`, `initialActive`, `workerPriority`, quota and host fields. `plugin/server/config.ts` reads the file and overlays saved settings. Its settings-only path requires GitHub owner and checkout root. `plugin/client/settings-factory.tsx` edits the overlay, including slots, preparation and initial active steer. |
+
+## Decision 2026-11-26: the tab title is the membership
+
+- A parentless tab in the scope main workspace holds slot X only while its live title is
+  "Steer X" (optional active marker, optional suffix). Untitled or otherwise titled tabs are
+  ignored; renaming a tab is how the user moves or releases a slot.
+- Two live tabs titled for one slot are ambiguous: no holder is selected and coordinating
+  actions refuse. No newer-wins and no timestamp ranking.
+- A ZeroSub continuation holds through its own title or its origin's title; archiving the
+  origin leaves the continuation live. Several live continuations of one origin are ambiguous.
+- Archiving a tab frees its slot.
+
+Code: `resolveSteerHolders` in `plugin/server/core/discovery.mjs`, `scopeHolder` in
+`plugin/server/core/scope-guard.mjs`. Sections below that speak of superseded holders
+predate this decision.
 
 ## Data and settings
 
@@ -198,12 +213,12 @@ errors. Keep the CLI entry and the in-package core consistent (single copy under
    agent, the continuation is not archived, has no parent and sits in the origin's workspace.
    Authority stays with the live end of the chain, so the errored origin cannot act for the slot.
    No manual adopt and no title matching.
-6. (2026-11-26) Every agent creation (plan/apply, steer add, fresh, worker start) pins the
-   ZeroSub account in the executor from live `zerosub.state` (`suggestAccountPin`) at create
-   time; a planned pin is only the fallback when the live read fails. The first chosen pin is
-   reserved under an account-independent creation key and reused on receipt retries. Plan/apply
-   passes ZeroSub state to `resolveProfile` like `steer add`, so profiles whose accounts are all
-   exhausted are skipped. ZeroSub remains the only account switcher.
+6. (2026-11-26, revised in P1) Factory creation uses ZeroSub account quota
+   to screen profiles, and ZeroSub chooses the actual start account.
+   ZeroSub 1.34.0 interprets `zerosub.account` on create as an explicit user
+   pin. Omit it from automatic requests, including legacy unattempted plans.
+   Existing bindings are preserved. A verified completed creation retains
+   its original request identity when replayed for receipt confirmation.
 7. (2026-11-26) An assignment report goes to the live recipient: the requester scope's active
    holder when it is recorded and live, else the continuation end of `by`, else `by`. Reports
    queue a deterministic K7 action and recover through the existing sweep and receipt

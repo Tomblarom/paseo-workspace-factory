@@ -9,13 +9,15 @@ import { isDeepStrictEqual } from 'node:util';
 import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { withLock, workspaceLockName } from './lock.mjs';
-import { planHash, WORKSPACE_REF } from './planner.mjs';
+import { enrollmentAdoptionProblem, enrollmentHolder, enrollmentRole, enrollmentRuntime, enrollmentState, enrollmentTabs, planHash, WORKSPACE_REF } from './planner.mjs';
 import { checkedCreationReceipt, confirmCreationReceipt, lookupCreation, verifySteerPlacement } from './steer-create.mjs';
-import { LABEL, METADATA_KEY, parentOf } from './paseo.mjs';
+import { LABEL, METADATA_KEY, parentOf, readPaseoAgents } from './paseo.mjs';
 import { validScope } from './scope.mjs';
-import { isWorktreeWorkspace } from './discovery.mjs';
-import { profileFamily } from './quota.mjs';
-import { ACCOUNT_METADATA_KEY, suggestAccountPin } from './zerosub.mjs';
+import { isWorktreeWorkspace, steerTitleSlot } from './discovery.mjs';
+import { scopeHolder } from './scope-guard.mjs';
+import { familyExhausted, profileFamily } from './quota.mjs';
+import { ACCOUNT_METADATA_KEY, resolveFactoryLabels } from './zerosub.mjs';
+import { isAdvisorSlot, isAdvisorSteer, providerIsSensitive } from './config.mjs';
 
 export class ApplyRefused extends Error {}
 export class NotAuthorized extends Error {}
@@ -164,6 +166,20 @@ export function resolveAuthorized(op, results) {
     if (typeof created !== 'string') throw new NotAuthorized(`${op.key}: main workspace reference is unresolved (workspace.main has no verified result in this plan)`);
     params.workspaceId = created;
   }
+  const initial = op.kind === 'paseo.workspace.metadata' ? params.metadata?.[METADATA_KEY] : null;
+  const resolveHolder = (value) => {
+    if (typeof value?.ref !== 'string') return value;
+    const holderId = results[value.ref]?.agentId;
+    if (typeof holderId !== 'string' || !holderId) throw new NotAuthorized(`${op.key}: initial holder was not verified by this plan`);
+    return holderId;
+  };
+  if (initial?.activeAgentId) initial.activeAgentId = resolveHolder(initial.activeAgentId);
+  if (op.kind === 'paseo.agent.worker' && params.enrollmentGuard) {
+    const guard = params.enrollmentGuard;
+    guard.activeHolderId = resolveHolder(guard.activeHolderId);
+    guard.ownerHolderId = resolveHolder(guard.ownerHolderId);
+    guard.expectedState.persistedHolderId = resolveHolder(guard.expectedState.persistedHolderId);
+  }
   return { key: op.key, kind: op.kind, params };
 }
 
@@ -195,6 +211,14 @@ function observationHash(plans, config) {
   return planHash(copy, config);
 }
 
+function matchesStoredHash(plans, config, hash) {
+  if (planHash(plans, config) === hash) return true;
+  // Older stored authorizations predate the derived role-priority field.
+  if (plans.some((plan) => plan.enrollment) || config.steers?.priority === undefined) return false;
+  const { priority: _derived, ...steers } = config.steers;
+  return planHash(plans, { ...config, steers }) === hash;
+}
+
 export function memoryProgress(initial = null) {
   let state = initial;
   return { load: () => structuredClone(state), save: (next) => { state = structuredClone(next); } };
@@ -221,8 +245,12 @@ export async function applyPlans({ authorization, config, confirm, runPlans, exe
       throw new ApplyRefused(`Stored plan uses retired operation ${op.key} (${op.kind}); bulk provisioning was removed — run a new plan for one existing workspace`);
     }
   }
-  if (planHash(authorization.plans, config) !== authorization.hash) throw new ApplyRefused('Stored plan does not match the current config or was altered; run a new dry-run');
+  if (!matchesStoredHash(authorization.plans, config, authorization.hash)) throw new ApplyRefused('Stored plan does not match the current config or was altered; run a new dry-run');
   const options = { adopt: authorization.adopt, adoptWorker: authorization.adoptWorker ?? {}, detach: authorization.detach ?? false, ...(authorization.slots !== undefined ? { slots: authorization.slots } : {}) };
+  // Replan stored authorizations with the enrollment rules used to confirm them.
+  const enrollment = authorization.plans[0].enrollment;
+  if (!enrollment) options.legacyEnrollment = true;
+  if (enrollment === 'live') options.enrollmentVersion = enrollment;
   const state = progress.load() ?? { hash: authorization.hash, started: false, results: {} };
   if (state.hash !== authorization.hash) throw new ApplyRefused('Progress belongs to a different plan');
   if (!state.started) {
@@ -315,73 +343,111 @@ export async function applyPlans({ authorization, config, confirm, runPlans, exe
 }
 
 /** Real executors. Every write is guarded by a fresh precondition and verified afterwards. */
-export function createExecutors({ client, paseoCli, getZerosub = null, lookupReceipt = null, reservePins = false, pinLock = withLock }) {
-  async function creationMetadata(workspaceId, agentConfig, metadata, idempotencyKey) {
-    const workspace = client.workspaces.ref(workspaceId);
-    const reservationKey = `${METADATA_KEY}.creation-pin.${createHash('sha256').update(idempotencyKey ?? '').digest('hex')}`;
-    const reservation = reservePins && idempotencyKey ? (await workspace.refresh())?.metadata?.[reservationKey] : null;
+export function createExecutors({ client, paseoCli, getZerosub = /** @type {(() => Promise<any>) | null} */ (null), lookupReceipt = /** @type {((kind: string, key: string) => Promise<any>) | null} */ (null), lock = withLock, beforeSteerCreate = null }) {
+  function verifyWorktree(workspace, workspaceId, expectation) {
+    if (!expectation) return;
+    if (!isWorktreeWorkspace(workspace)) throw new Error(`Workspace ${workspaceId} is no longer a worktree workspace; run a new dry-run`);
+    if (resolve(workspace.workspaceDirectory ?? '') !== resolve(expectation.directory ?? '')) {
+      throw new Error(`Workspace ${workspaceId} moved from ${expectation.directory} to ${workspace.workspaceDirectory}; run a new dry-run`);
+    }
+  }
+  async function readEnrollment(guard) {
+    const [workspace, agents] = await Promise.all([client.workspaces.ref(guard.workspaceId).refresh(), readPaseoAgents(client)]);
+    verifyWorktree(workspace, guard.workspaceId, guard.expectWorktree);
+    const state = workspace?.metadata?.[METADATA_KEY];
+    if (!workspace || workspace.archivedAt || (state && (state.main !== true || state.retired)) || !isDeepStrictEqual(enrollmentState(state), guard.expectedState)) {
+      throw new Error('Scope state changed since enrollment preview; run a new dry-run');
+    }
+    return { agents, tabs: enrollmentTabs(agents, guard.workspaceId, guard.scopeId, guard.aliases) };
+  }
+  function verifyEnrollmentAuthority(guard, tabs, config) {
+    const active = enrollmentHolder(tabs, guard.activeSlot, config, guard.repoPublic);
+    if (!active || active.id !== guard.activeHolderId) throw new Error('Active holder changed since enrollment preview; run a new dry-run');
+  }
+  async function checkEnrollmentCandidate(guard, agent, config) {
+    const { agents, tabs } = await readEnrollment(guard);
+    const current = agents.find((item) => item.id === agent.id);
+    const problem = enrollmentAdoptionProblem({ ...guard, agent: current, agents, tabs, config });
+    if (problem) throw new Error(`Cannot adopt ${agent.id}: ${problem}`);
+    if (guard.activeHolderId !== agent.id) verifyEnrollmentAuthority(guard, tabs, config);
+    if (parentOf(current) !== parentOf(agent) || !isDeepStrictEqual(enrollmentRuntime(current), guard.runtime) ||
+        enrollmentRole(config, current) !== guard.role) {
+      throw new Error('Candidate runtime or role changed since enrollment preview; run a new dry-run');
+    }
+  }
+  async function creationMetadata(workspaceId, agentConfig, metadata, idempotencyKey, config, { steerRole = null, recorded = false, requireEmptyWorkspace = false, expectWorktree = null } = {}) {
+    // Legacy plans could carry an automatic account hint as a ZeroSub user pin.
+    const { [ACCOUNT_METADATA_KEY]: _legacyPin, ...otherMetadata } = metadata ?? {};
     if (lookupReceipt && idempotencyKey) {
       const receipt = await lookupReceipt('agent', idempotencyKey);
       if (receipt) {
         if (receipt.phase !== 'completed' || receipt.outcomeUnknown || !receipt.agentId) {
           throw new Error('Creation receipt is incomplete or uncertain; refusing to repeat the request');
         }
+        if (recorded) return metadata ?? null;
+        // A completed request must replay its original bytes on old installs.
+        const reservationKey = `${METADATA_KEY}.creation-pin.${createHash('sha256').update(idempotencyKey).digest('hex')}`;
+        const reservation = (await client.workspaces.ref(workspaceId).refresh())?.metadata?.[reservationKey];
         if (reservation?.key === idempotencyKey) return reservation.metadata;
         const existing = receipt.agent ?? (await client.agents.ref(receipt.agentId).refresh())?.agent;
         if (!existing) throw new Error('Cannot read the existing agent to confirm its creation request');
-        const result = { ...metadata };
-        delete result[ACCOUNT_METADATA_KEY];
-        if (existing.metadata?.[ACCOUNT_METADATA_KEY]) result[ACCOUNT_METADATA_KEY] = existing.metadata[ACCOUNT_METADATA_KEY];
-        return Object.keys(result).length ? result : null;
+        const originalRole = existing.metadata?.[LABEL.steerRole];
+        if (originalRole != null) {
+          if (steerRole && originalRole !== steerRole) throw new Error('Existing steer creation receipt has a different role');
+          otherMetadata[LABEL.steerRole] = originalRole;
+        }
+        if (existing.metadata?.[ACCOUNT_METADATA_KEY]) otherMetadata[ACCOUNT_METADATA_KEY] = existing.metadata[ACCOUNT_METADATA_KEY];
+        return Object.keys(otherMetadata).length ? otherMetadata : null;
       }
     }
-    const choose = async () => {
-      if (!getZerosub) return metadata ?? null;
-      let state;
-      try {
-        state = await getZerosub();
-      } catch (error) {
-        console.error(`[factory] ZeroSub account read failed (${error instanceof Error ? error.message : String(error)}); using planned pin`);
-        return metadata ?? null;
+    const state = getZerosub ? await Promise.resolve().then(getZerosub).catch(() => null) : null;
+    const spec = agentConfig?.provider ?? '';
+    const slash = spec.indexOf('/');
+    const provider = slash < 0 ? spec : spec.slice(0, slash);
+    const model = slash < 0 ? null : spec.slice(slash + 1);
+    const family = profileFamily({ provider });
+    if (familyExhausted(state, family, { model, exhaustedPct: config?.quota?.exhaustedPct })) {
+      throw new Error(`All ${family} accounts are exhausted for ${model ?? 'this model'}; retry after quota becomes available`);
+    }
+    if (requireEmptyWorkspace) {
+      const [workspace, agents] = await Promise.all([client.workspaces.ref(workspaceId).refresh(), readPaseoAgents(client)]);
+      verifyWorktree(workspace, workspaceId, expectWorktree);
+      if (!workspace || workspace.metadata?.[METADATA_KEY] || agents.some((agent) => agent.workspaceId === workspaceId && !agent.archivedAt)) {
+        throw new Error('Initial workspace is no longer empty; run a new dry-run');
       }
-      if (!state) return metadata ?? null;
-      const spec = agentConfig?.provider ?? '';
-      const slash = spec.indexOf('/');
-      const provider = slash < 0 ? spec : spec.slice(0, slash);
-      const model = slash < 0 ? null : spec.slice(slash + 1);
-      const pin = suggestAccountPin(state, profileFamily({ provider }), { model });
-      const result = { ...metadata };
-      delete result[ACCOUNT_METADATA_KEY];
-      Object.assign(result, pin?.metadata ?? {});
-      return Object.keys(result).length ? result : null;
-    };
-    if (!reservePins || !idempotencyKey) return choose();
-    return pinLock(`creation-pin-${createHash('sha256').update(idempotencyKey).digest('hex')}`, async (held) => {
-      const existing = (await workspace.refresh())?.metadata?.[reservationKey];
-      if (existing?.key === idempotencyKey) return existing.metadata;
-      const chosen = await choose();
-      held.verify();
-      await workspace.setMetadata({ [reservationKey]: { key: idempotencyKey, metadata: chosen } });
-      const written = (await workspace.refresh())?.metadata?.[reservationKey];
-      if (written?.key !== idempotencyKey || !isDeepStrictEqual(written.metadata, chosen)) throw new Error('Creation account reservation not verifiable');
-      return chosen;
-    });
+    }
+    if (steerRole) otherMetadata[LABEL.steerRole] = steerRole;
+    return Object.keys(otherMetadata).length ? otherMetadata : null;
   }
   const handlers = {
-    async 'paseo.workspace.metadata'(op) {
+    async 'paseo.workspace.metadata'(op, config) {
       const handle = client.workspaces.ref(op.params.workspaceId);
-      const before = await handle.refresh();
-      if (before?.metadata?.[METADATA_KEY]) throw new Error(`Workspace ${op.params.workspaceId} already carries factory metadata`);
-      if (op.params.expectWorktree) {
-        if (!isWorktreeWorkspace(before)) throw new Error(`Workspace ${op.params.workspaceId} is no longer a worktree workspace; run a new dry-run`);
-        if (resolve(before.workspaceDirectory ?? '') !== resolve(op.params.expectWorktree.directory ?? '')) {
-          throw new Error(`Workspace ${op.params.workspaceId} moved from ${op.params.expectWorktree.directory} to ${before.workspaceDirectory}; run a new dry-run`);
+      const initial = op.params.metadata[METADATA_KEY];
+      const enroll = async (held) => {
+        const before = await handle.refresh();
+        if (before?.metadata?.[METADATA_KEY]) throw new Error(`Workspace ${op.params.workspaceId} already carries factory metadata`);
+        verifyWorktree(before, op.params.workspaceId, op.params.expectWorktree);
+        if (op.params.holderScopeId) {
+          const agents = await readPaseoAgents(client);
+          const holder = op.params.liveHolder
+            ? enrollmentHolder(enrollmentTabs(agents, op.params.workspaceId, op.params.holderScopeId), initial.activeSteer, config, op.params.repoPublic)
+            : scopeHolder({ agents, workspaceId: op.params.workspaceId, scopeId: op.params.holderScopeId, slot: initial.activeSteer });
+          const rival = !op.params.liveHolder && agents.some((agent) => agent.id !== holder.id && !agent.archivedAt && !agent.labels?.[LABEL.role] &&
+            agent.workspaceId === op.params.workspaceId && steerTitleSlot(agent.title) === initial.activeSteer);
+          if (rival || !holder || holder.id !== initial.activeAgentId || holder.background === true ||
+              (!op.params.liveHolder && isAdvisorSteer(config, holder.labels, holder.metadata)) || !holder.provider ||
+              (op.params.holderRuntime && !isDeepStrictEqual(enrollmentRuntime(holder), op.params.holderRuntime)) ||
+              (providerIsSensitive(config, holder.provider) && op.params.repoPublic !== true)) {
+            throw new Error('Initial coordinating holder changed; run a new dry-run');
+          }
         }
-      }
-      await handle.setMetadata(op.params.metadata);
-      const after = await handle.refresh();
-      if (after?.metadata?.[METADATA_KEY]?.main !== true) throw new Error('Workspace metadata not verifiable');
-      return { workspaceId: op.params.workspaceId };
+        held?.verify();
+        await handle.setMetadata(op.params.metadata);
+        const after = (await handle.refresh())?.metadata?.[METADATA_KEY];
+        if (after?.main !== true || (initial.activeAgentId && !isDeepStrictEqual(after, initial))) throw new Error('Workspace metadata not verifiable');
+        return { workspaceId: op.params.workspaceId };
+      };
+      return op.params.holderScopeId ? lock(workspaceLockName(op.params.workspaceId), enroll) : enroll();
     },
 
     async 'paseo.workspace.scope'(op) {
@@ -404,34 +470,52 @@ export function createExecutors({ client, paseoCli, getZerosub = null, lookupRec
       });
     },
 
-    async 'agent.detach'(op) {
-      const { agentId, parent } = op.params;
-      const handle = client.agents.ref(agentId);
-      const before = (await handle.refresh())?.agent;
-      if (!before || before.archivedAt) throw new Error(`Agent ${agentId} is missing or archived`);
-      const current = parentOf(before);
-      if (!current) throw new Error(`Agent ${agentId} has no parent; nothing to detach`);
-      if (parent !== undefined && current !== parent) throw new Error(`Agent ${agentId} parent is ${current}, expected ${parent}`);
-      await handle.detach();
-      const after = (await handle.refresh())?.agent;
-      if (parentOf(after)) throw new Error(`Agent ${agentId} still has parent ${parentOf(after)} after detach`);
-      return { agentId, detachedFrom: current };
+    async 'agent.detach'(op, config) {
+      const { agentId, parent, enrollmentGuard } = op.params;
+      const detach = async (held) => {
+        const handle = client.agents.ref(agentId);
+        const before = (await handle.refresh())?.agent;
+        if (!before || before.archivedAt) throw new Error(`Agent ${agentId} is missing or archived`);
+        const current = parentOf(before);
+        if (!current) throw new Error(`Agent ${agentId} has no parent; nothing to detach`);
+        if (parent !== undefined && current !== parent) throw new Error(`Agent ${agentId} parent is ${current}, expected ${parent}`);
+        if (enrollmentGuard) await checkEnrollmentCandidate(enrollmentGuard, before, config);
+        held?.verify();
+        await handle.detach();
+        const after = (await handle.refresh())?.agent;
+        if (parentOf(after)) throw new Error(`Agent ${agentId} still has parent ${parentOf(after)} after detach`);
+        return { agentId, detachedFrom: current };
+      };
+      return enrollmentGuard ? lock(workspaceLockName(enrollmentGuard.workspaceId), detach) : detach();
     },
 
-    async 'paseo.agent.worker'(op) {
-      const { agentId, workspaceId, labels } = op.params;
-      const handle = client.agents.ref(agentId);
-      const before = (await handle.refresh())?.agent;
-      if (!before || before.archivedAt) throw new Error(`Agent ${agentId} is missing or archived`);
-      if (before.workspaceId !== workspaceId) throw new Error(`Agent ${agentId} is in workspace ${before.workspaceId}, expected ${workspaceId}`);
-      if (before.labels?.[LABEL.role]) throw new Error(`Agent ${before.id} is already labelled ${before.labels[LABEL.role]}`);
-      const labelArg = Object.entries(labels).map(([k, v]) => `${k}=${v}`).join(',');
-      paseoCli(['agent', 'update', before.id, '--label', labelArg]);
-      const after = (await handle.refresh())?.agent;
-      for (const [key, value] of Object.entries(labels)) {
-        if (after?.labels?.[key] !== value) throw new Error(`Agent ${before.id} label ${key} is ${after?.labels?.[key]}, expected ${value}`);
-      }
-      return { agentId: after.id };
+    async 'paseo.agent.worker'(op, config) {
+      const { agentId, workspaceId, labels, enrollmentGuard } = op.params;
+      const adopt = async (held) => {
+        const handle = client.agents.ref(agentId);
+        const before = (await handle.refresh())?.agent;
+        verifySteerPlacement(before, { workspaceId });
+        if (before.labels?.[LABEL.role]) throw new Error(`Agent ${before.id} is already labelled ${before.labels[LABEL.role]}`);
+        if (enrollmentGuard) {
+          const { agents, tabs } = await readEnrollment(enrollmentGuard);
+          verifyEnrollmentAuthority(enrollmentGuard, tabs, config);
+          const holder = enrollmentHolder(tabs, labels[LABEL.owner], config, enrollmentGuard.repoPublic);
+          if (!holder || holder.id !== enrollmentGuard.ownerHolderId) throw new Error('Worker owner changed since enrollment preview; run a new dry-run');
+          const current = agents.find((agent) => agent.id === agentId);
+          verifySteerPlacement(current, { workspaceId });
+          if (resolveFactoryLabels(current, agents)?.[LABEL.role] || current.labels?.[LABEL.role] || current.labels?.[LABEL.scope] ||
+              current.labels?.[LABEL.repo] || steerTitleSlot(current.title)) {
+            throw new Error(`Agent ${before.id} has steer or scope membership`);
+          }
+        }
+        held?.verify();
+        const labelArg = Object.entries(labels).map(([k, v]) => `${k}=${v}`).join(',');
+        paseoCli(['agent', 'update', before.id, '--label', labelArg]);
+        const after = (await handle.refresh())?.agent;
+        verifySteerPlacement(after, { workspaceId, labels });
+        return { agentId: after.id };
+      };
+      return enrollmentGuard ? lock(workspaceLockName(enrollmentGuard.workspaceId), adopt) : adopt();
     },
 
     async 'scope.convert'(op) {
@@ -477,14 +561,20 @@ export function createExecutors({ client, paseoCli, getZerosub = null, lookupRec
       });
     },
 
-    async 'paseo.agent.create'(op) {
+    async 'paseo.agent.create'(op, config) {
       const { workspaceId, title, config: agentConfig, labels, idempotencyKey, metadata, clearInheritedParent: clearParent = false } = op.params;
       if (!workspaceId || workspaceId === WORKSPACE_REF || typeof workspaceId !== 'string') throw new Error('Main workspace is not resolved yet');
       // Deliberately no `parent` and no `prompt`: a top-level steer without a first turn.
-      // Optional `metadata` pins the agent (e.g. {"zerosub.account": id}, Paseo 0.16+).
       // `clearInheritedParent` (fresh only) detaches a link inherited from the
       // calling agent; plan/apply keeps failing closed with PARENT VIOLATION.
-      const liveMetadata = await creationMetadata(workspaceId, agentConfig, metadata, idempotencyKey);
+      const slot = labels?.[LABEL.slot];
+      const steerRole = op.params.steerRole ?? (config?.steers?.slots?.[slot]
+        ? (isAdvisorSlot(config, slot) ? 'advisor' : 'coordinator') : null);
+      const liveMetadata = await creationMetadata(workspaceId, agentConfig, metadata, idempotencyKey, config, {
+        steerRole, recorded: op.params.recordedCreationMetadata,
+        requireEmptyWorkspace: op.params.requireEmptyWorkspace, expectWorktree: op.params.expectWorktree,
+      });
+      await beforeSteerCreate?.(op);
       const handle = await client.workspaces.ref(workspaceId).agents.create({ config: agentConfig, title, labels, idempotencyKey, ...(liveMetadata ? { metadata: liveMetadata } : {}) });
       let agent = (await handle.refresh())?.agent;
       if (clearParent) agent = await detachInheritedParent(handle, agent);
@@ -492,7 +582,7 @@ export function createExecutors({ client, paseoCli, getZerosub = null, lookupRec
       return { agentId: agent.id, parent: null, accountId: liveMetadata?.[ACCOUNT_METADATA_KEY] ?? null };
     },
 
-    async 'paseo.agent.createWorker'(op) {
+    async 'paseo.agent.createWorker'(op, config) {
       const { workspaceId, title, config: agentConfig, labels, parent = null, prompt, idempotencyKey, metadata, clearInheritedParent: clearParent = false } = op.params;
       if (!workspaceId || typeof workspaceId !== 'string') throw new Error('Worker workspace is not resolved yet');
       if (parent !== null && (typeof parent !== 'string' || !parent)) throw new Error('Worker parent must be an agent id or null');
@@ -500,10 +590,10 @@ export function createExecutors({ client, paseoCli, getZerosub = null, lookupRec
       // afterwards like the steer handoff. The parent is the owning steer
       // taken from the refreshed worker — never the calling agent. A parent
       // expected to be absent is detached when the fresh flag allows it.
-      const liveMetadata = await creationMetadata(workspaceId, agentConfig, metadata, idempotencyKey);
+      const liveMetadata = await creationMetadata(workspaceId, agentConfig, metadata, idempotencyKey, config, { recorded: op.params.recordedCreationMetadata });
       const request = prompt
         ? { title, ...(parent ? { parent } : {}), prompt, labels, config: agentConfig, ...(liveMetadata ? { metadata: liveMetadata } : {}), idempotencyKey }
-        : { title, labels, config: agentConfig, idempotencyKey, ...(parent ? { parent } : {}), ...(liveMetadata ? { metadata: liveMetadata } : {}) };
+        : { title, labels, config: agentConfig, idempotencyKey, ...(parent ? { parent } : {}) };
       const handle = await client.workspaces.ref(workspaceId).agents.create(request);
       let agent = (await handle.refresh())?.agent;
       if (!parent && clearParent) agent = await detachInheritedParent(handle, agent);
@@ -511,17 +601,32 @@ export function createExecutors({ client, paseoCli, getZerosub = null, lookupRec
       return { agentId: agent.id, parent, accountId: liveMetadata?.[ACCOUNT_METADATA_KEY] ?? null };
     },
 
-    async 'paseo.agent.adopt'(op) {
-      const handle = client.agents.ref(op.params.agentId);
-      const before = (await handle.refresh())?.agent;
-      if (!before || before.archivedAt) throw new Error(`Agent ${op.params.agentId} is missing or archived`);
-      if (parentOf(before)) throw new Error(`Agent ${before.id} has parent ${parentOf(before)}`);
-      if (before.labels?.[LABEL.role]) throw new Error(`Agent ${before.id} is already labelled`);
-      const labelArg = Object.entries(op.params.labels).map(([k, v]) => `${k}=${v}`).join(',');
-      paseoCli(['agent', 'update', before.id, '--label', labelArg]);
-      const after = (await handle.refresh())?.agent;
-      verifySteerPlacement(after, { workspaceId: before.workspaceId, labels: op.params.labels, parent: null });
-      return { agentId: after.id };
+    async 'paseo.agent.adopt'(op, config) {
+      const guard = op.params.enrollmentGuard;
+      const adopt = async (held) => {
+        const handle = client.agents.ref(op.params.agentId);
+        const before = (await handle.refresh())?.agent;
+        if (!before || before.archivedAt) throw new Error(`Agent ${op.params.agentId} is missing or archived`);
+        if (parentOf(before)) throw new Error(`Agent ${before.id} has parent ${parentOf(before)}`);
+        if (before.labels?.[LABEL.role]) throw new Error(`Agent ${before.id} is already labelled`);
+        if (guard) await checkEnrollmentCandidate(guard, before, config);
+        if (!guard && providerIsSensitive(config, before.provider) && op.params.repoPublic !== true) {
+          throw new Error(`Cannot adopt ${before.id}: ${before.provider} agents require a public repository`);
+        }
+        const labels = { ...op.params.labels };
+        const slot = labels[LABEL.slot];
+        if (!guard && labels[LABEL.role] === 'steer' && config?.steers?.slots?.[slot]) {
+          labels[LABEL.steerRole] = before.labels?.[LABEL.steerRole] ?? before.metadata?.[LABEL.steerRole] ??
+            (isAdvisorSlot(config, slot) ? 'advisor' : 'coordinator');
+        }
+        held?.verify();
+        const labelArg = Object.entries(labels).map(([k, v]) => `${k}=${v}`).join(',');
+        paseoCli(['agent', 'update', before.id, '--label', labelArg]);
+        const after = (await handle.refresh())?.agent;
+        verifySteerPlacement(after, { workspaceId: before.workspaceId, labels, parent: null, ...guard?.runtime });
+        return { agentId: after.id };
+      };
+      return guard ? lock(workspaceLockName(guard.workspaceId), adopt) : adopt();
     },
 
   };

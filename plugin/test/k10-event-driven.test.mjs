@@ -122,7 +122,7 @@ function scopeWorld() {
   const steer = addAgent(world, {
     title: "Steer A",
     workspaceId: ws.id,
-    labels: { [LABEL.scope]: SCOPE, [LABEL.role]: "steer", [LABEL.slot]: "A" },
+    labels: { [LABEL.scope]: SCOPE, [LABEL.repo]: SCOPE, [LABEL.role]: "steer", [LABEL.slot]: "A" },
   });
   return { world, ws, steer, paseo: fakeClient(world) };
 }
@@ -187,12 +187,12 @@ test("steer subscribers share one timer and update together on notify", async ()
     assert.equal(first.pushes[0].steers[0].agentId, steer.id);
     // One shared compute per event push, fresh settings every time.
     const readsBefore = settingsReads;
-    steer.title = "Steer A renamed";
+    steer.title = "Steer A · renamed";
     feed.notifySteerFeed();
     await flush();
     assert.equal(settingsReads, readsBefore + 1);
-    assert.equal(first.pushes.at(-1).steers[0].title, "Steer A renamed");
-    assert.equal(second.pushes.at(-1).steers[0].title, "Steer A renamed");
+    assert.equal(first.pushes.at(-1).steers[0].title, "Steer A · renamed");
+    assert.equal(second.pushes.at(-1).steers[0].title, "Steer A · renamed");
     first.abort();
     second.abort();
   });

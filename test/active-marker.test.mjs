@@ -19,7 +19,7 @@ const CONFIG = {
   workspaceTitle: 'Main',
   profiles: {
     standard: { provider: 'codex', model: 'gpt-6.2-sol' },
-    cheap: { provider: 'muse', model: 'muse-spark-1.3-contributor' },
+    cheap: { provider: 'muse', model: 'muse-spark-1.3-contributor', sensitive: false },
   },
   steers: { slots: { A: 'standard', B: 'cheap' }, prepare: ['A', 'B'], initialActive: 'A' },
   workers: { defaultProfile: 'cheap' },
@@ -209,7 +209,7 @@ test('marker: switch with a disabled marker renames nothing', async () => {
 
 // ---------------------------------------------------------------- fresh
 
-test('marker: fresh creates the new steer marked and unmarks the retired one', async () => {
+test('marker: fresh creates the new steer marked and renames the retired one', async () => {
   const world = makeWorld();
   const { steers } = provisioned(world, { A: '▷ Steer A' });
   const result = await freshSteer({
@@ -220,12 +220,12 @@ test('marker: fresh creates the new steer marked and unmarks the retired one', a
   assert.equal(result.renameError, null);
   const created = world.agents.find((a) => a.id === result.to);
   assert.equal(created.title, '▷ Steer A');
-  assert.deepEqual(world.cli, [['agent', 'update', steers.A.id, '--name', 'Steer A']]);
+  assert.deepEqual(world.cli, [['agent', 'update', steers.A.id, '--name', 'Retired A']]);
 });
 
-test('marker: fresh with a disabled marker creates plain titles and renames nothing', async () => {
+test('marker: fresh with a disabled marker creates a plain title and retires the old tab', async () => {
   const world = makeWorld();
-  provisioned(world);
+  const { steers } = provisioned(world);
   const config = { ...CONFIG, steers: { ...CONFIG.steers, activeMarker: '' } };
   const result = await freshSteer({
     client: fakeClient(world), discovery: discoveryOf(world), config,
@@ -233,7 +233,7 @@ test('marker: fresh with a disabled marker creates plain titles and renames noth
   });
   assert.equal(result.applied, true);
   assert.equal(world.agents.find((a) => a.id === result.to).title, 'Steer A');
-  assert.deepEqual(world.cli, []);
+  assert.deepEqual(world.cli, [['agent', 'update', steers.A.id, '--name', 'Retired A']]);
 });
 
 // ---------------------------------------------------------------- helper

@@ -523,6 +523,35 @@ test("worker completion waits for an active steer to finish its current turn", a
   assert.equal(ws.metadata[WORKERS_KEY][worker.id].pendingWake, null);
 });
 
+test("a legacy composer stage does not block a worker wake or lose its packet", async () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  const worker = addWorker(world, ws);
+  const steer = steers.A;
+  const stage = { kind: "stage", phase: "staged", wakeId: "composer-stage", packet: "USER DRAFT", epoch: ws.metadata[METADATA_KEY].epoch };
+  ws.metadata[AGENTS_KEY] = { [steer.id]: { action: stage } };
+  ws.metadata[WORKERS_KEY] = { [worker.id]: entry("running", "t") };
+
+  const outcome = await turnedOut(world, worker, { assistant: checkpointOf("t", "done") });
+  assert.equal(outcome.action, "sent");
+  assert.equal(ws.metadata[WORKERS_KEY][worker.id].pendingWake, null);
+  const [wake] = sendsTo(world, steer.id);
+  assert.match(wake, new RegExp(worker.id));
+  assert.doesNotMatch(wake, /USER DRAFT/);
+  const sentAction = ws.metadata[AGENTS_KEY][steer.id].action;
+
+  const { deliverSteerBrief } = await import("../server/steer-brief.ts");
+  const paseo = fakeClient(world);
+  const input = { workspaceId: ws.id, agentId: steer.id, stageId: stage.wakeId, epoch: stage.epoch, claimId: "wake-test" };
+  const brief = await deliverSteerBrief(paseo, { ...input, action: "composer" }, { lock: noLock });
+  assert.equal(brief.packet, stage.packet);
+  assert.equal(brief.stageId, stage.wakeId);
+  assert.equal((await deliverSteerBrief(paseo, { ...input, action: "composer-complete" }, { lock: noLock })).transferred, true);
+  assert.deepEqual(ws.metadata[AGENTS_KEY][steer.id].action, sentAction);
+  assert.equal(ws.metadata[AGENTS_KEY][steer.id].stagedBrief, null);
+  assert.equal(sendsTo(world, steer.id).length, 1);
+});
+
 test("all actionable outcomes wake immediately; simultaneous events debounce", async () => {
   const world = makeWorld();
   const { ws, steers } = provisioned(world);
@@ -829,6 +858,18 @@ function unansweredWorld() {
   return { world, ws, steers, worker };
 }
 
+test("forced failover respects boot and drain without requiring a worker", async () => {
+  for (const quiet of ["boot", "global", "marker"]) {
+    const { world, ws, steers } = unansweredWorld();
+    ws.metadata[WORKERS_KEY] = {};
+    if (quiet === "marker") ws.metadata[DRAIN_METADATA_KEY] = drainMarker(at(NOW + 10 * MIN));
+    const result = await supervise.runFailoverCheck(fakeClient(world), { id: REPO, workspaceId: ws.id },
+      depsOf({ force: true, bootCheckDone: quiet !== "boot", draining: quiet === "global" }));
+    assert.equal(result.action, "wait", quiet);
+    assert.equal(sendsTo(world, steers.B.id).length, 0, quiet);
+  }
+});
+
 test("unanswered wake fails over to the next slot and logs the takeover", async () => {
   const { world, ws, steers, worker } = unansweredWorld();
   const paseo = fakeClient(world);
@@ -852,6 +893,7 @@ test("unanswered wake fails over to the next slot and logs the takeover", async 
 
 test("a cold takeover starts its answer window only after the renewed brief is sent", async () => {
   const { world, ws, steers, worker } = unansweredWorld();
+  steers.C.archivedAt = at(NOW); // B is the only eligible route in this renewal test.
   steers.B.provider = "claude";
   steers.B.persistence = { sessionId: "old-session" };
   ws.metadata[AGENTS_KEY][steers.B.id] = { lastTurnEndedAt: at(NOW - 6 * MIN) };
@@ -863,6 +905,11 @@ test("a cold takeover starts its answer window only after the renewed brief is s
   assert.deepEqual(sendsTo(world, steers.B.id), ["/clear"]);
   assert.equal(ws.metadata[WORKERS_KEY][worker.id].lastWakeAt, at(NOW - 11 * MIN));
   assert.equal(supervise.failoverStateForTests()[REPO], undefined);
+  // The same reserved K7 takeover remains binding even if another standby
+  // becomes available before renewal finishes.
+  steers.C.archivedAt = null;
+  assert.deepEqual(await supervise.runFailoverCheck(paseo, scope, deps), { action: "wait", reason: "brief-pending" });
+  assert.equal(sendsTo(world, steers.C.id).length, 0);
   assert.equal((await supervise.retryPendingWakeBrief(paseo, scope, deps)).delivered, false);
 
   // The verified clear is recorded by the turn hook, covered in wake-brief.test.
@@ -877,6 +924,89 @@ test("a cold takeover starts its answer window only after the renewed brief is s
   assert.equal(ws.metadata[CHECKPOINT_KEY].source, "failover");
   assert.equal(ws.metadata[WORKERS_KEY][worker.id].lastWakeAt, at(NOW));
   assert.deepEqual(supervise.failoverStateForTests()[REPO].asked, [steers.B.id]);
+});
+
+test("automatic failover compares preparation instead of just taking the next letter", async () => {
+  const { world, ws, steers } = unansweredWorld();
+  steers.B.provider = "claude";
+  ws.metadata[AGENTS_KEY][steers.B.id] = { lastTurnEndedAt: at(NOW - 6 * MIN) };
+  const result = await supervise.runFailoverCheck(fakeClient(world), { id: REPO, workspaceId: ws.id }, depsOf());
+  assert.equal(result.action, "failover");
+  assert.equal(result.to.steerId, steers.C.id);
+  assert.equal(sendsTo(world, steers.B.id).length, 0);
+  assert.equal(sendsTo(world, steers.C.id).length, 1);
+});
+
+test("failover excludes a sensitive runtime and leaves the worker wake pending", async () => {
+  const { world, ws, steers, worker } = unansweredWorld();
+  steers.B.provider = "muse";
+  steers.B.model = "changed";
+  steers.C.archivedAt = at(NOW);
+  const before = structuredClone(ws.metadata[WORKERS_KEY][worker.id]);
+  const result = await supervise.runFailoverCheck(fakeClient(world), { id: REPO, workspaceId: ws.id },
+    depsOf({ delivery: { getScopePublic: async () => true } }));
+  assert.equal(result.reason, "candidates-ineligible");
+  assert.equal(sendsTo(world, steers.B.id).length, 0);
+  assert.deepEqual(ws.metadata[WORKERS_KEY][worker.id], before);
+  assert.equal(ws.metadata[METADATA_KEY].epoch, 3);
+});
+
+test("preference strategy can select a cold earlier candidate while preserving renewal", async () => {
+  const { world, ws, steers } = unansweredWorld();
+  steers.B.provider = "claude";
+  ws.metadata[AGENTS_KEY][steers.B.id] = { lastTurnEndedAt: at(NOW - 6 * MIN) };
+  const result = await supervise.runFailoverCheck(fakeClient(world), { id: REPO, workspaceId: ws.id },
+    depsOf({ getConfig: async () => ({ routing: { strategy: "preference" } }) }));
+  assert.deepEqual(result, { action: "wait", reason: "brief-pending" });
+  assert.deepEqual(sendsTo(world, steers.B.id), ["/clear"]);
+  assert.equal(sendsTo(world, steers.C.id).length, 0);
+});
+
+test("an unattempted worker batch follows the scope through an epoch change", async () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  const worker = addWorker(world, ws);
+  const queuedAt = at(NOW - MIN);
+  ws.metadata[WORKERS_KEY] = { [worker.id]: entry("done", "work", { pendingWake: { state: "done", queuedAt } }) };
+  ws.metadata[AGENTS_KEY] = { [steers.A.id]: { action: {
+    wakeId: "old-batch", phase: "reserved", renewal: "send", epoch: 3, queuedAt,
+    batch: { workspaceId: ws.id, epoch: 3, events: [{ workerId: worker.id, state: "done", queuedAt }] },
+  } } };
+  ws.metadata[METADATA_KEY].activeSteer = "B";
+  ws.metadata[METADATA_KEY].activeAgentId = steers.B.id;
+  ws.metadata[METADATA_KEY].epoch = 4;
+  const result = await supervise.flushScope(fakeClient(world), { id: REPO, workspaceId: ws.id }, depsOf());
+  assert.equal(result.flushed, true);
+  assert.equal(sendsTo(world, steers.A.id).length, 0);
+  assert.equal(sendsTo(world, steers.B.id).length, 1);
+  assert.equal(ws.metadata[WORKERS_KEY][worker.id].pendingWake, null);
+});
+
+test("an unresolved old-epoch receipt holds only its own worker event", async () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  const old = addWorker(world, ws);
+  const current = addWorker(world, ws);
+  const queuedAt = at(NOW - MIN);
+  const pendingWake = { state: "done", queuedAt };
+  ws.metadata[WORKERS_KEY] = {
+    [old.id]: entry("done", "previous result", { pendingWake }),
+    [current.id]: entry("done", "new result", { pendingWake }),
+  };
+  ws.metadata[AGENTS_KEY] = { [steers.B.id]: { action: {
+    wakeId: "previous-send", phase: "blocked", renewal: "rewind", epoch: 2, queuedAt, attemptedAt: queuedAt,
+    batch: { workspaceId: ws.id, epoch: 2, events: [{ workerId: old.id, ...pendingWake }] },
+  } } };
+
+  const result = await supervise.flushScope(fakeClient(world), { id: REPO, workspaceId: ws.id }, depsOf());
+  assert.equal(result.flushed, true);
+  const [wake] = sendsTo(world, steers.A.id);
+  assert.ok(wake.includes(current.id));
+  assert.ok(!wake.includes(old.id));
+  assert.equal(sendsTo(world, steers.B.id).length, 0);
+  assert.equal(ws.metadata[AGENTS_KEY][steers.B.id].action.wakeId, "previous-send");
+  assert.deepEqual(ws.metadata[WORKERS_KEY][old.id].pendingWake, pendingWake);
+  assert.equal(ws.metadata[WORKERS_KEY][current.id].pendingWake, null);
 });
 
 test("answered and busy steers stop failover; fresh wakes wait", async () => {
@@ -1355,6 +1485,49 @@ test("continuedIn on a stayed row follows the continuation instead of failing ov
   assert.equal(world.calls.filter((c) => c[0] === "agent.send").length, 0);
 });
 
+test("a quota-triggered takeover waits when the bound account loses its usage reading", async () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  const worker = addWorker(world, ws);
+  ws.metadata[WORKERS_KEY] = { [worker.id]: entry("running", "t") };
+  const limited = { id: "source", family: "codex", status: "limited", exhausted: true };
+  const unknown = { id: "source", family: "codex", status: "ready", windows: [] };
+  let reads = 0;
+  const result = await turnedOut(world, worker, { assistant: checkpointOf("t", "done") }, {
+    getZerosub: async () => ({ agentAccount: { [steers.A.id]: "source" }, pending: {},
+      accounts: [++reads === 1 ? limited : unknown] }),
+  });
+  assert.equal(result.action, "queued");
+  assert.equal(result.reason, "quota-limit-unconfirmed");
+  assert.equal(world.calls.some(([kind]) => kind === "agent.send"), false);
+  assert.ok(ws.metadata[WORKERS_KEY][worker.id].pendingWake);
+  assert.equal(ws.metadata[METADATA_KEY].epoch, 3);
+});
+
+test("a worker result wakes the active API steer when a sibling subscription is exhausted", async () => {
+  const { sampleQuotaAsync, getQuotaSampledAt, resetQuotaForTests } = await import("../server/quota.ts");
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  const worker = addWorker(world, ws);
+  ws.metadata[WORKERS_KEY] = { [worker.id]: entry("running", "t") };
+  const zerosub = { agentAccount: { [steers.A.id]: "api" }, pending: {},
+    accounts: [{ id: "api", family: "codex", auth: "api", status: "ready", windows: [] }] };
+  try {
+    await sampleQuotaAsync(() => JSON.stringify([{ sourceId: "codex", report: {
+      windows: [{ id: "session", usedPct: 0 }, { id: "weekly", usedPct: 100 }],
+    } }]));
+    const nowMs = getQuotaSampledAt();
+    const result = await turnedOut(world, worker, { assistant: checkpointOf("t", "done") },
+      { getZerosub: async () => zerosub, nowMs, nowIso: at(nowMs) });
+    assert.equal(result.action, "sent");
+    assert.equal(sendsTo(world, steers.A.id).length, 1);
+    assert.equal(sendsTo(world, steers.B.id).length, 0);
+    assert.equal(ws.metadata[METADATA_KEY].epoch, 3);
+  } finally {
+    resetQuotaForTests();
+  }
+});
+
 test("all accounts exhausted holds the wake until the earliest reset", async () => {
   const world = makeWorld();
   const { ws, steers } = provisioned(world);
@@ -1380,19 +1553,20 @@ test("all accounts exhausted holds the wake until the earliest reset", async () 
   assert.equal(sendsTo(world, steers.A.id).length, 1);
 });
 
-test("wake text carries the ZeroSub quota line and fork warnings", async () => {
+test("wake text uses the live holder's bound account after the slot's provider changed", async () => {
   const world = makeWorld();
   const { ws, steers } = provisioned(world);
+  steers.A.provider = "claude";
   const config = {
-    profiles: { sonnet: { provider: "claude", model: "s" } },
-    steers: { slots: { A: "sonnet", B: "sonnet", C: "sonnet" } },
+    profiles: { sol: { provider: "codex", model: "sol" } },
+    steers: { slots: { A: "sol", B: "sol", C: "sol" } },
     quota: { warnPct: 75, exhaustedPct: 90 },
   };
   const worker = addWorker(world, ws);
   world.workspaces[0].metadata[WORKERS_KEY] = { [worker.id]: entry("running", "t") };
   const zerosub = zsState({
-    accounts: [zsAccount("acc-old", 99), zsAccount("acc-new", 20)],
-    routes: [zsRoute(worker.id, "acc-old")],
+    accounts: [zsAccount("acc-old", 99), zsAccount("acc-live", 80), zsAccount("acc-new", 20)],
+    routes: [zsRoute(worker.id, "acc-old"), zsRoute(steers.A.id, "acc-live")],
   });
   setTimeline(world, worker.id, [
     ...turnEntries("t1", "do it", checkpointOf("t", "done")),
@@ -1406,8 +1580,25 @@ test("wake text carries the ZeroSub quota line and fork warnings", async () => {
   assert.equal(result.action, "sent");
   const texts = sendsTo(world, steers.A.id);
   assert.equal(texts.length, 1);
-  assert.match(texts[0], /Quota: claude 99% \(5h\) — prefer acc-new/);
+  assert.match(texts[0], /Quota: claude \(acc-live\) 80% used — prefer acc-new/);
   assert.match(texts[0], /fork to other provider/);
+});
+
+test("wake omits quota when the live holder has a bound account without metrics", async () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  steers.A.provider = "claude";
+  const worker = addWorker(world, ws);
+  world.workspaces[0].metadata[WORKERS_KEY] = { [worker.id]: entry("running", "t") };
+  const zerosub = zsState({
+    accounts: [zsAccount("acc-other", 99), zsAccount("acc-live", null)],
+    routes: [zsRoute(steers.A.id, "acc-live")],
+  });
+  const result = await turnedOut(world, worker, { assistant: checkpointOf("t", "done") }, { zerosub });
+  assert.equal(result.action, "sent");
+  const texts = sendsTo(world, steers.A.id);
+  assert.equal(texts.length, 1);
+  assert.doesNotMatch(texts[0], /^Quota:/m);
 });
 
 test("failover waits on the holder's pending move, then proceeds past the timeout", async () => {

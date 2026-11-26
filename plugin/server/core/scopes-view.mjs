@@ -5,7 +5,7 @@ import { listScopes } from './scope.mjs';
 import { LABEL, METADATA_KEY, parentOf, restartMessage } from './paseo.mjs';
 import { AGENTS_KEY } from './agent-state.mjs';
 import { CHECKPOINT_KEY, agentUsage, isHeuristicRestart, restartInterruptions } from './steer.mjs';
-import { isAdvisorSlot, isSensitiveSlot } from './config.mjs';
+import { isAdvisorSteer, providerIsSensitive } from './config.mjs';
 import { applyContinuations, isWorktreeWorkspace, liveSlotHolders, resolveSteerHolders } from './discovery.mjs';
 
 /** One row per live scope: id, kind, active steer, epoch, checkpoint, usage, hints. */
@@ -29,16 +29,11 @@ export function scopeRows(paseoState, { now = () => Date.now(), daemonStartedAt 
     // Slot holders follow the live continuation tab: origins in this workspace
     // are replaced by their live tab (which inherits role/slot), so the active
     // holder is the live tab and the origin never appears as a second holder.
-    // Same-slot newer-wins applies on top: superseded older holders are
-    // listed separately and never selected as the active holder.
+    // Two live tabs titled for the active slot are ambiguous: no active holder.
     const labelledFound = agents.filter((a) => a.workspaceId === scope.workspaceId && a.labels?.[LABEL.role] === 'steer');
     const live = resolveSteerHolders(labelledFound, agents, zerosubSwitches).filter((a) => a && !a.archivedAt);
-    const candidates = live.filter((a) => a.labels?.[LABEL.slot] === state?.activeSteer);
-    const active = liveSlotHolders(live, state?.activeSteer)[0] ?? candidates[0] ?? null;
-    const superseded = live
-      .filter((a) => a.superseded === true && typeof a.labels?.[LABEL.slot] === 'string')
-      .map((a) => ({ slot: a.labels[LABEL.slot], id: a.id }))
-      .sort((a, b) => a.slot.localeCompare(b.slot) || a.id.localeCompare(b.id));
+    const holders = liveSlotHolders(live, state?.activeSteer);
+    const active = holders.length === 1 ? holders[0] : null;
     const updatedAt = checkpoint?.updatedAt ?? null;
     const updatedMs = updatedAt ? Date.parse(updatedAt) : NaN;
     const ageMs = Number.isFinite(updatedMs) ? Math.max(0, now() - updatedMs) : null;
@@ -79,7 +74,7 @@ export function scopeRows(paseoState, { now = () => Date.now(), daemonStartedAt 
     const activeProfile = activeProfileName ? config?.profiles?.[activeProfileName] : null;
     const warnings = [];
     if (config && active && activeSlot) {
-      if (isAdvisorSlot(config, activeSlot)) warnings.push(`Active steer ${activeSlot} is an advisor (profile "${activeProfileName}"); advisors never coordinate`);
+      if (isAdvisorSteer(config, active.labels, active.metadata)) warnings.push(`Active steer ${activeSlot} is an advisor; advisors never coordinate`);
       if (activeProfile && (`${active.provider}/${active.model}` !== `${activeProfile.provider}/${activeProfile.model}`)) {
         warnings.push(`Active steer ${activeSlot} runs ${active.provider}/${active.model} but slot profile "${activeProfileName}" names ${activeProfile.provider}/${activeProfile.model}`);
       }
@@ -90,7 +85,7 @@ export function scopeRows(paseoState, { now = () => Date.now(), daemonStartedAt 
       workspaceId: scope.workspaceId,
       domain,
       children,
-      active: active ? { slot: active.labels[LABEL.slot], id: active.id, model: `${active.provider}/${active.model}`, status: active.status, ...(active.continuedFrom ? { continuedFrom: active.continuedFrom } : {}), ...(config ? { advisor: isAdvisorSlot(config, activeSlot), sensitive: isSensitiveSlot(config, activeSlot) } : {}) } : null,
+      active: active ? { slot: active.labels[LABEL.slot], id: active.id, model: `${active.provider}/${active.model}`, status: active.status, ...(active.continuedFrom ? { continuedFrom: active.continuedFrom } : {}), ...(config ? { advisor: isAdvisorSteer(config, active.labels, active.metadata), sensitive: providerIsSensitive(config, active.provider) } : {}) } : null,
       ...(config ? { warnings } : {}),
       epoch: state?.epoch ?? null,
       checkpoint: checkpoint?.task
@@ -103,7 +98,6 @@ export function scopeRows(paseoState, { now = () => Date.now(), daemonStartedAt 
         : null,
       usage: agentUsage(active),
       ...(restartInterrupted.length ? { restartInterrupted } : {}),
-      ...(superseded.length ? { superseded } : {}),
       ...(inbox.length ? { inbox } : {}),
       ...(legacyAlias ? { legacyAlias } : {}),
       ...(hints.length ? { hints } : {}),
@@ -168,7 +162,6 @@ export function formatScopeRows(rows) {
     ];
     for (const w of row.warnings ?? []) parts.push(`! ${w}`);
     if (row.checkpoint?.domainEscalations?.length) parts.push(`domain: ${row.checkpoint.domainEscalations.join('; ')}`);
-    if ((row.superseded ?? []).length) parts.push(`superseded ${(row.superseded ?? []).map((s) => `${s.slot}:${s.id}`).join(', ')} (newest wins; archive them in Paseo)`);
     if (row.inbox?.length) parts.push(`inbox: ${row.inbox.join('; ')}`);
     parts.push(`ctx ${formatUsage(row.usage)}`);
     if (row.domain) parts.push(`domain ${row.domain}`);

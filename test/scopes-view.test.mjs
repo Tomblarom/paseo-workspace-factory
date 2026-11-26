@@ -53,6 +53,13 @@ test('scope row carries id, kind, active steer, epoch, checkpoint age, next and 
   assert.equal(row.hints, undefined);
 });
 
+test('scope row does not select an active holder when the slot is ambiguous', () => {
+  const state = githubState();
+  state.agents.push(steer({ id: 'another-a', workspaceId: 'wks_main1', slot: 'A', repo: 'example/web' }));
+  const [row] = scopeRows(state, { now: () => NOW });
+  assert.equal(row.active, null);
+});
+
 test('missing checkpoint, usage and active steer stay null without crashing', () => {
   const workspace = mainWorkspace({ id: 'wks_main2', dir: '/home/you/projects/empty', activeSteer: 'B', epoch: 1 });
   const state = {

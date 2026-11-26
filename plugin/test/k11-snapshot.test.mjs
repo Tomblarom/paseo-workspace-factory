@@ -105,9 +105,9 @@ test("feed rows agree with scopeHolder and resolveWakeTarget on continuation and
   const state = { agents: world.agents, workspaces: world.workspaces, projects: world.projects, providers: [] };
   const rows = collectSteerStates(state, { settings: CLEANUP_DEFAULTS, nowMs: Date.parse("2026-11-25T12:00:00.000Z") });
   const byId = new Map(rows.map((r) => [r.agentId, r]));
-  assert.equal(byId.get("origin-a").successor, "live-a");
+  assert.equal(byId.has("origin-a"), false);
   assert.equal(byId.get("live-a").successor, null);
-  assert.equal(byId.get("old-b").successor, "new-b");
+  assert.equal(byId.get("old-b").successor, null);
   assert.equal(byId.get("new-b").successor, null);
   const resolved = resolveSteerHolders(
     world.agents.filter((a) => a.labels?.[LABEL.role] === "steer"),
@@ -115,8 +115,8 @@ test("feed rows agree with scopeHolder and resolveWakeTarget on continuation and
     [],
   );
   const statusRows = resolved.map((a) => ({ slot: a.labels?.[LABEL.slot] ?? null, id: a.id, archivedAt: a.archivedAt ?? null, retired: false, superseded: a.superseded === true }));
-  for (const [slot, winner] of [["A", "live-a"], ["B", "new-b"]]) {
-    assert.equal(scopeHolder({ agents: world.agents, workspaceId: MAIN, scopeId: SCOPE, slot }).id, winner);
-    assert.equal(resolveWakeTarget({ activeSteer: slot }, statusRows), winner);
-  }
+  assert.equal(scopeHolder({ agents: world.agents, workspaceId: MAIN, scopeId: SCOPE, slot: "A" }).id, "live-a");
+  assert.equal(resolveWakeTarget({ activeSteer: "A" }, statusRows), "live-a");
+  assert.throws(() => scopeHolder({ agents: world.agents, workspaceId: MAIN, scopeId: SCOPE, slot: "B" }), /found 2/);
+  assert.equal(resolveWakeTarget({ activeSteer: "B" }, statusRows), null);
 });

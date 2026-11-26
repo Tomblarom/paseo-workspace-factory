@@ -11,6 +11,22 @@ export function readSteerAction(entry) {
   return entry?.action ?? null;
 }
 
+export function readStagedSteerBrief(entry) {
+  return entry?.action?.phase === 'staged' ? entry.action : entry?.stagedBrief ?? null;
+}
+
+/** A lost move reply must not become an ordinary send after a restart. */
+export function unsettledAccountMove(action) {
+  return !!action?.accountMove && action.accountMove.phase !== 'settled';
+}
+
+export function admittedAccountMoveReplan(action) {
+  const move = action?.accountMove, replan = action?.accountMoveReplan;
+  return move?.phase === 'settled' && move.resolution === 'replan' &&
+    replan?.status === 'ready' && replan.attemptedAt === move.attemptedAt &&
+    replan.accountId === move.observedAccountId;
+}
+
 export function actionEntry(entry, action) {
   return mergeActionFacts(entry, { action });
 }
@@ -27,12 +43,10 @@ export function newSteerAction(input) {
 }
 
 // Persist the attempt under the interprocess lock before calling send.
-// A native receipt replay uses exactly the persisted request; no new key or
-// packet may be created after an attempted dispatch. A process death releases
-// the lock, so the next reconciliation can ask the daemon about that receipt.
-// Concurrent exact replays are serialized by the native receipt, not by a lock
-// held across an RPC that can itself cause a hook to take the workspace lock.
-export async function reconcileSteerSend({ client, workspaceId, agentId, actionId, lock = withLock, validate = null, now = () => new Date().toISOString() }) {
+// An attempted packet is immutable. While authority is current, the daemon
+// reconciles an exact replay with its durable receipt before dispatching.
+// Once authority changes, a send cannot be used as a receipt lookup.
+export async function reconcileSteerSend({ client, workspaceId, agentId, actionId, lock = withLock, validate = null, beforeSend = null, now = () => new Date().toISOString() }) {
   const workspace = client.workspaces.ref(workspaceId);
   const claim = await lock(workspaceLockName(workspaceId), async (held) => {
     const meta = (await workspace.refresh())?.metadata ?? {};
@@ -40,6 +54,10 @@ export async function reconcileSteerSend({ client, workspaceId, agentId, actionI
     const action = readSteerAction(entries[agentId]);
     if (!action || action.wakeId !== actionId) return { status: 'missing' };
     if (action.phase === 'sent' || action.phase === 'done') return { status: 'sent', action };
+    if (unsettledAccountMove(action)) return { status: 'pending', action, detail: 'Account move needs reconciliation before delivery.' };
+    if (action.accountMove?.resolution === 'replan' && !admittedAccountMoveReplan(action)) {
+      return { status: 'pending', action, detail: 'Delivery needs a new route after the account move.' };
+    }
     if (!['ready', 'uncertain'].includes(action.phase) || typeof action.packet !== 'string') return { status: 'pending', action };
     const scope = meta[METADATA_KEY];
     if (scope?.retired || (action.epoch != null && action.epoch !== scope?.epoch)) return { status: 'blocked', action, detail: 'Scope authority changed before delivery.' };
@@ -54,6 +72,8 @@ export async function reconcileSteerSend({ client, workspaceId, agentId, actionI
     return { status: 'attempt', action: attempted };
   });
   if (claim.status !== 'attempt') return claim;
+  const admission = beforeSend && await beforeSend(claim.action);
+  if (admission?.allowed === false) return { status: 'pending', action: claim.action, detail: admission.reason };
   try {
     await client.agents.ref(agentId).send(claim.action.packet, { ...claim.action.sendOptions, messageId: claim.action.wakeId });
   } catch (error) {

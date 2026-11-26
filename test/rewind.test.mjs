@@ -23,7 +23,7 @@ const CONFIG = {
   workspaceTitle: 'Main',
   profiles: {
     standard: { provider: 'codex', model: 'gpt-6.2-sol', thinking: 'high', mode: 'full-access' },
-    cheap: { provider: 'muse', model: 'muse-spark-1.3-contributor', thinking: null, mode: 'allowAll' },
+    cheap: { provider: 'muse', model: 'muse-spark-1.3-contributor', thinking: null, mode: 'allowAll', sensitive: false },
   },
   steers: { slots: { A: 'standard', B: 'cheap' }, prepare: ['A', 'B'], initialActive: 'A' },
   workers: { defaultProfile: 'cheap' },
@@ -66,6 +66,7 @@ function discoveryOf(world, extra = {}) {
     workers: structuredClone(world.agents.filter((a) => !a.archivedAt && (a.labels?.[PARENT_LABEL] || a.labels?.[LABEL.role] === 'worker'))),
     agents: structuredClone(world.agents),
     providers: structuredClone(world.providers),
+    github: { fork: { repo: { private: false } } },
     ...extra,
   };
 }

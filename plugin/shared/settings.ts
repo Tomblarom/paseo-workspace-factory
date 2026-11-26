@@ -1,28 +1,51 @@
 import { defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
 import { QUOTA_DEFAULTS } from "./defaults.mjs";
+import { prioritiesFromSlots } from "./settings-validate.js";
 
 /**
- * factory-config v1 -> v2: workerDefault becomes workerPriority=[workerDefault];
- * every profile gets advisor=false and sensitive (muse without an explicit
- * flag is sensitive, everything else is not). Already-v2 values pass through.
+ * Preserve the original document before converting v1 via v2 to v3.
  */
 export function migrateFactoryConfig(values: unknown, fromVersion: number): unknown {
-  if (fromVersion >= 2 || !values || typeof values !== "object") return values;
+  if (fromVersion >= 3 || !values || typeof values !== "object" || Array.isArray(values)) return values;
   const old = values as Record<string, any>;
-  const profiles: Record<string, any> = {};
-  for (const [name, raw] of Object.entries(old.profiles ?? {})) {
-    const profile = (raw ?? {}) as Record<string, any>;
-    profiles[name] = {
-      ...profile,
-      advisor: typeof profile.advisor === "boolean" ? profile.advisor : false,
-      sensitive: typeof profile.sensitive === "boolean" ? profile.sensitive : profile.provider === "muse",
-    };
+  let next: Record<string, any> = { ...old };
+  if (fromVersion < 2) {
+    if (old.profiles && typeof old.profiles === "object" && !Array.isArray(old.profiles)) {
+      const profiles: Record<string, any> = {};
+      for (const [name, raw] of Object.entries(old.profiles)) {
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+          profiles[name] = raw;
+          continue;
+        }
+        const profile = raw as Record<string, any>;
+        profiles[name] = {
+          ...profile,
+          advisor: profile.advisor === undefined ? false : profile.advisor,
+          sensitive: profile.sensitive === undefined ? profile.provider === "muse" : profile.sensitive,
+        };
+      }
+      next.profiles = profiles;
+    }
+    if (next.workerPriority === undefined && old.workerDefault !== undefined) {
+      next.workerPriority = typeof old.workerDefault === "string" ? [old.workerDefault] : old.workerDefault;
+    }
+    delete next.workerDefault;
   }
-  const { workerDefault, ...rest } = old;
-  const next: Record<string, any> = { ...rest, profiles };
-  if (!Array.isArray(rest.workerPriority) && typeof workerDefault === "string" && workerDefault) {
-    next.workerPriority = [workerDefault];
+  const slots = next.slots === undefined ? { A: "factory-default" } : next.slots;
+  const rawProfiles = next.profiles === undefined ? { "factory-default": defaultProfile } : next.profiles;
+  const profiles = rawProfiles && typeof rawProfiles === "object" && !Array.isArray(rawProfiles)
+    ? Object.fromEntries(Object.entries(rawProfiles).map(([name, value]) => {
+      const parsed = profileSchema.safeParse(value);
+      return [name, parsed.success ? parsed.data : value];
+    }))
+    : rawProfiles;
+  const priorities = prioritiesFromSlots(slots && typeof slots === "object" && !Array.isArray(slots) ? slots : {}, profiles);
+  if (next.steerPriority === undefined) next.steerPriority = priorities.steerPriority;
+  if (next.advisorPriority === undefined) next.advisorPriority = priorities.advisorPriority;
+  if (next.routingStrategy === undefined) next.routingStrategy = "efficiency";
+  if (next.legacySnapshot == null) {
+    next.legacySnapshot = { version: fromVersion, values: JSON.parse(JSON.stringify(values)) };
   }
   return next;
 }
@@ -47,18 +70,38 @@ const defaultProfile = {
   sensitive: false,
 };
 
-// Factory configuration subset owned by the plugin: steer slots (slot order =
-// priority), prepare list, start steer, prioritized worker list, the profiles
-// they reference, and the optional host setup (GitHub owner, checkout root).
-// v1 -> v2: workerDefault becomes workerPriority, profiles gain
-// advisor/sensitive (see migrateFactoryConfig above).
-// Defaults mirror the single-steer example config; {} parses into this
-// document. Host fields default to null, which means unset: both are
-// required to form the complete configuration.
+const legacyProfileSchema = z.object({
+  provider: z.string().min(1),
+  model: z.string().min(1),
+  thinking: z.string().nullable().optional(),
+  mode: z.string().nullable().optional(),
+  advisor: z.boolean().optional(),
+  sensitive: z.boolean().optional(),
+}).passthrough();
+
+const legacySnapshotSchema = z.object({
+  version: z.number().int().min(0).max(2),
+  values: z.object({
+    profiles: z.record(z.string(), legacyProfileSchema).optional(),
+    slots: z.record(z.string(), z.string()).optional(),
+    prepare: z.array(z.string()).optional(),
+    initialActive: z.string().optional(),
+    workerDefault: z.string().optional(),
+    workerPriority: z.array(z.string()).optional(),
+    quota: z.object({
+      exhaustedPct: z.number().optional(),
+      warnPct: z.number().optional(),
+    }).passthrough().optional(),
+    githubOwner: z.string().nullable().optional(),
+    checkoutRoot: z.string().nullable().optional(),
+  }).passthrough(),
+});
+
+// Slots and their activation fields remain authoritative until runtime callers migrate.
 export const factoryConfigSettings = defineSettings({
   id: "factory-config",
   scope: "host",
-  version: 2,
+  version: 3,
   migrate: (values, fromVersion) => migrateFactoryConfig(values, fromVersion),
   schema: z.object({
     profiles: z.record(z.string(), profileSchema).default({ "factory-default": defaultProfile }),
@@ -66,12 +109,23 @@ export const factoryConfigSettings = defineSettings({
     prepare: z.array(z.string()).default(["A"]),
     initialActive: z.string().default("A"),
     workerPriority: z.array(z.string()).min(1).default(["factory-default"]),
+    steerPriority: z.array(z.string().min(1)).optional(),
+    advisorPriority: z.array(z.string().min(1)).optional(),
+    routingStrategy: z.enum(["efficiency", "balanced", "preference"]).default("efficiency"),
+    legacySnapshot: legacySnapshotSchema.nullable().default(null),
     quota: z.object({
       exhaustedPct: z.number().min(0).max(100).default(QUOTA_DEFAULTS.exhaustedPct),
       warnPct: z.number().min(0).max(100).default(QUOTA_DEFAULTS.warnPct),
     }).default({ exhaustedPct: QUOTA_DEFAULTS.exhaustedPct, warnPct: QUOTA_DEFAULTS.warnPct }),
     githubOwner: z.string().nullable().default(null),
     checkoutRoot: z.string().nullable().default(null),
+  }).transform((values) => {
+    const derived = prioritiesFromSlots(values.slots, values.profiles);
+    return {
+      ...values,
+      steerPriority: values.steerPriority ?? derived.steerPriority,
+      advisorPriority: values.advisorPriority ?? derived.advisorPriority,
+    };
   }),
 });
 

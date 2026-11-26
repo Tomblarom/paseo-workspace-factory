@@ -36,11 +36,13 @@ test("steer help covers add with runnable examples", () => {
   }
 });
 
-test("steerAddFingerprint is stable and sensitive to slot, profile, model and account", () => {
-  const base = { scope: "Test/scope", repo: "Test/scope", workspaceId: "wks_1", slot: "C", profile: "gamma", provider: "fake-x", model: "x2", thinking: null, mode: null, account: "acc-1" };
+test("steerAddFingerprint binds the selected route, generation and revision", () => {
+  const base = { scope: "Test/scope", repo: "Test/scope", workspaceId: "wks_1", slot: "C", profile: "gamma", provider: "fake-x", model: "x2", thinking: null, mode: null, advisor: false, generation: "gen1", epoch: 1, settingsRevision: "rev1" };
   assert.equal(steerAddFingerprint(base), steerAddFingerprint({ ...base }));
   assert.notEqual(steerAddFingerprint(base), steerAddFingerprint({ ...base, slot: "D" }));
   assert.notEqual(steerAddFingerprint(base), steerAddFingerprint({ ...base, profile: "delta" }));
   assert.notEqual(steerAddFingerprint(base), steerAddFingerprint({ ...base, model: "x9" }));
-  assert.notEqual(steerAddFingerprint(base), steerAddFingerprint({ ...base, account: "acc-2" }));
+  assert.notEqual(steerAddFingerprint(base), steerAddFingerprint({ ...base, generation: "gen2" }));
+  assert.notEqual(steerAddFingerprint(base), steerAddFingerprint({ ...base, epoch: 2 }));
+  assert.notEqual(steerAddFingerprint(base), steerAddFingerprint({ ...base, settingsRevision: "rev2" }));
 });

@@ -1,18 +1,19 @@
-import { readSteerAction } from "./core/steer-action.mjs";
+import { readStagedSteerBrief, readSteerAction } from "./core/steer-action.mjs";
 // Host-wide steer-state feed (docs/design/steer-menu.md, step 1): one small
 // projection per known steer tab for the persistent composer pill (the pill
 // itself subscribes in step 2). Read-only: local metadata reads plus the
 // reused quota sampling, no timeline fetches, no provider calls, no
 // per-agent polling for the face.
 import { AGENTS_KEY, currentFreshHint } from "./core/agent-state.mjs";
-import { isAdvisorSlot } from "./core/config.mjs";
+import { isAdvisorSteer } from "./core/config.mjs";
 import { liveSlotHolders, resolveSteerHolders } from "./core/discovery.mjs";
-import { METADATA_KEY, readPaseoState } from "./core/paseo.mjs";
+import { scopeHolder } from "./core/scope-guard.mjs";
+import { METADATA_KEY, parentOf, readPaseoState } from "./core/paseo.mjs";
 import { QUOTA_DEFAULTS } from "./core/quota.mjs";
 import { listScopes } from "./core/scope.mjs";
-import { resolveContinuations } from "./core/zerosub.mjs";
 import { getQuotaSampledAt, getQuotaSnapshot } from "./quota.js";
 import { resolveZerosub, type ZerosubState } from "./zerosub-runtime.js";
+import { applySteerTitleLabels } from "./steer-title-labels.js";
 import {
   CLEANUP_DEFAULTS,
   cleanupIdentity,
@@ -20,6 +21,7 @@ import {
   type CleanupSettings,
 } from "../shared/idle-cleanup.js";
 import { agentContextInputs } from "./agent-context.js";
+import { openTurnOf } from "../shared/auto-checkpoint.js";
 import { CACHE_CHECK_INTERVAL_MS } from "../shared/cache-profiles.js";
 import { projectSteer, type SteerMembership } from "../shared/steer-state.js";
 import {
@@ -33,16 +35,6 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
-}
-
-/** Advisor flag for the row; unknown config means not advisor. */
-function isAdvisorSlotOf(config: unknown, slot: string): boolean {
-  if (!config || typeof config !== "object") return false;
-  try {
-    return (isAdvisorSlot as unknown as (c: unknown, s: string) => boolean)(config, slot);
-  } catch {
-    return false;
-  }
 }
 
 function finiteNumber(value: unknown): number | null {
@@ -68,6 +60,7 @@ export interface SteerFeedRow {
   liveStatus: string | null;
   advisor: boolean;
   active: boolean;
+  activationEpoch: number | null;
   permissionNeeded: boolean;
   /** A brief is staged for this tab (initialize it from the steer menu). */
   stagedBrief: boolean;
@@ -122,7 +115,9 @@ export interface SteerFeedDeps {
 
 interface ScopeReads {
   mainId: string;
+  epoch: number | null;
   activeSteer: string | null;
+  activeAgentId: string | null;
   retired: boolean;
   previousSteer: string | null;
   entries: Record<string, unknown>;
@@ -135,7 +130,9 @@ function scopeReads(scope: any): ScopeReads | null {
   if (typeof mainId !== "string" || !wsf) return null;
   return {
     mainId,
+    epoch: typeof wsf.epoch === "number" && Number.isInteger(wsf.epoch) && wsf.epoch >= 0 ? wsf.epoch : null,
     activeSteer: typeof wsf.activeSteer === "string" ? wsf.activeSteer : null,
+    activeAgentId: typeof wsf.activeAgentId === "string" ? wsf.activeAgentId : null,
     retired: wsf.retired === true,
     previousSteer: typeof wsf.previousSteer === "string" ? wsf.previousSteer : null,
     entries: asRecord(meta[AGENTS_KEY]) ?? {},
@@ -144,11 +141,9 @@ function scopeReads(scope: any): ScopeReads | null {
 
 /**
  * Pure assembly of one feed event from an already-read daemon state (see
- * readPaseoState). Counts every known steer tab: live holders (ZeroSub
- * continuations inherit the origin's labels, missing keys only) plus
- * superseded origins, which keep a Retired row while their tab exists.
- * Continuation and same-slot supersession reuse the discovery rules;
- * switches stay empty because the face never fetches timelines.
+ * readPaseoState). One row per live titled steer tab (ZeroSub continuations
+ * inherit the origin's labels, missing keys only), resolved with the
+ * discovery rules; switches stay empty because the face never fetches timelines.
  */
 export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerFeedRow[] {
   const nowMs = typeof deps.nowMs === "number" ? deps.nowMs : Date.now();
@@ -157,16 +152,12 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
   const scopes = listScopes(paseoState);
   const byId = new Map<string, any>();
   for (const scope of scopes) byId.set(scope.id, scope);
-  const resolution = resolveContinuations(agents, []) as unknown as {
-    liveFor: Record<string, string>;
-  };
-  const liveFor: Record<string, string> = resolution?.liveFor ?? {};
   const quota = (deps.config as Record<string, any> | null)?.quota ?? {};
   const warnPct = finiteNumber(quota.warnPct) ?? QUOTA_DEFAULTS.warnPct;
   const exhaustedPct = finiteNumber(quota.exhaustedPct) ?? QUOTA_DEFAULTS.exhaustedPct;
   const queuedWakeFor = deps.queuedWakeFor ?? (() => false);
 
-  // Candidate tabs per scope: resolved holders plus superseded origins as retired rows.
+  // Candidate tabs per scope: live resolved holders.
   const rawByScope = new Map<string, any[]>();
   for (const agent of agents) {
     if (!agent || typeof agent.id !== "string" || !agent.id) continue;
@@ -180,17 +171,12 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
   for (const [scopeId, list] of rawByScope) {
     const group: any[] = [];
     byScope.set(scopeId, group);
+    // Only live titled holders: archived tabs and superseded continuation
+    // origins are no steers any more and get no row.
     for (const agent of resolveSteerHolders(list, agents, [])) {
-      if (!agent || typeof agent.id !== "string" || !agent.id || candidates.has(agent.id)) continue;
+      if (!agent || typeof agent.id !== "string" || !agent.id || agent.archivedAt || candidates.has(agent.id)) continue;
       candidates.set(agent.id, agent);
       group.push(agent);
-    }
-    for (const agent of list) {
-      if (liveFor[agent.id] && !candidates.has(agent.id)) {
-        const origin = { ...agent, superseded: true };
-        candidates.set(agent.id, origin);
-        group.push(origin);
-      }
     }
   }
 
@@ -203,16 +189,12 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
     const slot = typeof identity.slot === "string" && identity.slot ? identity.slot : null;
     const contenders = liveSlotHolders(byScope.get(identity.scopeId) ?? [], slot);
     const ambiguous = contenders.length > 1;
-    const uniqueHolder =
-      contenders.length === 1 && typeof contenders[0].id === "string" ? contenders[0].id : null;
-    const superseded =
-      agent.superseded === true && uniqueHolder !== null && uniqueHolder !== agent.id;
     const membership: SteerMembership = ambiguous ? "ambiguous" : "resolved";
     const entry = asRecord(reads.entries[agent.id]);
     const status = typeof agent.status === "string" ? agent.status : null;
     const permissionNeeded =
       Array.isArray(agent.pendingPermissions) && agent.pendingPermissions.length > 0;
-    const openTurn = entry?.openTurnId !== null && entry?.openTurnId !== undefined;
+    const openTurn = status !== "closed" && openTurnOf(entry) !== null;
     const confirmedRaw = asRecord(entry?.settingsConfirmed);
     const confirmed = confirmedRaw &&
         (typeof confirmedRaw.provider === "string" || typeof confirmedRaw.model === "string")
@@ -232,12 +214,11 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
       : null;
     const projection = projectSteer({
       membership,
-      scopeRetired: reads.retired,
+      scopeRetired: reads.retired || Boolean(agent.archivedAt),
       replacedHolder:
         reads.previousSteer !== null &&
         !/^[A-Z]$/.test(reads.previousSteer) &&
         reads.previousSteer === agent.id,
-      superseded,
       liveStatus: status,
       openTurn,
       permissionNeeded,
@@ -266,6 +247,24 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
       liveStatus: status,
       openTurn,
     });
+    let activeHolder: string | null = null;
+    if (slot === reads.activeSteer) {
+      try {
+        activeHolder = (scopeHolder as any)({ agents, workspaceId: reads.mainId, scopeId: identity.scopeId,
+          slot }).id;
+      } catch {
+        // Ambiguous or absent membership has no active tab.
+      }
+    }
+    const action = readSteerAction(entry);
+    const active = agent.id === activeHolder;
+    let activationEpoch: number | null = null;
+    if (!reads.retired && reads.epoch !== null && !agent.background && !parentOf(agent) && agent.workspaceId === reads.mainId) {
+      if (reads.activeSteer && slot !== reads.activeSteer) activationEpoch = reads.epoch;
+      if (active && action?.kind === "activate" && action.epoch === reads.epoch && action.phase !== "done" && reads.epoch > 0) {
+        activationEpoch = reads.epoch - 1;
+      }
+    }
     rows.push({
       scopeId: identity.scopeId,
       workspaceId: reads.mainId,
@@ -275,12 +274,12 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
       provider,
       model,
       liveStatus: status,
-      advisor: slot !== null && isAdvisorSlotOf(deps.config, slot),
-      active: slot !== null && slot === reads.activeSteer,
+      advisor: slot !== null && isAdvisorSteer(deps.config, agent.labels, agent.metadata),
+      active,
+      activationEpoch,
       permissionNeeded,
-      stagedBrief:
-        readSteerAction(entry)?.phase === "staged",
-      successor: liveFor[agent.id] ?? (superseded ? uniqueHolder : null),
+      stagedBrief: readStagedSteerBrief(entry) !== null,
+      successor: null,
       state: projection.state,
       warmth: projection.warmth,
       tokens: projection.tokens,
@@ -334,7 +333,9 @@ async function pushSteerFeed(): Promise<void> {
     const supervision = deps.readSupervision ? await deps.readSupervision().catch(() => null) : null;
     const quotaSampleMinutes = finiteNumber(supervision?.quotaSampleMinutes) ?? undefined;
     const zerosub = deps.getZerosub ? await resolveZerosub({ getZerosub: deps.getZerosub }) : null;
-    const rows = collectSteerStates(await readPaseoState(paseo), {
+    const paseoState = await readPaseoState(paseo);
+    if (config) await applySteerTitleLabels(paseoState, { config });
+    const rows = collectSteerStates(paseoState, {
       settings,
       config,
       zerosub,

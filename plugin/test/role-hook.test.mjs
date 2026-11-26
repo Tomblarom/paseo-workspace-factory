@@ -80,7 +80,7 @@ function openRequest(overrides = {}) {
     purpose: 'interactive',
     title: null,
     background: false,
-    labels: { 'wsf.role': 'steer' },
+    labels: { 'wsf.role': 'steer', 'wsf.slot': 'A' },
     metadata: {},
     appendSystemPrompt: [],
     tools: [],
@@ -109,6 +109,16 @@ test('advisor slot gets the advisor text and role in the log line', async (t) =>
   assert.equal(lines.length, 1);
   assert.match(lines[0], /role advisor$/);
   assert.ok(lines[0].startsWith('[factory] role prompt '));
+});
+
+test('a labelled continuation inherits the archived advisor role before its first open', async (t) => {
+  const { open, paseo } = setup(t);
+  const labels = { 'wsf.role': 'steer', 'wsf.scope': 'example/repo', 'wsf.slot': 'A' };
+  const origin = { id: 'origin', workspaceId: 'ws', archivedAt: '2026-11-26', labels, metadata: { 'wsf.steer-role': 'advisor' } };
+  const child = { id: 'child', workspaceId: 'ws', labels: { ...labels, 'zerosub.continued-from': 'origin' } };
+  paseo.agents = { list: async () => ({ entries: [child, origin], pageInfo: { hasMore: false } }) };
+  const result = await open({ request: openRequest({ agentId: child.id, workspaceId: 'ws', labels: child.labels }) }, { paseo });
+  assert.deepEqual(result.appendSystemPrompt, [ADVISOR_ROLE_PROMPT]);
 });
 
 test('interactive worker open merges env limits without overwriting and logs one line', async (t) => {

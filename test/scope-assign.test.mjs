@@ -42,6 +42,7 @@ function discoveryOf(world) {
 function fakeClient(world) {
   const findWs = (id) => world.workspaces.find((w) => w.id === id) ?? null;
   const agentHandle = (id) => ({
+    refresh: async () => ({ agent: structuredClone(world.agents.find((agent) => agent.id === id) ?? null) }),
     send: async (text) => {
       if (world.hooks.sendFails) throw new Error('agent unreachable');
       world.calls.push(['agent.send', id, text]);

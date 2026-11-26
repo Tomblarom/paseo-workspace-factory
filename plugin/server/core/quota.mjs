@@ -79,6 +79,16 @@ export function profilePool(profile) {
     : (typeof profile?.provider === 'string' ? profile.provider : '');
 }
 
+/** A live provider/model tuple takes precedence over creation preferences. */
+export function liveAgentPool(agent, config) {
+  const provider = profileFamily(agent);
+  if (!provider) return '';
+  const pools = new Set(Object.values(config?.profiles ?? {})
+    .filter((profile) => profileFamily(profile) === provider && profile.model === agent.model)
+    .map(profilePool));
+  return pools.size === 1 ? [...pools][0] : provider;
+}
+
 /** ZeroSub family of a profile (its lower-cased provider, e.g. 'claude'). */
 export function profileFamily(profile) {
   return typeof profile?.provider === 'string' ? profile.provider.toLowerCase() : '';
@@ -103,6 +113,9 @@ const MODEL_FAMILY_TOKENS = ['gemini', 'claude', 'gpt', 'opus', 'sonnet', 'haiku
 export function windowAppliesToModel(window, model) {
   const wanted = String(model ?? '').toLowerCase();
   if (!wanted) return true;
+  if (Array.isArray(window?.models) && window.models.length) {
+    return window.models.some((name) => String(name).toLowerCase() === wanted);
+  }
   const text = `${window?.id ?? ''} ${window?.label ?? ''} ${window?.shortLabel ?? ''}`.toLowerCase();
   const named = MODEL_FAMILY_TOKENS.filter((token) => text.includes(token));
   return !named.length || named.some((token) => wanted.includes(token));
@@ -119,7 +132,7 @@ export function windowAppliesToModel(window, model) {
  */
 export function freshMaxUsedPct(account, now = Date.now(), model = null) {
   const windows = Array.isArray(account?.windows) ? account.windows.filter((window) => windowAppliesToModel(window, model)) : null;
-  if (!windows || !windows.length) {
+  if (!windows || !account.windows.length) {
     return Number.isFinite(account?.maxUsedPct) ? account.maxUsedPct : null;
   }
   const pcts = [];
@@ -216,13 +229,13 @@ function entries(snapshot) {
 
 export function quotaEntry(snapshot, pool) {
   const map = entries(snapshot);
-  const value = map[pool];
+  const value = Object.hasOwn(map, pool) ? map[pool] : null;
   if (value && typeof value === 'object') return value;
   return null;
 }
 
 export function quotaPct(entry) {
-  const pct = Number(entry?.sessionPct ?? entry?.usedPct);
+  const pct = Number(entry?.sessionPct ?? entry?.usedPct ?? NaN);
   return Number.isFinite(pct) ? pct : null;
 }
 
@@ -254,17 +267,22 @@ export function preferredQuotaPool(config, currentPool, snapshot = null) {
   return available ?? pools[0];
 }
 
-export function formatQuotaLine(config, snapshot, { currentPool = null, warnPct = QUOTA_DEFAULTS.warnPct, zerosub = null, now = Date.now() } = {}) {
+export function formatQuotaLine(config, snapshot, { agent = null, currentPool = null, warnPct = QUOTA_DEFAULTS.warnPct, zerosub = null, now = Date.now() } = {}) {
   if (!snapshot && !zerosub) return null;
-  const pool = currentPool || quotaPools(config, { includeAdvisors: false })[0];
+  const pool = agent ? liveAgentPool(agent, config) : currentPool || quotaPools(config, { includeAdvisors: false })[0];
   if (!pool) return null;
-  const accounts = zerosub ? familyAccounts(zerosub, pool) : [];
-  if (accounts.length) {
-    const pcts = accounts.map((account) => freshMaxUsedPct(account, now)).filter((pct) => pct !== null);
-    const worst = pcts.length ? Math.max(...pcts) : null;
-    if (worst === null || worst < warnPct) return null;
-    const best = bestFamilyAccount(zerosub, pool, { now });
-    return `Quota: ${pool} ${worst}% (5h) — prefer ${best ? best.id : 'none'}`;
+  // During a move, ZeroSub reports the still-running account as pending.
+  const accountId = agent?.id && (zerosub?.pending?.[agent.id] ?? zerosub?.agentAccount?.[agent.id]);
+  if (accountId) {
+    const family = profileFamily(agent);
+    const account = familyAccounts(zerosub, family).find((entry) => entry.id === accountId);
+    const model = agent.model ?? null;
+    const pct = freshMaxUsedPct(account, now, model);
+    if (pct === null || pct < warnPct) return null;
+    const best = bestFamilyAccount(zerosub, family, { now, model, exhaustedPct: config?.quota?.exhaustedPct });
+    const bestPct = freshMaxUsedPct(best, now, model);
+    const preference = bestPct !== null && bestPct < pct ? ` — prefer ${best.id}` : '';
+    return `Quota: ${pool} (${accountId}) ${pct}% used${preference}`;
   }
   if (!snapshot) return null;
   const entry = quotaEntry(snapshot, pool);
@@ -316,24 +334,30 @@ function usagePoolOf(record) {
 
 /**
  * Converts the JSON emitted by `paseo usage --json` to { [pool]: quota }.
- * Provider/source names are intentionally treated as opaque; malformed records
- * are skipped rather than making usage sampling fatal.
+ * Each source can emit one report per account. Omit a pool when multiple
+ * reports share its key, including reports without usable metrics, because
+ * the pool key alone cannot identify the relevant account.
  */
 export function parseUsageJson(input) {
-  const snapshot = {};
+  const pools = new Map();
   for (const record of usageRecords(input)) {
-    const { session, weekly } = selectUsageWindows(findReport(record));
+    const pool = usagePoolOf(record);
+    const report = findReport(record);
+    if (!pool || !report || typeof report !== 'object') continue;
+    if (pools.has(pool)) {
+      pools.set(pool, null);
+      continue;
+    }
+    const { session, weekly } = selectUsageWindows(report);
     const pct = windowPctOf(session);
     const weeklyPct = windowPctOf(weekly);
-    const pool = usagePoolOf(record);
-    if (!pool || pct === null) continue;
-    snapshot[pool] = {
+    pools.set(pool, pct === null ? null : {
       sessionPct: pct,
       ...(session?.resetsAt ? { resetsAt: session.resetsAt } : {}),
       ...(weeklyPct !== null ? { weeklyPct } : {}),
-    };
+    });
   }
-  return snapshot;
+  return Object.fromEntries([...pools].filter(([, entry]) => entry !== null));
 }
 
 export const parseUsageSnapshot = parseUsageJson;

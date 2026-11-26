@@ -9,7 +9,7 @@ import { planHash } from '../plugin/server/core/planner.mjs';
 import { createRunner } from '../plugin/server/core/factory.mjs';
 import { applyPlans, createExecutors, createAuthorization, memoryProgress, storeAuthorization, fileProgress, withApplyLock, ApplyRefused } from '../plugin/server/core/apply.mjs';
 import { verifyCleanup, performCleanup } from './integration-cleanup.mjs';
-import { switchSteer, steerStatus, SwitchRefused, writeCheckpoint, CHECKPOINT_KEY, parseCheckpointBlock, buildHandoff } from '../plugin/server/core/steer.mjs';
+import { switchSteer as switchSteerCore, steerStatus, SwitchRefused, writeCheckpoint, CHECKPOINT_KEY, parseCheckpointBlock, buildHandoff } from '../plugin/server/core/steer.mjs';
 import { configureRuntime, daemonHost } from '../plugin/server/core/runtime.mjs';
 import { acquireLock, withLock, LockBusy } from '../plugin/server/core/lock.mjs';
 import { mkdtempSync, writeFileSync as writeFile, rmSync, mkdirSync, symlinkSync, renameSync, lstatSync, realpathSync, readFileSync, readdirSync, closeSync, openSync } from 'node:fs';
@@ -34,6 +34,8 @@ const CONFIG = {
   steers: { slots: { A: 'sol', B: 'muse', C: 'agy' }, prepare: ['A', 'B', 'C'], initialActive: 'A' },
   workers: { defaultProfile: 'muse' },
 };
+const switchConfig = { ...CONFIG, profiles: { ...CONFIG.profiles, muse: { ...CONFIG.profiles.muse, sensitive: false } } };
+const switchSteer = (options) => switchSteerCore({ config: switchConfig, ...options });
 
 const PROVIDERS = [
   { provider: 'codex', enabled: true, status: 'ready', models: [{ id: 'gpt-6.2-sol', thinkingOptions: [{ id: 'high' }, { id: 'low' }] }], modes: [{ id: 'auto' }, { id: 'full-access' }] },
@@ -45,7 +47,7 @@ const PROVIDERS = [
 const api = (fullName, extra = {}) => {
   const [owner, name] = fullName.split('/');
   return {
-    full_name: fullName, name, owner: { login: owner }, fork: false, archived: false, default_branch: 'main',
+    full_name: fullName, name, owner: { login: owner }, fork: false, archived: false, private: false, default_branch: 'main',
     clone_url: `https://github.com/${fullName}.git`, ssh_url: `git@github.com:${fullName}.git`, html_url: `https://github.com/${fullName}`, ...extra,
   };
 };
@@ -180,7 +182,7 @@ function fakeClient(world) {
     const labels = { ...opts.labels };
     if (opts.parent) labels[PARENT_LABEL] = String(opts.parent);
     if (world.hooks.injectParent) labels[PARENT_LABEL] = world.hooks.injectParent;
-    const agent = addAgent(world, { provider, model, title: opts.title, workspaceId: opts.workspaceId, labels, currentModeId: opts.config.modeId, cwd: findWs(opts.workspaceId).workspaceDirectory });
+    const agent = addAgent(world, { provider, model, title: opts.title, workspaceId: opts.workspaceId, labels, metadata: opts.metadata, currentModeId: opts.config.modeId, cwd: findWs(opts.workspaceId).workspaceDirectory });
     if (opts.idempotencyKey) {
       world.receipts.set(opts.idempotencyKey, agent.id);
       world.fingerprints.set(opts.idempotencyKey, fingerprint);
@@ -281,17 +283,17 @@ async function plan(world, entries = [FIRMWARE], options = {}) {
 }
 
 function executorsFor(world) {
-  return createExecutors({ client: fakeClient(world), paseoCli: fakePaseoCli(world) });
+  return createExecutors({ client: fakeClient(world), paseoCli: fakePaseoCli(world), lock: testLock });
 }
 
-async function authorize(world, entries = [FIRMWARE], { config = CONFIG, adopt = {}, slots } = {}) {
-  const plans = await runnerFor(world, config).runPlans(entries, { adopt, ...(slots ? { slots } : {}) });
-  return createAuthorization(plans, config, { entries, adopt, ...(slots ? { slots } : {}) });
+async function authorize(world, entries = [FIRMWARE], { config = CONFIG, adopt = {}, adoptWorker = {}, slots, legacyEnrollment = false, enrollmentVersion } = {}) {
+  const plans = await runnerFor(world, config).runPlans(entries, { adopt, adoptWorker, slots, legacyEnrollment, enrollmentVersion });
+  return createAuthorization(plans, config, { entries, adopt, adoptWorker, slots });
 }
 
 /** Dry-run + confirm + apply; `tamper` rewrites what rediscovery observes. */
-async function apply(world, entries = [FIRMWARE], { config = CONFIG, adopt = {}, slots, journal, authorization, progress, tamper, execute } = {}) {
-  const auth = authorization ?? (await authorize(world, entries, { config, adopt, ...(slots ? { slots } : {}) }));
+async function apply(world, entries = [FIRMWARE], { config = CONFIG, adopt = {}, adoptWorker = {}, slots, legacyEnrollment, journal, authorization, progress, tamper, execute } = {}) {
+  const auth = authorization ?? (await authorize(world, entries, { config, adopt, adoptWorker, slots, legacyEnrollment }));
   const runner = runnerFor(world, config);
   return applyPlans({
     authorization: auth, config, confirm: auth.hash, progress, journal, lookupReceipt: fakeLookup(world),
@@ -421,12 +423,12 @@ test('only origin == fork is reusable; fork under another remote or upstream clo
 
 // ---------------------------------------------------------------- planning (K13: enrollment + repair)
 
-test('enrollment adopts the Main workspace and plans three parent-free steers', async () => {
+test('default enrollment plans one parent-free coordinator for the Main workspace', async () => {
   const world = makeWorld();
   const ws = githubMain(world);
   const [p] = await plan(world);
   assert.equal(p.status, 'pending');
-  assert.deepEqual(keys(p), ['workspace.main.adopt', 'steer.A', 'steer.B', 'steer.C']);
+  assert.deepEqual(keys(p), ['steer.A', 'workspace.main.adopt']);
   const steer = p.ops.find((op) => op.key === 'steer.A').params;
   assert.equal(steer.title, 'Steer A');
   assert.equal(steer.workspaceId, ws.id);
@@ -490,7 +492,7 @@ test('existing Main workspace without factory metadata is adopted, not recreated
   world.checkouts['/p/example-repo'] = { remotes: { origin: `https://github.com/${FIRMWARE}`, upstream: `https://github.com/${FW_PARENT}` } };
   const ws = addWorkspace(world, { path: '/p/example-repo', title: 'Main' });
   const [p] = await plan(world);
-  assert.equal(p.ops[0].kind, 'paseo.workspace.metadata');
+  assert.equal(p.ops.find((op) => op.key === 'workspace.main.adopt').kind, 'paseo.workspace.metadata');
   assert.equal(p.ops.find((op) => op.key === 'steer.A').params.workspaceId, ws.id);
 });
 
@@ -544,12 +546,12 @@ test('invalid or ambiguous adoption is refused', async () => {
   // wrong id
   let { world } = legacyWorld([{ title: 'Steer A' }]);
   let [p] = await plan(world, [FIRMWARE], { adopt: { '*': { A: 'agent-999' } } });
-  assert.match(p.conflicts.find((c) => c.key === 'steer.A').reason, /does not name/);
+  assert.match(p.conflicts.find((c) => c.key === 'steer.A').reason, /must name a live foreground tab in the main workspace/);
   // two candidates, even when one is confirmed
   ({ world } = legacyWorld([{ title: 'Steer A' }, { title: 'Steer A' }]));
   const first = world.agents[0].id;
   [p] = await plan(world, [FIRMWARE], { adopt: { '*': { A: first } } });
-  assert.match(p.conflicts.find((c) => c.key === 'steer.A').reason, /Several unlabelled/);
+  assert.match(p.conflicts.find((c) => c.key === 'steer.A').reason, /several live agents/);
   // parented candidate
   ({ world } = legacyWorld([{ title: 'Steer A', labels: { [PARENT_LABEL]: 'main' } }]));
   [p] = await plan(world, [FIRMWARE], { adopt: { '*': { A: world.agents[0].id } } });
@@ -562,7 +564,8 @@ test('invalid or ambiguous adoption is refused', async () => {
   // an agent titled "Steer A" that already has a different factory role is not a candidate
   ({ world } = legacyWorld([{ title: 'Steer A', labels: { [LABEL.role]: 'worker' } }]));
   [p] = await plan(world);
-  assert.equal(p.ops.find((o) => o.key === 'steer.A').kind, 'paseo.agent.create');
+  assert.ok(!p.ops.some((o) => o.kind === 'paseo.agent.adopt' || o.kind === 'paseo.agent.create'));
+  assert.match(p.conflicts.find((c) => c.key === 'workspace.main').reason, /no eligible holder/);
 });
 
 test('labelled steer with a changed model configuration is reused silently (K13)', async () => {
@@ -578,16 +581,16 @@ test('steer outside the main workspace and duplicate slot labels are conflicts',
   const world = makeWorld();
   const { steers } = provisioned(world);
   steers.A.workspaceId = 'wks_elsewhere';
-  addAgent(world, { title: 'Steer C copy', provider: 'muse', model: 'm', workspaceId: steers.C.workspaceId, labels: { ...steers.C.labels } });
+  addAgent(world, { title: 'Steer C · copy', provider: 'muse', model: 'm', workspaceId: steers.C.workspaceId, labels: { ...steers.C.labels } });
   const [p] = await plan(world);
-  assert.deepEqual(p.conflicts.map((c) => c.key).sort(), ['steer.A', 'steer.C']);
+  assert.deepEqual(p.conflicts.map((c) => c.key).sort(), ['steer.C', 'workspace.main']);
 });
 
 test('archived steer slot is recreated under a new idempotency generation', async () => {
   const world = makeWorld();
   const { steers } = provisioned(world);
   steers.B.archivedAt = '2026-11-01';
-  const [p] = await plan(world);
+  const [p] = await plan(world, [FIRMWARE], { slots: ['A', 'B', 'C'], legacyEnrollment: true });
   assert.deepEqual(keys(p), ['steer.B']);
   assert.match(p.ops[0].params.idempotencyKey, /:steer:B:g2:[0-9a-f]{10}$/);
 });
@@ -596,7 +599,7 @@ test('profiles are validated against the live provider catalog per slot', async 
   const world = makeWorld();
   githubMain(world);
   world.providers.find((e) => e.provider === 'muse').modes = [{ id: 'onRequest' }];
-  const [p] = await plan(world);
+  const [p] = await plan(world, [FIRMWARE], { slots: ['A', 'B', 'C'], legacyEnrollment: true });
   assert.deepEqual(p.conflicts.map((c) => c.key), [], 'slot B falls back to the next startable profile instead of conflicting');
   assert.ok(p.notes.some((n) => /Steer B: profile "muse" is not startable.*mode "allowAll" is not available.*using fallback "agy"/.test(n)), `fallback note names the reason and the fallback: ${JSON.stringify(p.notes)}`);
   assert.equal(p.ops.find((o) => o.key === 'steer.B').params.config.provider, 'antigravity/gemini-3.8-flash-high');
@@ -607,7 +610,7 @@ test('steer slots conflict with the tried reasons only when no fallback is start
   const world = makeWorld();
   githubMain(world);
   for (const e of world.providers) e.modes = [];
-  const [p] = await plan(world);
+  const [p] = await plan(world, [FIRMWARE], { slots: ['A', 'B', 'C'], legacyEnrollment: true });
   assert.equal(p.status, 'conflict');
   assert.deepEqual(p.conflicts.map((c) => c.key).sort(), ['steer.A', 'steer.B', 'steer.C']);
   assert.match(p.conflicts.find((c) => c.key === 'steer.B').reason, /Profile "muse" for Steer B is not startable.*no fallback available; tried/);
@@ -678,14 +681,15 @@ test('apply enrolls end to end, verifies parent freedom, and a rerun is a no-op'
   const events = [];
   const { report } = await apply(world, [FIRMWARE], { journal: (e) => events.push(e) });
   assert.equal(report[0].status, 'complete', report[0].error);
-  assert.deepEqual(report[0].executed.map((e) => e.key), ['workspace.main.adopt', 'steer.A', 'steer.B', 'steer.C']);
+  assert.deepEqual(report[0].executed.map((e) => e.key), ['steer.A', 'workspace.main.adopt']);
   const steers = world.agents.filter((a) => a.labels[LABEL.role] === 'steer');
-  assert.equal(steers.length, 3);
+  assert.equal(steers.length, 1);
   assert.ok(steers.every((a) => !(PARENT_LABEL in a.labels)));
   const creates = world.calls.filter((c) => c[0] === 'agent.create').map((c) => c[1]);
   assert.ok(creates.every((o) => o.parent === undefined && o.prompt === undefined && o.idempotencyKey));
   assert.equal(world.workspaces[0].metadata[METADATA_KEY].activeSteer, 'A');
-  assert.equal(events.filter((e) => e.event === 'done').length, 4);
+  assert.equal(world.workspaces[0].metadata[METADATA_KEY].activeAgentId, steers[0].id);
+  assert.equal(events.filter((e) => e.event === 'done').length, 2);
 
   const before = world.calls.length;
   const rerun = await apply(world);
@@ -700,20 +704,22 @@ test('failure mid-way stops the repo; the next run continues with only the missi
   const world = makeWorld();
   githubMain(world);
   world.hooks.failCreate = (opts) => opts.title === 'Steer B';
-  const first = await apply(world);
+  const first = await apply(world, [FIRMWARE], { slots: ['A', 'B', 'C'], legacyEnrollment: true });
   assert.equal(first.report[0].status, 'failed');
   assert.match(first.report[0].error, /Steer B/);
   assert.deepEqual(first.report[0].executed.map((e) => e.key), ['workspace.main.adopt', 'steer.A']);
   delete world.hooks.failCreate;
-  const second = await apply(world);
+  const second = await apply(world, [FIRMWARE], { slots: ['A', 'B', 'C'], legacyEnrollment: true });
   assert.deepEqual(second.report[0].executed.map((e) => e.key), ['steer.B', 'steer.C']);
   assert.equal(world.agents.filter((a) => a.labels[LABEL.slot] === 'A').length, 1, 'no duplicate Steer A');
 });
 
-test('recovery resumes the same confirmed plan with its stored progress', async () => {
+test('recovery resumes the same confirmed legacy default plan with its stored progress', async () => {
   const world = makeWorld();
   githubMain(world);
-  const authorization = await authorize(world);
+  const authorization = await authorize(world, [FIRMWARE], { legacyEnrollment: true });
+  assert.equal(authorization.slots, undefined);
+  assert.equal(authorization.plans[0].enrollment, undefined);
   const progress = memoryProgress();
   world.hooks.failCreate = (opts) => opts.title === 'Steer B';
   const first = await apply(world, [FIRMWARE], { authorization, progress });
@@ -762,6 +768,7 @@ async function applyWithObservedChange(mutate, { prepare } = {}) {
   if (prepare) prepare(world);
   let step = 0;
   const result = await apply(world, [FIRMWARE], {
+    slots: ['A', 'B', 'C'], legacyEnrollment: true,
     tamper: (plans) => {
       if (step++ > 0) mutate(plans[0]);
       return plans;
@@ -828,6 +835,8 @@ test('adopting a legacy steer re-checks the agent before labelling', async () =>
   const ws = addWorkspace(world, { path: '/p/x', title: 'Main' });
   const agent = addAgent(world, { title: 'Steer A', workspaceId: ws.id, labels: { [PARENT_LABEL]: 'late-parent' } });
   await assert.rejects(executorsFor(world)({ kind: 'paseo.agent.adopt', params: { agentId: agent.id, labels: { [LABEL.role]: 'steer' } } }, CONFIG), /has parent late-parent/);
+  const restricted = addAgent(world, { title: 'Steer B', workspaceId: ws.id, provider: 'muse' });
+  await assert.rejects(executorsFor(world)({ kind: 'paseo.agent.adopt', params: { agentId: restricted.id, labels: { [LABEL.role]: 'steer' } } }, CONFIG), /require a public repository/);
   assert.equal(world.calls.filter((c) => c[0] === 'paseo').length, 0);
 });
 
@@ -835,12 +844,12 @@ test('apply aborted after the daemon already created a steer resumes without a d
   const world = makeWorld();
   githubMain(world);
   world.hooks.dropResponseAfterCreate = (opts) => opts.title === 'Steer B';
-  const first = await apply(world);
+  const first = await apply(world, [FIRMWARE], { slots: ['A', 'B', 'C'], legacyEnrollment: true });
   assert.equal(first.report[0].status, 'failed');
   assert.match(first.report[0].error, /socket closed/);
   assert.equal(world.agents.filter((a) => a.labels[LABEL.slot] === 'B').length, 1, 'the daemon did create Steer B');
   delete world.hooks.dropResponseAfterCreate;
-  const second = await apply(world);
+  const second = await apply(world, [FIRMWARE], { slots: ['A', 'B', 'C'], legacyEnrollment: true });
   assert.deepEqual(second.report[0].executed.map((e) => e.key), ['steer.C']);
   assert.equal(world.agents.filter((a) => a.labels[LABEL.slot] === 'B').length, 1);
 });
@@ -849,15 +858,15 @@ test('changed config after an aborted create uses a new key instead of a key con
   const world = makeWorld();
   githubMain(world);
   world.hooks.failCreate = (opts) => opts.title === 'Steer B';
-  await apply(world);
+  await apply(world, [FIRMWARE], { slots: ['A', 'B', 'C'], legacyEnrollment: true });
   delete world.hooks.failCreate;
   const config = structuredClone(CONFIG);
   config.profiles.muse.mode = 'onRequest';
-  const [before] = await plan(world);
-  const [after] = await plan(world, [FIRMWARE], { config });
+  const [before] = await plan(world, [FIRMWARE], { slots: ['A', 'B', 'C'], legacyEnrollment: true });
+  const [after] = await plan(world, [FIRMWARE], { config, slots: ['A', 'B', 'C'], legacyEnrollment: true });
   const keyOf = (p) => p.ops.find((o) => o.key === 'steer.B').params.idempotencyKey;
   assert.notEqual(keyOf(before), keyOf(after));
-  const { report } = await apply(world, [FIRMWARE], { config });
+  const { report } = await apply(world, [FIRMWARE], { config, slots: ['A', 'B', 'C'], legacyEnrollment: true });
   assert.equal(report[0].status, 'complete', report[0].error);
 });
 
@@ -940,14 +949,14 @@ test('two simultaneous switches from the same state: exactly one succeeds (and w
 });
 
 // Real processes against a real lock directory. CONTENDER tries once (busy/acquired),
-// HOLDER keeps the lock for the given milliseconds after printing "holding".
+// HOLDER keeps the lock for the given milliseconds, or until stdin closes.
 const LOCK_URL = new URL('../plugin/server/core/lock.mjs', import.meta.url).href;
 function lockProcess(dir, mode, holdMs = 0) {
   const code = `import { acquireLock } from ${JSON.stringify(LOCK_URL)};
 try {
   const held = await acquireLock('workspace-wks_x', { dir: ${JSON.stringify(dir)} });
   console.log(${JSON.stringify(mode)} === 'hold' ? 'holding' : 'acquired');
-  await new Promise((r) => setTimeout(r, ${holdMs}));
+  ${holdMs === null ? 'process.stdin.resume(); await new Promise((resolve) => process.stdin.once("end", resolve));' : `await new Promise((resolve) => setTimeout(resolve, ${holdMs}));`}
   await held.release();
 } catch (e) { console.log(e.name === 'LockBusy' || /held by another/.test(e.message) ? 'busy' : 'error ' + e.message); }`;
   const child = spawn(process.execPath, ['--input-type=module', '-e', code]);
@@ -974,11 +983,15 @@ test('lock: six parallel processes, exactly one enters', async () => {
 
 test('lock: a live holder is never taken over, however long it holds', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'wsf-live-'));
-  const holder = lockProcess(dir, 'hold', 2500);
+  const holder = lockProcess(dir, 'hold', null);
   await holder.holding;
-  for (const wait of [0, 800, 1600]) {
-    await new Promise((r) => setTimeout(r, wait ? 800 : 0));
-    assert.equal(await tryOnce(dir), 'busy', `contender after ~${wait} ms`);
+  try {
+    assert.equal(await tryOnce(dir), 'busy', 'contender while the holder is live');
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+    assert.equal(await tryOnce(dir), 'busy', 'later contender while the holder is still live');
+  } finally {
+    holder.stdin.end();
+    await holder.output;
   }
   assert.equal(await holder.output, 'holding');
   assert.equal(await tryOnce(dir), 'acquired', 'free after the holder released');
@@ -1221,9 +1234,9 @@ test('knownLimits mismatch falls back with the reason instead of failing at appl
   const [p] = await plan(world, [FIRMWARE], { config });
   assert.equal(p.status, 'pending');
   assert.deepEqual(p.conflicts.map((c) => c.key), [], 'slot A falls back while another profile is startable');
-  assert.ok(p.notes.some((n) => /Steer A: profile "sol" is not startable.*Test limit: codex rejects thinking here.*using fallback "muse"/.test(n)), `fallback note names the reason and the fallback: ${JSON.stringify(p.notes)}`);
+  assert.ok(p.notes.some((n) => /Skipped coordinator profile "sol": Test limit: codex rejects thinking here/.test(n)), `fallback note names the reason: ${JSON.stringify(p.notes)}`);
   assert.equal(p.ops.find((o) => o.key === 'steer.A').params.config.provider, 'muse/muse-spark-1.3-contributor');
-  assert.ok(keys(p).includes('steer.B') && keys(p).includes('steer.C'), 'unaffected slots are still planned');
+  assert.deepEqual(keys(p), ['steer.A', 'workspace.main.adopt']);
 });
 
 test('knownLimits entries are validated', () => {
@@ -1290,7 +1303,7 @@ function dyingAt(world, key, { before = false } = {}) {
 async function crashAfterSteerCreate() {
   const world = makeWorld();
   githubMain(world);
-  const authorization = await authorize(world);
+  const authorization = await authorize(world, [FIRMWARE], { legacyEnrollment: true });
   const progress = memoryProgress();
   const first = await apply(world, [FIRMWARE], { authorization, progress, execute: dyingAt(world, 'steer.B') });
   assert.equal(first.report[0].status, 'failed');
@@ -1338,7 +1351,7 @@ test('crash recovery stops safely when the receipt is missing, unknown, failed, 
 test('request that never reached the daemon: an identical-looking foreign steer is not adopted', async () => {
   const world = makeWorld();
   githubMain(world);
-  const authorization = await authorize(world);
+  const authorization = await authorize(world, [FIRMWARE], { legacyEnrollment: true });
   const progress = memoryProgress();
   const first = await apply(world, [FIRMWARE], { authorization, progress, execute: dyingAt(world, 'steer.B', { before: true }) });
   assert.equal(first.report[0].status, 'failed');
@@ -1363,7 +1376,7 @@ test('resume after a crash with a changed configuration is refused before any ca
 async function attemptedWithoutArrival(key) {
   const world = makeWorld();
   githubMain(world);
-  const authorization = await authorize(world);
+  const authorization = await authorize(world, [FIRMWARE], { legacyEnrollment: true });
   const progress = memoryProgress();
   await apply(world, [FIRMWARE], { authorization, progress, execute: dyingAt(world, key, { before: true }) });
   assert.ok(progress.load().attempted.includes(`${FIRMWARE}#${key}`));
@@ -1430,7 +1443,7 @@ test('P0.1 progress without a prior attempt never adopts; agents are reconciled 
   // no attempt recorded: the run executes normally and never touches receipts
   const world = makeWorld();
   githubMain(world);
-  const authorization = await authorize(world);
+  const authorization = await authorize(world, [FIRMWARE], { legacyEnrollment: true });
   const progress = memoryProgress({ hash: authorization.hash, started: true, results: {}, attempted: [] });
   const resumed = await apply(world, [FIRMWARE], { authorization, progress });
   assert.equal(resumed.report[0].status, 'complete', resumed.report[0].error);
@@ -1439,7 +1452,7 @@ test('P0.1 progress without a prior attempt never adopts; agents are reconciled 
   // steer created, result lost, discovery already sees it: receipt confirms, no duplicate
   const crash = makeWorld();
   githubMain(crash);
-  const auth = await authorize(crash);
+  const auth = await authorize(crash, [FIRMWARE], { legacyEnrollment: true });
   const prog = memoryProgress();
   await apply(crash, [FIRMWARE], { authorization: auth, progress: prog, execute: dyingAt(crash, 'steer.B') });
   const done = await apply(crash, [FIRMWARE], { authorization: auth, progress: prog });
@@ -1449,7 +1462,7 @@ test('P0.1 progress without a prior attempt never adopts; agents are reconciled 
   // steer attempted, no receipt, but a steer for the slot is observed: refuse
   const odd = makeWorld();
   githubMain(odd);
-  const auth2 = await authorize(odd);
+  const auth2 = await authorize(odd, [FIRMWARE], { legacyEnrollment: true });
   const prog2 = memoryProgress();
   await apply(odd, [FIRMWARE], { authorization: auth2, progress: prog2, execute: dyingAt(odd, 'steer.B', { before: true }) });
   addAgent(odd, { title: 'Steer B', provider: 'muse', model: 'muse-spark-1.3-contributor', workspaceId: odd.workspaces[0].id, labels: { [LABEL.repo]: FIRMWARE, [LABEL.role]: 'steer', [LABEL.slot]: 'B' } });
@@ -1461,7 +1474,7 @@ test('P0.1 defensive paths: contradicting observation and failed receipt lookup 
   // no receipt, discovery lists the steer as pending yet reports a steer for the slot
   const odd = makeWorld();
   githubMain(odd);
-  const auth = await authorize(odd);
+  const auth = await authorize(odd, [FIRMWARE], { legacyEnrollment: true });
   const prog = memoryProgress();
   await apply(odd, [FIRMWARE], { authorization: auth, progress: prog, execute: dyingAt(odd, 'steer.B', { before: true }) });
   const res = await apply(odd, [FIRMWARE], {
@@ -1498,7 +1511,7 @@ test('P0.2 two concurrent applies on one plan: exactly one enters, the other fai
   assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1);
   assert.match(results.find((r) => r.status === 'rejected').reason.message, /held by another process/);
   assert.equal(world.workspaces.length, 1);
-  assert.equal(world.agents.length, 3);
+  assert.equal(world.agents.length, 1);
   assert.equal(world.calls.filter((c) => c[0] === 'workspace.setMetadata').length, 1, 'one adoption');
   rmSync(dir, { recursive: true, force: true });
 });
@@ -1519,7 +1532,7 @@ test('P0.2 apply lock across real processes; a replaced lock file stops apply be
 
   const world = makeWorld();
   githubMain(world);
-  const authorization = await authorize(world);
+  const authorization = await authorize(world, [FIRMWARE], { slots: ['A', 'B', 'C'], legacyEnrollment: true });
   const real = executorsFor(world);
   const lockFile = join(dir, 'factory-apply.lock');
   const outcome = await withApplyLock(async (held) => {
@@ -1713,7 +1726,7 @@ test('steer slots A-Z are free: any letters, any order, no minimum beyond one sl
   assert.ok(validateConfig(noPrepare).some((e) => /prepare/.test(e)));
 });
 
-test('adopt accepts any defined slot outside prepare and plans only the adoption', async () => {
+test('adopt accepts live tab letters outside configured slots', async () => {
   const config = structuredClone(CONFIG);
   config.steers.slots.D = 'sol';
   const { world, created: [legacy] } = legacyWorld([{ title: 'Steer D' }]);
@@ -1723,46 +1736,232 @@ test('adopt accepts any defined slot outside prepare and plans only the adoption
   const unknown = structuredClone(CONFIG);
   const { world: w2, created: [other] } = legacyWorld([{ title: 'Steer Z' }]);
   const [q] = await plan(w2, [FIRMWARE], { config: unknown, adopt: { '*': { Z: other.id } } });
-  assert.match(q.conflicts.find((c) => c.key === 'steer.Z').reason, /not defined in steers.slots/);
+  assert.equal(q.ops.find((op) => op.key === 'steer.Z').kind, 'paseo.agent.adopt');
 });
 
 test('default factory starts with exactly one steer', async () => {
   const config = structuredClone(CONFIG);
-  config.steers = { slots: { A: 'sol' }, prepare: ['A'], initialActive: 'A' };
+  config.steers.priority = ['sol', 'agy', 'muse'];
+  config.profiles.sol.advisor = true;
+  config.steers.initialActive = 'B';
   const world = makeWorld();
   githubMain(world);
   const [p] = await plan(world, [FIRMWARE], { config });
-  assert.deepEqual(keys(p), ['workspace.main.adopt', 'steer.A']);
-});
-
-test('plan --slots overrides prepare for this run and adjusts initialActive', async () => {
-  const config = structuredClone(CONFIG);
-  config.steers.slots.D = 'sol';
-  const one = makeWorld();
-  githubMain(one);
-  let [p] = await plan(one, [FIRMWARE], { config, slots: ['D'] });
-  assert.deepEqual(keys(p), ['workspace.main.adopt', 'steer.D']);
-  assert.equal(p.ops.find((o) => o.key === 'workspace.main.adopt').params.metadata[METADATA_KEY].activeSteer, 'D');
-  const two = makeWorld();
-  githubMain(two);
-  [p] = await plan(two, [FIRMWARE], { config, slots: ['B', 'C'] });
-  assert.deepEqual(keys(p).filter((k) => k.startsWith('steer.')), ['steer.B', 'steer.C']);
-  assert.equal(p.ops.find((o) => o.key === 'workspace.main.adopt').params.metadata[METADATA_KEY].activeSteer, 'B');
-  const three = makeWorld();
-  githubMain(three);
-  [p] = await plan(three, [FIRMWARE], { config, slots: ['A', 'C'] });
-  assert.equal(p.ops.find((o) => o.key === 'workspace.main.adopt').params.metadata[METADATA_KEY].activeSteer, 'A', 'initialActive kept when included');
-  const four = makeWorld();
-  githubMain(four);
-  const { report } = await apply(four, [FIRMWARE], { config, slots: ['C'] });
+  assert.deepEqual(keys(p), ['steer.A', 'workspace.main.adopt']);
+  assert.equal(p.ops[0].params.config.provider, 'antigravity/gemini-3.8-flash-high');
+  assert.equal(p.ops[0].params.steerRole, 'coordinator');
+  assert.match(p.notes.join('\n'), /"sol".*tagged as advisor/);
+  const { report } = await apply(world, [FIRMWARE], { config });
   assert.equal(report[0].status, 'complete', report[0].error);
-  assert.deepEqual(report[0].executed.map((e) => e.key), ['workspace.main.adopt', 'steer.C']);
+  assert.equal(world.agents[0].metadata[LABEL.steerRole], 'coordinator');
+  assert.equal(world.agents.length, 1);
 });
 
-test('plan --slots must be a subset of defined slots', async () => {
+test('default enrollment reuses a durable coordinator at an unconfigured letter', async () => {
+  const world = makeWorld();
+  const ws = githubMain(world);
+  const holder = addAgent(world, { title: 'Steer Z · Existing', workspaceId: ws.id, provider: 'codex', model: 'native-model',
+    labels: { [LABEL.repo]: FIRMWARE, [LABEL.scope]: FIRMWARE, [LABEL.role]: 'steer', [LABEL.slot]: 'Z', [LABEL.steerRole]: 'coordinator' } });
+  const advisor = addAgent(world, { title: 'Steer A', workspaceId: ws.id, provider: 'codex', model: 'advisor-model',
+    labels: { [LABEL.repo]: FIRMWARE, [LABEL.role]: 'steer', [LABEL.slot]: 'A', [LABEL.steerRole]: 'advisor' } });
+  const [p] = await plan(world);
+  assert.deepEqual(keys(p), ['workspace.main.adopt']);
+  const { report } = await apply(world);
+  assert.equal(report[0].status, 'complete', report[0].error);
+  assert.equal(ws.metadata[METADATA_KEY].activeAgentId, holder.id);
+  assert.equal(ws.metadata[METADATA_KEY].activeSteer, 'Z');
+  assert.equal(holder.model, 'native-model');
+  assert.equal(advisor.labels[LABEL.steerRole], 'advisor');
+  ws.metadata[METADATA_KEY].epoch = 17;
+  const [existing] = await plan(world);
+  assert.equal(existing.status, 'complete', JSON.stringify(existing.conflicts));
+  holder.archivedAt = '2026-11-01';
+  const [missing] = await plan(world);
+  assert.equal(missing.status, 'conflict');
+  assert.deepEqual(missing.ops, []);
+  addAgent(world, { title: 'Steer Z', workspaceId: ws.id, provider: 'codex', model: 'native-model', labels: holder.labels });
+  const [replaced] = await plan(world);
+  assert.match(replaced.conflicts[0].reason, /no longer resolves to the controlling agent/);
+  assert.equal(ws.metadata[METADATA_KEY].epoch, 17);
+  assert.equal(ws.metadata[METADATA_KEY].activeAgentId, holder.id);
+});
+
+test('default enrollment refuses ambiguous titles and occupied workspaces without a coordinator', async () => {
+  for (const [configuration, expected] of [
+    [['advisor'], /live agents but no coordinating steer/],
+    [['worker'], /live agents but no coordinating steer/],
+    [['coordinator', 'unlabelled'], /Several live agents are titled Steer Z/],
+    [['coordinator', 'coordinator'], /Several live agents are titled Steer Z/],
+  ]) {
+    const world = makeWorld();
+    const ws = githubMain(world);
+    for (const role of configuration) {
+      addAgent(world, { title: role === 'worker' ? 'Feature work' : 'Steer Z', workspaceId: ws.id, provider: 'codex', model: 'native-model',
+        labels: role === 'unlabelled' ? {} : role === 'worker' ? { [LABEL.role]: 'worker' } : {
+          [LABEL.repo]: FIRMWARE, [LABEL.role]: 'steer', [LABEL.slot]: 'Z', [LABEL.steerRole]: role,
+        } });
+    }
+    const [p] = await plan(world);
+    assert.equal(p.status, 'conflict');
+    assert.match(p.conflicts.map(({ reason }) => reason).join('\n'), expected);
+    assert.deepEqual(p.ops, []);
+  }
+});
+
+test('default enrollment recovers the original create receipt before recording authority', async () => {
+  const world = makeWorld();
+  const ws = githubMain(world);
+  const authorization = await authorize(world);
+  const progress = memoryProgress();
+  const execute = createExecutors({ client: fakeClient(world), paseoCli: fakePaseoCli(world), lookupReceipt: fakeLookup(world), lock: testLock });
+  world.hooks.dropResponseAfterCreate = () => true;
+  const first = await apply(world, [FIRMWARE], { authorization, progress, execute });
+  assert.equal(first.report[0].status, 'failed');
+  assert.equal(ws.metadata[METADATA_KEY], undefined);
+  assert.equal(world.agents.length, 1);
+  world.hooks.dropResponseAfterCreate = null;
+  const resumed = await apply(world, [FIRMWARE], { authorization, progress, execute });
+  assert.equal(resumed.report[0].status, 'complete', resumed.report[0].error);
+  assert.equal(world.agents.length, 1);
+  assert.equal(ws.metadata[METADATA_KEY].activeAgentId, world.agents[0].id);
+  assert.equal(ws.metadata[METADATA_KEY].epoch, 1);
+  assert.equal(progress.load().results[FIRMWARE]['steer.A'].via, 'receipt');
+  const requests = world.calls.filter(([kind]) => kind === 'agent.create').map(([, request]) => request);
+  assert.deepEqual(requests, [requests[0], requests[0]]);
+});
+
+test('default enrollment rechecks the empty workspace before native creation', async () => {
+  const world = makeWorld();
+  const ws = githubMain(world);
+  const execute = executorsFor(world);
+  const { report } = await apply(world, [FIRMWARE], { execute: (op, config) => {
+    addAgent(world, { title: 'Native tab', workspaceId: ws.id, provider: 'codex', model: 'native-model' });
+    return execute(op, config);
+  } });
+  assert.match(report[0].error, /workspace is no longer empty/);
+  assert.equal(world.agents.length, 1);
+  assert.equal(ws.metadata[METADATA_KEY], undefined);
+});
+
+test('default enrollment rechecks the selected holder before recording authority', async () => {
+  const world = makeWorld();
+  const ws = githubMain(world);
+  const holder = addAgent(world, { title: 'Steer Z', workspaceId: ws.id, provider: 'codex', model: 'native-model',
+    labels: { [LABEL.repo]: FIRMWARE, [LABEL.role]: 'steer', [LABEL.slot]: 'Z' } });
+  const execute = executorsFor(world);
+  const { report } = await apply(world, [FIRMWARE], { execute: (op, config) => {
+    holder.labels[LABEL.steerRole] = 'advisor';
+    return execute(op, config);
+  } });
+  assert.match(report[0].error, /Initial coordinating holder changed/);
+  assert.equal(ws.metadata[METADATA_KEY], undefined);
+  assert.equal(world.agents.length, 1);
+});
+
+test('plan --slots selects one exact live coordinator at an unconfigured letter', async () => {
+  const world = makeWorld();
+  const ws = githubMain(world);
+  const labels = { [LABEL.scope]: FIRMWARE, [LABEL.role]: 'steer', [LABEL.steerRole]: 'coordinator' };
+  for (const slot of ['A', 'Z']) addAgent(world, { title: `Steer ${slot}`, workspaceId: ws.id, provider: 'codex', model: 'native', labels: { ...labels, [LABEL.slot]: slot } });
+  const foreign = addWorkspace(world, { path: '/p/example-repo', title: 'Other' });
+  addAgent(world, { title: 'Steer Z', workspaceId: foreign.id, provider: 'codex', model: 'other', labels: { ...labels, [LABEL.slot]: 'Z' } });
+  const options = { slots: ['Z'] };
+  const [preview] = await plan(world, [FIRMWARE], options);
+  assert.deepEqual(keys(preview), ['workspace.main.adopt']);
+  assert.equal(preview.ops[0].params.metadata[METADATA_KEY].activeAgentId, world.agents[1].id);
+  const { report } = await apply(world, [FIRMWARE], options);
+  assert.equal(report[0].status, 'complete', report[0].error);
+  const [changed] = await plan(world, [FIRMWARE], { slots: ['A'] });
+  assert.match(changed.conflicts[0].reason, /use switch/);
+});
+
+test('plan --slots cannot provision an absent coordinator or select several letters', async () => {
   const world = makeWorld();
   githubMain(world);
-  const [p] = await plan(world, [FIRMWARE], { slots: ['Z'] });
-  assert.match(p.conflicts.find((c) => c.key === 'steer.Z').reason, /not defined in steers.slots/);
-  assert.equal(p.ops.some((o) => o.key === 'steer.Z'), false);
+  for (const slots of [['A'], ['A', 'B']]) {
+    const [p] = await plan(world, [FIRMWARE], { slots });
+    assert.match(p.conflicts[0].reason, /one live (eligible )?coordinator/);
+    assert.deepEqual(keys(p), []);
+  }
+});
+
+test('explicit bootstrap adopts the first eligible coordinator and resumes after a lost label reply', async () => {
+  const world = makeWorld();
+  const ws = githubMain(world);
+  const config = structuredClone(CONFIG);
+  config.steers.priority = ['sol'];
+  config.steers.slots = { B: 'advisor' };
+  config.profiles.advisor = { ...config.profiles.sol, model: 'advisor-runtime', advisor: true };
+  const addTab = (slot, model) => addAgent(world, { title: `Steer ${slot}`, workspaceId: ws.id, provider: 'codex', model });
+  const advisor = addTab('Q', 'advisor-runtime');
+  const coordinator = addTab('Z', 'native-coordinator');
+  const standby = addTab('B', 'native-standby');
+  const adopt = { '*': { Q: advisor.id, Z: coordinator.id, B: standby.id } };
+  const authorization = await authorize(world, [FIRMWARE], { config, adopt });
+  const [preview] = authorization.plans;
+  assert.equal(preview.status, 'pending', JSON.stringify(preview.conflicts));
+  assert.deepEqual(keys(preview), ['steer.Z', 'steer.Q', 'steer.B', 'workspace.main.adopt']);
+  assert.equal(preview.ops[0].params.labels[LABEL.steerRole], 'coordinator');
+  assert.equal(preview.ops[1].params.labels[LABEL.steerRole], 'advisor');
+  assert.equal(preview.ops[2].params.labels[LABEL.steerRole], 'coordinator');
+  assert.equal(preview.ops[3].params.metadata[METADATA_KEY].activeAgentId, coordinator.id);
+  const progress = memoryProgress();
+  const execute = executorsFor(world);
+  const first = await apply(world, [FIRMWARE], { config, authorization, progress, execute: async (op, settings) => {
+    await execute(op, settings);
+    throw new Error('lost adoption reply');
+  } });
+  assert.match(first.report[0].error, /lost adoption reply/);
+  assert.equal(ws.metadata[METADATA_KEY], undefined);
+  const resumed = await apply(world, [FIRMWARE], { config, authorization, progress });
+  assert.equal(resumed.report[0].status, 'complete', resumed.report[0].error);
+  assert.equal(ws.metadata[METADATA_KEY].activeAgentId, coordinator.id);
+  assert.equal(world.agents.length, 3);
+  assert.equal(world.calls.filter((call) => call[0] === 'paseo' && call[2] === 'update').length, 3);
+});
+
+test('adoption executor refuses late workspace, runtime, role and authority changes', async () => {
+  for (const [change, error] of [
+    [({ candidate }) => { candidate.workspaceId = 'wks_other'; }, /live foreground tab in the main workspace/],
+    [({ candidate }) => { candidate.model = 'swapped'; }, /runtime or role changed/],
+    [({ candidate }) => { candidate.metadata = { [LABEL.steerRole]: 'advisor' }; }, /runtime or role changed/],
+    [({ candidate }) => { candidate.provider = 'muse'; }, /runtime or role changed/],
+    [({ ws }) => { ws.metadata[METADATA_KEY].epoch++; }, /Scope state changed/],
+    [({ steers }) => { steers.A.archivedAt = 'then'; }, /Active holder changed/],
+  ]) {
+    const world = makeWorld();
+    const { ws, steers } = provisioned(world);
+    const candidate = addAgent(world, { title: 'Steer Z', workspaceId: ws.id, provider: 'codex', model: 'native' });
+    const [preview] = await plan(world, [FIRMWARE], { adopt: { '*': { Z: candidate.id } } });
+    assert.equal(preview.status, 'pending', JSON.stringify(preview.conflicts));
+    change({ candidate, ws, steers });
+    await assert.rejects(executorsFor(world)(preview.ops[0], CONFIG), error);
+    assert.equal(candidate.labels[LABEL.role], undefined);
+  }
+});
+
+test('stored pre-priority explicit multi-slot authorization recovers its completed create receipt', async () => {
+  const world = makeWorld();
+  githubMain(world);
+  const authorization = await authorize(world, [FIRMWARE], { slots: ['A', 'B'], legacyEnrollment: true });
+  const config = { ...CONFIG, steers: { ...CONFIG.steers, priority: ['sol'] } };
+  const progress = memoryProgress();
+  world.hooks.dropResponseAfterCreate = (options) => options.title === 'Steer B';
+  const failed = await apply(world, [FIRMWARE], { config, authorization, progress });
+  assert.match(failed.report[0].error, /socket closed/);
+  delete world.hooks.dropResponseAfterCreate;
+  const recovered = await apply(world, [FIRMWARE], { config, authorization, progress });
+  assert.equal(recovered.report[0].status, 'complete', recovered.report[0].error);
+  assert.equal(progress.load().results[FIRMWARE]['steer.B'].via, 'receipt');
+  assert.equal(world.agents.filter((a) => a.labels[LABEL.slot] === 'B').length, 1);
+});
+
+test('stored live enrollment v1 can still apply after the explicit enrollment cutover', async () => {
+  const world = makeWorld();
+  const ws = githubMain(world);
+  const authorization = await authorize(world, [FIRMWARE], { enrollmentVersion: 'live' });
+  assert.equal(authorization.plans[0].enrollment, 'live');
+  const { report } = await apply(world, [FIRMWARE], { authorization });
+  assert.equal(report[0].status, 'complete', report[0].error);
+  assert.equal(ws.metadata[METADATA_KEY].activeAgentId, world.agents[0].id);
 });

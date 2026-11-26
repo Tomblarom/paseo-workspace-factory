@@ -16,7 +16,7 @@ import {
   buildRestartInterrupted,
   isOpenTurnBeforeRestart,
 } from "./core/agent-state.mjs";
-import { isAdvisorSlot } from "./core/config.mjs";
+import { isAdvisorSteer } from "./core/config.mjs";
 import { factoryIdentity } from "../shared/auto-checkpoint.js";
 import { RESUME_CLEAR_DEFAULTS, bootResumeReason } from "../shared/idle-cleanup.js";
 import { continuedFromId, resolveFactoryLabels, resolveContinuations } from "./core/zerosub.mjs";
@@ -203,7 +203,8 @@ export async function runBootCheck({
     const superseded = new Set(resolveContinuations(state.agents).superseded);
     for (const agent of continuations) {
       if (superseded.has(agent.id)) continue;
-      const identity = factoryIdentity(resolveFactoryLabels(agent, state.agents));
+      const labels = resolveFactoryLabels(agent, state.agents);
+    const identity = factoryIdentity(labels);
       const scope = identity ? byId.get(identity.scopeId) : null;
       if (!scope) continue;
       try {
@@ -243,7 +244,8 @@ export async function runBootCheck({
   const superseded = new Set(resolveContinuations(state.agents).superseded);
   for (const agent of state.agents ?? []) {
     if (agent?.archivedAt || superseded.has(agent.id)) continue;
-    const identity = factoryIdentity(resolveFactoryLabels(agent, state.agents));
+    const labels = resolveFactoryLabels(agent, state.agents);
+    const identity = factoryIdentity(labels);
     if (!identity) continue;
     const scope = byId.get(identity.scopeId) ?? null;
     if (!scope) continue;
@@ -261,7 +263,7 @@ export async function runBootCheck({
       if (!identity.slot || scopeMeta?.retired === true) continue;
       const advisor = configFailed
         ? true
-        : (isAdvisorSlot as unknown as (c: unknown, s: string) => boolean)(config, identity.slot);
+        : isAdvisorSteer(config, labels, agent.metadata);
       reason = (bootResumeReason as unknown as (a: unknown) => string | null)({
         openTurn: openCheck,
         active: scopeMeta?.activeSteer === identity.slot,

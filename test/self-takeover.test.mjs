@@ -23,7 +23,7 @@ function world({ fromStatus = 'idle', toStatus = 'running', metaAfter = null } =
         setMetadata: async (m) => { Object.assign(ws.metadata, metaAfter ?? m); },
       }),
     },
-    agents: { list: async () => ({ entries: structuredClone(agents), pageInfo: { hasMore: false } }), ref: (id) => ({ send: async (p) => { sent.push([id, p]); }, timeline: { refetch: async () => ({ entries: [] }) }, waitForFinish: async () => {} }) },
+    agents: { list: async () => ({ entries: structuredClone(agents), pageInfo: { hasMore: false } }), ref: (id) => ({ refresh: async () => ({ agent: structuredClone(agents.find((agent) => agent.id === id)) }), send: async (p) => { sent.push([id, p]); }, timeline: { refetch: async () => ({ entries: [] }) }, waitForFinish: async () => {} }) },
   };
   const discovery = { forkName: REPO, mainWorkspace: structuredClone(ws), steers: { labelled: structuredClone(agents), legacy: [] }, workers: [], providers: [] };
   return { client, discovery, sent, ws };

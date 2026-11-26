@@ -2,7 +2,7 @@
 // Fake state only; no daemon. The runner reuses a passed snapshot instead
 // of re-reading, and every holder pick (liveSlotHolders, scopeHolder,
 // resolveWakeTarget) agrees on plain labels, ZeroSub multi-hop
-// continuations and same-slot newer-wins cases.
+// continuations and same-slot ambiguity.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdtempSync } from 'node:fs';
@@ -34,7 +34,7 @@ const CONFIG = {
 function agent(id, over = {}) {
   return {
     id, status: 'idle', archivedAt: null, workspaceId: MAIN,
-    provider: 'codex', model: 'gpt-6.2-sol', title: `Steer ${id}`, labels: {},
+    provider: 'codex', model: 'gpt-6.2-sol', title: over.labels?.[LABEL.slot] ? `Steer ${over.labels[LABEL.slot]}` : null, labels: {},
     ...over,
   };
 }
@@ -83,7 +83,7 @@ function agreementWorld() {
   const holderA = agent('holder-a', { labels: steerLabels('A') });
   const originB = agent('origin-b', { labels: steerLabels('B') });
   const midB = agent('mid-b', { labels: { [CONTINUED_FROM_LABEL]: 'origin-b' } });
-  const liveB = agent('live-b', { labels: { [CONTINUED_FROM_LABEL]: 'mid-b' } });
+  const liveB = agent('live-b', { title: 'Steer B', labels: { [CONTINUED_FROM_LABEL]: 'mid-b' } });
   const oldC = agent('old-c', { labels: steerLabels('C'), createdAt: '2026-11-24T09:00:00.000Z' });
   const newC = agent('new-c', { labels: steerLabels('C'), createdAt: '2026-11-24T10:00:00.000Z' });
   const agents = [holderA, originB, midB, liveB, oldC, newC];
@@ -98,22 +98,14 @@ test('holder selectors agree on labelled, ZeroSub multi-hop and same-slot cases'
   const viaHelper = (slot) => liveSlotHolders(resolved, slot).map((a) => a.id);
   const viaGuard = (slot) => scopeHolder({ agents, workspaceId: MAIN, scopeId: SCOPE, slot }).id;
   const viaWake = (slot) => resolveWakeTarget({ activeSteer: slot }, rows);
-  for (const [slot, winner] of [['A', 'holder-a'], ['B', 'live-b'], ['C', 'new-c']]) {
+  for (const [slot, winner] of [['A', 'holder-a'], ['B', 'live-b']]) {
     assert.deepEqual(viaHelper(slot), [winner], `liveSlotHolders picks ${winner} for slot ${slot}`);
     assert.equal(viaGuard(slot), winner, `scopeHolder picks ${winner} for slot ${slot}`);
     assert.equal(viaWake(slot), winner, `resolveWakeTarget picks ${winner} for slot ${slot}`);
   }
-});
-
-test('holder selectors agree that tied timestamps stay ambiguous', () => {
-  const tied = [
-    agent('t1', { labels: steerLabels('A'), createdAt: '2026-11-24T10:00:00.000Z' }),
-    agent('t2', { labels: steerLabels('A'), createdAt: '2026-11-24T10:00:00.000Z' }),
-  ];
-  const resolved = resolveSteerHolders(tied, tied, []);
-  assert.deepEqual(liveSlotHolders(resolved, 'A').map((a) => a.id).sort(), ['t1', 't2']);
-  assert.equal(resolveWakeTarget({ activeSteer: 'A' }, resolved.map(rowOf)), null);
-  assert.throws(() => scopeHolder({ agents: tied, workspaceId: MAIN, scopeId: SCOPE, slot: 'A' }), /one active/);
+  assert.deepEqual(viaHelper('C').sort(), ['new-c', 'old-c']);
+  assert.equal(viaWake('C'), null);
+  assert.throws(() => viaGuard('C'), /found 2/);
 });
 
 test('liveSlotHolders skips archived, superseded and retired rows; empty without a slot', () => {

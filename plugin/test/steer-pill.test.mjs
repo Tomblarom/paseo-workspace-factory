@@ -710,7 +710,7 @@ test("new UI text and pill summaries are English", () => {
     'pill("Models")',
     'pill("Resume brief")',
     '"Worker models"',
-    '"Steer slots"',
+    '"Steer priorities"',
     'pill("Worker pick")',
     'pill("Steer add")',
   ]) {

@@ -4,14 +4,13 @@
 import { LABEL, METADATA_KEY } from './paseo.mjs';
 import { liveSlotHolders } from './discovery.mjs';
 import { idempotencyKey, profileAgentConfig, requestDigest } from './steer-create.mjs';
-import { ACCOUNT_METADATA_KEY } from './zerosub.mjs';
 import { findingsPassage } from './findings.mjs';
 import { WORKER_ROLE_PROMPT, withFactoryCli } from './role-prompts.mjs';
 import { withWorkspaceLock } from './lock.mjs';
 import { guardScope } from './scope-guard.mjs';
 import { createExecutors } from './apply.mjs';
 
-export async function startScopedWorker({ client, status, callerId, aliases = [], profile, accountId, prompt, title, apply = false, promptOptions, execute = null }) {
+export async function startScopedWorker({ client, status, callerId, aliases = [], profile, accountId, prompt, title, apply = false, promptOptions, config, execute = null }) {
   const { state, workspace, repo, steers } = status;
   const slot = state?.activeSteer;
   const holders = liveSlotHolders(steers, slot);
@@ -30,7 +29,6 @@ export async function startScopedWorker({ client, status, callerId, aliases = []
     prompt: [prompt, roleBlock, findings || null].filter(Boolean).join('\n\n'),
     labels,
     config: profileAgentConfig(profile),
-    ...(accountId ? { metadata: { [ACCOUNT_METADATA_KEY]: accountId } } : {}),
   };
   const result = { scope: scopeId, workspaceId: workspace.id, parentId: parent.id, profile: profile.name, provider: request.config.provider, accountId: accountId ?? null };
   if (!apply) return result;
@@ -41,7 +39,7 @@ export async function startScopedWorker({ client, status, callerId, aliases = []
   const created = await withWorkspaceLock(workspace.id, async (held) => {
     await guardScope({ client, held, workspaceId: workspace.id, scopeId, epoch: state.epoch, agentId: parent.id, aliases });
     held.verify();
-    return run({ key, kind: 'paseo.agent.createWorker', params: { ...request, workspaceId: workspace.id, idempotencyKey: key } });
+    return run({ key, kind: 'paseo.agent.createWorker', params: { ...request, workspaceId: workspace.id, idempotencyKey: key } }, config);
   });
   if (!created?.agentId) throw new Error('Worker creation returned no agent id');
   return { ...result, accountId: created.accountId ?? null, agentId: created.agentId };

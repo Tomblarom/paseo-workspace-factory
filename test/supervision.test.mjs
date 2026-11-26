@@ -33,7 +33,7 @@ function addWorkspace(world, { metadata }) {
   return ws;
 }
 function addAgent(world, fields) {
-  const agent = { id: `agent-${++world.seq}`, status: 'idle', archivedAt: null, labels: {}, ...fields };
+  const agent = { id: `agent-${++world.seq}`, provider: 'codex', model: 'm', status: 'idle', archivedAt: null, labels: {}, ...fields };
   world.agents.push(agent);
   return agent;
 }
@@ -52,6 +52,7 @@ function fakeClient(world) {
     agents: {
       list: async () => ({ entries: structuredClone(world.agents), pageInfo: { hasMore: false } }),
       ref: (id) => ({
+        refresh: async () => ({ agent: structuredClone(world.agents.find((agent) => agent.id === id)) }),
         send: async (text) => { world.calls.push(['agent.send', id, text]); },
         timeline: { refetch: async () => ({ entries: [{ item: { type: 'assistant_message', text: 'Done.' } }] }) },
       }),
