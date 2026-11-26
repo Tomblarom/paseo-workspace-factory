@@ -256,3 +256,11 @@ Real limits are covered without it: ZeroSub continues a limited agent on another
 the factory follows the continuation (slots-live-design decision 5), and new agents are
 pinned to the roomiest account at creation (decision 6). Exclusion of accounts uses
 `exhaustedPct` everywhere; `steer add` no longer treats the warn threshold as exhausted.
+
+Policy (configurable defaults, pragmatic, not empirically tuned): below `warnPct` 93 % work
+normally; from 93 % warn only in status, pill and briefs that are delivered anyway; from
+`exhaustedPct` 95 % prefer a holder on another account with room at the next delivery that
+happens anyway (wake, report, resume), judged by the quota at dispatch time. Never interrupt
+a running turn and never send a prompt only to warn or to hand over. This reuses the
+existing delivery target choice (deliverSteer and the failover order); if that cannot pick
+another holder at dispatch, note the gap instead of adding switching infrastructure.
