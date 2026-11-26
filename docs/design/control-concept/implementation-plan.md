@@ -710,23 +710,27 @@ panel showed that wake and the retained composer brief, and Enter activated
 the refresh control. The 390-pixel layout kept the overview and steer list
 accessible. Switching workspaces in the same web session kept the first
 workspace's result and pending wake out of the second panel. The overview
-also rendered with dark mode requested by the browser. Resources and Activity
-still need their projections.
+also rendered with dark mode requested by the browser.
 
-The Resources and Activity source review identifies two independent read paths.
-Resources can use quota samples, ZeroSub aliases and windows, and the existing
-scoped selection logic. Label unsampled or stale windows explicitly. A configured
-alternative is only eligible if scope admission has evaluated it. Keep
-host-wide quota commands available for maintenance.
+Resources uses quota samples, ZeroSub aliases and windows, and the scoped
+worker selector. It labels stale and unavailable windows and distinguishes the
+selected profile, exclusions and alternatives past the selection. Account and
+pool aliases describe that snapshot. The host-wide quota command remains
+available for maintenance.
 
-Activity can start with the latest recorded holder change, preparation outcome,
-delivery, assignment receipt and worker updates, including completed workers
-with queued wakes. Label this as recent recorded activity. Current records
-overwrite earlier events and some creation steps have no recorded timestamp.
-Expose action kind, phase, verified timestamp and bounded reason labels. Exclude
-prompt bodies, checkpoint or report text, credentials, raw errors and records
-from other workspaces. Read the stored evidence without calling a reconciliation
-operation. Add a bounded event record only for missing transitions needed by the UI.
+Activity shows up to 20 recent recorded events from holder changes, creation,
+renewal, recovery, delivery, assignment and worker records. Creation uses the
+native agent timestamp for agents in the workspace. The RPC exposes structured
+status, bounded reason codes and observed timestamps, including unknown times.
+The projection reads retained evidence without reconciliation. It omits prompt
+bodies, checkpoint or report text, credentials and raw errors.
+
+On Paseo 0.17.4 both live RPCs returned the exact requested workspace and
+refused an unknown workspace. The web client rendered both views on desktop
+and at 390 pixels. Enter opened Activity and invoked its refresh action.
+Activity also rendered with dark mode requested by the browser. A browser-only
+disconnect kept both last snapshots visible with an offline label. The label
+cleared when the browser reconnected.
 
 Track read-only dispatch receipt recovery with the existing
 [Paseo issue #9947](https://github.com/getpaseo/paseo/issues/9947) and
