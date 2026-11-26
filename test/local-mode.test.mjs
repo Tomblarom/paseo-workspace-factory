@@ -243,6 +243,21 @@ test('local directory without a workspace is a conflict (K13: enroll existing wo
   assert.equal(ghCalls(world).length, 0);
 });
 
+test('a plain workspace enrollment refusal explains the Main title on either address', async () => {
+  const world = makeWorld();
+  const workspace = addWorkspace(world, { path: '/p/plain', title: 'Development' });
+  const runner = runnerFor(world);
+  const [byPath] = await runner.runPlans([{ local: '/p/plain' }]);
+  const [byId] = await runner.runPlans([{ workspace: workspace.id }]);
+  for (const conflict of [byPath.conflicts.find((c) => c.key === 'workspace.main'), byId.conflicts[0]]) {
+    assert.match(conflict.reason, /titled "Main" \(or ending in "· Main"\)/);
+    assert.match(conflict.reason, /plan --local <path>/);
+  }
+  workspace.title = 'Plain · Main';
+  const [discovered] = await runner.discoverAll([{ local: '/p/plain' }]);
+  assert.equal(discovered.mainWorkspace.id, workspace.id);
+});
+
 test('plain folder without git remotes is usable in local mode', async () => {
   const world = makeWorld();
   world.localDirs.add('/p/plain');

@@ -15,6 +15,7 @@ const { collectSteerStates } = await import("../server/steer-feed.ts");
 const { factoryWorkspaceResources } = await import("../shared/factory.ts");
 import { LABEL, METADATA_KEY, PARENT_LABEL } from "../server/core/paseo.mjs";
 import { AGENTS_KEY } from "../server/core/agent-state.mjs";
+import { LockBusy } from "../server/core/lock.mjs";
 import { PROFILE_HEALTH_KEY } from "../server/core/quota.mjs";
 import { formatStatus, scopeCandidates } from "../server/core/scopes-view.mjs";
 import { formatSlotProfileSuggestion, resolveWorkerPick, workerListRows } from "../server/core/models.mjs";
@@ -251,6 +252,44 @@ test("activation prepares the selected cold tab while another standby is ready",
   assert.equal(workspace.metadata[AGENTS_KEY][target.id].action.routing.intent.agentId, target.id);
 });
 
+test("own-tab activation takes a vacant slot's authority once and preserves delegated work", async () => {
+  const { world, workspace, active, target, activate } = activationWorld();
+  const meta = workspace.metadata;
+  meta[METADATA_KEY].activeAgentId = active.id;
+  active.archivedAt = "2026-11-26T11:59:00Z";
+  const workers = structuredClone(meta[WORKERS_KEY]);
+  const assignment = { by: active.id, requesterWorkspaceId: workspace.id, reportActionId: "build-report" };
+  const assignmentKey = `${METADATA_KEY}.assignment`;
+  world.workspaces.push({ ...workspace, id: "wks_assignment", metadata: { [assignmentKey]: assignment } });
+
+  await assert.rejects(activate(target.id, 2), /authority changed/);
+  assert.equal((await activate()).status, "sent");
+  const receipt = meta[AGENTS_KEY][target.id].action;
+  assert.equal(receipt.kind, "activate");
+  assert.equal(receipt.phase, "done");
+  assert.equal((await activate()).status, "sent");
+  assert.deepEqual(meta[AGENTS_KEY][target.id].action, receipt);
+  assert.equal(meta[METADATA_KEY].epoch, 4);
+  assert.equal(meta[METADATA_KEY].activeAgentId, target.id);
+  assert.equal(meta[METADATA_KEY].previousSteer, "A");
+  assert.deepEqual(meta[WORKERS_KEY], workers);
+  assert.deepEqual(world.workspaces[1].metadata[assignmentKey], assignment);
+  assert.deepEqual(world.sent.map(([id]) => id), [target.id]);
+});
+
+test("activation refuses a busy live controller and a holder that appears after discovery", async () => {
+  const { world, workspace, active, target, activate } = activationWorld();
+  active.pendingPermissions = [{ id: "open" }];
+  await assert.rejects(activate(), /active steer is busy/);
+  active.archivedAt = "2026-11-26T11:59:00Z";
+  await assert.rejects(activate(target.id, 3, workspace.id, { lock: async (_name, run) => {
+    active.archivedAt = null;
+    return run({ verify() {} });
+  } }), /Active steer changed since discovery/);
+  assert.equal(workspace.metadata[METADATA_KEY].epoch, 3);
+  assert.deepEqual(world.sent, []);
+});
+
 test("activation refuses stale epochs, other workspaces, and non-steer or ambiguous targets", async () => {
   const { world, workspace, active, target, worker, alternative, activate } = activationWorld();
   await assert.rejects(activate(target.id, 2), /authority changed/);
@@ -386,6 +425,86 @@ test("Fresh RPC rechecks runtime after a successful rewind before sending the br
   assert.match(world.workspaces[0].metadata[AGENTS_KEY][active.id].action.packet, /Steer refresh/);
   assert.equal(world.workspaces[0].metadata[METADATA_KEY].epoch, 3);
   assert.deepEqual(world.sent, []);
+});
+
+test("Fresh retries journal contention after rewind and returns the staged result", async () => {
+  const world = makeWorld();
+  const [workspace] = world.workspaces;
+  const [active] = world.agents;
+  const paseo = fakePaseo(world);
+  const ref = paseo.workspaces.ref;
+  paseo.workspaces.ref = (id) => {
+    const workspace = ref(id);
+    return { ...workspace, setMetadata: (patch) => workspace.setMetadata(JSON.parse(JSON.stringify(patch))) };
+  };
+  let rewinds = 0;
+  let lockBusy = false;
+  const deps = {
+    lock: async (name, run) => {
+      if (lockBusy) {
+        lockBusy = false;
+        throw new LockBusy(`Workspace lock ${name} is held by another process`);
+      }
+      return run({ verify() {} });
+    },
+    rewindClient: async () => ({
+      fetchAgentTimeline: async () => ({ entries: [{ item: { type: "user_message", messageId: "point" } }] }),
+      rewindAgent: async () => { rewinds++; lockBusy = true; },
+      sendMessage: async () => assert.fail("the staged brief must not be sent"),
+    }),
+  };
+  const preview = await handlers.previewFresh({ workspaceId: MAIN }, { paseo }, loader, deps);
+  assert.equal(preview.refreshMode, "rewind");
+  const result = await handlers.applyFresh({ workspaceId: MAIN, fingerprint: preview.fingerprint, deliver: "stage" },
+    { paseo }, loader, deps);
+  const action = workspace.metadata[AGENTS_KEY][active.id].action;
+  assert.equal(rewinds, 1);
+  assert.equal(result.applied, true);
+  assert.equal(result.delivered, false);
+  assert.equal(result.staged, true);
+  assert.equal(result.stagingError, null);
+  assert.equal(result.stageId, action.wakeId);
+  assert.equal(action.phase, "staged");
+  assert.equal(action.facts.refreshed.messageId, "point");
+  assert.equal(workspace.metadata[METADATA_KEY].epoch, 3);
+  assert.equal(world.agents.length, 3);
+  assert.deepEqual(world.sent, []);
+});
+
+test("Fresh reports an applied rewind if its journal cannot be settled", async () => {
+  const world = makeWorld();
+  const [workspace] = world.workspaces;
+  const [active] = world.agents;
+  const paseo = fakePaseo(world);
+  let rewinds = 0;
+  const deps = {
+    lock: async (_name, run) => {
+      if (rewinds) throw new Error("Factory journal unavailable");
+      return run({ verify() {} });
+    },
+    rewindClient: async () => ({
+      fetchAgentTimeline: async () => ({ entries: [{ item: { type: "user_message", messageId: "point" } }] }),
+      rewindAgent: async () => { rewinds++; },
+    }),
+  };
+  const preview = await handlers.previewFresh({ workspaceId: MAIN }, { paseo }, loader, deps);
+  const result = await handlers.applyFresh({ workspaceId: MAIN, fingerprint: preview.fingerprint, deliver: "stage" },
+    { paseo }, loader, deps);
+  assert.equal(rewinds, 1);
+  assert.equal(result.applied, true);
+  assert.equal(result.refreshMode, "rewind");
+  assert.equal(result.staged, false);
+  assert.match(result.stagingError, /Rewind applied.*Factory journal unavailable/);
+  assert.equal(workspace.metadata[AGENTS_KEY][active.id].action.phase, "rewinding");
+  assert.equal(world.agents.length, 3);
+});
+
+test("steer creation reports a missing slot before looking up the workspace", async () => {
+  const world = makeWorld();
+  await assert.rejects(handlers.applySteerAddRpc(
+    { workspaceId: MAIN, fingerprint: "confirmation-without-slot" }, { paseo: fakePaseo(world) }, loader,
+  ), /Steer creation requires a slot/);
+  assert.equal(world.agents.length, 3);
 });
 
 test("steer creation preview binds discovery, preferences and revision to one settings state", async () => {

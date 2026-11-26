@@ -226,7 +226,10 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
   if (discovery.mainCandidates.length > 1 && !main) {
     conflict('workspace.main', `Several main workspaces use ${checkoutPath}: ${discovery.mainCandidates.map((w) => `${w.id} "${w.title ?? w.name}"`).join(', ')}`);
   } else if (!main) {
-    conflict('workspace.main', `No factory main workspace for ${checkoutPath ?? forkName}; open or create the Paseo workspace natively, then enroll it (plan workspace:<id> or --local <path>)`);
+    const enrollment = isLocal && !isWorktree
+      ? 'Open or create a Paseo workspace titled "Main" (or ending in "· Main"), then enroll it with plan --local <path>.'
+      : 'Open or create the Paseo workspace natively, then enroll it (plan workspace:<id> or --local <path>).';
+    conflict('workspace.main', `No factory main workspace for ${checkoutPath ?? forkName}. ${enrollment}`);
   } else {
     const state = main.metadata?.[METADATA_KEY];
     if (!state && effectiveInitialActive && (!currentEnrollment || activeAgentId)) {

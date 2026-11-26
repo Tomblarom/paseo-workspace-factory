@@ -90,6 +90,7 @@ function fakeClient(world) {
       if (world.hooks.beforeMetadataWrite) world.hooks.beforeMetadataWrite(patch);
       world.calls.push(['workspace.setMetadata', id, patch]);
       Object.assign(findWs(id).metadata, structuredClone(patch));
+      world.hooks.afterMetadataWrite?.(patch);
     },
     agents: {
       create: async (opts) => {
@@ -571,7 +572,7 @@ test('rewind failure leaves a durable uncertain action', async () => {
   assert.deepEqual(world.workspaces[0].metadata[METADATA_KEY], { main: true, activeSteer: 'A', epoch: 1 });
 });
 
-test('lost metadata write after a committed rewind cannot repeat it', async () => {
+test('lost metadata write after a committed rewind reports it as applied and cannot repeat it', async () => {
   const world = makeWorld();
   const { steers } = provisioned(world);
   const daemon = fakeDaemon({ timeline: userTimeline() });
@@ -583,7 +584,9 @@ test('lost metadata write after a committed rewind cannot repeat it', async () =
     }
   };
   const run = () => freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon });
-  await assert.rejects(run(), /metadata disconnected/);
+  const result = await run();
+  assert.equal(result.applied, true);
+  assert.match(result.recordingError, /Rewind applied.*metadata disconnected/);
   assert.equal(world.workspaces[0].metadata[AGENTS_KEY][steers.B.id].action.phase, 'rewinding');
   assert.equal((await run()).idempotent, true);
   assert.equal(daemon.calls.filter((c) => c[0] === 'rewindAgent').length, 1);
@@ -607,23 +610,26 @@ test('a landed rewind with a failed brief send records done, not uncertain', asy
   assert.equal(daemon.calls.filter((c) => c[0] === 'rewindAgent').length, 1, 'the landed rewind is not repeated');
 });
 
-test('lost facts write after a settled rewind stays idempotent via the action', async () => {
+test('lost metadata receipt after a settled rewind leaves the action and facts together', async () => {
   const world = makeWorld();
   const { steers } = provisioned(world);
   world.workspaces[0].metadata[AGENTS_KEY] = { [steers.B.id]: { lastTurnEndedAt: '2026-11-24T11:00:00.000Z' } };
   const daemon = fakeDaemon({ timeline: userTimeline() });
   let fail = true;
-  world.hooks.beforeMetadataWrite = (patch) => {
+  world.hooks.afterMetadataWrite = (patch) => {
     if (fail && patch[AGENTS_KEY]?.[steers.B.id]?.action?.facts?.cleared?.mode === 'rewind') {
       fail = false;
-      throw new Error('metadata disconnected after settle');
+      throw new Error('metadata receipt lost after settle');
     }
   };
   const run = () => freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon, now: () => new Date('2026-11-24T12:00:00.000Z') });
-  await assert.rejects(run(), /metadata disconnected after settle/);
+  const result = await run();
+  assert.equal(result.applied, true);
+  assert.match(result.recordingError, /Rewind applied.*metadata receipt lost/);
   const entry = world.workspaces[0].metadata[AGENTS_KEY][steers.B.id];
   assert.equal(entry.action.phase, 'done');
-  assert.equal(entry.action.facts?.cleared, undefined);
+  assert.equal(entry.action.facts.cleared.mode, 'rewind');
+  assert.equal(entry.action.facts.refreshed.messageId, entry.action.messageId);
   assert.equal((await run()).idempotent, true);
   assert.equal(daemon.calls.filter((c) => c[0] === 'rewindAgent').length, 1);
 });

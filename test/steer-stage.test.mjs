@@ -232,6 +232,67 @@ test('switch returns the identity committed with the staged handoff', async () =
   assert.deepEqual(sendsTo(world, steers.B.id), []);
 });
 
+test('switch supersedes an unused standby reset stage and keeps its prior delivery receipt', async () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  ws.metadata[AGENTS_KEY] = { [steers.B.id]: { action: {
+    kind: 'stage', stageKind: 'fresh', phase: 'staged', wakeId: 'old-stage', epoch: 1,
+    lastDeliveryId: 'prior-send', packet: 'Old reset brief',
+  } } };
+  const applied = await switchSteer({
+    client: fakeClient(world), discovery: discoveryOf(world), toSlot: 'B', apply: true,
+    stage: true, send: false, lock: testLock, language: 'en', config: CONFIG,
+  });
+  const action = ws.metadata[AGENTS_KEY][steers.B.id].action;
+  assert.equal(applied.applied, true);
+  assert.equal(applied.stageId, action.wakeId);
+  assert.notEqual(action.wakeId, 'old-stage');
+  assert.equal(action.lastDeliveryId, 'prior-send');
+  assert.equal(action.epoch, 2);
+  assert.match(action.packet, /Steer handoff/);
+  assert.deepEqual(sendsTo(world, steers.B.id), []);
+});
+
+test('switch preserves pending deliveries and stages with unresolved composer transfer', async (t) => {
+  const staged = { kind: 'stage', phase: 'staged', wakeId: 'standby-stage', epoch: 1, packet: 'Reset brief' };
+  const claimed = { ...staged, composerClaim: { id: 'claim', recoveryId: 'recovery' } };
+  const cases = {
+    queued: { action: { ...staged, phase: 'reserved' } },
+    attempted: { action: { ...staged, attemptedAt: '2026-11-26T11:58:00Z' } },
+    uncertain: { action: { ...staged, phase: 'uncertain' } },
+    claimed: { action: claimed },
+    retainedClaim: { action: { phase: 'done', wakeId: 'worker-wake' }, stagedBrief: { ...claimed, epoch: 0 } },
+    reopenedClaim: { action: { ...staged, manualComposerOnly: true } },
+  };
+  for (const [name, entry] of Object.entries(cases)) {
+    await t.test(name, async () => {
+      const world = makeWorld();
+      const { ws, steers } = provisioned(world);
+      ws.metadata[AGENTS_KEY] = { [steers.B.id]: structuredClone(entry) };
+      await assert.rejects(switchSteer({
+        client: fakeClient(world), discovery: discoveryOf(world), toSlot: 'B', apply: true,
+        stage: true, send: false, lock: testLock, language: 'en', config: CONFIG,
+      }), /Target has a pending steer delivery/);
+      assert.deepEqual(ws.metadata[AGENTS_KEY][steers.B.id], entry);
+      assert.equal(ws.metadata[METADATA_KEY].epoch, 1);
+      assert.deepEqual(world.calls, []);
+    });
+  }
+});
+
+test('switch keeps the receipt for a stage already transferred to the composer', async () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  const composerTransfer = { stageId: 'transferred-stage', claimId: 'claim', epoch: 1 };
+  ws.metadata[AGENTS_KEY] = { [steers.B.id]: { composerTransfer } };
+  const applied = await switchSteer({
+    client: fakeClient(world), discovery: discoveryOf(world), toSlot: 'B', apply: true,
+    stage: true, send: false, lock: testLock, language: 'en', config: CONFIG,
+  });
+  assert.equal(applied.applied, true);
+  assert.deepEqual(ws.metadata[AGENTS_KEY][steers.B.id].composerTransfer, composerTransfer);
+});
+
 test('switch keeps the packet when the send fails (partial apply)', async () => {
   const world = makeWorld();
   const { steers } = provisioned(world);

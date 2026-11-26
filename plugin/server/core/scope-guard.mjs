@@ -13,7 +13,7 @@ export class ScopeGuardError extends Error {}
  * rules as discovery: the tab titled "Steer <slot>" is the holder; two such
  * tabs are ambiguous and never ranked.
  */
-export function scopeHolder({ agents, workspaceId, scopeId, slot, switches = [], excludeIds = [], aliases = [] }) {
+export function scopeHolder({ agents, workspaceId, scopeId, slot, switches = [], excludeIds = [], aliases = [], allowVacant = false }) {
   const excluded = new Set(excludeIds);
   const labelled = (agents ?? []).filter((a) => {
     const labels = a?.labels ?? {};
@@ -30,6 +30,7 @@ export function scopeHolder({ agents, workspaceId, scopeId, slot, switches = [],
   });
   // Membership is limited to parentless tabs of the scope main workspace.
   const holders = liveSlotHolders(resolved, slot).filter((a) => a.workspaceId === workspaceId && !parentOf(a));
+  if (allowVacant && holders.length === 0) return null;
   if (holders.length !== 1) throw new ScopeGuardError(`Expected one active Steer ${slot}, found ${holders.length}`);
   const holder = holders[0];
   if (holder.status === 'error' && (agents ?? []).some((agent) => continuedFromId(agent) === holder.id)) {
@@ -39,17 +40,19 @@ export function scopeHolder({ agents, workspaceId, scopeId, slot, switches = [],
 }
 
 /** Call only inside the matching workspace lock; verify the lock again immediately before writing. */
-export async function guardScope({ client, held, workspaceId, scopeId, epoch, agentId, slot = null, switches = [], excludeIds = [], aliases = [], config = null }) {
-  if (!workspaceId || !scopeId || !Number.isInteger(epoch) || !agentId) throw new ScopeGuardError('Scope guard needs workspace, scope, integer epoch and active agent id');
+export async function guardScope({ client, held, workspaceId, scopeId, epoch, agentId, slot = null, switches = [], excludeIds = [], aliases = [], config = null, expectVacant = false }) {
+  if (!workspaceId || !scopeId || !Number.isInteger(epoch) || (expectVacant ? !slot || agentId : !agentId)) {
+    throw new ScopeGuardError('Scope guard needs workspace, scope, integer epoch and an expected active agent or vacant slot');
+  }
   const metadata = (await client.workspaces.ref(workspaceId).refresh())?.metadata ?? {};
   const state = metadata[METADATA_KEY];
   if (!state || state.retired || state.epoch !== epoch || (slot && state.activeSteer !== slot) || (state.scope?.id && !sameScopeId(state.scope.id, scopeId))) {
     throw new ScopeGuardError(`Scope state changed since discovery (expected ${slot ?? '?'}@${epoch}, found ${state?.activeSteer}@${state?.epoch}); repeat the operation`);
   }
   const agents = await readPaseoAgents(client);
-  const holder = scopeHolder({ agents, workspaceId, scopeId, slot: state.activeSteer, switches, excludeIds, aliases });
-  if (isAdvisorSteer(config, holder.labels, holder.metadata)) throw new ScopeGuardError('An advisor steer cannot hold scope authority');
-  if (holder.id !== agentId) throw new ScopeGuardError('Active steer changed since discovery; repeat the operation');
+  const holder = scopeHolder({ agents, workspaceId, scopeId, slot: state.activeSteer, switches, excludeIds, aliases, allowVacant: expectVacant });
+  if (holder && isAdvisorSteer(config, holder.labels, holder.metadata)) throw new ScopeGuardError('An advisor steer cannot hold scope authority');
+  if ((holder?.id ?? null) !== (agentId ?? null)) throw new ScopeGuardError('Active steer changed since discovery; repeat the operation');
   held.verify();
   return { metadata, state, holder, agents };
 }

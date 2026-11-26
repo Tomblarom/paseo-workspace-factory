@@ -682,7 +682,7 @@ function discoverWorktreeById(normalized, { checkouts, paseo, realpath, git, liv
   if (!isWorktreeWorkspace(found)) {
     return buildWorktreeDiscovery([], {
       normalized, parentDir, checkouts, paseo, realpath, git, liveScopes, zerosubSwitches,
-      checkoutIssues: [`Workspace ${id} ("${found.title ?? found.name}") is not a worktree workspace; adopt plain directories with {"local": <path>}`],
+      checkoutIssues: [`Workspace ${id} ("${found.title ?? found.name}") is not a worktree workspace. For local enrollment, use a workspace titled "Main" (or ending in "· Main") with plan --local <path>.`],
     });
   }
   return buildWorktreeDiscovery([found], { normalized, parentDir, checkouts, paseo, realpath, git, liveScopes, zerosubSwitches, checkoutIssues: [] });

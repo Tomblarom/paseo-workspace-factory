@@ -13,7 +13,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { isDeepStrictEqual } from 'node:util';
 import { LABEL, METADATA_KEY, parentOf, readPaseoAgents, agentUsage, isRestartReason, restartMessage } from './paseo.mjs';
-import { withLock, workspaceLockName } from './lock.mjs';
+import { LockBusy, withLock, workspaceLockName } from './lock.mjs';
 import { discoveryScopeAliases, guardScope, scopeHolder, ScopeGuardError } from './scope-guard.mjs';
 import { runtime } from './runtime.mjs';
 import { isAdvisorSlot, isAdvisorSteer, providerIsSensitive, steerPrivacyAdmission } from './config.mjs';
@@ -939,13 +939,18 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
   const workspace = client.workspaces.ref(status.workspace.id);
   let switchAction = null;
   await lock(workspaceLockName(status.workspace.id), async (held) => {
-    const { metadata, state: fresh, holder, agents } = await guardSteerScope({ client, held, workspaceId: status.workspace.id, scopeId: expected.scope?.id ?? status.repo, epoch: expected.epoch, agentId: from?.id, aliases: discoveryScopeAliases(discovery), config });
-    if (BUSY.has(holder.status) || holder.activeTurn) throw new SwitchRefused(`Active Steer ${from.slot} is running; stop it or wait for its turn to end first`);
+    const { metadata, state: fresh, holder, agents } = await guardSteerScope({
+      client, held, workspaceId: status.workspace.id, scopeId: expected.scope?.id ?? status.repo,
+      epoch: expected.epoch, slot: expected.activeSteer, agentId: from?.id, expectVacant: Boolean(activation && !from),
+      aliases: discoveryScopeAliases(discovery), config,
+    });
+    if (holder && (BUSY.has(holder.status) || holder.activeTurn)) throw new SwitchRefused(`Active Steer ${from.slot} is running; stop it or wait for its turn to end first`);
     const entries = metadata[AGENTS_KEY] ?? {};
-    const outgoing = readSteerAction(entries[holder.id]);
+    const outgoingEntry = holder ? entries[holder.id] : null;
+    const outgoing = readSteerAction(outgoingEntry);
     if ((activation || outgoing?.kind === 'activate') && outgoing?.phase !== 'done' &&
         (outgoing?.attemptedAt || outgoing?.rewindAttempt || ['renewing', 'uncertain', 'sent'].includes(outgoing?.phase) ||
-          readCleanupAction(entries[holder.id]) || unsettledAccountMove(outgoing))) {
+          readCleanupAction(outgoingEntry) || unsettledAccountMove(outgoing))) {
       throw new SwitchRefused('The active steer has an operation awaiting reconciliation. Try again after it settles.');
     }
     const liveTarget = scopeHolder({ agents, workspaceId: status.workspace.id, scopeId: expected.scope?.id ?? status.repo, slot: toSlot, aliases: discoveryScopeAliases(discovery) });
@@ -958,21 +963,30 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
       if (callerId !== from?.id) throw new SwitchRefused('Only the active steer or the takeover target may request this switch');
     }
     const next = { ...fresh, activeSteer: toSlot, activeAgentId: to.id, epoch: fresh.epoch + 1, previousSteer: fresh.activeSteer, switchedAt: now().toISOString() };
+    let targetEntry = entries[to.id];
     if (!selfTakeover && (send || stage)) {
-      const prior = readSteerAction(entries[to.id]);
-      if (prior && prior.phase !== 'done') throw new SwitchRefused('Target has a pending steer delivery; finish it before switching');
+      const prior = readSteerAction(targetEntry);
+      // P5 can retain a composer stage beside the current delivery. Preserve a
+      // claim even after an epoch change or when recovery reopened the stage.
+      const stages = [prior?.phase === 'staged' ? prior : null, targetEntry?.stagedBrief];
+      if ((prior && !['done', 'staged'].includes(prior.phase)) ||
+          stages.some((brief) => brief && (brief.phase !== 'staged' || brief.attemptedAt || brief.rewindAttempt ||
+            brief.batch || brief.cleanup || brief.accountMove || brief.composerClaim || brief.manualComposerOnly))) {
+        throw new SwitchRefused('Target has a pending steer delivery; finish it before switching');
+      }
       switchAction = newSteerAction({ kind: activation ? 'activate' : stage ? 'stage' : 'switch', epoch: next.epoch, at: next.switchedAt,
         text: activation ? undefined : packet, note: `Handoff from Steer ${fromInfo.slot} to Steer ${toSlot} in round ${next.epoch}.`, phase: stage ? 'staged' : 'reserved' });
       if (activation) switchAction.routing = { intent: { mode: 'explicit', agentId: to.id,
         provider: liveTarget.provider, model: liveTarget.model ?? undefined } };
-      switchAction.needsResumeAt = entries[to.id]?.needsResume?.at ?? null;
+      switchAction.needsResumeAt = targetEntry?.needsResume?.at ?? null;
       if (!stage) switchAction.authority = { scopeId: expected.scope?.id ?? status.repo, agentId: to.id };
       if (prior?.phase === 'done') switchAction.lastDeliveryId = prior.wakeId;
       else if (prior?.lastDeliveryId) switchAction.lastDeliveryId = prior.lastDeliveryId;
       if (stage) switchAction.stageKind = 'switch';
+      if (targetEntry?.stagedBrief) targetEntry = { ...targetEntry, stagedBrief: null };
     }
     held.verify(); // commit authority and delivery intent together
-    await workspace.setMetadata({ [METADATA_KEY]: next, ...(switchAction ? { [AGENTS_KEY]: { ...entries, [to.id]: actionEntry(entries[to.id], switchAction) } } : {}) });
+    await workspace.setMetadata({ [METADATA_KEY]: next, ...(switchAction ? { [AGENTS_KEY]: { ...entries, [to.id]: actionEntry(targetEntry, switchAction) } } : {}) });
     const writtenMeta = (await workspace.refresh())?.metadata;
     const written = writtenMeta?.[METADATA_KEY];
     if (written?.epoch !== next.epoch || written?.activeSteer !== toSlot) throw new Error('Steer switch not verifiable after write');
@@ -1097,7 +1111,7 @@ async function runTabRewind({ client, workspaceId, agentId, packet, checkpoint, 
     if (readCleanupAction(entry) || (previous && !['done', 'staged'].includes(previous.phase))) {
       throw new SwitchRefused('An existing agent action needs reconciliation before rewind');
     }
-    const reserved = { kind: 'rewind', wakeId: actionId, phase: 'rewinding', queuedAt: now().toISOString(), packet, previousBriefId, previousAction: previous };
+    const reserved = { kind: 'rewind', wakeId: actionId, phase: 'rewinding', queuedAt: now().toISOString(), packet, previousBriefId: previousBriefId ?? null, previousAction: previous };
     held.verify();
     await workspace.setMetadata({ [AGENTS_KEY]: { ...agents, [agentId]: actionEntry(entry, reserved) } });
     return reserved;
@@ -1117,24 +1131,36 @@ async function runTabRewind({ client, workspaceId, agentId, packet, checkpoint, 
     },
     beforeBrief: () => checkPrivacy(agentId),
   });
-  await lock(workspaceLockName(workspaceId), async (held) => {
-    const latest = (await workspace.refresh())?.metadata ?? {};
-    const entries = latest[AGENTS_KEY] ?? {};
-    const current = entries[agentId] ?? {};
-    if (current.action?.wakeId !== actionId) throw new SwitchRefused('Rewind action changed while running; outcome needs attention');
+  const settle = () => updateAgentEntry({ client, workspaceId, agentId, lock, patch: (entry) => {
+    if (entry?.action?.wakeId !== actionId) throw new SwitchRefused('Rewind action changed while running; outcome needs attention');
     const preDispatch = ['no-point', 'no-op', 'unsupported', 'unavailable', 'deferred'].includes(outcome.status);
-    if (preDispatch) {
-      held.verify();
-      await workspace.setMetadata({ [AGENTS_KEY]: { ...entries, [agentId]: actionEntry(current, action.previousAction ?? null) } });
-      return;
-    }
+    if (preDispatch) return { action: action.previousAction ?? null };
     const { previousAction: _dropped, ...attempt } = action;
-    const settled = outcome.status === 'rewound'
-      ? { ...attempt, phase: 'done', messageId: outcome.messageId, briefMessageId: outcome.briefMessageId, ...(outcome.sendError ? { sendError: outcome.sendError } : {}) }
-      : { ...attempt, phase: 'uncertain', lastError: outcome.error ?? 'Rewind outcome could not be confirmed' };
-    held.verify();
-    await workspace.setMetadata({ [AGENTS_KEY]: { ...entries, [agentId]: actionEntry(current, settled) } });
-  });
+    if (outcome.status !== 'rewound') {
+      return { action: { ...attempt, phase: 'uncertain', lastError: outcome.error ?? 'Rewind outcome could not be confirmed' } };
+    }
+    return {
+      action: { ...attempt, phase: 'done', messageId: outcome.messageId, briefMessageId: outcome.briefMessageId, ...(outcome.sendError ? { sendError: outcome.sendError } : {}) },
+      ...buildRewindRecord({ checkpoint, messageId: outcome.messageId, briefMessageId: outcome.briefMessageId, now }),
+      ...(note ? { note, noteAt: checkpoint?.capturedAt ?? null } : {}),
+    };
+  } });
+  // Retry the journal write only. The native rewind and any send already ran.
+  const settleDeadline = Date.now() + 1_000;
+  for (;;) {
+    try {
+      await settle();
+      break;
+    } catch (error) {
+      if (error instanceof LockBusy && Date.now() < settleDeadline) {
+        await delay(50);
+        continue;
+      }
+      if (outcome.status !== 'rewound') throw error;
+      const detail = error instanceof Error ? error.message : String(error);
+      return { outcome, recordingError: `Rewind applied. Factory could not confirm its record (${detail}).` };
+    }
+  }
   if (privacyError) throw privacyError;
   if (outcome.status === 'failed') {
     const error = new SwitchRefused(`Rewind of ${agentId} has an uncertain outcome (${outcome.error ?? 'unknown error'}); inspect the agent before recovery`);
@@ -1142,15 +1168,6 @@ async function runTabRewind({ client, workspaceId, agentId, packet, checkpoint, 
     error.refreshMode = 'rewind';
     throw error;
   }
-  if (outcome.status !== 'rewound') return { outcome };
-  await updateAgentEntry({
-    client, workspaceId, agentId, lock,
-    patch: (entry) => ({
-      ...buildRewindRecord({ checkpoint, messageId: outcome.messageId ?? null, briefMessageId: outcome.briefMessageId ?? null, now }),
-      ...(note ? { note, noteAt: checkpoint?.capturedAt ?? null } : {}),
-    }),
-    liveIds: null,
-  });
   return { outcome };
 }
 
@@ -1226,7 +1243,7 @@ async function tryActiveRewind({ client, discovery, status, expected, slot, from
     note: entry?.note ?? null, noteAt: entry?.noteAt ?? null,
     lastMessage: await hintOf(client, from.id), language, workerModel, rewound: true, promptOptions,
   });
-  const { outcome } = await runTabRewind({ client, workspaceId: status.workspace.id, agentId: from.id, packet, checkpoint: status.checkpoint, lock, now, rewindClient, previousBriefId, send, checkPrivacy, confirmRewind,
+  const { outcome, recordingError } = await runTabRewind({ client, workspaceId: status.workspace.id, agentId: from.id, packet, checkpoint: status.checkpoint, lock, now, rewindClient, previousBriefId, send, checkPrivacy, confirmRewind,
     authority: { scopeId: expected.scope?.id ?? status.repo, epoch: expected.epoch, aliases: discoveryScopeAliases(discovery), callerId, config } });
   if (outcome.status !== 'rewound') {
     if (requireRefreshMode === 'rewind') {
@@ -1244,6 +1261,7 @@ async function tryActiveRewind({ client, discovery, status, expected, slot, from
     previousNotified: false, reused: false, renameError: null,
     warnings: [], fallbackFrom: null, profileSuggestion: null, refreshMode: 'rewind',
     rewindPoint: outcome.messageId ?? null, briefMessageId: outcome.briefMessageId ?? null,
+    ...(recordingError ? { recordingError } : {}),
   };
 }
 
@@ -1691,7 +1709,7 @@ async function tryTabRewind({ client, discovery, status, expected, from, kind, p
   const packet = await packetOf();
   const savedCheckpoint = kind === 'worker' ? { capturedAt: entry?.noteAt } : status.checkpoint;
   const block = kind === 'worker' ? parseCheckpointBlock(packet) : null;
-  const { outcome } = await runTabRewind({ client, workspaceId: status.workspace.id, agentId: from.id, packet, checkpoint: savedCheckpoint, lock, now, rewindClient, previousBriefId, send, checkPrivacy, confirmRewind, note: block ? formatCheckpointBlock(block) : null });
+  const { outcome, recordingError } = await runTabRewind({ client, workspaceId: status.workspace.id, agentId: from.id, packet, checkpoint: savedCheckpoint, lock, now, rewindClient, previousBriefId, send, checkPrivacy, confirmRewind, note: block ? formatCheckpointBlock(block) : null });
   if (outcome.status !== 'rewound') {
     if (requireRefreshMode === 'rewind') {
       const error = new SwitchRefused(`Bound rewind route failed (${outcome.status}${outcome.error ? `: ${outcome.error}` : ''}); nothing sent, nothing recorded, no new agent created. The brief is kept.`);
@@ -1708,6 +1726,7 @@ async function tryTabRewind({ client, discovery, status, expected, from, kind, p
     previousNotified: false, reused: false, renameError: null,
     warnings: [], fallbackFrom: null, profileSuggestion: null, refreshMode: 'rewind',
     rewindPoint: outcome.messageId ?? null, briefMessageId: outcome.briefMessageId ?? null,
+    ...(recordingError ? { recordingError } : {}),
   };
 }
 

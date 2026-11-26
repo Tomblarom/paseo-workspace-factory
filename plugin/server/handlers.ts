@@ -496,6 +496,7 @@ function freshIdentityOf(dry: any): FreshPreviewIdentity {
 async function stageAppliedPacket(
   paseo: any,
   args: { workspaceId: unknown; agentId: unknown; packet: unknown; kind: string; epoch: number; deliver: unknown; deliveryError: unknown },
+  deps?: FreshDeps,
 ): Promise<{ staged: boolean; stagedTo: string | null; stagingError: string | null; stageId?: string }> {
   const quiet = { staged: false, stagedTo: null, stagingError: null };
   const packet = typeof args.packet === "string" && args.packet.trim() ? args.packet : null;
@@ -504,7 +505,7 @@ async function stageAppliedPacket(
   if (!packet || !agentId || !workspaceId) return quiet;
   if (args.deliver !== "stage" && (args.deliveryError === null || args.deliveryError === undefined)) return quiet;
   try {
-    const { stageId } = await stageSteerBrief(paseo, { workspaceId, agentId, packet, kind: args.kind, epoch: args.epoch });
+    const { stageId } = await stageSteerBrief(paseo, { workspaceId, agentId, packet, kind: args.kind, epoch: args.epoch }, deps);
     return { staged: true, stagedTo: agentId, stagingError: null, stageId };
   } catch (error) {
     return { staged: false, stagedTo: null, stagingError: error instanceof Error ? error.message : String(error) };
@@ -554,7 +555,7 @@ export async function applyFresh(
     }
     throw error;
   }
-  const { routeBinding: _internalRoute, ...result } = applied;
+  const { routeBinding: _internalRoute, recordingError, ...result } = applied;
   if (!applied.applied) return result;
   const destination = typeof applied.to === "string" && applied.to ? applied.to : applied.from;
   const staged = await stageAppliedPacket(paseo, {
@@ -565,10 +566,10 @@ export async function applyFresh(
     epoch: applied.epoch,
     deliver: input.deliver,
     deliveryError: applied.deliveryError,
-  });
+  }, deps);
   // Keep the packet in Factory state if the destination changed during Fresh.
   // Composer insertion rechecks admission when it fetches the stage.
-  if (staged.staged || applied.deliveryError) {
+  if (staged.staged || applied.deliveryError || recordingError) {
     try {
       await requireFreshPrivacy({ client: paseo, workspaceId: dry.workspaceId,
         scopeId: discovery.mainWorkspace?.metadata?.[METADATA_KEY]?.scope?.id,
@@ -583,6 +584,7 @@ export async function applyFresh(
   return {
     ...result,
     ...staged,
+    stagingError: recordingError ?? staged.stagingError,
   };
 }
 
@@ -906,7 +908,7 @@ export async function activateSteer(
         if (target.background || hasActiveAgentWork(target, entries[target.id])) {
           throw new Error("This steer is busy. Resolve any permission request or wait for its turn to finish.");
         }
-        if (hasActiveAgentWork(holder, entries[holder.id])) {
+        if (holder && hasActiveAgentWork(holder, entries[holder.id])) {
           throw new Error("The active steer is busy. Resolve any permission request or stop its turn before activating this steer.");
         }
         const quota = await steerQuotaAdmission(target, entries[target.id], { ...deps, paseo }, entries);
@@ -1765,6 +1767,8 @@ export async function applySteerAddRpc(
   hostSettings?: HostSettingsReader | null,
   { lookupReceipt = lookupCreationReceipt, readZerosub = readZerosubStateSafe, getZerosub = readZerosubState } = {},
 ): Promise<any> {
+  const slot = input.slot?.trim().toUpperCase();
+  if (!slot) throw new Error("Steer creation requires a slot. Review the preview and select a steer slot.");
   const workspaceId = input.workspaceId ?? (await resolveEntryForAddress(paseo, input.repo, undefined)).workspaceId;
   if (!workspaceId) throw new Error("Steer creation requires an enrolled workspace.");
   return withWorkspaceLock(workspaceId, async (held: { verify(): void }) => {
@@ -1779,8 +1783,7 @@ export async function applySteerAddRpc(
       );
     }
     if (status.state.retired) throw new Error("This scope is retired; choose an active scope.");
-    const slot = input.slot?.trim().toUpperCase();
-    if (!slot || status.workspace.id !== workspaceId) throw new Error("The creation target changed. Review the preview again.");
+    if (status.workspace.id !== workspaceId) throw new Error("The creation target changed. Review the preview again.");
     const workspace = paseo.workspaces.ref(workspaceId);
     const agents = discovery.agents ?? [];
     let pending: SteerAddPending | null = discovery.mainWorkspace?.metadata?.[STEER_ADD_PENDING_KEY] ?? null;
