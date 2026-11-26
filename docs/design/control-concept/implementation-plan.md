@@ -746,11 +746,22 @@ pool aliases describe that snapshot. The host-wide quota command remains
 available for maintenance.
 
 Activity shows up to 20 recent recorded events from holder changes, creation,
-renewal, recovery, delivery, assignment and worker records. Creation uses the
-native agent timestamp for agents in the workspace. The RPC exposes structured
-status, bounded reason codes and observed timestamps, including unknown times.
-The projection reads retained evidence without reconciliation. It omits prompt
-bodies, checkpoint or report text, credentials and raw errors.
+renewal, recovery, delivery, takeover requests, assignment and worker records
+as a compact timeline. Creation uses the native agent timestamp for agents in
+the workspace. The RPC exposes structured status, bounded reason and cause
+codes, observed timestamps including unknown times, and verified participants
+as `Steer <letter>`, `Steer` or `Worker`. Steps are grouped only when retained
+records identify the same operation (shared epoch and stamp, brief ID or
+cleanup reservation). The projection reads retained evidence without
+reconciliation. It omits prompt bodies, checkpoint or report text,
+credentials and raw errors.
+
+Host settings show one compact profile list with native catalog labels, a
+focused profile editor and separate steer, advisor and worker priority lists
+with move, add and remove actions. Priority edits use exact stored profile
+names, keep at least one worker profile and move a profile between steer and
+advisor priorities when its advisor flag changes. Validation, revision checks
+and autosave are unchanged.
 
 On Paseo 0.17.4 both live RPCs returned the exact requested workspace and
 refused an unknown workspace. The web client rendered both views on desktop
@@ -758,6 +769,16 @@ and at 390 pixels. Enter opened Activity and invoked its refresh action.
 Activity also rendered with dark mode requested by the browser. A browser-only
 disconnect kept both last snapshots visible with an offline label. The label
 cleared when the browser reconnected.
+
+P5 visual acceptance (2026-11-26, Paseo 0.17.4, after reload): Overview,
+Steers, Resources, Activity and host settings were compared against the
+earlier captures at 1366 and 390 pixels in light and dark mode. Text wrapped
+without overflow, edge move actions and the empty advisor picker were
+disabled, and closing the daemon WebSocket showed the offline label, disabled
+refresh in Activity and Resources and recovered on reconnect. Playwright's
+`setOffline` leaves an open localhost WebSocket connected, so the check routes
+and closes the socket instead. P1/P3 mutation acceptance (successful creation,
+standby activation, Fresh recovery) remains open for an isolated workspace.
 
 Track read-only dispatch receipt recovery with the existing
 [Paseo issue #9947](https://github.com/getpaseo/paseo/issues/9947) and
