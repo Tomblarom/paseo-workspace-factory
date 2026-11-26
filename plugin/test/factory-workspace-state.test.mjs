@@ -9,12 +9,14 @@ const {
   createFactorySteerFeed,
   enrollmentPlan,
   pendingWorkspaceWork,
+  steerActionEligibility,
   steerConditions,
+  steerModelName,
   workspaceSteers,
 } = await import('../client/factory-workspace-state.ts');
 
 const steer = (agentId, overrides = {}) => ({
-  agentId, workspaceId: 'wks_main', slot: 'A', active: false, advisor: false,
+  agentId, workspaceId: 'wks_main', scopeId: 'local/example', slot: 'A', active: false, advisor: false,
   state: 'running', liveStatus: 'running', warmth: 'cold', tokens: 128_000,
   large: true, limited: true, awaitingUpdate: false, quotaRows: [], headerFacts: ['Estimated'],
   permissionNeeded: true, stagedBrief: true, ...overrides,
@@ -37,26 +39,66 @@ test('only one eligible steer may control the current workspace', () => {
 });
 
 test('running, large context, quota and pending actions remain visible together', () => {
-  const active = steer('a', { active: true });
+  const active = steer('a', { active: true, warmth: 'warm' });
   const conditions = steerConditions(active);
   assert.equal(conditions.runtime, 'Running');
-  assert.equal(conditions.context, `${active.tokens.toLocaleString()} tokens · large, cache cold (estimated)`);
-  assert.equal(conditions.quota, 'Limited');
+  assert.equal(conditions.context, `${active.tokens.toLocaleString()} tokens · large`);
+  assert.equal(conditions.cache, 'Warm (estimated)');
+  assert.equal(conditions.quota, 'Quota limited');
   assert.equal(conditions.attention, 'Permission requested · Brief staged');
-  assert.deepEqual(pendingWorkspaceWork({
-    openWorkers: [{ id: 'registered', state: 'blocked' }],
-    pendingWorkerWakeCount: 2,
-    workers: [{ id: 'registered', status: 'running' }, { id: 'unregistered', status: 'running' }],
-  }, [active]), [
-    'Blocked workers (1)', 'Worker updates queued (2)', 'Workers in progress (1)',
-    'Steer briefs staged (1)', 'Steer permission requests (1)',
-  ]);
   const unknown = steerConditions(steer('b', {
     state: 'unknown', liveStatus: null, tokens: null, warmth: 'unknown', headerFacts: [], large: false, limited: false,
   }));
   assert.equal(unknown.runtime, 'Unknown');
-  assert.equal(unknown.context, 'Size unknown, cache unknown');
-  assert.equal(unknown.quota, 'Unknown');
+  assert.equal(unknown.context, 'Context unknown');
+  assert.equal(unknown.cache, 'Cache unknown');
+  assert.equal(unknown.quota, 'Quota unknown');
+  const quotaRows = [{ usedPct: 35.2, stale: false }, { usedPct: 79.9, stale: false }];
+  assert.equal(steerConditions(steer('a', { limited: false, quotaRows })).quota, '80% used');
+  assert.equal(steerConditions(steer('a', { limited: false, quotaRows: [...quotaRows, { usedPct: 99, stale: true }] })).quota,
+    'Awaiting quota update');
+});
+
+test('a namespaced steer model takes its display name from the provider catalog', () => {
+  const catalog = [{ id: 'claude-opus-5-5', label: 'Opus 5.5' }];
+  assert.equal(steerModelName('anthropic/claude-opus-5-5', catalog), 'Opus 5.5');
+  assert.equal(steerModelName('anthropic/claude-opus-5-5', [...catalog,
+    { id: 'anthropic/claude-opus-5-5', label: 'Hosted Opus' }]), 'Hosted Opus');
+  assert.equal(steerModelName('arbitrary/model', catalog), 'arbitrary/model');
+});
+
+test('attention preserves the affected steer and metrics only count observed work', () => {
+  const active = steer('a', { active: true });
+  const recovering = steer('b', { slot: 'B', state: 'needs-resume', permissionNeeded: false, stagedBrief: false,
+    detail: 'Last reply failed · recovery pending' });
+  const retired = steer('c', { slot: 'C', state: 'retired' });
+  const pending = pendingWorkspaceWork({
+    openWorkers: [{ id: 'registered', state: 'blocked' }],
+    pendingWorkerWakeCount: 2,
+    workers: [{ id: 'registered', status: 'running' }, { id: 'unregistered', status: 'running' }],
+  }, [active, recovering, retired]);
+  assert.equal(pending.workerCount, 2);
+  assert.equal(pending.workerRunning, 1);
+  assert.deepEqual(pending.workerItems, ['Blocked workers (1)', 'Worker updates queued (2)']);
+  assert.equal(pending.operationCount, 5);
+  assert.deepEqual(pending.steerItems.map(({ kind, steer: row }) => [kind, row.agentId]),
+    [['permission', 'a'], ['brief', 'a'], ['recovery', 'b']]);
+  assert.equal(pending.steerItems[2].detail, recovering.detail);
+  assert.equal(pendingWorkspaceWork(undefined, [active]).operationCount, null);
+  assert.equal(pendingWorkspaceWork(undefined, []).workerCount, null);
+});
+
+test('reset and recovery can both be available while preserving the menu guards', () => {
+  const idle = { liveStatus: 'idle', state: 'warm', permissionNeeded: false, limited: false };
+  assert.deepEqual(steerActionEligibility(steer('a', idle)), { reset: null, resume: 'No recovery pending' });
+  const recovery = { ...idle, state: 'needs-resume' };
+  assert.deepEqual(steerActionEligibility(steer('b', recovery)), { reset: null, resume: null });
+  const permission = steerActionEligibility(steer('b', { ...recovery, permissionNeeded: true }));
+  assert.match(permission.reset, /permission/);
+  assert.equal(permission.resume, permission.reset);
+  assert.deepEqual(steerActionEligibility(steer('b', { ...recovery, limited: true })), {
+    reset: 'Quota depleted', resume: 'Quota depleted',
+  });
 });
 
 test('the existing steer feed retains the last rows through a disconnect', () => {

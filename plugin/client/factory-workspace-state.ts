@@ -1,6 +1,8 @@
 import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
 import type { factoryPlan, factoryStatus } from "../shared/factory.js";
 import { parseFactoryArgs } from "../shared/factory-args.js";
+import { modelDisplayName } from "../shared/model-label.js";
+import { resumeRouteFor } from "./steer-menu.js";
 import type { SteerPillRow } from "./steer-pill.js";
 
 export type WorkspaceStatus = RpcOutput<typeof factoryStatus>;
@@ -47,6 +49,27 @@ export function steerName(row: SteerPillRow): string {
   return row.slot ? `Steer ${row.slot}` : label(row.title) ?? "Unnamed steer";
 }
 
+export function steerModelName(model: string | null, catalog: readonly {
+  id: string; label?: string | null; aliases?: readonly string[] | null;
+}[] = []) {
+  if (!model) return "Model unknown";
+  const find = (id: string) => catalog.find((entry) => entry.id === id || entry.aliases?.includes(id));
+  const bareId = /^[\w.-]+\/([\w.-]+)$/.exec(model)?.[1];
+  const direct = find(model);
+  const resolved = direct ?? (bareId ? find(bareId) : undefined);
+  return modelDisplayName(direct || !resolved ? model : bareId, resolved?.label) ?? "Model unknown";
+}
+
+export function steerActionEligibility(row: SteerPillRow) {
+  const route = resumeRouteFor(row, { keepChatHistory: false });
+  const reason = route.kind === "blocked" ? route.reason : route.kind === "reset-details" ? "Quota depleted"
+    : !row.scopeId || !row.slot ? "Steer membership is unavailable" : null;
+  return {
+    reset: reason,
+    resume: reason ?? (row.state === "needs-resume" ? null : "No recovery pending"),
+  };
+}
+
 export function enrollmentPlan(error: Error | null, workspaceId: string): RpcInput<typeof factoryPlan> | undefined {
   const suggestion = error?.message.match(/ is not managed by the factory yet\. To set it up, preview a plan: \/factory (plan .+)$/)?.[1];
   if (!suggestion) return;
@@ -75,31 +98,51 @@ export function workspaceSteers(rows: readonly SteerPillRow[] | null, workspaceI
   };
 }
 
+type SteerAttention = "permission" | "brief" | "waiting" | "recovery" | "membership";
+
+function steerAttention(row: SteerPillRow): { kind: SteerAttention; detail: string }[] {
+  if (row.state === "retired") return [];
+  const items: ReturnType<typeof steerAttention> = [];
+  if (row.permissionNeeded) items.push({ kind: "permission", detail: "Permission requested" });
+  if (row.stagedBrief) items.push({ kind: "brief", detail: "Brief staged" });
+  if (row.state === "waiting") items.push({ kind: "waiting", detail: row.detail || "Waiting to continue" });
+  if (row.state === "needs-resume") items.push({ kind: "recovery", detail: row.detail || "Recovery pending" });
+  if (row.state === "unknown" && row.detail === "Membership ambiguous") {
+    items.push({ kind: "membership", detail: row.detail });
+  }
+  return items;
+}
+
 export function pendingWorkspaceWork(status: WorkspaceStatus | undefined, steers: readonly SteerPillRow[]) {
-  const counts = new Map<string, number>();
-  const count = (condition: string) => counts.set(condition, (counts.get(condition) ?? 0) + 1);
-  const registered = new Set<string>();
+  const workerCounts = new Map<string, number>();
+  const count = (condition: string) => workerCounts.set(condition, (workerCounts.get(condition) ?? 0) + 1);
+  const workers = new Set<string>();
   const openWorkers = Array.isArray(status?.openWorkers) ? status.openWorkers : [];
   for (const worker of openWorkers) {
     const entry = record(worker);
     const id = label(entry?.id);
-    if (!id || registered.has(id)) continue;
-    registered.add(id);
+    if (!id || workers.has(id)) continue;
+    workers.add(id);
     const state = label(entry?.state);
     count(state ? workerConditions[state] ?? "Worker status unknown" : "Worker status unknown");
   }
-  if (status?.pendingWorkerWakeCount) counts.set("Worker updates queued", status.pendingWorkerWakeCount);
   for (const worker of status?.workers ?? []) {
-    if (!registered.has(worker.id) && worker.status === "running") count("Workers in progress");
+    if (workers.has(worker.id)) continue;
+    workers.add(worker.id);
+    if (worker.status === "running") count("Workers in progress");
   }
-  for (const steer of steers) {
-    if (steer.state === "retired") continue;
-    if (steer.stagedBrief) count("Steer briefs staged");
-    if (steer.permissionNeeded) count("Steer permission requests");
-    if (steer.state === "waiting") count("Steers waiting");
-    if (steer.state === "needs-resume") count("Steers awaiting recovery");
-  }
-  return Array.from(counts, ([condition, count]) => `${condition} (${count})`);
+  const workerRunning = workerCounts.get("Workers in progress");
+  workerCounts.delete("Workers in progress");
+  if (status?.pendingWorkerWakeCount) workerCounts.set("Worker updates queued", status.pendingWorkerWakeCount);
+  const steerItems = steers.flatMap((steer) => steerAttention(steer).map((item) => ({ ...item, steer })));
+  const observedOperations = steerItems.filter(({ kind }) => kind !== "membership").length;
+  return {
+    workerCount: status ? workers.size : null,
+    workerRunning,
+    workerItems: [...workerCounts].map(([condition, count]) => `${condition} (${count})`),
+    steerItems,
+    operationCount: status?.pendingWorkerWakeCount === undefined ? null : observedOperations + status.pendingWorkerWakeCount,
+  };
 }
 
 const workerConditions: Record<string, string> = {
@@ -115,23 +158,17 @@ export function steerConditions(row: SteerPillRow) {
   const runtime = running ? "Running" : ({
     idle: "Idle", initializing: "Starting", closed: "Closed", error: "Error",
   } as Record<string, string>)[row.liveStatus ?? ""] ?? "Unknown";
-  const tokens = row.tokens === null ? "Size unknown" : `${row.tokens.toLocaleString()} tokens`;
-  const cache = ({ warm: "warm", cooling: "cooling", cold: "cold" } as Record<string, string>)[row.warmth] ?? "unknown";
-  const estimated = row.headerFacts.includes("Estimated");
-  const quota = row.limited ? "Limited" : row.awaitingUpdate || row.quotaRows.some((window) => window.stale)
-    ? "Awaiting update" : row.quotaRows.some((window) => window.usedPct !== null)
-      ? "Within sampled limits" : "Unknown";
-  const attention = [
-    row.permissionNeeded && "Permission requested",
-    row.stagedBrief && "Brief staged",
-    row.state === "waiting" && "Waiting to continue",
-    row.state === "needs-resume" && row.detail,
-    row.state === "unknown" && row.detail === "Membership ambiguous" && row.detail,
-  ].filter(Boolean).join(" · ");
+  const context = row.tokens === null ? "Context unknown"
+    : `${row.tokens.toLocaleString()} tokens${row.large ? " · large" : ""}`;
+  const cache = ({ warm: "Warm", cooling: "Cooling", cold: "Cold" } as Record<string, string>)[row.warmth] ?? "Cache unknown";
+  const usage = row.quotaRows.flatMap(({ usedPct, stale }) => !stale && usedPct !== null ? [usedPct] : []);
+  const quota = row.limited ? "Quota limited" : row.awaitingUpdate || row.quotaRows.some((window) => window.stale)
+    ? "Awaiting quota update" : usage.length ? `${Math.round(Math.max(...usage))}% used` : "Quota unknown";
   return {
     runtime,
-    context: `${tokens}${row.large ? " · large" : ""}, cache ${cache}${estimated ? " (estimated)" : ""}`,
+    context,
+    cache: row.headerFacts.includes("Estimated") ? `${cache} (estimated)` : cache,
     quota,
-    attention,
+    attention: steerAttention(row).map(({ detail }) => detail).join(" · "),
   };
 }

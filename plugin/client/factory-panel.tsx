@@ -3,8 +3,8 @@ import type { PluginClientContext, PluginWorkspacePanelProps } from "@getpaseo/p
 import { useHosts, useRpc } from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/ui";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { AccessibilityInfo, findNodeHandle, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import type { TextStyle, ViewStyle } from "react-native";
 import {
   factoryApply,
@@ -108,9 +108,35 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
   const setFactoryResult = results.setResult;
   const lastResult = useRef(result);
   const scroll = useRef<ScrollView>(null);
+  const dashboard = useRef<View>(null);
   const tabHandles = useRef<Partial<Record<FactoryView, View | null>>>({});
+  const [focusedSteerId, setFocusedSteerId] = useState<string | null>(null);
+  const selectView = (next: FactoryView, steerAgentId?: string) => {
+    setFocusedSteerId(next === "Steers" ? steerAgentId ?? null : null);
+    setView(next);
+  };
+  const openView = (next: FactoryView, steerAgentId?: string) => {
+    selectView(next, steerAgentId);
+    if (!steerAgentId) requestAnimationFrame(() => tabHandles.current[next]?.focus());
+  };
+  const focusContent = useCallback((element: View) => {
+    requestAnimationFrame(() => {
+      if (!dashboard.current) return;
+      element.measureLayout(dashboard.current, (_x, y) => {
+        scroll.current?.scrollTo({ y: Math.max(0, y - 8), animated: false });
+        if (layout.platform === "web") element.focus();
+        else {
+          const node = findNodeHandle(element);
+          if (node !== null) AccessibilityInfo.setAccessibilityFocus(node);
+        }
+      });
+    });
+  }, [layout.platform]);
   useEffect(() => {
-    if (result && result !== lastResult.current) setView("Diagnostics");
+    if (result && result !== lastResult.current) {
+      setFocusedSteerId(null);
+      setView("Diagnostics");
+    }
     lastResult.current = result;
   }, [result]);
   useEffect(() => { scroll.current?.scrollTo({ y: 0, animated: false }); }, [view, result]);
@@ -570,7 +596,7 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
 
   return (
     <ScrollView ref={scroll} style={styles.screen}>
-      <View testID="factory-dashboard" style={styles.dashboard}>
+      <View ref={dashboard} collapsable={false} testID="factory-dashboard" style={styles.dashboard}>
       <View style={styles.header}>
         <View style={styles.row}>
           <Icon name="Factory" size={18} color={theme.colors.foregroundMuted} />
@@ -579,7 +605,7 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
         <Pressable accessibilityRole="button" accessibilityLabel="Diagnostics" aria-expanded={view === "Diagnostics"}
           style={({ pressed }) => [{ flexDirection: "row", alignItems: "center", gap: 6, minHeight: 38,
             borderRadius: 6, paddingHorizontal: 8 }, (pressed || view === "Diagnostics") && { backgroundColor: theme.colors.surface2 }]}
-          onPress={() => setView(view === "Diagnostics" ? "Overview" : "Diagnostics")}>
+          onPress={() => selectView(view === "Diagnostics" ? "Overview" : "Diagnostics")}>
           <Icon name="Terminal" size={15} color={theme.colors.foregroundMuted} />
           {!layout.compact ? <Text style={styles.label}>Diagnostics</Text> : null}
         </Pressable>
@@ -600,13 +626,13 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
                 if (next === null) return;
                 event.preventDefault();
                 const target = factoryViews[next].name;
-                setView(target);
+                selectView(target);
                 tabHandles.current[target]?.focus();
               },
             } : {})}
             style={({ pressed }) => [styles.viewButton, view === name && styles.selectedView,
               pressed && { backgroundColor: theme.colors.surface1 }]}
-            onPress={() => setView(name)}
+            onPress={() => selectView(name)}
           >
             {!layout.compact ? <Icon name={icon} size={15} color={view === name ? theme.colors.accent : theme.colors.foregroundMuted} /> : null}
             <Text style={[styles.viewLabel, view === name && styles.selectedViewLabel]}>{name}</Text>
@@ -616,7 +642,7 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
       {view === "Resources" ? (
         <FactoryWorkspaceResources workspaceId={workspaceId} layout={layout} host={host} offline={offline} styles={styles} />
       ) : view === "Activity" ? (
-        <FactoryWorkspaceActivity workspaceId={workspaceId} layout={layout} host={host} offline={offline} styles={styles} />
+        <FactoryWorkspaceActivity workspaceId={workspaceId} layout={layout} host={host} offline={offline} styles={styles} navigation={props.navigation} />
       ) : view !== "Diagnostics" ? (
         <FactoryWorkspaceStatus
           view={view}
@@ -635,7 +661,9 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
           refresh={() => { void workspaceStatus.refetch(); }}
           setup={planMutation.mutate}
           setupBusy={busy}
-          openView={setView}
+          openView={openView}
+          focusedSteerId={focusedSteerId}
+          focusContent={focusContent}
         />
       ) : tools}
       </View>
