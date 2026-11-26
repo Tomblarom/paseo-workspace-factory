@@ -151,3 +151,5 @@ could be set per factory agent without `CODEX_HOME` or a global `config.toml`. O
 strict `CodexProviderOptionsSchema` rejects them. A Codex update (0.172.0 available) does
 not change this. Decision: no factory workaround; an upstream proposal to admit these
 context keys is the native path.
+
+Upstream discussion (2026-11-26): https://github.com/getpaseo/paseo/discussions/10914.

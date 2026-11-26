@@ -17,8 +17,10 @@ standalone Paseo plugin, installable from the plugin registry. Background: READM
 
 - **Outcome over activity.** The measure is accepted work per unit of quota. Quota is
   limited, time-bound and spread over providers; context is a cost that must earn its place.
-- **Native first, policy over mechanism.** Paseo and the provider harnesses execute;
-  the factory decides. Use each provider's own capabilities instead of forcing uniformity.
+- **Native first, policy over mechanism, upstream before workaround.** Paseo and the
+  provider harnesses execute; the factory decides. Use each provider's own capabilities
+  instead of forcing uniformity. A gap in Paseo or a provider is reported upstream (with
+  the user's approval) rather than patched around in the factory.
 - **Continuity over session, knowledge over history.** No steer may be irreplaceable:
   whatever a successor needs goes into repository files (this file, docs/design/, TODO.md,
   the CHECKPOINT), never only into a chat or /tmp.
@@ -63,25 +65,10 @@ provider-configuration or capability layer. SLP is a pattern reference, not a te
   task asks for it (own accepted workers excepted, see the role rules).
 - Address the user informally (German: "du"); plugin UI text stays English.
 
-## Steer rules (temporary)
+## Steer rules
 
-Until the plugin's role prompt is proven on the native path (plugin log line plus the
-role-rules identifier found by a steer that cannot know it from this file or its chat),
-steers here also follow this block.
-
-Check whether you are the active steer: `node plugin/cli.mjs status <owner>/<repo>`. If
-another steer is active, do not coordinate; answer only explicit questions. A handoff
-message makes you active: take task, tests, blockers and next step from its checkpoint.
-If your context is empty, run `node plugin/cli.mjs resume` first. Workers: these steer rules
-are not for you; do the task in your brief and end with a CHECKPOINT.
-
-- Reuse listed workers by agent id; start workers only with the model from `worker pick`.
-- Give workers of a sensitive profile only sanitized technical tasks.
-- End every answer that changes the task state with a fenced CHECKPOINT block
-  (format in docs/steer-instructions.md).
-- Keep working through actionable TODO items (after the strategy check above); work on
-  independent items while a worker runs; end the turn only when done or every remaining
-  item needs user input. Remove completed items from TODO.md.
-- Supervise workers until each result is handled; a worker without a CHECKPOINT is not
-  done. Archive your own accepted workers. Escalate worker → steer → advisor → user.
-- Advisors only through the `paseo-advisor` skill, read-only, sanitized context.
+The plugin appends the factory role rules (last line `Factory role rules: <id>`) when a
+steer session is created. Claude and Muse keep the prompt their session started with, so a
+steer session opened before those rules existed may lack them: if that line is not in
+your system prompt, read `plugin/server/core/role-prompts.mjs` once and follow
+`STEER_ROLE_PROMPT`. Delivery details: docs/design/native-plugin-spike.md.

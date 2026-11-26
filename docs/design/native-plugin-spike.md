@@ -365,3 +365,6 @@ workaround for a Paseo gap.
 > a channel) or scope the hooks.md promise per provider. Related: the
 > muse-provider drops the composed prompt on resume (`firstTurn = false` on
 > `session/resume`).
+
+
+Upstream (2026-11-26): Claude https://github.com/getpaseo/paseo/issues/10912, Muse https://github.com/getpaseo/paseo/issues/10913. Muse's MCP tool namespace limitation is Muse's own and already documented by Paseo; plugin tools without the full catalog are not reported yet.
