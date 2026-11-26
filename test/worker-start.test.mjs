@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { LABEL, METADATA_KEY, PARENT_LABEL } from '../plugin/server/core/paseo.mjs';
+import { WORKER_ROLE_PROMPT } from '../plugin/server/core/role-prompts.mjs';
 import { startScopedWorker } from '../plugin/server/core/workers.mjs';
 
 function setup() {
@@ -55,10 +56,10 @@ test('worker start previews without changes and pins the account at native creat
   assert.equal(requests[1].idempotencyKey, request.idempotencyKey);
 });
 
-test('worker start leaves the task verbatim when findings are disabled', async () => {
+test('worker start appends only the role block when findings are disabled', async () => {
   const { options, requests } = setup();
   await startScopedWorker({ ...options, apply: true, promptOptions: { findingsInPrompts: false } });
-  assert.equal(requests[0].prompt, options.prompt);
+  assert.equal(requests[0].prompt, `${options.prompt}\n\n${WORKER_ROLE_PROMPT}`);
 });
 
 test('worker start requires the active steer and rejects a stale epoch', async () => {

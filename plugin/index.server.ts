@@ -59,6 +59,8 @@ import {
 import { startQuotaTimer } from "./server/quota.js";
 import { getQuota } from "./server/quota-rpc.js";
 import { readZerosubStateSafe } from "./server/zerosub-runtime.js";
+import { isAdvisorSlot } from "./server/core/config.mjs";
+import { rolePromptForOpen, withFactoryCli } from "./server/core/role-prompts.mjs";
 import {
   factoryApply,
   factoryAssign,
@@ -255,6 +257,35 @@ export default function contribute(server: PluginServerContext) {
     await handleArchiveAfter(payload, context, { getSettings: readSupervision });
     notifyFeeds();
   });
+  // Static role rules for interactive factory steers (workers get theirs via
+  // `worker start`; history opens and non-factory agents stay unchanged).
+  // The text is static (cache-stable); only the advisor choice reads config.
+  const removeRoleHook = server.addHook("agent.open.before", async ({ request }, context) => {
+    if (request.purpose !== "interactive" || request.labels?.["wsf.role"] !== "steer") return;
+    let isAdvisor = false;
+    const slot = request.labels["wsf.slot"];
+    if (typeof slot === "string" && slot) {
+      try {
+        const config = await loader.loadEffectiveConfig();
+        isAdvisor = (isAdvisorSlot as unknown as (c: unknown, s: string) => boolean)(config, slot);
+      } catch {
+        isAdvisor = false;
+      }
+    }
+    const text = (rolePromptForOpen as unknown as (args: { labels: unknown; purpose: unknown; isAdvisor: boolean }) => string | null)({
+      labels: request.labels, purpose: request.purpose, isAdvisor,
+    });
+    if (!text) return;
+    // Name the runnable CLI for this host; never fail the open on it.
+    let rendered = text;
+    try {
+      const promptOptions = await loader.loadPromptOptions(context.paseo);
+      rendered = (withFactoryCli as unknown as (text: string, options: unknown) => string)(text, promptOptions);
+    } catch {
+      rendered = text;
+    }
+    return { ...request, appendSystemPrompt: [...(request.appendSystemPrompt ?? []), rendered] };
+  });
   const stopCleanupTimer = startCleanupTimer({ readSettings, getZerosub, getQuotaSettings: readQuotaSettings });
   const stopSupervisionTimer = startSupervisionTimer({ getSettings: readSupervision, getConfig: () => loader.loadEffectiveConfig(), delivery, getZerosub, buildBrief: buildResumeBrief });
   const stopQuotaTimer = startQuotaTimer({ getSettings: readQuotaSettings });
@@ -264,6 +295,7 @@ export default function contribute(server: PluginServerContext) {
     removeCreateHook();
     removeSuperviseHook();
     removeArchiveHook();
+    removeRoleHook();
     stopCleanupTimer();
     stopSupervisionTimer();
     stopQuotaTimer();

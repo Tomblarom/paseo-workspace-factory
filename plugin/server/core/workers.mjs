@@ -6,6 +6,7 @@ import { liveSlotHolders } from './discovery.mjs';
 import { idempotencyKey, profileAgentConfig, requestDigest, verifySteerPlacement } from './steer-create.mjs';
 import { ACCOUNT_METADATA_KEY } from './zerosub.mjs';
 import { findingsPassage } from './findings.mjs';
+import { WORKER_ROLE_PROMPT, withFactoryCli } from './role-prompts.mjs';
 import { withWorkspaceLock } from './lock.mjs';
 import { guardScope } from './scope-guard.mjs';
 
@@ -21,10 +22,11 @@ export async function startScopedWorker({ client, status, callerId, aliases = []
   const scopeId = state.scope?.id ?? repo;
   const labels = { [LABEL.scope]: scopeId, [LABEL.role]: 'worker', [LABEL.owner]: slot };
   const findings = findingsPassage(promptOptions);
+  const roleBlock = withFactoryCli(WORKER_ROLE_PROMPT, promptOptions);
   const request = {
     title: title?.trim() || 'Worker',
     parent: parent.id,
-    prompt: findings ? `${prompt}\n\n${findings}` : prompt,
+    prompt: [prompt, roleBlock, findings || null].filter(Boolean).join('\n\n'),
     labels,
     config: profileAgentConfig(profile),
     ...(accountId ? { metadata: { [ACCOUNT_METADATA_KEY]: accountId } } : {}),
@@ -32,7 +34,7 @@ export async function startScopedWorker({ client, status, callerId, aliases = []
   const result = { scope: scopeId, workspaceId: workspace.id, parentId: parent.id, profile: profile.name, provider: request.config.provider, accountId: accountId ?? null };
   if (!apply) return result;
 
-  // The same assignment keeps its key when prompt settings change between retries.
+  // The same assignment keeps its key when prompt settings change between retries: the digest covers the raw task, not the appended role text.
   const key = idempotencyKey(scopeId, 'worker', slot, `e${state.epoch}`, requestDigest({ parentId: parent.id, title: request.title, prompt }));
   const workspaceHandle = client.workspaces.ref(workspace.id);
   const handle = await withWorkspaceLock(workspace.id, async (held) => {
