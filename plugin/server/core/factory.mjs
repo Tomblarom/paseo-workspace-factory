@@ -32,7 +32,7 @@ function resolvePlanEntry(entry, paseoState) {
   return typeof base === 'string' ? { repo: base, ...keep } : { ...base, ...keep };
 }
 
-export function createRunner({ config, client, gh, git, readState = readPaseoState, scan = scanCheckouts, realpath = realpathSync, existsDir } = {}) {
+export function createRunner({ config, client, gh, git, readState = readPaseoState, scan = scanCheckouts, realpath = realpathSync, existsDir, getZerosub = null } = {}) {
   async function discoverAll(entries, { state = null } = {}) {
     const paseo = state ?? await readState(client);
     const liveScopes = listScopes(paseo);
@@ -61,7 +61,8 @@ export function createRunner({ config, client, gh, git, readState = readPaseoSta
       // Single-entry adoption: the legacy '*' fallback plus exact scope/repo
       // keys (scoped per-entry keys are retired with multi-repo plans).
       const adoptFor = adopt['*'] ?? adopt[d.scope?.id?.toLowerCase()] ?? adopt[d.forkName?.toLowerCase()] ?? adopt[String(d.input ?? '').toLowerCase()] ?? {};
-      return [planRepository(d, config, { adopt: adoptFor, slots, adoptWorker, detach })];
+      const zerosub = getZerosub ? await getZerosub() : null;
+      return [planRepository(d, config, { adopt: adoptFor, slots, adoptWorker, detach, zerosub })];
     },
   };
 }

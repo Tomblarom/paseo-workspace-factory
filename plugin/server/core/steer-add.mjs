@@ -332,7 +332,7 @@ export function planSteerAdd(config, providerEntries, liveSteers, {
   const fingerprintInput = {
     kind: 'factory.steer.add', scope: effectiveScope, repo: effectiveRepo, workspaceId: workspaceId ?? null,
     slot: target, profile: profileName, provider: effective.provider, model: effective.model,
-    thinking: effective.thinking, mode: effective.mode, account: zerosubAccount, advisor: advisorSlot,
+    thinking: effective.thinking, mode: effective.mode, advisor: advisorSlot,
   };
   return {
     slot: target, advisorSlot, profile: picked, profileName, skipped, zerosubAccount, zerosubPin, earliestReset,
@@ -477,7 +477,7 @@ async function recoverOccupiedSlot(config, providerEntries, liveSteers, planArgs
     if (receiptAgentId !== occupant.id) {
       throw new SteerAddRecovery(`Steer add recovery stopped: the receipt names ${receiptAgentId} but ${occupant.id} is live; check manually and archive the spare steer in Paseo`);
     }
-    return finishApplied(plan, occupant.id, { reused: true, scopeId: planArgs.scopeId ?? planArgs.repo, note: 'reused after receipt' });
+    return finishApplied(plan, occupant.id, { reused: true, scopeId: planArgs.scopeId ?? planArgs.repo, note: 'reused after receipt', account: occupant.metadata?.['zerosub.account'] ?? null });
   }
   // A live occupant from our own request converges without a receipt; a
   // foreign one (other scope labels or model) stays a conflict. Workspace and
@@ -488,7 +488,7 @@ async function recoverOccupiedSlot(config, providerEntries, liveSteers, planArgs
     if (error instanceof SteerPlacementError) throw occupiedError(classification.slot, classification);
     throw error;
   }
-  return finishApplied(plan, occupant.id, { reused: false, scopeId: planArgs.scopeId ?? planArgs.repo, note: 'already provisioned' });
+  return finishApplied(plan, occupant.id, { reused: false, scopeId: planArgs.scopeId ?? planArgs.repo, note: 'already provisioned', account: occupant.metadata?.['zerosub.account'] ?? null });
 }
 
 async function createWithReceipt(plan, lookupReceipt, execute, scope) {
@@ -498,23 +498,23 @@ async function createWithReceipt(plan, lookupReceipt, execute, scope) {
     const created = await execute(plan.op, undefined);
     const agentId = created?.agentId;
     if (!agentId) throw new SteerAddRecovery('Steer add creation returned no agent id');
-    return finishApplied(plan, agentId, { reused: false, scopeId: scope });
+    return finishApplied(plan, agentId, { reused: false, scopeId: scope, account: created.accountId });
   }
   const receiptAgentId = checkedCreationReceipt(receipt, key, addRecoveryFail);
-  const { id } = await confirmCreationReceipt(execute, plan.op, undefined, receiptAgentId, addRecoveryFail);
-  return finishApplied(plan, id, { reused: true, scopeId: scope, note: 'reused after receipt' });
+  const { id, confirmed } = await confirmCreationReceipt(execute, plan.op, undefined, receiptAgentId, addRecoveryFail);
+  return finishApplied(plan, id, { reused: true, scopeId: scope, note: 'reused after receipt', account: confirmed.accountId });
 }
 
-function finishApplied(plan, agentId, { reused, scopeId, note = null }) {
+function finishApplied(plan, agentId, { reused, scopeId, note = null, account = plan.zerosubAccount }) {
   const text = [
     `Steer ${plan.slot} created: agent ${agentId} (profile "${plan.profileName}" ${plan.profile.provider}/${plan.profile.model})`,
-    plan.zerosubAccount ? `ZeroSub account ${plan.zerosubAccount}` : null,
+    account ? `ZeroSub account ${account}` : null,
     note,
   ].filter(Boolean).join(' · ') + '.';
   return {
     scope: scopeId ?? plan.fingerprintInput.scope ?? plan.fingerprintInput.repo,
     slot: plan.slot, agentId, profile: plan.profileName,
     provider: plan.profile.provider, model: plan.profile.model,
-    account: plan.zerosubAccount, applied: true, reused, text,
+    account, applied: true, reused, text,
   };
 }

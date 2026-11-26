@@ -336,7 +336,7 @@ test("interrupted worker resume reuses a small, warm native worker and sends its
 });
 
 test("cold and large interrupted workers use fresh --worker before receiving their brief", async () => {
-  for (const options of [{ minutes: 8, tokens: 2000 }, { minutes: 1, tokens: 70_000 }]) {
+  for (const options of [{ minutes: 8, tokens: 2000 }, { minutes: 1, tokens: 100_000 }]) {
     const { world, ws, worker, discovery, paseo } = interruptedWorker(options);
     const now = () => at(NOW);
     const applied = await resumeApply.applyResume(paseo, { workspaceId: ws.id, agentId: worker.id }, {

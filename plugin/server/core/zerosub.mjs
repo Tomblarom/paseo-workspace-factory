@@ -5,7 +5,7 @@
 // windows of usedPercent/resetsAt, agentCount), agent routes and logins.
 // Account `email`/`organization`/`home` fields are never stored or output;
 // the normaliser drops them. All reads fail soft (null) so callers fall back.
-import { LABEL, PARENT_LABEL, connectPluginRpc, paseoBinary } from './paseo.mjs';
+import { LABEL, PARENT_LABEL, connectPluginRpc, paseoBinary, parentOf } from './paseo.mjs';
 import { runtime } from './runtime.mjs';
 import { QUOTA_DEFAULTS, bestFamilyAccount } from './quota.mjs';
 
@@ -133,6 +133,36 @@ export function continuedFromId(agent) {
   if (typeof value !== 'string') return null;
   const id = value.trim();
   return id ? id : null;
+}
+
+/** Labelled root of a parent-free continuation in the same workspace, or null. */
+export function continuationOrigin(agent, agents) {
+  if (!continuedFromId(agent) || agent.archivedAt || parentOf(agent) || !agent.workspaceId) return null;
+  const byId = new Map((agents ?? []).map((entry) => [entry.id, entry]));
+  const seen = new Set([agent.id]);
+  let origin = agent;
+  while (continuedFromId(origin)) {
+    const id = continuedFromId(origin);
+    if (seen.has(id)) return null;
+    seen.add(id);
+    origin = byId.get(id);
+    if (!origin) return null;
+  }
+  const role = origin.labels?.[LABEL.role];
+  return origin.workspaceId === agent.workspaceId && (role === 'steer' || role === 'worker') &&
+    (origin.labels?.[LABEL.scope] || origin.labels?.[LABEL.repo]) ? origin : null;
+}
+
+/** Factory identity labels, inferred from a valid continuation before normalization. */
+export function resolveFactoryLabels(agent, agents = []) {
+  const labels = agent?.labels ?? {};
+  const role = labels[LABEL.role];
+  if ((role === 'steer' || role === 'worker') && (labels[LABEL.scope] || labels[LABEL.repo])) return labels;
+  const origin = continuationOrigin(agent, agents);
+  if (!origin) return null;
+  const inherited = inheritContinuationLabels(agent, origin);
+  const { [PARENT_LABEL]: _parent, ...withoutParent } = inherited;
+  return withoutParent;
 }
 
 function text(value) {

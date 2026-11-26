@@ -7,7 +7,6 @@
 import {
   cacheAgeMs,
   compactAtMinutes,
-  contextSizeThreshold,
   effectiveMinContextTokens,
   groupForProviderModel,
   isCleanupProfile,
@@ -210,7 +209,7 @@ export const CLEANUP_DEFAULTS: CleanupSettings = {
   mode: "clear",
   profile: "balanced",
   idleMinutes: 60,
-  minContextTokens: 60000,
+  minContextTokens: 100000,
   providers: ["claude"],
   roles: ["steer", "worker"],
   clearAcknowledged: false,
@@ -456,7 +455,7 @@ export function decideCleanupAction(input: CleanupInput): CleanupDecision {
   const floor = compacting
     ? effectiveMinContextTokens(profile, settings.minContextTokens)
     : settings.minContextTokens;
-  const minTokens = contextSizeThreshold(floor, input.contextWindowMaxTokens);
+  const minTokens = floor;
   if (input.contextTokens < minTokens) {
     return deny(`context ${input.contextTokens} is below ${minTokens}`);
   }

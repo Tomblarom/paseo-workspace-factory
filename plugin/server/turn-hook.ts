@@ -1,8 +1,9 @@
-import { randomUUID } from "node:crypto";
-import { finishSteerDelivery, pendingSteerDelivery, type SteerDeliveryDeps } from "./steer-delivery.js";
-import { METADATA_KEY, readPaseoState } from "./core/paseo.mjs";
+import { createHash, randomUUID } from "node:crypto";
+import { dispatchAssignmentReport, finishSteerDelivery, pendingSteerDelivery, type SteerDeliveryDeps } from "./steer-delivery.js";
+import { METADATA_KEY, createPaseoCli, parentOf, readPaseoAgents, readPaseoState } from "./core/paseo.mjs";
 import { listScopes } from "./core/scope.mjs";
 import { guardScope } from "./core/scope-guard.mjs";
+import { continuedFromId, resolveFactoryLabels } from "./core/zerosub.mjs";
 import { readCleanupAction, readSteerAction } from "./core/steer-action.mjs";
 import { ACTION_FACTS, actionFact, mergeActionFacts } from "./core/action-facts.mjs";
 import { pushPreviousSession } from "../shared/idle-cleanup.js";
@@ -75,6 +76,7 @@ export interface TurnHookDeps extends ZerosubSource {
   getSupervisionSettings?: () => Promise<any>;
   /** Lock for metadata writes; tests only (defaults to the real one, always with LockBusy retry). */
   lock?: (name: string, fn: (held: { verify: () => void }) => Promise<any>) => Promise<any>;
+  setContinuationLabels?: (agentId: string, labels: Record<string, string>) => Promise<void>;
 }
 
 /**
@@ -125,7 +127,11 @@ async function runTurnBefore(payload: TurnBeforePayload, paseo: any, deps: TurnH
   const snap: any = await paseo.agents.ref(agentId).refresh().catch(() => null);
   const agent: any = snap?.agent ?? null;
   if (!agent || agent.archivedAt) return;
-  const identity = factoryIdentity(agent.labels ?? null) ?? workerIdentityFromMetadata(agent);
+  let identity = factoryIdentity(agent.labels ?? null);
+  if (!identity && continuedFromId(agent)) {
+    identity = factoryIdentity(resolveFactoryLabels(agent, await readPaseoAgents(paseo)));
+  }
+  identity ??= workerIdentityFromMetadata(agent);
   if (!identity) return;
   const paseoState: any = await readPaseoState(paseo);
   const scope: any = listScopes(paseoState).find((s: any) => s.id === identity.scopeId) ?? null;
@@ -178,6 +184,33 @@ async function withWorkspaceLockRetry(
   const lock = lockOf(deps);
   const name = (workspaceLockName as unknown as (id: string) => string)(mainId);
   return lock(name, fn);
+}
+
+export async function adoptContinuation(paseo: any, agent: any, deps: TurnHookDeps = {}): Promise<any | null> {
+  if (!continuedFromId(agent) || !agent.workspaceId || agent.archivedAt || parentOf(agent)) return null;
+  return withWorkspaceLockRetry(agent.workspaceId, async (held) => {
+    const current = (await paseo.agents.ref(agent.id).refresh())?.agent;
+    if (!current || current.archivedAt || parentOf(current) || current.workspaceId !== agent.workspaceId) return null;
+    if (factoryIdentity(current.labels)) return current;
+    const agents: any[] = await readPaseoAgents(paseo);
+    const labels = resolveFactoryLabels(current, agents) as Record<string, string> | null;
+    if (!labels) return null;
+    const added = Object.fromEntries(Object.entries(labels).filter(([key]) => key.startsWith("wsf.") && current.labels?.[key] === undefined));
+    if (!factoryIdentity(labels) || !Object.keys(added).length) return null;
+    held.verify();
+    if (deps.setContinuationLabels) {
+      await deps.setContinuationLabels(current.id, added);
+    } else {
+      const cli = createPaseoCli();
+      cli(["agent", "update", current.id, "--label", Object.entries(added).map(([key, value]) => `${key}=${value}`).join(",")]);
+    }
+    const updated = (await paseo.agents.ref(current.id).refresh())?.agent;
+    if (!updated || updated.archivedAt || parentOf(updated) || updated.workspaceId !== current.workspaceId ||
+        Object.entries(added).some(([key, value]) => updated.labels?.[key] !== value)) {
+      throw new Error(`Continuation ${current.id} labels not verifiable after adoption`);
+    }
+    return updated;
+  }, deps);
 }
 
 /**
@@ -248,12 +281,9 @@ async function proactiveHintForTurn(args: {
 }
 
 /**
- * Sends the done/blocked CHECKPOINT of an assigned active steer to the agent
- * that asked (wsf.assignment.by), once: reportedAt is stamped under the
- * workspace lock before sending, so two turn hooks never both report.
- * Never throws.
+ * Queue a deterministic K7 action before dispatch; recovery needs no sender turn.
  */
-async function reportAssignment(args: {
+export async function reportAssignment(args: {
   paseo: any;
   mainId: string;
   scopeId: string;
@@ -269,13 +299,12 @@ async function reportAssignment(args: {
   const { paseo, mainId, agentId } = args;
   try {
     let decision: ReturnType<typeof decideAssignmentReport> | null = null;
+    let queued = false;
     await withWorkspaceLockRetry(mainId, async (held: any) => {
       const snap: any = await paseo.workspaces.ref(mainId).refresh().catch(() => null);
       const meta = snap?.metadata ?? {};
       const wsf = asRecord(meta[METADATA_KEY]);
       const assignment = asRecord(meta[ASSIGNMENT_KEY]);
-      if (args.config === false) return;
-      await (guardScope as any)({ client: paseo, held, workspaceId: mainId, scopeId: args.scopeId, epoch: args.epoch, agentId, config: args.config });
       decision = decideAssignmentReport({
         assignment,
         agentId,
@@ -289,20 +318,44 @@ async function reportAssignment(args: {
         lastAnswer: args.lastAnswer,
       });
       if (!decision.report || !assignment) return;
+      if (args.config === false) return;
+      await (guardScope as any)({ client: paseo, held, workspaceId: mainId, scopeId: args.scopeId, epoch: args.epoch, agentId, config: args.config });
+      if (typeof assignment.at !== "string" || !assignment.at || !Number.isInteger(assignment.epoch)) {
+        throw new Error("Assignment needs its original timestamp and epoch to queue a report");
+      }
+      const actionId = `wsf-assignment-${createHash("sha256").update(JSON.stringify([args.scopeId.toLowerCase(), assignment.epoch, assignment.at])).digest("hex")}`;
+      if (assignment.reportActionId && assignment.reportActionId !== actionId) throw new Error("Assignment report action does not match its assignment");
+      if (assignment.reportActionId) { queued = true; return; }
       held.verify();
       await paseo.workspaces.ref(mainId).setMetadata({
-        [ASSIGNMENT_KEY]: { ...assignment, reportedAt: new Date().toISOString(), reportStatus: decision.status },
+        [ASSIGNMENT_KEY]: { ...assignment, reportActionId: actionId, reportStatus: decision.status, reportText: decision.text },
       });
+      queued = true;
     }, args.deps ?? {});
-    const sent = decision as ReturnType<typeof decideAssignmentReport> | null;
-    if (!sent?.report || !sent.to || !sent.text) return;
-    await paseo.agents.ref(sent.to).send(sent.text);
-    console.log(`[factory] turn hook: reported ${sent.status} of ${agentId} to ${sent.to}`);
+    if (queued) {
+      const result = await dispatchAssignmentReport(paseo, mainId, { ...args.deps?.delivery, lock: lockOf(args.deps ?? {}) });
+      if (result?.status === "blocked") console.error(`[factory] assignment report for ${agentId} blocked (${result.detail})`);
+    }
   } catch (error) {
     console.error(
       `[factory] turn hook: assignment report for ${agentId} failed (${error instanceof Error ? error.message : String(error)})`,
     );
   }
+}
+
+/** Recover a completed continuation's report when its turn ended before reload. */
+export async function reportContinuationAssignment(paseo: any, agent: any, scope: any, config: any, deps: TurnHookDeps = {}): Promise<void> {
+  const identity = factoryIdentity(resolveFactoryLabels(agent, await readPaseoAgents(paseo)));
+  if (!identity || identity.role !== "steer" || agent?.status === "running" || agent?.activeTurn) return;
+  const meta = scope.workspace?.metadata ?? {};
+  const assignment = meta[ASSIGNMENT_KEY];
+  if (!assignment || assignment.reportedAt || identity.slot !== meta[METADATA_KEY]?.activeSteer) return;
+  const entries = (await paseo.agents.ref(agent.id).timeline.refetch({ direction: "tail", limit: 1, wholeTurns: true }))?.entries ?? [];
+  const lastAnswer = lastAssistantText({ entries });
+  const block = lastAnswer ? parseCheckpointBlock(lastAnswer) : null;
+  if (block?.status !== "done" && block?.status !== "blocked") return;
+  await reportAssignment({ paseo, mainId: scope.workspaceId, scopeId: scope.id, agentId: agent.id, identity,
+    kind: "completed", block, lastAnswer, epoch: scope.workspace?.metadata?.[METADATA_KEY]?.epoch, config, deps });
 }
 
 async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps): Promise<void> {
@@ -314,14 +367,23 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
     return;
   }
   const snap: any = await paseo.agents.ref(agentId).refresh().catch(() => null);
-  const agent: any = snap?.agent ?? null;
+  let agent: any = snap?.agent ?? null;
   if (!agent) {
     console.log(`[factory] turn hook: agent ${agentId} gone; skip`);
     return;
   }
-  // Native workers can carry their scope in worker metadata instead of labels.
-  const identity = factoryIdentity(agent.labels ?? null) ?? workerIdentityFromMetadata(agent);
+  const labels = factoryIdentity(agent.labels ?? null) ? agent.labels :
+    continuedFromId(agent) ? resolveFactoryLabels(agent, await readPaseoAgents(paseo)) : null;
+  const identity = factoryIdentity(labels) ?? workerIdentityFromMetadata(agent);
   if (!identity) return;
+  if (!factoryIdentity(agent.labels ?? null) && continuedFromId(agent)) {
+    try {
+      agent = await adoptContinuation(paseo, agent, deps) ?? { ...agent, labels };
+    } catch (error) {
+      console.error(`[factory] continuation ${agentId} normalization failed (${error instanceof Error ? error.message : String(error)})`);
+      agent = { ...agent, labels };
+    }
+  }
   const paseoState: any = await readPaseoState(paseo);
   const scope: any = listScopes(paseoState).find((s: any) => s.id === identity.scopeId) ?? null;
   if (!scope) {

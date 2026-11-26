@@ -4,6 +4,7 @@ import { liveSlotHolders, resolveSteerHolders } from './discovery.mjs';
 import { LABEL, METADATA_KEY, parentOf, readPaseoAgents } from './paseo.mjs';
 import { sameScopeId } from './scope.mjs';
 import { isAdvisorSlot } from './config.mjs';
+import { continuedFromId, resolveContinuations, resolveFactoryLabels } from './zerosub.mjs';
 
 export class ScopeGuardError extends Error {}
 
@@ -16,12 +17,21 @@ export function scopeHolder({ agents, workspaceId, scopeId, slot, switches = [],
     const role = labels[LABEL.role];
     return !excluded.has(a?.id) && role === 'steer' && [scopeId, ...aliases].some((id) => sameScopeId(scope, id));
   });
-  const resolved = resolveSteerHolders(labelled, agents, switches).filter((a) => !a.archivedAt && a.labels?.[LABEL.slot] === slot);
+  const resolved = resolveSteerHolders(labelled, agents, switches).filter((a) => {
+    if (a.archivedAt || a.labels?.[LABEL.slot] !== slot) return false;
+    const raw = (agents ?? []).find((agent) => agent.id === a.id);
+    const labels = resolveFactoryLabels(raw, agents);
+    return labels?.[LABEL.role] === 'steer' && labels[LABEL.slot] === slot &&
+      [scopeId, ...aliases].some((id) => sameScopeId(labels[LABEL.scope] ?? labels[LABEL.repo], id));
+  });
   const holders = ownerId
-    ? resolved.filter((a) => a.id === ownerId || a.continuedFrom === ownerId)
+    ? resolved.filter((a) => a.id === (resolveContinuations(agents, switches).liveFor[ownerId] ?? ownerId))
     : liveSlotHolders(resolved, slot);
   if (holders.length !== 1) throw new ScopeGuardError(`Expected one active Steer ${slot}, found ${holders.length}`);
   const holder = holders[0];
+  if (holder.status === 'error' && (agents ?? []).some((agent) => continuedFromId(agent) === holder.id)) {
+    throw new ScopeGuardError('Errored steer has a continuation and cannot resume scope authority');
+  }
   if (!ownerId && strictLegacy && resolved.some((a) => a.id !== holder.id && a.id !== previousSteer)) {
     throw new ScopeGuardError(`Active Steer ${slot} has ambiguous legacy membership`);
   }

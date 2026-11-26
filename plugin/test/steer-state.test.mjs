@@ -271,6 +271,8 @@ test("the profile floor decides Large (efficiency 10k, balanced 60k)", () => {
   assert.equal(isLargeContext(null, "efficiency", 60000), false);
   assert.equal(projectSteer(base({ liveUsedTokens: 10000, cleanupProfile: "efficiency" })).state, "large");
   assert.equal(projectSteer(base({ liveUsedTokens: 10000 })).state, "warm");
+  assert.equal(projectSteer(base({ minContextTokens: 100_000, contextWindowMaxTokens: 1_000_000, liveUsedTokens: 99_999 })).large, false);
+  assert.equal(projectSteer(base({ minContextTokens: 100_000, contextWindowMaxTokens: 1_000_000, liveUsedTokens: 100_000 })).large, true);
 });
 
 // ---------------------------------------------------------------------------

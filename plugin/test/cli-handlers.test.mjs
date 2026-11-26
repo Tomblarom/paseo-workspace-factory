@@ -179,7 +179,7 @@ test("pickWorker, listWorkersModels and startWorkerRpc agree and record --failed
   const world = makeWorld();
   const paseo = fakePaseo(world);
   // No live ZeroSub state: worker selection must be deterministic in tests.
-  const noZerosub = { getZerosub: async () => null };
+  const noZerosub = { getZerosub: async () => null, lookupReceipt: async () => null, reservePins: false };
   const listBefore = await handlers.listWorkersModels({ cwd: world.workspaces[0].workspaceDirectory }, { paseo }, loader, noZerosub);
   const sel = resolveWorkerPick(CONFIG, world.providers, { repoPublic: listBefore.repoPublic, zerosub: null });
   assert.equal(listBefore.chosen, sel.profile.name);

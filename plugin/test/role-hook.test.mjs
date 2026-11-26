@@ -135,3 +135,24 @@ test('history opens and non-factory agents pass through silent', async (t) => {
   assert.equal(await open({ request: openRequest({ labels: {} }) }, { paseo }), undefined);
   assert.deepEqual(lines, []);
 });
+
+test('continuations get the origin role before their labels are persisted', async (t) => {
+  const { open, paseo } = setup(t);
+  const origin = { id: 'origin', workspaceId: 'ws', labels: { 'wsf.role': 'steer', 'wsf.scope': 'example/repo', 'wsf.slot': 'A' } };
+  const continued = { id: 'child', workspaceId: 'ws', labels: { 'zerosub.continued-from': 'origin' } };
+  paseo.agents = { list: async () => ({ entries: [origin, continued], pageInfo: { hasMore: false } }) };
+  const request = openRequest({ agentId: 'child', workspaceId: 'ws', labels: continued.labels });
+  const result = await open({ request }, { paseo });
+  assert.ok(result.appendSystemPrompt[0].includes('Factory role rules'));
+  assert.deepEqual(continued.labels, { 'zerosub.continued-from': 'origin' });
+  continued.workspaceId = 'different';
+  assert.equal(await open({ request }, { paseo }), undefined);
+  continued.workspaceId = 'ws';
+  continued.labels['wsf.role'] = 'steer';
+  const partial = openRequest({ agentId: 'child', workspaceId: 'ws', labels: continued.labels });
+  assert.ok((await open({ request: partial }, { paseo })).appendSystemPrompt[0].includes('Factory role rules'));
+  delete continued.labels['wsf.role'];
+  origin.labels['wsf.role'] = 'worker';
+  const worker = await open({ request }, { paseo });
+  assert.equal(worker.env.COPILOT_LARGE_OUTPUT_THRESHOLD_BYTES, '10240');
+});

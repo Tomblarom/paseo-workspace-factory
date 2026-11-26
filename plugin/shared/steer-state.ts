@@ -13,7 +13,6 @@
 // text is English.
 import {
   effectiveMinContextTokens,
-  contextSizeThreshold,
   cacheAgeMs,
   resolveCacheTtl,
   resolveWarmth,
@@ -81,7 +80,7 @@ export const STEER_QUOTA_EXHAUSTED_PCT = QUOTA_DEFAULTS.exhaustedPct;
 export const STEER_QUOTA_SAMPLE_MINUTES = QUOTA_SAMPLE_MINUTES;
 
 /** Fallback context floor; mirrors CLEANUP_DEFAULTS in idle-cleanup.ts. */
-export const STEER_MIN_CONTEXT_TOKENS = 60_000;
+export const STEER_MIN_CONTEXT_TOKENS = 100_000;
 
 function stampMs(value: unknown): number | null {
   if (typeof value !== "string" || !value) return null;
@@ -122,18 +121,17 @@ export function resolveContextTokens(args: {
   return null;
 }
 
-/** Known windows must also reach 30% utilization before a context is large. */
+/** A context is large once it reaches the profile's configured floor. */
 export function isLargeContext(
   tokens: number | null,
   profile: unknown,
   configuredMin: number,
-  windowTokens?: unknown,
 ): boolean {
   if (tokens === null || tokens === undefined) return false;
   const clean: CleanupProfile = isCleanupProfile(profile) ? profile : "balanced";
   const floor =
     Number.isFinite(configuredMin) && configuredMin > 0 ? configuredMin : STEER_MIN_CONTEXT_TOKENS;
-  return tokens >= contextSizeThreshold(effectiveMinContextTokens(clean, floor), windowTokens);
+  return tokens >= effectiveMinContextTokens(clean, floor);
 }
 
 // ---------------------------------------------------------------------------
@@ -696,7 +694,6 @@ export function projectAgentContext(input: Pick<SteerProjectionInput,
     tokens,
     input.cleanupProfile,
     Number.isFinite(input.minContextTokens) ? (input.minContextTokens as number) : STEER_MIN_CONTEXT_TOKENS,
-    input.contextWindowMaxTokens,
   );
   return { ttl, warmth, ageMs, tokens, large };
 }

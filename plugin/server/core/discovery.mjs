@@ -448,11 +448,13 @@ function halfLabelledSteers(paseo, mainWorkspace, matchKeys) {
  */
 export function resolveScopeMembers(paseo, { mainWorkspace, matchKeys, labelledFound, scopeName, projectIds, zerosubSwitches = [] }) {
   const agentsById = new Map((paseo.agents ?? []).map((a) => [a.id, a]));
+  const continuations = resolveContinuations(paseo.agents, zerosubSwitches);
+  const labelledEnds = new Set((labelledFound ?? []).map((a) => continuations.liveFor[a.id]).filter(Boolean));
   const legacyAll = mainWorkspace
-    ? paseo.agents.filter((a) => a.workspaceId === mainWorkspace.id && !a.archivedAt && !a.labels?.[LABEL.role] && STEER_TITLE.test((a.title ?? '').trim()))
+    ? paseo.agents.filter((a) => a.workspaceId === mainWorkspace.id && !a.archivedAt && !labelledEnds.has(a.id) && !a.labels?.[LABEL.role] && STEER_TITLE.test((a.title ?? '').trim()))
     : [];
   const splitLegacy = splitCandidates(legacyAll, matchKeys, agentsById);
-  const splitDigit = splitCandidates(digitSteerCandidates(paseo.agents, mainWorkspace?.id), matchKeys, agentsById);
+  const splitDigit = splitCandidates(digitSteerCandidates(paseo.agents, mainWorkspace?.id).filter((a) => !labelledEnds.has(a.id)), matchKeys, agentsById);
   const legacy = splitLegacy.kept;
   const digitCandidates = splitDigit.kept;
   const foreignWorkers = [...splitLegacy.foreignWorkers, ...splitDigit.foreignWorkers];
@@ -461,7 +463,7 @@ export function resolveScopeMembers(paseo, { mainWorkspace, matchKeys, labelledF
   // Worker parent ids: mapped steers plus the superseded origins they stand
   // in for (workers still point at the origin).
   const steerIds = new Set([...labelled, ...legacy].map((a) => a?.id).filter((id) => typeof id === 'string' && id));
-  for (const [origin, live] of Object.entries(resolveContinuations(paseo.agents, zerosubSwitches).liveFor)) {
+  for (const [origin, live] of Object.entries(continuations.liveFor)) {
     if (steerIds.has(live)) steerIds.add(origin);
   }
   const projectWorkspaceIds = [...new Set(paseo.workspaces.filter((w) => projectIds.has(w.projectId)).map((w) => w.id))];

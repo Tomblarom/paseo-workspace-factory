@@ -114,12 +114,6 @@ export function effectiveMinContextTokens(
     : configuredMin;
 }
 
-/** Known context windows also need at least 30% occupancy before cleanup. */
-export function contextSizeThreshold(floor: number, windowTokens: unknown): number {
-  const window = typeof windowTokens === "number" && Number.isFinite(windowTokens) ? windowTokens : 0;
-  return Math.max(floor, window * 0.3);
-}
-
 /**
  * Confirmed Claude billing route. "subscription" is the Factory subscription
  * baseline (or a confirmed 1h path); "api-5m" is a known 5-minute path

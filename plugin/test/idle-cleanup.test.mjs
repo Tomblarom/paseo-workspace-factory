@@ -167,8 +167,10 @@ test("idle and context thresholds fail closed on unknown values", () => {
   );
   assert.match(decideCleanupAction(input({ lastTurnEndedAt: null })).reason, /unknown/);
   assert.match(decideCleanupAction(input({ lastTurnEndedAt: "not-a-date" })).reason, /unknown/);
-  assert.match(decideCleanupAction(input({ contextTokens: 1000 })).reason, /below 60000/);
+  assert.match(decideCleanupAction(input({ contextTokens: 1000 })).reason, /below 100000/);
   assert.match(decideCleanupAction(input({ contextTokens: null })).reason, /unknown/);
+  assert.match(decideCleanupAction(input({ contextTokens: 99_999, contextWindowMaxTokens: 1_000_000 })).reason, /below 100000/);
+  assert.equal(decideCleanupAction(input({ contextTokens: 100_000, contextWindowMaxTokens: 1_000_000 })).action, "compact-warm");
   const clearIdle = input({
     settings: { ...CLEANUP_DEFAULTS, mode: "clear", clearAcknowledged: true },
     lastTurnEndedAt: at(NOW - 55 * 60_000),
@@ -535,7 +537,7 @@ test("efficiency compacts small contexts early, comfort compacts late", () => {
     ).action,
     "compact-warm",
   );
-  assert.match(decideCleanupAction(input(small)).reason, /below 60000/);
+  assert.match(decideCleanupAction(input(small)).reason, /below 100000/);
   assert.match(
     decideCleanupAction(
       input({

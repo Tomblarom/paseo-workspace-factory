@@ -9,7 +9,8 @@ import { join } from 'node:path';
 import { freshSteer, steerStatus, switchSteer } from '../plugin/server/core/steer.mjs';
 import { markSupersededSlotHolders } from '../plugin/server/core/discovery.mjs';
 import { planRepository } from '../plugin/server/core/planner.mjs';
-import { createExecutors } from '../plugin/server/core/apply.mjs';
+import { buildSteerCreate } from '../plugin/server/core/steer-create.mjs';
+import { applyPlans, createAuthorization, createExecutors } from '../plugin/server/core/apply.mjs';
 import { planSteerAdd } from '../plugin/server/core/steer-add.mjs';
 import { WORKERS_KEY, formatWorkersPruneText, pruneWorkerRegister, staleWorkerEntries } from '../plugin/server/core/supervision.mjs';
 import { formatSlotProfileSuggestion, suggestSlotProfile } from '../plugin/server/core/models.mjs';
@@ -108,6 +109,7 @@ function fakeClient(world) {
         const agent = addAgent(world, {
           provider, model, title: opts.title, workspaceId: id,
           labels: { ...opts.labels, ...(opts.parent ? { [PARENT_LABEL]: opts.parent } : {}) },
+          metadata: opts.metadata,
           currentModeId: opts.config.modeId,
         });
         if (opts.idempotencyKey) {
@@ -667,6 +669,137 @@ function labelledSteer(id, slot, provider, model, createdAt) {
     labels: { [LABEL.scope]: 'notes', [LABEL.role]: 'steer', [LABEL.slot]: slot },
   };
 }
+
+test('planner skips exhausted profiles and carries the selected account pin', () => {
+  const zerosub = { accounts: [
+    { id: 'full', family: 'codex', exhausted: true, windows: [] },
+    { id: 'room', family: 'muse', exhausted: false, windows: [], maxUsedPct: 20 },
+  ] };
+  const plan = planRepository(planDiscovery([]), CONFIG, { slots: ['A'], zerosub });
+  const create = plan.ops.find((op) => op.key === 'steer.A');
+  assert.equal(create.params.config.provider, 'muse/muse-spark-1.3-contributor');
+  assert.equal(create.params.metadata['zerosub.account'], 'room');
+});
+
+test('executor pins both create kinds from live state, falls back on read failure and preserves receipt retries', async () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  const client = fakeClient(world);
+  let state = { accounts: [{ id: 'live', family: 'codex', exhausted: false, windows: [], maxUsedPct: 10 }] };
+  const execute = createExecutors({ client, getZerosub: async () => state, lookupReceipt: fakeLookup(world) });
+  const params = {
+    workspaceId: ws.id, title: 'Steer C', config: { provider: 'codex/gpt-6.2-sol' },
+    labels: { [LABEL.role]: 'steer', [LABEL.scope]: REPO, [LABEL.slot]: 'C' },
+    metadata: { 'zerosub.account': 'planned', other: 'kept' }, idempotencyKey: 'live-steer',
+  };
+  const steer = await execute({ kind: 'paseo.agent.create', params });
+  assert.equal(steer.accountId, 'live');
+  state = { accounts: [{ id: 'new', family: 'codex', exhausted: false, windows: [], maxUsedPct: 1 }] };
+  const retry = await execute({ kind: 'paseo.agent.create', params });
+  assert.equal(retry.agentId, steer.agentId);
+  assert.equal(retry.accountId, 'live');
+  const worker = await execute({ kind: 'paseo.agent.createWorker', params: {
+    ...params, title: 'Worker', labels: { [LABEL.role]: 'worker', [LABEL.scope]: REPO },
+    parent: steers.A.id, idempotencyKey: 'live-worker',
+  } });
+  assert.equal(worker.accountId, 'new');
+  const fallback = createExecutors({ client, getZerosub: async () => { throw new Error('offline'); } });
+  const created = await fallback({ kind: 'paseo.agent.create', params: { ...params, idempotencyKey: 'offline' } });
+  assert.equal(created.accountId, 'planned');
+});
+
+test('a lost create response retains the reserved pin and key when the best account changes', async () => {
+  const world = makeWorld();
+  const { ws } = provisioned(world);
+  const client = fakeClient(world);
+  const originalRef = client.workspaces.ref;
+  let loseResponse = true;
+  client.workspaces.ref = (id) => {
+    const handle = originalRef(id);
+    const create = handle.agents.create;
+    handle.agents.create = async (request) => {
+      const created = await create(request);
+      if (loseResponse) { loseResponse = false; throw new Error('response lost'); }
+      return created;
+    };
+    return handle;
+  };
+  const build = (account) => buildSteerCreate({
+    keyScope: REPO, repo: REPO, scopeId: REPO, slot: 'C', workspaceId: ws.id,
+    profile: CONFIG.profiles.standard, keyParts: ['steer', 'C', 'g1'], metadata: { 'zerosub.account': account },
+  });
+  const first = build('old');
+  const second = build('new');
+  assert.equal(first.idempotencyKey, second.idempotencyKey);
+  let account = 'old';
+  const execute = createExecutors({
+    client, lookupReceipt: fakeLookup(world), reservePins: true, pinLock: async (_name, fn) => fn({ verify() {} }),
+    getZerosub: async () => ({ accounts: [{ id: account, family: 'codex', exhausted: false, windows: [], maxUsedPct: 10 }] }),
+  });
+  const op = (plan) => ({ kind: 'paseo.agent.create', params: { ...plan.request, idempotencyKey: plan.idempotencyKey } });
+  await assert.rejects(execute(op(first)), /response lost/);
+  account = 'new';
+  const retried = await execute(op(second));
+  assert.equal(retried.accountId, 'old');
+  assert.equal(world.agents.length, 3);
+  assert.equal(world.agents.at(-1).id, retried.agentId);
+});
+
+test('a failed receipt confirmation reuses the original pin on a later retry', async () => {
+  const world = makeWorld();
+  const { ws } = provisioned(world);
+  const client = fakeClient(world);
+  const originalRef = client.workspaces.ref;
+  let failConfirmation = false;
+  client.workspaces.ref = (id) => {
+    const handle = originalRef(id);
+    const create = handle.agents.create;
+    handle.agents.create = async (request) => {
+      const created = await create(request);
+      if (failConfirmation) { failConfirmation = false; throw new Error('confirmation response lost'); }
+      return created;
+    };
+    return handle;
+  };
+  let account = 'old';
+  const execute = createExecutors({
+    client, lookupReceipt: fakeLookup(world), reservePins: true, pinLock: async (_name, fn) => fn({ verify() {} }),
+    getZerosub: async () => ({ accounts: [{ id: account, family: 'codex', exhausted: false, windows: [], maxUsedPct: 10 }] }),
+  });
+  const plan = buildSteerCreate({ keyScope: REPO, repo: REPO, scopeId: REPO, slot: 'C', workspaceId: ws.id,
+    profile: CONFIG.profiles.standard, keyParts: ['steer', 'C', 'g1'] });
+  const op = { kind: 'paseo.agent.create', params: { ...plan.request, idempotencyKey: plan.idempotencyKey } };
+  const created = await execute(op);
+  failConfirmation = true;
+  await assert.rejects(execute(op), /confirmation response lost/);
+  account = 'new';
+  const retried = await execute(op);
+  assert.equal(retried.agentId, created.agentId);
+  assert.equal(retried.accountId, 'old');
+  assert.equal(world.agents.length, 3);
+});
+
+test('apply permits account changes since preview but still executes the authorized operation', async () => {
+  const op = { key: 'steer.A', kind: 'paseo.agent.create', params: {
+    workspaceId: 'ws', idempotencyKey: 'key', labels: { [LABEL.slot]: 'A' },
+    metadata: { 'zerosub.account': 'preview' },
+  } };
+  const plan = { repo: REPO, status: 'pending', ops: [op], conflicts: [] };
+  const auth = createAuthorization([plan], CONFIG, { entries: [REPO] });
+  let created = false;
+  const result = await applyPlans({
+    authorization: auth, config: CONFIG, confirm: auth.hash,
+    runPlans: async () => [{
+      ...plan, ops: created ? [] : [{ ...op, params: { ...op.params, metadata: { 'zerosub.account': 'latest' } } }],
+    }],
+    execute: async (observed) => {
+      assert.equal(observed.params.metadata['zerosub.account'], 'preview');
+      created = true;
+      return { agentId: 'agent' };
+    },
+  });
+  assert.equal(result.report[0].status, 'complete', result.report[0].error);
+});
 
 test('plan keeps a superseded extra as a note but conflicts on several live holders', () => {
   const marked = markSupersededSlotHolders([

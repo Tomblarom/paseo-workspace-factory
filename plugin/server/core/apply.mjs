@@ -7,12 +7,15 @@
 import { mkdirSync, writeFileSync, linkSync, unlinkSync, readFileSync, renameSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 import { join, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
 import { withLock, workspaceLockName } from './lock.mjs';
 import { planHash, WORKSPACE_REF } from './planner.mjs';
 import { checkedCreationReceipt, confirmCreationReceipt, lookupCreation, verifySteerPlacement } from './steer-create.mjs';
 import { LABEL, METADATA_KEY, parentOf } from './paseo.mjs';
 import { validScope } from './scope.mjs';
 import { isWorktreeWorkspace } from './discovery.mjs';
+import { profileFamily } from './quota.mjs';
+import { ACCOUNT_METADATA_KEY, suggestAccountPin } from './zerosub.mjs';
 
 export class ApplyRefused extends Error {}
 export class NotAuthorized extends Error {}
@@ -167,10 +170,29 @@ export function resolveAuthorized(op, results) {
 /** Effect-relevant comparison; the idempotency key is derived and stays the authorized one. */
 export function authorizationMismatch(observed, authorized) {
   if (observed.kind !== authorized.kind) return [`kind ${observed.kind} instead of ${authorized.kind}`];
-  const strip = ({ idempotencyKey, ...rest }) => rest;
+  const strip = ({ idempotencyKey, ...rest }) => {
+    if (observed.kind !== 'paseo.agent.create' || !rest.metadata) return rest;
+    const { [ACCOUNT_METADATA_KEY]: ignored, ...other } = rest.metadata;
+    if (Object.keys(other).length) return { ...rest, metadata: other };
+    const { metadata, ...withoutMetadata } = rest;
+    return withoutMetadata;
+  };
   const a = strip(observed.params ?? {});
   const b = strip(authorized.params ?? {});
   return [...new Set([...Object.keys(a), ...Object.keys(b)])].filter((k) => !isDeepStrictEqual(a[k], b[k])).map((k) => `${k} differs`);
+}
+
+function observationHash(plans, config) {
+  const copy = structuredClone(plans);
+  const stripPin = (op) => {
+    if (op.kind === 'paseo.agent.create' && op.params?.metadata) {
+      delete op.params.metadata[ACCOUNT_METADATA_KEY];
+      if (!Object.keys(op.params.metadata).length) delete op.params.metadata;
+    }
+    for (const implied of op.implies ?? []) stripPin(implied);
+  };
+  for (const plan of copy) for (const op of plan.ops ?? []) stripPin(op);
+  return planHash(copy, config);
 }
 
 export function memoryProgress(initial = null) {
@@ -205,7 +227,7 @@ export async function applyPlans({ authorization, config, confirm, runPlans, exe
   if (state.hash !== authorization.hash) throw new ApplyRefused('Progress belongs to a different plan');
   if (!state.started) {
     const fresh = await runPlans(authorization.entries, options);
-    if (planHash(fresh, config) !== authorization.hash) throw new ApplyRefused('State changed since the dry-run (fresh plan hash differs); run a new dry-run');
+    if (observationHash(fresh, config) !== observationHash(authorization.plans, config)) throw new ApplyRefused('State changed since the dry-run (fresh plan hash differs); run a new dry-run');
     state.started = true; // from here on, a rerun resumes this plan even if nothing was recorded yet
     guard();
     progress.save(state);
@@ -293,7 +315,58 @@ export async function applyPlans({ authorization, config, confirm, runPlans, exe
 }
 
 /** Real executors. Every write is guarded by a fresh precondition and verified afterwards. */
-export function createExecutors({ client, paseoCli }) {
+export function createExecutors({ client, paseoCli, getZerosub = null, lookupReceipt = null, reservePins = false, pinLock = withLock }) {
+  async function creationMetadata(workspaceId, agentConfig, metadata, idempotencyKey) {
+    const workspace = client.workspaces.ref(workspaceId);
+    const reservationKey = `${METADATA_KEY}.creation-pin.${createHash('sha256').update(idempotencyKey ?? '').digest('hex')}`;
+    const reservation = reservePins && idempotencyKey ? (await workspace.refresh())?.metadata?.[reservationKey] : null;
+    if (lookupReceipt && idempotencyKey) {
+      const receipt = await lookupReceipt('agent', idempotencyKey);
+      if (receipt) {
+        if (receipt.phase !== 'completed' || receipt.outcomeUnknown || !receipt.agentId) {
+          throw new Error('Creation receipt is incomplete or uncertain; refusing to repeat the request');
+        }
+        if (reservation?.key === idempotencyKey) return reservation.metadata;
+        const existing = receipt.agent ?? (await client.agents.ref(receipt.agentId).refresh())?.agent;
+        if (!existing) throw new Error('Cannot read the existing agent to confirm its creation request');
+        const result = { ...metadata };
+        delete result[ACCOUNT_METADATA_KEY];
+        if (existing.metadata?.[ACCOUNT_METADATA_KEY]) result[ACCOUNT_METADATA_KEY] = existing.metadata[ACCOUNT_METADATA_KEY];
+        return Object.keys(result).length ? result : null;
+      }
+    }
+    const choose = async () => {
+      if (!getZerosub) return metadata ?? null;
+      let state;
+      try {
+        state = await getZerosub();
+      } catch (error) {
+        console.error(`[factory] ZeroSub account read failed (${error instanceof Error ? error.message : String(error)}); using planned pin`);
+        return metadata ?? null;
+      }
+      if (!state) return metadata ?? null;
+      const spec = agentConfig?.provider ?? '';
+      const slash = spec.indexOf('/');
+      const provider = slash < 0 ? spec : spec.slice(0, slash);
+      const model = slash < 0 ? null : spec.slice(slash + 1);
+      const pin = suggestAccountPin(state, profileFamily({ provider }), { model });
+      const result = { ...metadata };
+      delete result[ACCOUNT_METADATA_KEY];
+      Object.assign(result, pin?.metadata ?? {});
+      return Object.keys(result).length ? result : null;
+    };
+    if (!reservePins || !idempotencyKey) return choose();
+    return pinLock(`creation-pin-${createHash('sha256').update(idempotencyKey).digest('hex')}`, async (held) => {
+      const existing = (await workspace.refresh())?.metadata?.[reservationKey];
+      if (existing?.key === idempotencyKey) return existing.metadata;
+      const chosen = await choose();
+      held.verify();
+      await workspace.setMetadata({ [reservationKey]: { key: idempotencyKey, metadata: chosen } });
+      const written = (await workspace.refresh())?.metadata?.[reservationKey];
+      if (written?.key !== idempotencyKey || !isDeepStrictEqual(written.metadata, chosen)) throw new Error('Creation account reservation not verifiable');
+      return chosen;
+    });
+  }
   const handlers = {
     async 'paseo.workspace.metadata'(op) {
       const handle = client.workspaces.ref(op.params.workspaceId);
@@ -411,30 +484,31 @@ export function createExecutors({ client, paseoCli }) {
       // Optional `metadata` pins the agent (e.g. {"zerosub.account": id}, Paseo 0.16+).
       // `clearInheritedParent` (fresh only) detaches a link inherited from the
       // calling agent; plan/apply keeps failing closed with PARENT VIOLATION.
-      const handle = await client.workspaces.ref(workspaceId).agents.create({ config: agentConfig, title, labels, idempotencyKey, ...(metadata ? { metadata } : {}) });
+      const liveMetadata = await creationMetadata(workspaceId, agentConfig, metadata, idempotencyKey);
+      const handle = await client.workspaces.ref(workspaceId).agents.create({ config: agentConfig, title, labels, idempotencyKey, ...(liveMetadata ? { metadata: liveMetadata } : {}) });
       let agent = (await handle.refresh())?.agent;
       if (clearParent) agent = await detachInheritedParent(handle, agent);
       verifySteerPlacement(agent, { workspaceId, labels, parent: null });
-      return { agentId: agent.id, parent: null };
+      return { agentId: agent.id, parent: null, accountId: liveMetadata?.[ACCOUNT_METADATA_KEY] ?? null };
     },
 
     async 'paseo.agent.createWorker'(op) {
-      const { workspaceId, title, config: agentConfig, labels, parent = null, idempotencyKey, metadata, clearInheritedParent: clearParent = false } = op.params;
+      const { workspaceId, title, config: agentConfig, labels, parent = null, prompt, idempotencyKey, metadata, clearInheritedParent: clearParent = false } = op.params;
       if (!workspaceId || typeof workspaceId !== 'string') throw new Error('Worker workspace is not resolved yet');
       if (parent !== null && (typeof parent !== 'string' || !parent)) throw new Error('Worker parent must be an agent id or null');
       // A fresh worker starts without a first turn; the brief is delivered
       // afterwards like the steer handoff. The parent is the owning steer
       // taken from the refreshed worker — never the calling agent. A parent
       // expected to be absent is detached when the fresh flag allows it.
-      const handle = await client.workspaces.ref(workspaceId).agents.create({
-        title, labels, config: agentConfig, idempotencyKey,
-        ...(parent ? { parent } : {}),
-        ...(metadata ? { metadata } : {}),
-      });
+      const liveMetadata = await creationMetadata(workspaceId, agentConfig, metadata, idempotencyKey);
+      const request = prompt
+        ? { title, ...(parent ? { parent } : {}), prompt, labels, config: agentConfig, ...(liveMetadata ? { metadata: liveMetadata } : {}), idempotencyKey }
+        : { title, labels, config: agentConfig, idempotencyKey, ...(parent ? { parent } : {}), ...(liveMetadata ? { metadata: liveMetadata } : {}) };
+      const handle = await client.workspaces.ref(workspaceId).agents.create(request);
       let agent = (await handle.refresh())?.agent;
       if (!parent && clearParent) agent = await detachInheritedParent(handle, agent);
       verifySteerPlacement(agent, { workspaceId, labels, parent });
-      return { agentId: agent.id, parent };
+      return { agentId: agent.id, parent, accountId: liveMetadata?.[ACCOUNT_METADATA_KEY] ?? null };
     },
 
     async 'paseo.agent.adopt'(op) {

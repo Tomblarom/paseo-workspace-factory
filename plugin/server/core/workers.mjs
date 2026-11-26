@@ -3,14 +3,15 @@
 // no factory retire command.
 import { LABEL, METADATA_KEY } from './paseo.mjs';
 import { liveSlotHolders } from './discovery.mjs';
-import { idempotencyKey, profileAgentConfig, requestDigest, verifySteerPlacement } from './steer-create.mjs';
+import { idempotencyKey, profileAgentConfig, requestDigest } from './steer-create.mjs';
 import { ACCOUNT_METADATA_KEY } from './zerosub.mjs';
 import { findingsPassage } from './findings.mjs';
 import { WORKER_ROLE_PROMPT, withFactoryCli } from './role-prompts.mjs';
 import { withWorkspaceLock } from './lock.mjs';
 import { guardScope } from './scope-guard.mjs';
+import { createExecutors } from './apply.mjs';
 
-export async function startScopedWorker({ client, status, callerId, aliases = [], profile, accountId, prompt, title, apply = false, promptOptions }) {
+export async function startScopedWorker({ client, status, callerId, aliases = [], profile, accountId, prompt, title, apply = false, promptOptions, execute = null }) {
   const { state, workspace, repo, steers } = status;
   const slot = state?.activeSteer;
   const holders = liveSlotHolders(steers, slot);
@@ -36,19 +37,14 @@ export async function startScopedWorker({ client, status, callerId, aliases = []
 
   // The same assignment keeps its key when prompt settings change between retries: the digest covers the raw task, not the appended role text.
   const key = idempotencyKey(scopeId, 'worker', slot, `e${state.epoch}`, requestDigest({ parentId: parent.id, title: request.title, prompt }));
-  const workspaceHandle = client.workspaces.ref(workspace.id);
-  const handle = await withWorkspaceLock(workspace.id, async (held) => {
+  const run = execute ?? createExecutors({ client });
+  const created = await withWorkspaceLock(workspace.id, async (held) => {
     await guardScope({ client, held, workspaceId: workspace.id, scopeId, epoch: state.epoch, agentId: parent.id, aliases });
     held.verify();
-    return workspaceHandle.agents.create({ ...request, idempotencyKey: key });
+    return run({ key, kind: 'paseo.agent.createWorker', params: { ...request, workspaceId: workspace.id, idempotencyKey: key } });
   });
-  const agent = (await handle.refresh())?.agent;
-  try {
-    verifySteerPlacement(agent, { workspaceId: workspace.id, labels, parent: parent.id, ...(accountId ? { accountId } : {}) });
-  } catch (error) {
-    throw new Error(`Worker creation could not be verified (${error.message})`);
-  }
-  return { ...result, agentId: agent.id };
+  if (!created?.agentId) throw new Error('Worker creation returned no agent id');
+  return { ...result, accountId: created.accountId ?? null, agentId: created.agentId };
 }
 
 export function readGitState(git, path) {

@@ -59,7 +59,9 @@ export function buildSteerCreate({ keyScope, repo, scopeId, slot, workspaceId, p
   const labels = steerCreateLabels(repo, scopeId, slot);
   const config = profileAgentConfig(profile);
   const request = { workspaceId, title, labels, config, ...(metadata ? { metadata: { ...metadata } } : {}) };
-  const key = steerCreateKey(keyScope, keyParts, digestInput ?? request);
+  const { [ACCOUNT_METADATA_KEY]: _account, ...otherMetadata } = metadata ?? {};
+  const digestRequest = { workspaceId, title, labels, config, ...(Object.keys(otherMetadata).length ? { metadata: otherMetadata } : {}) };
+  const key = steerCreateKey(keyScope, keyParts, digestInput ?? digestRequest);
   const expected = {
     workspaceId, labels, slot, scopeId, provider: profile.provider, model: profile.model, parent: null,
     ...(accountId ? { accountId } : {}),

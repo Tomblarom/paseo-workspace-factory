@@ -43,7 +43,7 @@ import {
 import { notifySteerFeed, serveSteerSubscription } from "./server/steer-feed.js";
 import { readResumeSettings } from "./server/resume-apply.js";
 import { deliverSteer, type SteerDeliveryDeps } from "./server/steer-delivery.js";
-import { handleTurnAfter, handleTurnBefore } from "./server/turn-hook.js";
+import { adoptContinuation, handleTurnAfter, handleTurnBefore, reportContinuationAssignment } from "./server/turn-hook.js";
 import { ensureBootChecked } from "./server/boot-check.js";
 import { RESUME_CLEAR_DEFAULTS } from "./shared/idle-cleanup.js";
 import {
@@ -61,6 +61,9 @@ import { getQuota } from "./server/quota-rpc.js";
 import { readZerosubStateSafe } from "./server/zerosub-runtime.js";
 import { isAdvisorSlot } from "./server/core/config.mjs";
 import { ROLE_RULES_ID, rolePromptForOpen, withFactoryCli, workerEnvAdditions } from "./server/core/role-prompts.mjs";
+import { readPaseoAgents } from "./server/core/paseo.mjs";
+import { continuedFromId, resolveFactoryLabels } from "./server/core/zerosub.mjs";
+import { factoryIdentity } from "./shared/auto-checkpoint.js";
 import { shortHolderId } from "./server/core/steer-create.mjs";
 import {
   factoryApply,
@@ -143,6 +146,9 @@ export default function contribute(server: PluginServerContext) {
   const bootDeps = {
     getRecentHours: async () => (await readResume())?.recentHours ?? RESUME_CLEAR_DEFAULTS.recentHours,
     getConfig: () => loader.loadEffectiveConfig(),
+    normalizeContinuation: (paseo: any, agent: any) => adoptContinuation(paseo, agent),
+    reportContinuation: (paseo: any, agent: any, scope: any, config: unknown) =>
+      reportContinuationAssignment(paseo, agent, scope, config, { delivery }),
   };
   let bootChained = false;
   // Fail-soft ZeroSub state for supervision wakes, failover, and the turn-end
@@ -263,11 +269,22 @@ export default function contribute(server: PluginServerContext) {
   // The text is static (cache-stable); only the advisor choice reads config.
   const removeRoleHook = server.addHook("agent.open.before", async ({ request }, context) => {
     if (request.purpose !== "interactive") return;
+    let labels = request.labels;
+    if (!factoryIdentity(labels) && labels?.["zerosub.continued-from"]) {
+      labels = {};
+      try {
+        const agents = await readPaseoAgents(context.paseo);
+        const current = agents.find((agent: any) => agent.id === request.agentId);
+        if (continuedFromId(current)) labels = resolveFactoryLabels(current, agents) ?? labels;
+      } catch (error) {
+        console.error(`[factory] role identity lookup failed (${error instanceof Error ? error.message : String(error)})`);
+      }
+    }
     // Workers get output limits via env (their role text comes via `worker
     // start`); steers get the appended prompt below; the rest is untouched.
-    if (request.labels?.["wsf.role"] === "worker") {
+    if (labels?.["wsf.role"] === "worker") {
       const additions = (workerEnvAdditions as unknown as (args: { labels: unknown; purpose: unknown; env: unknown }) => Record<string, string> | null)({
-        labels: request.labels, purpose: request.purpose, env: request.env,
+        labels, purpose: request.purpose, env: request.env,
       });
       const count = additions ? Object.keys(additions).length : 0;
       const workerShortId = (shortHolderId as unknown as (id: unknown) => string)(request.agentId);
@@ -275,9 +292,9 @@ export default function contribute(server: PluginServerContext) {
       if (!additions || count === 0) return;
       return { ...request, env: { ...request.env, ...additions } };
     }
-    if (request.labels?.["wsf.role"] !== "steer") return;
+    if (labels?.["wsf.role"] !== "steer") return;
     let isAdvisor = false;
-    const slot = request.labels["wsf.slot"];
+    const slot = labels["wsf.slot"];
     if (typeof slot === "string" && slot) {
       try {
         const config = await loader.loadEffectiveConfig();
@@ -287,7 +304,7 @@ export default function contribute(server: PluginServerContext) {
       }
     }
     const text = (rolePromptForOpen as unknown as (args: { labels: unknown; purpose: unknown; isAdvisor: boolean }) => string | null)({
-      labels: request.labels, purpose: request.purpose, isAdvisor,
+      labels, purpose: request.purpose, isAdvisor,
     });
     if (!text) return;
     // Name the runnable CLI for this host; never fail the open on it.

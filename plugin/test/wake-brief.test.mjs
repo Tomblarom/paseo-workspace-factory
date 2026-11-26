@@ -513,8 +513,8 @@ test("a ready brief with the original provider session is held visibly", async (
   assert.equal(ws.metadata[AGENTS_KEY][steer.id].action.phase, "blocked");
 });
 
-test("a warm steer using 210k of 1M gets the queued wake after its turn without renewal", async () => {
-  const { ws, steer, workerId, world, client, deps } = deliveryFixture({ minutesIdle: 1, tokens: 210_000 });
+test("a warm steer below the floor gets the queued wake after its turn without renewal", async () => {
+  const { ws, steer, workerId, world, client, deps } = deliveryFixture({ minutesIdle: 1, tokens: 99_999 });
   steer.model = "claude-opus";
   steer.lastUsage.contextWindowMaxTokens = 1_000_000;
   const scope = { id: REPO, workspaceId: ws.id };
@@ -610,8 +610,8 @@ test("a stored stale-worker brief cannot wake a steer after its worker is archiv
 for (const [name, provider, minutesIdle, tokens, keepChatHistory] of [
   ["cold Claude with Keep chat history", "claude", 6, 1000, true],
   ["cold Codex", "codex", 31, 1000, false],
-  ["warm Codex with a large context", "codex", 1, 60_000, false],
-  ["an oversized context with unknown warmth", "codex", null, 60_000, false],
+  ["warm Codex with a large context", "codex", 1, 100_000, false],
+  ["an oversized context with unknown warmth", "codex", null, 100_000, false],
 ]) {
   test(`${name} rewinds before delivering a wake and assigns the next brief anchor`, async () => {
     const { wake, recheck, ws, steer, workerId, world } = deliveryFixture({ provider, minutesIdle, tokens });

@@ -62,8 +62,8 @@ acceptance checks. That classification is an open design point; no live runs are
   handoff work. Track maintenance-only turns separately. Compute idle age at
   turn start from the last observed request end in the same provider session.
   A turn is predicted cold or oversized when the age exceeds the
-  pinned retention threshold or the last pre-turn context is at least 60,000
-  tokens. Divide the union count by the number of classifiable continuing work
+  pinned retention threshold or the last pre-turn context reaches the configured
+  context-size floor (100,000 tokens by default). Divide the union count by the number of classifiable continuing work
   turns. A turn with either known condition true qualifies, while a negative
   classification requires both known conditions to be false. Report each
   condition, their overlap, fresh-turn share and unknown counts. Report observed

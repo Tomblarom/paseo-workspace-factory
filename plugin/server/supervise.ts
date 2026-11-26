@@ -10,7 +10,8 @@
 // and are never duplicated here; plugin-only text and scans live in
 // ../shared/supervise.ts. Only erasable TypeScript: node --test imports this
 // file with type stripping (see plugin/test/ts-resolve-hooks.mjs).
-import { deliverSteer, finishSteerDelivery, pendingSteerDelivery, type EventBatch, type SteerDeliveryDeps } from "./steer-delivery.js";
+import { deliverSteer, dispatchAssignmentReport, finishSteerDelivery, pendingSteerDelivery, type EventBatch, type SteerDeliveryDeps } from "./steer-delivery.js";
+import { ASSIGNMENT_KEY } from "./core/assign.mjs";
 import { canMarkWorkerStale, filterStaleWorkerEvents } from "./worker-wakes.js";
 import * as paseoCore from "./core/paseo.mjs";
 import { setTimeout as delay } from "node:timers/promises";
@@ -1021,6 +1022,14 @@ export async function flushAllScopes(paseo: any, deps: SuperviseDeps & { state?:
   const out: FlushResult[] = [];
   for (const scope of listScopes(paseoState)) {
     const meta = scope.workspace?.metadata;
+    const assignment = meta?.[ASSIGNMENT_KEY];
+    if (assignment?.reportActionId && !assignment.reportedAt) {
+      try {
+        await dispatchAssignmentReport(paseo, scope.workspaceId, deliveryDeps(deps));
+      } catch (error) {
+        logOf(deps)(`[factory] supervise: assignment recovery for ${scope.id} failed (${error instanceof Error ? error.message : String(error)})`);
+      }
+    }
     const hasBrief = Object.values(meta?.[AGENTS_KEY] ?? {}).some((entry) => {
       const pending = pendingSteerDelivery(entry);
       return pending && (settings?.enabled || !pending.batch);

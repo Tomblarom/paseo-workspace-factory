@@ -118,7 +118,7 @@ export const factoryCleanupSettings = defineSettings({
     mode: z.enum(["off", "clear", "compact-warm"]).default("clear"),
     profile: z.enum(["efficiency", "balanced", "comfort"]).default("balanced"),
     idleMinutes: z.number().int().min(5).default(60),
-    minContextTokens: z.number().int().min(1000).default(60000),
+    minContextTokens: z.number().int().min(1000).default(100000),
     providers: z.array(z.string().min(1)).min(1).default(["claude"]),
     roles: z.array(z.enum(["steer", "worker"])).min(1).default(["steer", "worker"]),
     clearAcknowledged: z.boolean().default(false),

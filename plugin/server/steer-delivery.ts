@@ -4,7 +4,9 @@ import { readSteerAction, readCleanupAction, actionEntry, newSteerAction, reconc
 import { actionFact, mergeActionFacts } from "./core/action-facts.mjs";
 import { withLock, workspaceLockName } from "./core/lock.mjs";
 import { METADATA_KEY, readPaseoState } from "./core/paseo.mjs";
-import { guardScope } from "./core/scope-guard.mjs";
+import { guardScope, scopeHolder } from "./core/scope-guard.mjs";
+import { ASSIGNMENT_KEY } from "./core/assign.mjs";
+import { resolveContinuations, resolveFactoryLabels } from "./core/zerosub.mjs";
 import { defaultCreateRewindClient, rewindAndBrief } from "./core/rewind.mjs";
 import { listScopes, sameScopeId } from "./core/scope.mjs";
 import { buildRewindRecord } from "./core/steer.mjs";
@@ -82,6 +84,7 @@ export interface PendingSteerDelivery {
   observedAt?: string;
   authority?: { scopeId: string; agentId: string };
   needsResumeAt?: string | null;
+  assignment?: { workspaceId: string; actionId: string };
 }
 
 const productionLock = withLock as unknown as Lock;
@@ -173,6 +176,92 @@ const CLEAR_UNCONFIRMED = "Claude context clear could not be confirmed. Retry re
 
 function deferred(detail: string = STEER_BUSY): DeliveryResult {
   return { status: "pending", cleared: false, detail };
+}
+
+/** Reserve the existing K7 action even when the recipient is currently busy. */
+export async function reserveAssignmentDelivery(
+  paseo: any, input: { workspaceId: string; agentId: string; epoch: number; scopeId: string; actionId: string; text: string; sourceWorkspaceId: string },
+  deps: SteerDeliveryDeps = {},
+): Promise<DeliveryResult> {
+  const lock = deps.lock ?? productionLock;
+  let alreadySent = false;
+  const reserved = await changeEntry(paseo, input, lock, (entry, meta) => {
+    const scope = scopeState(meta);
+    if (!scope || scope.retired || scope.epoch !== input.epoch) return null;
+    const prior = readSteerAction(entry);
+    if (prior?.wakeId === input.actionId) {
+      if (prior.phase === "done") alreadySent = true;
+      return null;
+    }
+    if (prior && prior.phase !== "done") return null;
+    const action = {
+      ...newSteerAction({ kind: "assignment", id: input.actionId, epoch: input.epoch, text: input.text,
+        at: deps.now?.() ?? new Date().toISOString(), phase: "reserved" }),
+      authority: { scopeId: input.scopeId, agentId: input.agentId },
+      assignment: { workspaceId: input.sourceWorkspaceId, actionId: input.actionId },
+      ...(prior?.wakeId ? { lastDeliveryId: prior.wakeId } : {}),
+    };
+    return { action };
+  });
+  if (alreadySent) return { status: "sent", cleared: false, detail: "Assignment report already delivered." };
+  if (!reserved) {
+    const meta = (await paseo.workspaces.ref(input.workspaceId).refresh())?.metadata ?? {};
+    if (readSteerAction(meta[AGENTS_KEY]?.[input.agentId])?.wakeId !== input.actionId) {
+      return deferred("Another steer operation is already queued.");
+    }
+  }
+  return deliverSteer(paseo, { ...input, epoch: input.epoch }, deps);
+}
+
+/** Re-dispatch a durably queued assignment without depending on another sender turn. */
+export async function dispatchAssignmentReport(
+  paseo: any, sourceWorkspaceId: string, deps: SteerDeliveryDeps = {},
+): Promise<DeliveryResult | null> {
+  const lock = deps.lock ?? productionLock;
+  let assignment: any = null;
+  let target: { workspaceId: string; agentId: string; epoch: number; scopeId: string } | null = null;
+  const source = (await paseo.workspaces.ref(sourceWorkspaceId).refresh())?.metadata ?? {};
+  assignment = source[ASSIGNMENT_KEY];
+  if (!assignment?.reportActionId || assignment.reportedAt || typeof assignment.reportText !== "string") return null;
+  if (assignment.reportTarget) {
+    target = assignment.reportTarget;
+  } else {
+    const state: any = await readPaseoState(paseo);
+    const agents: any[] = state.agents ?? [];
+    const liveFor = resolveContinuations(agents).liveFor as Record<string, string>;
+    let recipient = liveFor[assignment.by] ?? assignment.by;
+    const requester = state.workspaces?.find((ws: any) => ws.id === assignment.requesterWorkspaceId);
+    const requesterState = requester?.metadata?.[METADATA_KEY];
+    if (requester && !requester.archivedAt && requesterState && !requesterState.retired && requesterState.scope?.id && requesterState.activeSteer) {
+      try {
+        recipient = scopeHolder({ agents, workspaceId: requester.id, scopeId: requesterState.scope.id,
+          slot: requesterState.activeSteer, ownerId: requesterState.activeAgentId,
+          previousSteer: requesterState.previousSteer, strictLegacy: true }).id;
+      } catch (error) {
+        console.error(`[factory] assignment requester scope unavailable (${error instanceof Error ? error.message : String(error)}); using continuation`);
+      }
+    }
+    const agent = agents.find((entry) => entry.id === recipient);
+    const workspace = state.workspaces?.find((entry: any) => entry.id === agent?.workspaceId);
+    const scope = workspace?.metadata?.[METADATA_KEY];
+    const labels = resolveFactoryLabels(agent, agents);
+    if (!agent || agent.archivedAt || !workspace || workspace.archivedAt || !scope || scope.retired ||
+        labels?.["wsf.role"] !== "steer" || !scope.scope?.id || !Number.isInteger(scope.epoch)) {
+      return blocked("Assignment recipient is not a live Factory steer; K7 cannot deliver to it.");
+    }
+    const chosen = { workspaceId: workspace.id, agentId: recipient, epoch: scope.epoch, scopeId: scope.scope.id };
+    await lock(workspaceLockName(sourceWorkspaceId), async (held) => {
+      const meta = (await paseo.workspaces.ref(sourceWorkspaceId).refresh())?.metadata ?? {};
+      const current = meta[ASSIGNMENT_KEY];
+      if (current?.reportActionId !== assignment.reportActionId || current.reportedAt) return;
+      if (current.reportTarget) { target = current.reportTarget; return; }
+      held.verify();
+      await paseo.workspaces.ref(sourceWorkspaceId).setMetadata({ [ASSIGNMENT_KEY]: { ...current, reportTarget: chosen } });
+      target = chosen;
+    });
+  }
+  if (!target) return null;
+  return reserveAssignmentDelivery(paseo, { ...target, actionId: assignment.reportActionId, text: assignment.reportText, sourceWorkspaceId }, deps);
 }
 
 function clearConfirmed(entry: any, snapshot: any, pending: PendingSteerDelivery): boolean {
@@ -334,6 +423,16 @@ ${pending.note}` : brief;
         }
         if (batch.takeover) await deps.onTakeoverDelivered?.(paseo, { ...batch, takeover: { ...batch.takeover, observedAt: sent.observedAt } }, input.agentId);
       }
+      if (pending.assignment) {
+        await lock(workspaceLockName(pending.assignment.workspaceId), async (held) => {
+          const workspace = paseo.workspaces.ref(pending.assignment!.workspaceId);
+          const meta = (await workspace.refresh())?.metadata ?? {};
+          const assignment = meta[ASSIGNMENT_KEY];
+          if (assignment?.reportActionId !== pending.assignment!.actionId || assignment.reportedAt) return;
+          held.verify();
+          await workspace.setMetadata({ [ASSIGNMENT_KEY]: { ...assignment, reportedAt: deps.now?.() ?? new Date().toISOString() } });
+        });
+      }
       await replacePending(paseo, input, lock, pending, (current) => ({
         action: afterDelivery(pending, true),
         ...((pending.needsResumeAt === undefined ? entry?.needsResume?.at : pending.needsResumeAt) && current.needsResume?.at === (pending.needsResumeAt === undefined ? entry?.needsResume?.at : pending.needsResumeAt) ? { needsResume: null } : {}),
@@ -367,7 +466,8 @@ export async function deliverSteer(
     resolveZerosub(deps),
   ]);
   const meta = fresh?.metadata ?? {};
-  const agent = snapshot?.agent;
+  const observed = snapshot?.agent;
+  const agent = observed ? { ...observed, labels: resolveFactoryLabels(observed, state.agents) ?? observed.labels } : null;
   const identity = cleanupIdentity(agent?.labels);
   const scope = scopeState(meta);
   if (identity?.role !== "steer" || !scope || agent.archivedAt || agent.background === true) {
@@ -375,8 +475,15 @@ export async function deliverSteer(
   }
   if (input.epoch !== undefined && input.epoch !== scope.epoch) return blocked("The scope moved before the steer could be reached.");
   const entry = meta[AGENTS_KEY]?.[input.agentId];
+  const previous = readSteerAction(entry);
+  if (input.actionId && previous?.wakeId === input.actionId && previous.phase === "done") {
+    return { status: "sent", cleared: false, detail: "Message already delivered." };
+  }
   if (hasActiveAgentWork(agent, entry)) return deferred();
   const existing = pendingSteerDelivery(entry);
+  if (existing && input.actionId && existing.wakeId === input.actionId && existing.phase !== "reserved") {
+    return (await finishSteerDelivery(paseo, input, deps)) ?? deferred();
+  }
   if (existing && existing.epoch === scope.epoch && existing.wakeId !== input.actionId) {
     if (existing.phase === "blocked") return blocked(existing.lastError ?? "Context renewal needs attention.");
     if (input.manual && existing.phase !== "renewing") {
@@ -422,11 +529,13 @@ export async function deliverSteer(
     }
     const pending: any = newSteerAction({ id: input.actionId, epoch: scope.epoch, at, text, options: input.sendOptions, batch });
     pending.needsResumeAt = needsResumeAt;
+    if (existing?.assignment) pending.assignment = existing.assignment;
     if (identity.slot === scope.activeSteer) pending.authority = { scopeId: identity.scopeId, agentId: input.agentId };
     const reserved = await changeEntry(paseo, input, lock, (current, currentMeta) => {
       if (scopeState(currentMeta)?.epoch !== scope.epoch || readCleanupAction(current)) return null;
       const prior = readSteerAction(current);
       if (prior && prior.phase !== "done" && prior.wakeId !== input.actionId) return null;
+      if (input.actionId && prior?.wakeId === input.actionId && prior.phase !== "reserved") return null;
       return { action: { ...pending, ...(prior?.phase === "done" ? { lastDeliveryId: prior.wakeId } : prior?.lastDeliveryId ? { lastDeliveryId: prior.lastDeliveryId } : {}) } };
     });
     if (!reserved) return deferred("A steer operation is already queued.");
@@ -440,17 +549,20 @@ export async function deliverSteer(
     phase: "renewing",
     queuedAt: at,
     epoch: typeof scope.epoch === "number" ? scope.epoch : null,
-    note: (input.renewalNote ?? input.text ?? original?.note ?? "").slice(0, 1500),
+    note: existing?.assignment ? (input.renewalNote ?? input.text ?? original?.note ?? "") :
+      (input.renewalNote ?? input.text ?? original?.note ?? "").slice(0, 1500),
     ...(eventBatch ? { batch: eventBatch } : {}),
     needsResumeAt,
     ...(input.sendOptions ? { sendOptions: input.sendOptions } : {}),
     ...(identity.slot === scope.activeSteer ? { authority: { scopeId: identity.scopeId, agentId: input.agentId } } : {}),
     ...(readSteerAction(entry)?.phase === "done" ? { lastDeliveryId: readSteerAction(entry).wakeId } : {}),
+    ...(existing?.assignment ? { assignment: existing.assignment } : {}),
   };
   const reserved = await changeEntry(paseo, input, lock, (current, currentMeta) => {
     if (scopeState(currentMeta)?.epoch !== scope.epoch || readCleanupAction(current)) return null;
     const priorAction = readSteerAction(current);
     if (priorAction && priorAction.phase !== "done" && priorAction.wakeId !== input.actionId) return null;
+    if (input.actionId && priorAction?.wakeId === input.actionId && priorAction.phase !== "reserved") return null;
     return { action: pending };
   });
   if (!reserved) return { status: "pending", cleared: false, detail: "A steer operation is already queued." };

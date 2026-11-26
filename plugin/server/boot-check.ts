@@ -19,6 +19,7 @@ import {
 import { isAdvisorSlot } from "./core/config.mjs";
 import { factoryIdentity } from "../shared/auto-checkpoint.js";
 import { RESUME_CLEAR_DEFAULTS, bootResumeReason } from "../shared/idle-cleanup.js";
+import { continuedFromId, resolveFactoryLabels, resolveContinuations } from "./core/zerosub.mjs";
 
 const CHECKPOINT_KEY = `${METADATA_KEY}.checkpoint`;
 const AGENTS_KEY = `${METADATA_KEY}.agents`;
@@ -47,6 +48,8 @@ export interface BootCheckDeps {
   getRecentHours?: () => Promise<number | null | undefined> | number | null | undefined;
   /** Effective config for advisor slots. Absent: no advisors known; throwing: all steers treated as advisors (fail closed). */
   getConfig?: () => Promise<unknown>;
+  normalizeContinuation?: (paseo: any, agent: any) => Promise<any | null>;
+  reportContinuation?: (paseo: any, agent: any, scope: any, config: unknown) => Promise<void>;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -144,6 +147,8 @@ export async function runBootCheck({
   log,
   getRecentHours,
   getConfig,
+  normalizeContinuation,
+  reportContinuation,
 }: BootCheckDeps & { paseo: any }): Promise<BootMark[]> {
   const logFn = log ?? console.log;
   const nowFn = now ?? (() => new Date().toISOString());
@@ -155,11 +160,19 @@ export async function runBootCheck({
     logFn(`[factory] boot check: daemon start lookup failed (${error instanceof Error ? error.message.slice(0, 200) : "error"})`);
     daemonStartedAt = null;
   }
-  if (!daemonStartedAt) {
-    logFn("[factory] boot check: daemon start unknown; skip");
-    return [];
+  let state: any = await readPaseoState(paseo);
+  const continuations = (state.agents ?? []).filter((agent: any) => continuedFromId(agent) && !agent.archivedAt && resolveFactoryLabels(agent, state.agents));
+  if (normalizeContinuation) {
+    for (const agent of continuations) {
+      if (factoryIdentity(agent.labels)) continue;
+      try {
+        const updated = await normalizeContinuation(paseo, agent);
+        if (updated) Object.assign(agent, updated);
+      } catch (error) {
+        logFn(`[factory] boot check: continuation ${agent.id} normalization failed (${error instanceof Error ? error.message : String(error)})`);
+      }
+    }
   }
-  const state: any = await readPaseoState(paseo);
   const scopes: any[] = listScopes(state);
   const byId = new Map<string, any>(scopes.map((s: any) => [s.id, s]));
   const excerptOf = readExcerpt ?? defaultReadExcerpt;
@@ -186,6 +199,24 @@ export async function runBootCheck({
       configFailed = true;
     }
   }
+  if (reportContinuation) {
+    const superseded = new Set(resolveContinuations(state.agents).superseded);
+    for (const agent of continuations) {
+      if (superseded.has(agent.id)) continue;
+      const identity = factoryIdentity(resolveFactoryLabels(agent, state.agents));
+      const scope = identity ? byId.get(identity.scopeId) : null;
+      if (!scope) continue;
+      try {
+        await reportContinuation(paseo, agent, scope, configFailed ? false : config);
+      } catch (error) {
+        logFn(`[factory] boot check: continuation ${agent.id} report failed (${error instanceof Error ? error.message : String(error)})`);
+      }
+    }
+  }
+  if (!daemonStartedAt) {
+    logFn("[factory] boot check: daemon start unknown; skip restart marks");
+    return [];
+  }
 
   // Candidates grouped by main workspace so each scope is locked once. A
   // closed steer is never a reason by itself (after a daemon restart nearly
@@ -209,9 +240,10 @@ export async function runBootCheck({
   };
   const qualified = new Set<string>();
   const reasonCounts = { "open-turn": 0, "active-recent": 0, recent: 0 };
+  const superseded = new Set(resolveContinuations(state.agents).superseded);
   for (const agent of state.agents ?? []) {
-    if (agent?.archivedAt) continue;
-    const identity = factoryIdentity(agent?.labels ?? null);
+    if (agent?.archivedAt || superseded.has(agent.id)) continue;
+    const identity = factoryIdentity(resolveFactoryLabels(agent, state.agents));
     if (!identity) continue;
     const scope = byId.get(identity.scopeId) ?? null;
     if (!scope) continue;

@@ -99,7 +99,7 @@ The plugin checks once per minute. All conditions must hold, checked again right
 - provider in `providers` (default `["claude"]`), role in `roles` (steers and workers),
 - status idle, no pending permission, no `pendingAction`,
 - clear mode: `now - lastTurnEndedAt ≥ idleMinutes` (default 60); compact mode: idle past the profile-derived threshold below while the group cache is still warm,
-- `contextTokens ≥ minContextTokens` (default 60000; unknown → skip; efficiency compacts from 10000),
+- `contextTokens ≥ minContextTokens` (default 100000; unknown → skip; efficiency compacts from 10000),
 - valid state: active steer → scope checkpoint `capturedAt ≥ lastTurnEndedAt`, not interrupted; others → `noteAt ≥ lastTurnEndedAt`,
 - not cleared since the last turn, no label `wsf.keepContext=true`.
 
@@ -127,8 +127,8 @@ The `profile` setting (default `balanced`) derives the per-group compact thresho
 | Profile | Compact when idle past | Small contexts |
 |---|---|---|
 | Maximum efficiency | half the TTL (Claude 30, GPT-5.6+ 15, ≤5.5 5 min) | from 10k tokens |
-| Balanced (default) | shortly before the TTL (Claude 50, GPT-5.6+ 25, ≤5.5 8 min) | configured floor (60k) |
-| Comfort (side product, as-is) | just before the TTL (Claude 58, GPT-5.6+ 28, ≤5.5 8 min) | configured floor (60k) |
+| Balanced (default) | shortly before the TTL (Claude 50, GPT-5.6+ 25, ≤5.5 8 min) | configured floor (100k) |
+| Comfort (side product, as-is) | just before the TTL (Claude 58, GPT-5.6+ 28, ≤5.5 8 min) | configured floor (100k) |
 
 On a five-minute route, efficiency becomes eligible at two minutes. Balanced and comfort become eligible at three minutes.
 

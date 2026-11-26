@@ -109,6 +109,7 @@ import type { ConfigLoader, HostSettingsReader } from "./config.js";
 import { getQuotaSampledAt, getQuotaSnapshot } from "./quota.js";
 import { settingsFromConfig, validateFactorySettings, type FactorySettingsValues } from "../shared/settings-validate.js";
 import { readZerosubStateSafe } from "./zerosub-runtime.js";
+import { readZerosubState } from "./core/zerosub.mjs";
 import { workerIdentityFromMetadata } from "../shared/supervise.js";
 import { filterStaleWorkerEvents } from "./worker-wakes.js";
 import { loadCatalog } from "./models-rpc.js";
@@ -301,7 +302,7 @@ export async function applyResumeRpc(
           client: paseo, discovery, config, workerId, git,
           apply: true, notifyPrevious: false,
           lookupReceipt: lookupCreationReceipt,
-          execute: createExecutors({ client: paseo, paseoCli: createPaseoCli() }),
+          execute: (createExecutors as any)({ client: paseo, paseoCli: createPaseoCli(), getZerosub: readZerosubState, lookupReceipt: lookupCreationReceipt, reservePins: true }),
           rewindClient: extra?.rewindClient ?? defaultCreateRewindClient,
           promptOptions: await loader.loadPromptOptions(paseo),
         } as any);
@@ -469,6 +470,9 @@ export async function applyFresh(
   const executeOptions: any = {
     client: paseo,
     paseoCli: createPaseoCli(),
+    getZerosub: readZerosubState,
+    lookupReceipt: lookupCreationReceipt,
+    reservePins: true,
   };
   const applyOptions: any = {
     client: paseo,
@@ -737,7 +741,7 @@ export async function getPlan(
   const adopt = normalizePlanAdopt(input.adopt ?? {}, entries.length);
   const adoptWorker = normalizePlanAdoptWorker(input.adoptWorker ?? {}, entries.length);
   const detach = input.detach ?? false;
-  const runnerOptions: any = { config, client: paseo, gh: createGh(), git: createGit() };
+  const runnerOptions: any = { config, client: paseo, gh: createGh(), git: createGit(), getZerosub: readZerosubStateSafe };
   const runner = createRunner(runnerOptions);
   const planOptions: any = { adopt, adoptWorker, detach, ...(slots ? { slots } : {}), ...(snapshot ? { state: snapshot } : {}) };
   const plans = await runner.runPlans(entries, planOptions);
@@ -1072,6 +1076,9 @@ export async function applyPlan(
     const executeOptions: any = {
       client: paseo,
       paseoCli: createPaseoCli(),
+      getZerosub: readZerosubState,
+      lookupReceipt: lookupCreationReceipt,
+      reservePins: true,
     };
     const applyOptions: any = {
       authorization,
@@ -1081,7 +1088,7 @@ export async function applyPlan(
       progress: fileProgress(join(planDir, `${input.hash}.progress.json`)),
       guard: () => held.verify(),
       runPlans: (list: any, options: any) => {
-        const runnerOptions: any = { config, client: paseo, gh: createGh(), git: createGit() };
+        const runnerOptions: any = { config, client: paseo, gh: createGh(), git: createGit(), getZerosub: readZerosubStateSafe };
         return createRunner(runnerOptions).runPlans(list, options);
       },
       execute: createExecutors(executeOptions),
@@ -1165,6 +1172,8 @@ export async function getWorkers(
 
 export interface ZerosubHandlerExtra {
   getZerosub?: () => Promise<any>;
+  lookupReceipt?: (kind: string, key: string) => Promise<any>;
+  reservePins?: boolean;
 }
 
 async function readHandlerZerosub(extra?: ZerosubHandlerExtra): Promise<any> {
@@ -1340,6 +1349,7 @@ export async function startWorkerRpc(
     title: input.title,
     apply: Boolean(input.apply),
     promptOptions: await loader.loadPromptOptions(paseo),
+    execute: (createExecutors as any)({ client: paseo, getZerosub: extra?.getZerosub ?? readZerosubState, lookupReceipt: extra?.lookupReceipt ?? lookupCreationReceipt, reservePins: extra?.reservePins ?? true }),
   });
   const text = result.agentId
     ? `Started worker ${result.agentId} (${result.provider}) in ${result.scope}`
@@ -1604,6 +1614,9 @@ export async function applySteerAddRpc(
     gh: createGh(),
     git: createGit(),
     paseoCli: createPaseoCli(),
+    getZerosub: readZerosubState,
+    lookupReceipt: lookupCreationReceipt,
+    reservePins: true,
   };
   return (applySteerAdd as any)(config, discovery.providers ?? [], liveSteers, {
     slot,

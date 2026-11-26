@@ -12,7 +12,7 @@ import { normalizeEntry } from '../plugin/server/core/discovery.mjs';
 import { listScopes, sameScopeId, domainOfScope } from '../plugin/server/core/scope.mjs';
 import { createRunner } from '../plugin/server/core/factory.mjs';
 import { applyPlans, createExecutors, createAuthorization } from '../plugin/server/core/apply.mjs';
-import { assignScope, buildAssignment } from '../plugin/server/core/assign.mjs';
+import { ASSIGNMENT_KEY, assignScope, buildAssignment } from '../plugin/server/core/assign.mjs';
 import { steerStatus, buildResumeBrief, CHECKPOINT_KEY } from '../plugin/server/core/steer.mjs';
 import { scopeRows, formatScopeRows } from '../plugin/server/core/scopes-view.mjs';
 import { LABEL, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
@@ -321,6 +321,25 @@ test('assign packet routes Hub → Domain → Kind; result carries domain fields
   assert.deepEqual(domain.domainChildren, ['web']);
   assert.match(domain.packet, /Domain scope for 1 child scope\(s\) \(web\); lifecycle \(create\/archive\/delete\) stays with the hub/);
   assert.equal(buildAssignment({ repo: 'x' }, { slot: 'A', steerId: 's', epoch: 1, task: 't', tests: [], blockers: [], next: null }).includes('Domain'), false);
+});
+
+test('assignment records the requester workspace only for the requester recipient', async () => {
+  const world = makeWorld();
+  const source = provisionDir(world, { path: '/p/source', id: 'source' });
+  const target = provisionDir(world, { path: '/p/target', id: 'target' });
+  const requester = world.agents.find((agent) => agent.workspaceId === source.id && agent.labels[LABEL.slot] === 'A');
+  const [discovery] = await runnerFor(world).discoverAll([{ local: '/p/target' }]);
+  const client = fakeClient(world);
+  client.agents.list = async () => ({ entries: structuredClone(world.agents), pageInfo: { hasMore: false } });
+  const args = {
+    client, discovery, task: 'Ship', apply: true, send: false, lock: noLock,
+    requester: { workspaceId: source.id, scopeId: 'source', epoch: 1, agentId: requester.id },
+    assignedBy: requester.id,
+  };
+  await assignScope(args);
+  assert.equal(target.metadata[ASSIGNMENT_KEY].requesterWorkspaceId, source.id);
+  await assignScope({ ...args, reportTo: 'someone-else' });
+  assert.equal(target.metadata[ASSIGNMENT_KEY].requesterWorkspaceId, undefined);
 });
 
 test('scopes groups domains with children, tags and inboxes', () => {

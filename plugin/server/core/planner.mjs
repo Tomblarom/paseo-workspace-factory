@@ -15,7 +15,7 @@ import { buildSteerCreate, idempotencyKey, requestDigest, steerCreateLabels } fr
 export const WORKSPACE_REF = { ref: 'main-workspace' };
 export { idempotencyKey, requestDigest };
 
-export function planRepository(discovery, config, { adopt = {}, slots, adoptWorker = {}, detach = false } = {}) {
+export function planRepository(discovery, config, { adopt = {}, slots, adoptWorker = {}, detach = false, zerosub = null } = {}) {
   const ops = [];
   const conflicts = [];
   const notes = [...(discovery.github?.notes ?? [])];
@@ -337,8 +337,8 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
       conflict(key, `Steer ${slot} has no live agent and there is no main workspace to create it in; enroll the workspace first`);
       continue;
     }
-    const { profile: resolved, skipped } = resolveProfile(config, discovery.providers, steerFallbackList(config, slot), {
-      role: 'steer', advisorSlot, usedProfiles,
+    const { profile: resolved, skipped, zerosubPin } = resolveProfile(config, discovery.providers, steerFallbackList(config, slot), {
+      role: 'steer', advisorSlot, usedProfiles, zerosub,
     });
     if (!resolved) {
       const tried = skipped.length
@@ -358,6 +358,7 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
     const { request, idempotencyKey: createKey } = buildSteerCreate({
       keyScope: forkName, repo: effScopeId, scopeId: effScopeId, slot, workspaceId, profile: effective,
       keyParts: ['steer', slot, `g${generation}`],
+      metadata: zerosubPin?.metadata ?? null,
     });
     add(key, 'paseo.agent.create', `Create top-level Steer ${slot} (${effective.provider}/${effective.model}) without prompt`, {
       ...request, idempotencyKey: createKey,

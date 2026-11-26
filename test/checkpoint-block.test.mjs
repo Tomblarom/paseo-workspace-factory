@@ -181,7 +181,7 @@ test('instruction docs require and show the fenced block', () => {
   assert.ok(instructions.includes('\nblockers: <open problems, or "none">'), 'field lines shown directly');
   const required = instructions.match(/fenced CHECKPOINT block/g) ?? [];
   assert.ok(required.length >= 3, `steer, worker and answer-format sections require it (${required.length})`);
-  assert.match(readDoc('AGENTS.md'), /fenced CHECKPOINT block/, 'repo instructions require it');
+  assert.match(readDoc('plugin/server/core/role-prompts.mjs'), /fenced CHECKPOINT block/, 'plugin role rules require it');
 });
 
 test('instruction docs document the status line and worker completion', () => {

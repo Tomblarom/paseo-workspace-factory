@@ -15,7 +15,7 @@ export class AssignRefused extends Error {}
 
 /**
  * Who asked for the current assignment and whether the report went out:
- * { by, epoch, at, reportedAt }. Kept apart from the checkpoint, which turn
+ * { by, requesterWorkspaceId, epoch, at, reportedAt }. Kept apart from the checkpoint, which turn
  * hooks overwrite; the plugin turn hook reports a done/blocked CHECKPOINT of
  * the active steer to `by` once and stamps reportedAt.
  */
@@ -91,7 +91,7 @@ export async function assignScope({ client, discovery, task, tests = [], blocker
     const stamp = now().toISOString();
     const checkpoint = { ...fields, epoch: fresh.epoch, updatedAt: stamp, source: 'assign', assignedBy, capturedAt: stamp, interrupted: null };
     held.verify(); // the lock file must still be the locked inode right before the write
-    await workspace.setMetadata({ [CHECKPOINT_KEY]: checkpoint, [ASSIGNMENT_KEY]: report ? { by: report, epoch: fresh.epoch, at: stamp, reportedAt: null } : null });
+    await workspace.setMetadata({ [CHECKPOINT_KEY]: checkpoint, [ASSIGNMENT_KEY]: report ? { by: report, ...(report === requester?.agentId ? { requesterWorkspaceId: requester.workspaceId } : {}), epoch: fresh.epoch, at: stamp, reportedAt: null } : null });
     const written = (await workspace.refresh())?.metadata?.[CHECKPOINT_KEY];
     if (written?.task !== checkpoint.task || written?.epoch !== checkpoint.epoch) throw new Error('Assignment checkpoint not verifiable after write');
     result.checkpoint = checkpoint;

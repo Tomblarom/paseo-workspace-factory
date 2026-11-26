@@ -66,3 +66,11 @@ test('recorded owner resolves to its live continuation', async () => {
   assert.equal((await guardScope({ ...args, agentId: 'continued' })).holder.id, 'continued');
   await assert.rejects(guardScope(args), /Active steer changed/);
 });
+
+test('an errored origin cannot regain authority when its continuation is archived', async () => {
+  const args = fixture();
+  args.state.activeAgentId = 'a';
+  args.agents[0].status = 'error';
+  args.agents.push({ id: 'continued', workspaceId, archivedAt: '2026-01-01', labels: { [CONTINUED_FROM_LABEL]: 'a' } });
+  await assert.rejects(guardScope(args), /continuation.*cannot resume/);
+});

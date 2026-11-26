@@ -223,7 +223,13 @@ test('planSteerAdd pins the roomiest ZeroSub account below warn as creation meta
   const plan = planSteerAdd(CONFIG, PROVIDERS, [], { spec: 'alpha', zerosub, scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW });
   assert.equal(plan.zerosubAccount, 'acc-roomy');
   assert.deepEqual(plan.op.params.metadata, { 'zerosub.account': 'acc-roomy' });
-  assert.equal(plan.fingerprintInput.account, 'acc-roomy');
+  const changed = planSteerAdd(CONFIG, PROVIDERS, [], {
+    spec: 'alpha', zerosub: state([acc('another-account', 'fake-x', 10)]),
+    scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW,
+  });
+  assert.notEqual(changed.zerosubAccount, plan.zerosubAccount);
+  assert.deepEqual(changed.fingerprintInput, plan.fingerprintInput);
+  assert.equal(changed.op.params.idempotencyKey, plan.op.params.idempotencyKey);
 });
 
 test('planSteerAdd reports all accounts exhausted with the earliest reset', () => {

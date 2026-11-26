@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { LABEL, METADATA_KEY, PARENT_LABEL } from '../plugin/server/core/paseo.mjs';
 import { WORKER_ROLE_PROMPT } from '../plugin/server/core/role-prompts.mjs';
 import { startScopedWorker } from '../plugin/server/core/workers.mjs';
+import { createExecutors } from '../plugin/server/core/apply.mjs';
 
 function setup() {
   const workspaceId = 'wks_example';
@@ -54,6 +55,17 @@ test('worker start previews without changes and pins the account at native creat
   await startScopedWorker({ ...options, accountId: null, apply: true });
   assert.equal(requests[1].metadata, undefined);
   assert.equal(requests[1].idempotencyKey, request.idempotencyKey);
+});
+
+test('worker start uses the live account instead of the preview account', async () => {
+  const { options, requests } = setup();
+  const execute = createExecutors({
+    client: options.client,
+    getZerosub: async () => ({ accounts: [{ id: 'live-account', family: 'codex', exhausted: false, windows: [], maxUsedPct: 10 }] }),
+  });
+  const result = await startScopedWorker({ ...options, apply: true, execute });
+  assert.equal(requests[0].metadata['zerosub.account'], 'live-account');
+  assert.equal(result.accountId, 'live-account');
 });
 
 test('worker start appends only the role block when findings are disabled', async () => {
