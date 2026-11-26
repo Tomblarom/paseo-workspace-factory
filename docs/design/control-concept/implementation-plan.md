@@ -603,6 +603,33 @@ while exercising the same backend functions. Do not make UI acceptance depend
 on a model issuing the correct CLI command. Gate exact-draft scenarios on the
 verified native capability above; direct existing-tab activation is independent.
 
+### P5 UI and interaction polish
+
+Use Paseo's panel, modal, settings and icon contracts. Follow native provider
+and profile lists for compact rows and focused editing. Use ZeroSub's account
+cards and usage meters as the reference for quota. Use theme status colors for
+control, cache, quota and recovery. Pair each color with a label or icon.
+
+- Workspace Overview summarizes current work, control, resources and attention.
+  Checkpoint evidence is available when needed. Overview, Steers, Resources
+  and Activity are the primary navigation. Generic commands and their results
+  have a separate Diagnostics entry.
+- Steer rows show the model, role, runtime, cache and quota and offer Open,
+  Reset, Activate and Handover where applicable. Reuse the menu's eligibility,
+  preview, confirmation and target checks.
+- Resources shows measured usage and remaining capacity per applicable window,
+  sample freshness, reset times and the worker route. Activity uses a compact
+  timeline. Show verified participants, causes, decisions and outcomes. Link
+  steps only when retained records identify the same operation.
+- Host settings shows one compact list of profiles, a focused editor and
+  separate order controls for steer, advisor and worker priorities. Use native
+  model labels and safe account aliases. Preserve settings validation, autosave
+  and existing profile semantics.
+- Compare actual Paseo screenshots at desktop and 390 px. Review light and
+  dark tokens, text wrapping, keyboard focus, compact controls and read-only
+  offline states. Exercise safe previews and disabled states in the live
+  workspace. Keep P1/P3 mutation acceptance in an isolated workspace.
+
 ## Validation and release gates
 
 Run focused regression checks for each changed contract, then `npm test` and
