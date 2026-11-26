@@ -22,7 +22,7 @@ All factory configuration lives in the Paseo plugin settings (Settings → Plugi
 | `workers.priority` | Ordered profile-name list for workers, highest priority first. A missing `priority` reads as `[defaultProfile]`; writing sets `defaultProfile` to `priority[0]` for older readers. |
 | `workers.defaultProfile` | First entry of `workers.priority`, kept for backwards compatibility. Prefer `workers.priority`. |
 | `usage.warnContextTokens` | Retired: no longer read. |
-| `quota.warnPct` / `quota.exhaustedPct` | Session quota warning/exhaustion thresholds (defaults `75` and `95`). |
+| `quota.warnPct` / `quota.exhaustedPct` | Session quota warning/exhaustion thresholds (defaults `93` and `95`). |
 | `profiles.<name>.pool` | Retired: pools default to the profile's provider; profiles in one pool share availability and failover preference. |
 | `wsf.profileHealth` (workspace metadata) | Runtime-only profile failure marks, written under the workspace lock from a fresh read as their own top-level key (never inside the `wsf` scope state, so a concurrent switch/epoch is kept). `worker pick --failed <profile> --reason <text>` records the failure; the profile is skipped for 10 minutes with its classified reason, without changing config or the provider catalog. A legacy nested `profileHealth` field inside the `wsf` scope state is still read. |
 | `runtime.stateDir` | Plans, progress, journals and locks (default `$XDG_STATE_HOME/paseo-workspace-factory`, override with `PASEO_FACTORY_STATE_DIR`). Not in the plugin settings. |
@@ -169,7 +169,7 @@ A profile with `"advisor": true` marks its model as a second-opinion candidate f
 
 ## Quota pools
 
-In the Paseo composer, run `/factory quota` (or press **Quota** in the Factory panel) to see provider quota pools with their warn/exhausted state plus which steer or worker uses each pool. The view is read-only. Thresholds live in Settings → Plugins → Factory → Quota: `warnPct` (default 75) and `exhaustedPct` (default 95). The plugin samples quota in the background (result pill; the sidebar warns when a non-advisor steer's pool reaches the warn level).
+In the Paseo composer, run `/factory quota` (or press **Quota** in the Factory panel) to see provider quota pools with their warn/exhausted state plus which steer or worker uses each pool. The view is read-only. Thresholds live in Settings → Plugins → Factory → Quota: `warnPct` (default 93) and `exhaustedPct` (default 95). The plugin samples quota in the background (result pill; the sidebar warns when a non-advisor steer's pool reaches the warn level).
 
 Profiles belong to a quota pool named by `profiles.<name>.pool`, or by their provider when `pool` is omitted. A pool at `quota.exhaustedPct` is skipped by profile resolution. Briefs show a preferred different pool at `quota.warnPct`; configure at least two non-advisor steer pools to make that failover useful.
 

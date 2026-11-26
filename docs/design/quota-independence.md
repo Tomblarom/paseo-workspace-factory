@@ -264,3 +264,8 @@ happens anyway (wake, report, resume), judged by the quota at dispatch time. Nev
 a running turn and never send a prompt only to warn or to hand over. This reuses the
 existing delivery target choice (deliverSteer and the failover order); if that cannot pick
 another holder at dispatch, note the gap instead of adding switching infrastructure.
+
+Dispatch review: `deliverSteer` uses the supplied agent ID. Worker wakes can invoke the
+failover order when the active provider pool is exhausted and can wait for a ZeroSub
+reset. A single bound account crossing `exhaustedPct` does not by itself select another
+holder for wakes, reports or resume. Account-based target selection at dispatch remains open.

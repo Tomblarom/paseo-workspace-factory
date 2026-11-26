@@ -57,11 +57,11 @@ test('quota warning is included in briefs and assignments only above threshold',
     steers: [{ slot: 'A', id: 'a' }], workers: [], openWorkers: [],
     checkpoint: null, workspace: { id: 'w', directory: '/tmp' },
   };
-  const snapshot = { shared: { sessionPct: 78 } };
-  const line = 'Quota: shared 78% (5h) — prefer codex';
-  assert.match(buildResumeBrief(status, { config, quotaSnapshot: snapshot }), /Quota: shared 78% \(5h\) — prefer codex/);
-  assert.match(buildAssignment(status, { slot: 'A', steerId: 'a', epoch: 1, task: 't', tests: [], blockers: [], next: null, config, quotaSnapshot: snapshot }), /Quota: shared 78%/);
-  assert.equal(formatQuotaLine(config, { shared: { sessionPct: 74 } }), null);
+  const snapshot = { shared: { sessionPct: 93 } };
+  const line = 'Quota: shared 93% (5h) — prefer codex';
+  assert.match(buildResumeBrief(status, { config, quotaSnapshot: snapshot }), /Quota: shared 93% \(5h\) — prefer codex/);
+  assert.match(buildAssignment(status, { slot: 'A', steerId: 'a', epoch: 1, task: 't', tests: [], blockers: [], next: null, config, quotaSnapshot: snapshot }), /Quota: shared 93%/);
+  assert.equal(formatQuotaLine(config, { shared: { sessionPct: 92 } }), null);
   assert.ok(line.includes('prefer codex'));
 });
 

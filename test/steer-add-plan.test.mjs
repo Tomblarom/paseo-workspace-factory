@@ -214,7 +214,7 @@ test('planSteerAdd model override drops mode/thinking the new provider does not 
   assert.equal(sameProvider.thinking, 'high');
 });
 
-test('planSteerAdd pins the roomiest ZeroSub account below warn as creation metadata', () => {
+test('planSteerAdd pins the roomiest eligible ZeroSub account as creation metadata', () => {
   const zerosub = state([
     acc('acc-roomy', 'fake-x', 20),
     acc('acc-full', 'fake-x', 10, { status: 'limited', limitedUntil: RESET_5H }),
@@ -232,20 +232,33 @@ test('planSteerAdd pins the roomiest ZeroSub account below warn as creation meta
   assert.equal(changed.op.params.idempotencyKey, plan.op.params.idempotencyKey);
 });
 
+test('planSteerAdd uses exhaustion, not warning, for all profile selection paths', () => {
+  for (const spec of [null, 'alpha', 'fake-x/x1']) {
+    for (const [pct, eligible] of [[93, true], [94, true], [95, false]]) {
+      const zerosub = state([acc('acc-x', 'fake-x', pct)]);
+      const plan = planSteerAdd(CONFIG, PROVIDERS, [], {
+        spec, slot: 'A', zerosub, scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW,
+      });
+      assert.equal(plan.profile !== null, eligible, `${spec}: ${pct}%`);
+      if (eligible) assert.equal(plan.zerosubAccount, 'acc-x');
+    }
+  }
+});
+
 test('planSteerAdd reports all accounts exhausted with the earliest reset', () => {
   const zerosub = state([
-    acc('acc-x', 'fake-x', 80, { resetsAt: RESET_LATE }),
-    acc('acc-y', 'fake-y', 90, { resetsAt: RESET_5H }),
+    acc('acc-x', 'fake-x', 95, { resetsAt: RESET_LATE }),
+    acc('acc-y', 'fake-y', 99, { resetsAt: RESET_5H }),
   ]);
   const blocked = planSteerAdd(CONFIG, PROVIDERS, [], { zerosub, scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW });
   assert.equal(blocked.profile, null);
   assert.equal(blocked.op, null);
   assert.equal(blocked.skipped.length, 3);
-  assert.ok(blocked.skipped.every((s) => s.reason.startsWith('accounts over warn threshold')));
+  assert.ok(blocked.skipped.every((s) => s.reason.startsWith('accounts exhausted')));
   assert.equal(blocked.earliestReset, RESET_5H);
-  const unknown = state([acc('acc-x', 'fake-x', 80, { resetsAt: null })]);
+  const unknown = state([acc('acc-x', 'fake-x', 95, { resetsAt: null })]);
   const bare = planSteerAdd(CONFIG, PROVIDERS, [], { spec: 'alpha', zerosub: unknown, scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW });
-  assert.equal(bare.skipped[0].reason, 'accounts over warn threshold (≥75%)');
+  assert.equal(bare.skipped[0].reason, 'accounts exhausted');
   assert.equal(bare.earliestReset, null);
 });
 
@@ -266,7 +279,7 @@ test('formatSteerAddPreview names slot, profile, account, skips and the op', () 
   assert.match(text, /steer slots:/);
   assert.match(text, new RegExp(plan.op.params.idempotencyKey));
   assert.match(text, /Nothing written/);
-  const zerosub = state([acc('acc-x', 'fake-x', 80, { resetsAt: RESET_5H })]);
+  const zerosub = state([acc('acc-x', 'fake-x', 95, { resetsAt: RESET_5H })]);
   const blocked = planSteerAdd(CONFIG, PROVIDERS, [], { spec: 'alpha', zerosub, scopeId: SCOPE, workspaceId: WORKSPACE, repo: SCOPE, now: NOW });
   const blockedText = formatSteerAddPreview(blocked, { scopeId: SCOPE });
   assert.match(blockedText, /blocked, no startable profile/);

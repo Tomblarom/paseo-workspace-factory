@@ -89,7 +89,7 @@ test("quota view tolerates a missing snapshot, pools wrapper, and missing thresh
     nowMs: NOW,
   });
   assert.deepEqual(wrapped.pools.map((pool) => [pool.pool, pool.sessionPct, pool.state]), [["codex", 50, "ok"]]);
-  assert.equal(wrapped.warnPct, 75);
+  assert.equal(wrapped.warnPct, 93);
   assert.equal(wrapped.exhaustedPct, 95);
 });
 

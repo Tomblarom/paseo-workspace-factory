@@ -101,23 +101,11 @@ function checkedTargetSlot(config, liveSteers, scopeId, slotInput) {
   return { target: raw, classification };
 }
 
-function mapWarnReason(skipped, quotaWarnPct) {
-  return (skipped ?? []).map((entry) => {
-    const reason = entry?.reason;
-    if (typeof reason === 'string' && reason.startsWith('accounts exhausted')) {
-      const prefix = 'accounts exhausted, earliest reset ';
-      const reset = reason.startsWith(prefix) ? reason.slice(prefix.length) : null;
-      return { ...entry, reason: reset ? `accounts over warn threshold (≥${quotaWarnPct}%), earliest reset ${reset}` : `accounts over warn threshold (≥${quotaWarnPct}%)` };
-    }
-    return entry;
-  });
-}
-
-function earliestResetAcross(config, mapped, zerosub, now) {
+function earliestResetAcross(config, skipped, zerosub, now) {
   let earliestReset = null;
   let bestMs = Infinity;
-  for (const entry of mapped) {
-    if (typeof entry?.reason !== 'string' || !entry.reason.startsWith('accounts over warn')) continue;
+  for (const entry of skipped) {
+    if (typeof entry?.reason !== 'string' || !entry.reason.startsWith('accounts exhausted')) continue;
     const family = profileFamily(config?.profiles?.[entry.name]);
     if (!family) continue;
     const reset = earliestFamilyReset(zerosub, family, { now });
@@ -130,14 +118,10 @@ function earliestResetAcross(config, mapped, zerosub, now) {
   return earliestReset;
 }
 
-function resolveOneProfile(config, providerEntries, name, opts, quotaWarnPct, now, zerosub) {
-  const { profile, skipped, zerosubAccount, zerosubPin } = resolveProfile(config, providerEntries, [name], {
-    ...opts,
-    zerosubExhaustedPct: quotaWarnPct,
-  });
-  const mapped = mapWarnReason(skipped, quotaWarnPct);
-  const earliestReset = !profile && zerosub ? earliestResetAcross(config, mapped, zerosub, now) : null;
-  return { profile, skipped: mapped, zerosubAccount, zerosubPin, earliestReset };
+function resolveOneProfile(config, providerEntries, name, opts, now, zerosub) {
+  const { profile, skipped, zerosubAccount, zerosubPin } = resolveProfile(config, providerEntries, [name], opts);
+  const earliestReset = !profile && zerosub ? earliestResetAcross(config, skipped, zerosub, now) : null;
+  return { profile, skipped, zerosubAccount, zerosubPin, earliestReset };
 }
 
 function candidateForProviderModel(config, profileName, provider, model, thinking, mode, providerEntries, notes) {
@@ -175,7 +159,7 @@ export function planSteerAdd(config, providerEntries, liveSteers, {
   slot = null, spec = null, thinking = undefined, mode = undefined, profile: profileOption = undefined,
   scopeId = null, workspaceId = null, repo = null,
   usedProfiles = [], quotaSnapshot = null, quotaExhaustedPct = config?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct,
-  quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, profileHealth = null, now = Date.now(), zerosub = null,
+  profileHealth = null, now = Date.now(), zerosub = null,
 } = {}) {
   const { target, classification } = checkedTargetSlot(config, liveSteers, scopeId, slot);
   const notes = [];
@@ -202,7 +186,7 @@ export function planSteerAdd(config, providerEntries, liveSteers, {
       advisorSlot = isAdvisorProfile(config, name);
       const resolved = resolveOneProfile(config, providerEntries, name, {
         role: 'steer', advisorSlot, usedProfiles, quotaSnapshot, quotaExhaustedPct, profileHealth, now, zerosub,
-      }, quotaWarnPct, now, zerosub);
+      }, now, zerosub);
       picked = resolved.profile;
       skipped = resolved.skipped;
       zerosubAccount = resolved.zerosubAccount;
@@ -212,7 +196,7 @@ export function planSteerAdd(config, providerEntries, liveSteers, {
       notes.push(`Slot ${target} is configured but has no live steer; provisioning profile "${name}"`);
     } else {
       const resolved = resolveSteerAdd(config, providerEntries, {
-        slot: target, usedProfiles, quotaSnapshot, quotaExhaustedPct, quotaWarnPct, profileHealth, now, zerosub, allowGap: true,
+        slot: target, usedProfiles, quotaSnapshot, quotaExhaustedPct, profileHealth, now, zerosub, allowGap: true,
       });
       picked = resolved.profile;
       skipped = resolved.skipped;
@@ -234,7 +218,7 @@ export function planSteerAdd(config, providerEntries, liveSteers, {
     }
     const resolved = resolveOneProfile(config, providerEntries, name, {
       role: 'steer', advisorSlot, usedProfiles, quotaSnapshot, quotaExhaustedPct, profileHealth, now, zerosub,
-    }, quotaWarnPct, now, zerosub);
+    }, now, zerosub);
     picked = resolved.profile;
     skipped = resolved.skipped;
     zerosubAccount = resolved.zerosubAccount;
@@ -278,7 +262,7 @@ export function planSteerAdd(config, providerEntries, liveSteers, {
     advisorSlot = isAdvisorProfile(withCandidate, name);
     const resolved = resolveOneProfile(withCandidate, providerEntries, name, {
       role: 'steer', advisorSlot, usedProfiles, quotaSnapshot, quotaExhaustedPct, profileHealth, now, zerosub,
-    }, quotaWarnPct, now, zerosub);
+    }, now, zerosub);
     picked = resolved.profile;
     skipped = resolved.skipped;
     zerosubAccount = resolved.zerosubAccount;
@@ -428,7 +412,7 @@ export async function applySteerAdd(config, providerEntries, liveSteers, {
   slot = null, spec = null, thinking = undefined, mode = undefined, profile: profileOption = undefined,
   scopeId = null, workspaceId = null, repo = null, fingerprint = null,
   fingerprintOf = null, usedProfiles = [], quotaSnapshot = null,
-  quotaExhaustedPct = config?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct,
+  quotaExhaustedPct = config?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct,
   profileHealth = null, now = Date.now(), zerosub = null, lookupReceipt = null, execute = null,
 } = {}) {
   if (typeof fingerprint !== 'string' || !fingerprint) throw new SteerAddStale('Steer add needs the fingerprint of a confirmed preview.');
@@ -438,7 +422,7 @@ export async function applySteerAdd(config, providerEntries, liveSteers, {
   }
   const planArgs = {
     slot, spec, thinking, mode, profile: profileOption, scopeId, workspaceId, repo,
-    usedProfiles, quotaSnapshot, quotaExhaustedPct, quotaWarnPct, profileHealth, now, zerosub,
+    usedProfiles, quotaSnapshot, quotaExhaustedPct, profileHealth, now, zerosub,
   };
   const raw = slot === null || slot === undefined || String(slot).trim() === ''
     ? nextFreeSlotForAdd(config, liveSteers, scopeId)

@@ -1483,46 +1483,6 @@ test("failover skips steers on the exhausted failing account", async () => {
   assert.equal(result.to.slot, "C", "B shares the exhausted account with A");
 });
 
-test("proactive hint fires at warnPct with room elsewhere, else stays quiet", async () => {
-  const world = makeWorld();
-  const { ws, steers } = provisioned(world);
-  const paseoState = await readPaseoState(fakeClient(world));
-  const scope = { id: REPO, workspaceId: ws.id };
-  const wsf = world.workspaces[0].metadata[METADATA_KEY];
-  const config = {
-    profiles: { sonnet: { provider: "claude", model: "s" } },
-    steers: { slots: { A: "sonnet", B: "sonnet", C: "sonnet" } },
-    quota: { warnPct: 75, exhaustedPct: 90 },
-  };
-  const decide = (zerosub) => supervise.proactiveHintDecision({
-    paseoState, scope, wsf, agentState: {}, config,
-    agentId: steers.A.id, zerosub, nowMs: NOW, warnPct: 75, exhaustedPct: 90,
-  });
-  const routes = (pendingA = null) => [
-    zsRoute(steers.A.id, "acc-a", pendingA),
-    zsRoute(steers.B.id, "acc-b"),
-    zsRoute(steers.C.id, "acc-b"),
-  ];
-  const hint = decide(zsState({ accounts: [zsAccount("acc-a", 80), zsAccount("acc-b", 20)], routes: routes() }));
-  assert.equal(hint.decision, "hint");
-  assert.equal(hint.to.slot, "B");
-  assert.equal(hint.accountId, "acc-a");
-  assert.equal(hint.usedPct, 80);
-  assert.match(hint.text, /Account acc-a is at 80% of its window \(warn 75%\)/);
-  assert.match(hint.text, new RegExp(`switch ${REPO.replace(/[./-]/g, (c) => `\\${c}`)} --to B --apply`));
-  assert.equal(decide(null).decision, "skip");
-  assert.equal(decide(null).reason, "no-zerosub");
-  const calm = decide(zsState({ accounts: [zsAccount("acc-a", 74), zsAccount("acc-b", 20)], routes: routes() }));
-  assert.equal(calm.decision, "skip");
-  assert.equal(calm.reason, "below-warn");
-  const moving = decide(zsState({ accounts: [zsAccount("acc-a", 80), zsAccount("acc-b", 20)], routes: routes("acc-b") }));
-  assert.equal(moving.decision, "skip");
-  assert.equal(moving.reason, "zerosub-move-pending");
-  const full = decide(zsState({ accounts: [zsAccount("acc-a", 80), zsAccount("acc-b", 99)], routes: routes() }));
-  assert.equal(full.decision, "skip");
-  assert.equal(full.reason, "no-candidate-with-room");
-});
-
 test("boot finished queues post-boot wakes while all accounts are exhausted", async () => {
   const world = makeWorld();
   const { ws, steers } = provisioned(world);

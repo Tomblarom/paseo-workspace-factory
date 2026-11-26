@@ -22,8 +22,8 @@ import { createExecutors } from './apply.mjs';
 import { resolveScope, scopeToEntry, sameScopeId, domainOfScope } from './scope.mjs';
 import { STEER_TITLE, activeMarker, liveSlotHolders, markSteerTitle, stripActiveMarker } from './discovery.mjs';
 import { AGENTS_KEY, currentFreshHint, updateAgentEntry } from './agent-state.mjs';
-import { SUPERVISION_DEFAULTS, WORKERS_KEY, failoverChain, openWorkers as openRegisterWorkers, readWorkers, zerosubMoveDecision } from './supervision.mjs';
-import { QUOTA_DEFAULTS, accountExhausted, accountForAgent, formatQuotaLine, freshMaxUsedPct, profilePool } from './quota.mjs';
+import { WORKERS_KEY, openWorkers as openRegisterWorkers, readWorkers } from './supervision.mjs';
+import { QUOTA_DEFAULTS, formatQuotaLine, profilePool } from './quota.mjs';
 import { readRewindPoint, rewindAndBrief } from './rewind.mjs';
 import { findingsPassage } from './findings.mjs';
 import { readSteerAction, readCleanupAction, actionEntry, newSteerAction, reconcileSteerSend } from './steer-action.mjs';
@@ -795,49 +795,6 @@ export function applyActiveMarker({ paseoCli, marker, mark, unmark }) {
   } catch (error) {
     return error.message;
   }
-}
-
-/**
- * Proactive switch at turn end: when the agent's ZeroSub account window is at
- * or above `warnPct`, the caller writes a CHECKPOINT and switches to the first
- * failover-chain candidate on another account (or provider) with room — a
- * planned handoff is cheaper than an abort mid-turn. Candidates on the same
- * warned account or on an exhausted account are skipped; domain/hub fallbacks
- * (no account known) stay eligible last. While ZeroSub itself moves the agent
- * (`wait-zerosub`) the decision stays, so the two automatics never race.
- * Without ZeroSub state, route or usage the decision stays too (the quota line
- * still covers legacy pools). Pure; the returned `to` feeds switchSteer.
- * Returns { decision: 'switch'|'stay', to?, accountId?, usedPct?, checkpoint?, reason }.
- */
-export function proactiveSwitchDecision({
-  zerosub = null, agentId = null, steers = [], activeSlot = null,
-  warnPct = QUOTA_DEFAULTS.warnPct, exhaustedPct = QUOTA_DEFAULTS.exhaustedPct, now = Date.now(),
-  pendingSince = null, zerosubPendingMinutes = SUPERVISION_DEFAULTS.zerosubPendingMinutes,
-  retiredIds = [], interruptedIds = [], advisorIds = [], domainSteer = null, hubSteer = null,
-} = {}) {
-  if (!zerosub?.accounts?.length) return { decision: 'stay', reason: 'no-zerosub' };
-  const move = zerosubMoveDecision({ zerosub, agentId, pendingSince, nowMs: now, zerosubPendingMinutes });
-  if (move.decision === 'wait-zerosub') return { decision: 'stay', reason: 'zerosub-move-pending', pending: move.pending };
-  const account = accountForAgent(zerosub, agentId);
-  if (!account) return { decision: 'stay', reason: 'no-route' };
-  const used = freshMaxUsedPct(account, now);
-  if (used === null) return { decision: 'stay', reason: 'unknown-usage', accountId: account.id };
-  if (used < warnPct) return { decision: 'stay', reason: 'below-warn', accountId: account.id, usedPct: used };
-  const chain = failoverChain({
-    steers, activeSlot, retiredIds, interruptedIds, advisorIds, domainSteer, hubSteer,
-    zerosub, failingAccountId: account.id, exhaustedPct, now,
-  });
-  const byId = new Map((zerosub.accounts ?? []).map((entry) => [entry?.id, entry]));
-  const rows = new Map((steers ?? []).map((row) => [row?.id, row]));
-  for (const candidate of chain) {
-    const row = rows.get(candidate.steerId) ?? null;
-    const candidateAccountId = row?.accountId ?? zerosub.agentAccount?.[candidate.steerId] ?? null;
-    if (candidateAccountId && candidateAccountId === account.id) continue;
-    const candidateAccount = candidateAccountId ? (byId.get(candidateAccountId) ?? null) : null;
-    if (candidateAccount && accountExhausted(candidateAccount, { exhaustedPct, now })) continue;
-    return { decision: 'switch', to: candidate, accountId: account.id, usedPct: used, warnPct, checkpoint: true, reason: 'account-window-warn' };
-  }
-  return { decision: 'stay', reason: 'no-candidate-with-room', accountId: account.id, usedPct: used };
 }
 
 /** Retired scopes never coordinate here again; revival needs an explicit un-retire. */

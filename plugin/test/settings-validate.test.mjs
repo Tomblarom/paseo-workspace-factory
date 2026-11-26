@@ -105,6 +105,15 @@ test("configFromSettings builds the effective config from settings only", () => 
   assert.deepEqual(config.quota, { exhaustedPct: 95, warnPct: 75 });
 });
 
+test("quota settings default to warn 93 and exhausted 95", async () => {
+  const { factoryConfigSettings, factorySupervisionSettings } = await import("../shared/settings.ts");
+  for (const settings of [factoryConfigSettings, factorySupervisionSettings]) {
+    assert.deepEqual(settings.schema.parse({}).quota, { exhaustedPct: 95, warnPct: 93 });
+    assert.deepEqual(settings.schema.parse({ quota: {} }).quota, { exhaustedPct: 95, warnPct: 93 });
+    assert.deepEqual(settings.schema.parse({ quota: { warnPct: 75, exhaustedPct: 90 } }).quota, { exhaustedPct: 90, warnPct: 75 });
+  }
+});
+
 function catalog() {
   return [
     {

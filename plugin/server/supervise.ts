@@ -59,7 +59,7 @@ const {
   zerosubPendingTarget,
 } = S;
 const { AGENTS_KEY } = AS;
-const { lastAssistantText, parseCheckpointBlock, proactiveSwitchDecision } = ST;
+const { lastAssistantText, parseCheckpointBlock } = ST;
 const { QUOTA_DEFAULTS, accountForAgent, formatQuotaLine, profilePool, quotaExhausted } = Q;
 import { factoryIdentity } from "../shared/auto-checkpoint.js";
 import { getQuotaSnapshot } from "./quota.js";
@@ -1431,105 +1431,6 @@ export async function runFailoverCheck(
     return { action: "wait", reason: outcome.status === "blocked" ? "resume-refused" : "brief-pending" };
   }
   return { action: "failover", to: next };
-}
-
-// ---------------------------------------------------------------------------
-// Proactive switch hint at steer turn end.
-// ---------------------------------------------------------------------------
-
-export interface ProactiveHint {
-  decision: "hint" | "skip";
-  reason: string;
-  to?: { kind: string; slot?: string | null; steerId: string; scopeId?: string | null } | null;
-  accountId?: string | null;
-  usedPct?: number | null;
-  warnPct?: number | null;
-  resetsAt?: string | null;
-  text?: string | null;
-}
-
-function formatProactiveHint(args: {
-  scopeId: string;
-  to: { kind: string; slot?: string | null; steerId: string };
-  accountId: string;
-  usedPct: number;
-  warnPct: number;
-  factoryCmd: string;
-}): string {
-  const head = `[factory] Account ${args.accountId} is at ${args.usedPct}% of its window (warn ${args.warnPct}%).`;
-  if (args.to.kind === "steer" && args.to.slot) {
-    return (
-      `${head} Hand over now while it is cheap: ` +
-      `\`${args.factoryCmd} switch ${args.scopeId} --to ${args.to.slot} --apply\` — ` +
-      `a planned CHECKPOINT handoff beats an abort mid-turn.`
-    );
-  }
-  return (
-    `${head} No steer slot with room; hand over to the ${args.to.kind} steer ` +
-    `before the window closes — a planned CHECKPOINT handoff beats an abort mid-turn.`
-  );
-}
-
-/**
- * Pure proactive-switch evaluation for a steer turn end: when the steer's
- * ZeroSub account window sits at or above `warnPct` and the failover chain
- * offers a candidate with room, the caller sends `text` so the steer hands
- * over now instead of aborting mid-turn later. `skip` covers no ZeroSub
- * state, usage below warn, a pending ZeroSub move, and no room anywhere.
- */
-export function proactiveHintDecision(args: {
-  paseoState: any;
-  scope: any;
-  wsf: Record<string, any> | null;
-  agentState: Record<string, unknown>;
-  config?: any;
-  agentId: string;
-  zerosub?: any;
-  nowMs?: number;
-  warnPct?: number;
-  exhaustedPct?: number;
-  factoryCmd?: string;
-}): ProactiveHint {
-  const nowMs = typeof args.nowMs === "number" ? args.nowMs : Date.now();
-  const rows = steerRows(args.paseoState, args.scope?.id, args.wsf, args.agentState, args.config ?? null);
-  const activeSlot = typeof args.wsf?.activeSteer === "string" ? args.wsf.activeSteer : null;
-  const retired = retiredAgentId(args.wsf);
-  const decision = proactiveSwitchDecision({
-    zerosub: args.zerosub ?? null,
-    agentId: args.agentId,
-    steers: rows,
-    activeSlot,
-    ...(args.warnPct !== undefined ? { warnPct: args.warnPct } : {}),
-    ...(args.exhaustedPct !== undefined ? { exhaustedPct: args.exhaustedPct } : {}),
-    now: nowMs,
-    retiredIds: retired ? [retired] : [],
-    interruptedIds: rows.filter((r) => r.interrupted).map((r) => r.id),
-    advisorIds: rows.filter((r) => r.advisor).map((r) => r.id),
-    ...domainHubSteers(args.paseoState, listScopes(args.paseoState), args.scope, args.wsf),
-  });
-  if (decision.decision !== "switch" || !decision.to) return { decision: "skip", reason: decision.reason ?? "stay" };
-  const account = accountForAgent(args.zerosub ?? null, args.agentId);
-  const resetsAt = (account?.windows ?? [])
-    .map((window: any) => (typeof window?.resetsAt === "string" ? window.resetsAt : null))
-    .filter((stamp: string | null): stamp is string => !!stamp)
-    .sort()[0] ?? null;
-  return {
-    decision: "hint",
-    reason: decision.reason ?? "account-window-warn",
-    to: decision.to,
-    accountId: decision.accountId ?? account?.id ?? null,
-    usedPct: decision.usedPct ?? null,
-    warnPct: decision.warnPct ?? args.warnPct ?? null,
-    resetsAt,
-    text: formatProactiveHint({
-      scopeId: args.scope?.id ?? "?",
-      to: decision.to,
-      accountId: decision.accountId ?? account?.id ?? "?",
-      usedPct: decision.usedPct ?? 0,
-      warnPct: decision.warnPct ?? args.warnPct ?? QUOTA_DEFAULTS.warnPct,
-      factoryCmd: args.factoryCmd ?? FACTORY_CMD,
-    }),
-  };
 }
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 // ZeroSub supervision (Package A): fake-state unit tests for the wait-zerosub
-// coexistence decision, the proactive warnPct switch and the exhausted-quota
+// coexistence decision and the exhausted-quota
 // wake time. Never touches the live RPC: all state is built by the helpers
 // below, in the style of zerosub.test.mjs.
 import assert from 'node:assert/strict';
@@ -8,12 +8,10 @@ import { normalizeZerosubState } from '../plugin/server/core/zerosub.mjs';
 import {
   SUPERVISION_DEFAULTS,
   exhaustedWakeDecision,
-  failoverChain,
   planWake,
   zerosubMoveDecision,
   zerosubPendingTarget,
 } from '../plugin/server/core/supervision.mjs';
-import { proactiveSwitchDecision } from '../plugin/server/core/steer.mjs';
 import { LABEL } from '../plugin/server/core/paseo.mjs';
 import {
   accountForAgent,
@@ -52,11 +50,6 @@ function scopedAgent(id) {
   return { id, status: 'idle', archivedAt: null, labels: { [LABEL.scope]: 'example/repo', [LABEL.role]: 'worker' } };
 }
 
-const STEERS = [
-  { id: 'steer-d', slot: 'D', provider: 'claude' },
-  { id: 'steer-e', slot: 'E', provider: 'claude' },
-  { id: 'steer-f', slot: 'F', provider: 'claude' },
-];
 
 // ------------------------------------------------- pending-move coexistence
 
@@ -170,120 +163,6 @@ test('planWake keeps ineligible, quiet and not-actionable ahead of the zerosub w
   assert.deepEqual(
     planWake({ agent, newState: 'running', nowMs: NOW, zerosub }),
     { action: 'skip', reason: 'not-actionable' },
-  );
-});
-
-// ------------------------------------------------------ proactive warn switch
-
-test('below warnPct the proactive decision stays', () => {
-  const zerosub = state(
-    [account('acc-a', 74), account('acc-b', 40)],
-    [route('steer-d', 'acc-a'), route('steer-e', 'acc-b')],
-  );
-  assert.deepEqual(
-    proactiveSwitchDecision({ zerosub, agentId: 'steer-d', steers: STEERS, activeSlot: 'D', now: NOW }),
-    { decision: 'stay', reason: 'below-warn', accountId: 'acc-a', usedPct: 74 },
-  );
-  const custom = state(
-    [account('acc-a', 80), account('acc-b', 40)],
-    [route('steer-d', 'acc-a'), route('steer-e', 'acc-b')],
-  );
-  assert.equal(
-    proactiveSwitchDecision({ zerosub: custom, agentId: 'steer-d', steers: STEERS, activeSlot: 'D', now: NOW, warnPct: 85 }).reason,
-    'below-warn',
-  );
-});
-
-test('at warnPct the decision CHECKPOINTs and switches to the roomiest account', () => {
-  for (const pct of [75, 90]) {
-    const zerosub = state(
-      [account('acc-a', pct), account('acc-b', 40)],
-      [route('steer-d', 'acc-a'), route('steer-e', 'acc-b'), route('steer-f', 'acc-a')],
-    );
-    assert.deepEqual(
-      proactiveSwitchDecision({ zerosub, agentId: 'steer-d', steers: STEERS, activeSlot: 'D', now: NOW }),
-      {
-        decision: 'switch',
-        to: { kind: 'steer', slot: 'E', steerId: 'steer-e' },
-        accountId: 'acc-a', usedPct: pct, warnPct: 75, checkpoint: true, reason: 'account-window-warn',
-      },
-    );
-  }
-  // The target matches the head of the failover chain (reuse, not a copy).
-  const zerosub = state(
-    [account('acc-a', 80), account('acc-b', 40)],
-    [route('steer-d', 'acc-a'), route('steer-e', 'acc-b'), route('steer-f', 'acc-a')],
-  );
-  const chain = failoverChain({ steers: STEERS, activeSlot: 'D', zerosub, failingAccountId: 'acc-a', now: NOW });
-  const decided = proactiveSwitchDecision({ zerosub, agentId: 'steer-d', steers: STEERS, activeSlot: 'D', now: NOW });
-  assert.deepEqual(decided.to, chain[0]);
-});
-
-test('proactive switch skips the same warned account and exhausted accounts', () => {
-  // Every steer runs on the warned account: nothing is gained by switching.
-  const same = state(
-    [account('acc-a', 80), account('acc-b', 40)],
-    [route('steer-d', 'acc-a'), route('steer-e', 'acc-a'), route('steer-f', 'acc-a')],
-  );
-  assert.deepEqual(
-    proactiveSwitchDecision({ zerosub: same, agentId: 'steer-d', steers: STEERS, activeSlot: 'D', now: NOW }),
-    { decision: 'stay', reason: 'no-candidate-with-room', accountId: 'acc-a', usedPct: 80 },
-  );
-  // The only other account is exhausted too.
-  const allFull = state(
-    [account('acc-a', 80), account('acc-b', 99)],
-    [route('steer-d', 'acc-a'), route('steer-e', 'acc-b'), route('steer-f', 'acc-a')],
-  );
-  assert.equal(
-    proactiveSwitchDecision({ zerosub: allFull, agentId: 'steer-d', steers: STEERS, activeSlot: 'D', now: NOW }).reason,
-    'no-candidate-with-room',
-  );
-  // A cross-provider steer with room wins over the same-account one.
-  const codex = state(
-    [account('acc-a', 80), account('acc-codex', 10, { family: 'codex', resetsAt: RESET_WEEK })],
-    [route('steer-d', 'acc-a'), route('steer-e', 'acc-a'), route('steer-f', 'acc-codex')],
-  );
-  const decided = proactiveSwitchDecision({ zerosub: codex, agentId: 'steer-d', steers: STEERS, activeSlot: 'D', now: NOW });
-  assert.equal(decided.decision, 'switch');
-  assert.equal(decided.to.steerId, 'steer-f');
-});
-
-test('proactive switch falls back to domain/hub, and never races a pending move', () => {
-  const same = state(
-    [account('acc-a', 80)],
-    [route('steer-d', 'acc-a'), route('steer-e', 'acc-a')],
-  );
-  const fallback = proactiveSwitchDecision({
-    zerosub: same, agentId: 'steer-d', steers: STEERS.slice(0, 2), activeSlot: 'D', now: NOW,
-    domainSteer: { steerId: 'steer-dom', scopeId: 'shop' },
-  });
-  assert.equal(fallback.decision, 'switch');
-  assert.deepEqual(fallback.to, { kind: 'domain', steerId: 'steer-dom', scopeId: 'shop' });
-  // ZeroSub already moves this agent: stay out of its way.
-  const moving = state(
-    [account('acc-a', 80), account('acc-b', 40)],
-    [route('steer-d', 'acc-a', 'acc-b'), route('steer-e', 'acc-b')],
-  );
-  assert.deepEqual(
-    proactiveSwitchDecision({ zerosub: moving, agentId: 'steer-d', steers: STEERS, activeSlot: 'D', now: NOW }),
-    { decision: 'stay', reason: 'zerosub-move-pending', pending: 'acc-b' },
-  );
-});
-
-test('proactive switch stays without state, route or usage', () => {
-  const zerosub = state([account('acc-a', 80)], [route('steer-d', 'acc-a')]);
-  assert.deepEqual(
-    proactiveSwitchDecision({ zerosub: null, agentId: 'steer-d', steers: STEERS, activeSlot: 'D', now: NOW }),
-    { decision: 'stay', reason: 'no-zerosub' },
-  );
-  assert.equal(
-    proactiveSwitchDecision({ zerosub, agentId: 'steer-x', steers: STEERS, activeSlot: 'D', now: NOW }).reason,
-    'no-route',
-  );
-  const noUsage = normalizeZerosubState({ accounts: [{ id: 'acc-n', family: 'claude' }], agents: [route('steer-d', 'acc-n')] }, { now: NOW });
-  assert.deepEqual(
-    proactiveSwitchDecision({ zerosub: noUsage, agentId: 'steer-d', steers: STEERS, activeSlot: 'D', now: NOW }),
-    { decision: 'stay', reason: 'unknown-usage', accountId: 'acc-n' },
   );
 });
 

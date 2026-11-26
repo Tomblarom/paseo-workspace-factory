@@ -1,5 +1,5 @@
 // Pure steer-add selection (plugin/server/core/models.mjs): slot suggestion, slot-priority
-// profile order, catalog/health/quota eligibility and warn-threshold account
+// profile order, catalog/health/quota eligibility and account
 // choice. Offline only: fake config, catalog and ZeroSub state, no live RPC.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -142,7 +142,7 @@ test('resolveSteerAdd reuses live-duplicate avoidance with the first entry exemp
   assert.ok(fell.skipped.some((s) => /already used by a live steer/.test(s.reason)));
 });
 
-test('resolveSteerAdd skips limited accounts and picks the roomiest below warn', () => {
+test('resolveSteerAdd skips limited accounts and picks the roomiest', () => {
   const zerosub = state([
     acc('acc-roomy', 'fake-x', 20),
     acc('acc-full', 'fake-x', 10, { status: 'limited', limitedUntil: RESET_5H }),
@@ -157,14 +157,19 @@ test('resolveSteerAdd skips limited accounts and picks the roomiest below warn',
   assert.equal(picked.earliestReset, null);
 });
 
-test('resolveSteerAdd skips accounts at the warning threshold and prefers headroom', () => {
-  const zerosub = state([acc('acc-warn', 'fake-x', 75), acc('acc-roomy', 'fake-x', 20)]);
+test('resolveSteerAdd keeps warned accounts eligible and excludes exhausted accounts', () => {
+  const zerosub = state([acc('acc-warn', 'fake-x', 93), acc('acc-roomy', 'fake-x', 20)]);
   const picked = resolveSteerAdd(CONFIG, PROVIDERS, { profile: 'alpha', zerosub, now: NOW });
   assert.equal(picked.zerosubAccount, 'acc-roomy');
-  const onlyWarn = state([acc('acc-warn', 'fake-x', 75, { resetsAt: RESET_5H })]);
-  const none = resolveSteerAdd(CONFIG, PROVIDERS, { profile: 'alpha', zerosub: onlyWarn, now: NOW });
+  for (const pct of [93, 94]) {
+    const onlyWarn = state([acc('acc-warn', 'fake-x', pct)]);
+    const eligible = resolveSteerAdd(CONFIG, PROVIDERS, { profile: 'alpha', zerosub: onlyWarn, now: NOW });
+    assert.equal(eligible.zerosubAccount, 'acc-warn', `${pct}%`);
+  }
+  const full = state([acc('acc-full', 'fake-x', 95, { resetsAt: RESET_5H })]);
+  const none = resolveSteerAdd(CONFIG, PROVIDERS, { profile: 'alpha', zerosub: full, now: NOW });
   assert.equal(none.profile, null);
-  assert.equal(none.skipped[0].reason, `accounts over warn threshold (≥75%), earliest reset ${RESET_5H}`);
+  assert.equal(none.skipped[0].reason, `accounts exhausted, earliest reset ${RESET_5H}`);
   assert.equal(none.earliestReset, RESET_5H);
   assert.equal(none.zerosubAccount, null);
   assert.equal(none.zerosubPin, null);
@@ -179,21 +184,21 @@ test('resolveSteerAdd skips accounts at the warning threshold and prefers headro
 
 test('resolveSteerAdd reports the earliest reset across account-blocked families', () => {
   const zerosub = state([
-    acc('acc-x', 'fake-x', 80, { resetsAt: RESET_LATE }),
-    acc('acc-y', 'fake-y', 90, { resetsAt: RESET_5H }),
+    acc('acc-x', 'fake-x', 95, { resetsAt: RESET_LATE }),
+    acc('acc-y', 'fake-y', 99, { resetsAt: RESET_5H }),
   ]);
   const none = resolveSteerAdd(CONFIG, PROVIDERS, { zerosub, now: NOW });
   assert.equal(none.profile, null);
   assert.equal(none.skipped.length, 3);
-  assert.ok(none.skipped.every((s) => s.reason.startsWith('accounts over warn threshold (≥75%)')));
+  assert.ok(none.skipped.every((s) => s.reason.startsWith('accounts exhausted')));
   assert.equal(none.earliestReset, RESET_5H);
   // Without a future reset the reason stays actionable but bare.
-  const unknown = state([acc('acc-x', 'fake-x', 80, { resetsAt: null })]);
+  const unknown = state([acc('acc-x', 'fake-x', 95, { resetsAt: null })]);
   const bare = resolveSteerAdd(CONFIG, PROVIDERS, { profile: 'alpha', zerosub: unknown, now: NOW });
-  assert.equal(bare.skipped[0].reason, 'accounts over warn threshold (≥75%)');
+  assert.equal(bare.skipped[0].reason, 'accounts exhausted');
   assert.equal(bare.earliestReset, null);
   // An expired window does not block: its percent is stale.
-  const past = state([acc('acc-x', 'fake-x', 80, { resetsAt: PAST })]);
+  const past = state([acc('acc-x', 'fake-x', 95, { resetsAt: PAST })]);
   const roomy = resolveSteerAdd(CONFIG, PROVIDERS, { profile: 'alpha', zerosub: past, now: NOW });
   assert.equal(roomy.profile.name, 'alpha');
   assert.equal(roomy.zerosubAccount, 'acc-x');
@@ -208,11 +213,11 @@ test('resolveSteerAdd reports the earliest reset across account-blocked families
   assert.equal(catalogOnly.earliestReset, null);
 });
 
-test('resolveSteerAdd honors a custom warn threshold', () => {
-  const zerosub = state([acc('acc-mid', 'fake-x', 75)]);
-  const strict = resolveSteerAdd(CONFIG, PROVIDERS, { profile: 'alpha', zerosub, now: NOW });
+test('resolveSteerAdd honors a custom exhaustion threshold independently of warning', () => {
+  const zerosub = state([acc('acc-mid', 'fake-x', 85)]);
+  const strict = resolveSteerAdd(CONFIG, PROVIDERS, { profile: 'alpha', zerosub, now: NOW, quotaExhaustedPct: 85 });
   assert.equal(strict.profile, null);
-  const relaxed = resolveSteerAdd(CONFIG, PROVIDERS, { profile: 'alpha', zerosub, now: NOW, quotaWarnPct: 80 });
+  const relaxed = resolveSteerAdd(CONFIG, PROVIDERS, { profile: 'alpha', zerosub, now: NOW, quotaExhaustedPct: 90 });
   assert.equal(relaxed.profile.name, 'alpha');
   assert.equal(relaxed.zerosubAccount, 'acc-mid');
 });
@@ -225,15 +230,14 @@ test('resolveSteerAdd keeps pool families on the exhausted threshold', () => {
   assert.equal(spent.skipped[0].reason, 'pool exhausted');
 });
 
-test('resolveProfile defaults still pick warned accounts for existing callers', () => {
+test('resolveProfile applies the configured exhaustion threshold', () => {
   const zerosub = state([acc('acc-warn', 'fake-x', 80, { resetsAt: RESET_5H })]);
   const legacy = resolveProfile(CONFIG, PROVIDERS, ['alpha'], { role: 'steer', zerosub, now: NOW });
   assert.equal(legacy.profile.name, 'alpha');
   assert.equal(legacy.zerosubAccount, 'acc-warn');
-  const strict = resolveProfile(CONFIG, PROVIDERS, ['alpha'], { role: 'steer', zerosub, now: NOW, zerosubExhaustedPct: 75 });
+  const strict = resolveProfile(CONFIG, PROVIDERS, ['alpha'], { role: 'steer', zerosub, now: NOW, quotaExhaustedPct: 75 });
   assert.equal(strict.profile, null);
   assert.match(strict.skipped[0].reason, /^accounts exhausted, earliest reset /);
   const added = resolveSteerAdd(CONFIG, PROVIDERS, { profile: 'alpha', zerosub, now: NOW });
-  assert.equal(added.profile, null);
-  assert.match(added.skipped[0].reason, /^accounts over warn threshold/);
+  assert.equal(added.profile.name, 'alpha');
 });

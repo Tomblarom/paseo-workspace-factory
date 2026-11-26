@@ -1,5 +1,5 @@
 // ZeroSub flow: fake-state unit tests for pending account moves, continuation
-// tabs and the proactive warnPct switch. Never touches the live RPC: all
+// tabs and informative quota lines. Never touches the live RPC: all
 // state is built by the helpers below, in the style of zerosub.test.mjs.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -137,31 +137,31 @@ test('continuation tabs count as the same slot: no duplicate failover candidate'
   assert.deepEqual(roomy.map((candidate) => candidate.steerId), ['steer-e-tab', 'steer-f']);
 });
 
-test('below warnPct: no quota line and no proactive switch signal', () => {
+test('below warnPct: no quota line', () => {
   const zerosub = normalizeZerosubState({
-    accounts: [account('acc-a', 74), account('acc-b', 40)],
+    accounts: [account('acc-a', 92), account('acc-b', 40)],
     agents: [route('steer-d', 'acc-a')],
   }, { now: NOW });
   assert.equal(formatQuotaLine(CONFIG, null, { currentPool: 'claude', zerosub, now: NOW }), null);
   assert.equal(
-    formatQuotaLine(CONFIG, null, { currentPool: 'claude', warnPct: 80, zerosub, now: NOW }),
+    formatQuotaLine(CONFIG, null, { currentPool: 'claude', warnPct: 95, zerosub, now: NOW }),
     null,
   );
   const tight = normalizeZerosubState({
     accounts: [account('acc-a', 79), account('acc-b', 40)],
     agents: [route('steer-d', 'acc-a')],
   }, { now: NOW });
-  assert.equal(formatQuotaLine(CONFIG, null, { currentPool: 'claude', warnPct: 80, zerosub, now: NOW }), null);
+  assert.equal(formatQuotaLine(CONFIG, null, { currentPool: 'claude', warnPct: 80, zerosub: tight, now: NOW }), null);
   assert.equal(buildResumeBrief(briefStatus(), { config: CONFIG, zerosub, now: () => NOW }).includes('Quota:'), false);
   // Picking a profile for a new worker still prefers the roomiest account;
-  // only the proactive switch signal (the quota line) is gated by warnPct.
+  // the informative quota line is gated by warnPct.
   const picked = resolveProfile(CONFIG, PROVIDERS, ['sonnet', 'codex'], { role: 'worker', repoPublic: true, zerosub, now: NOW });
   assert.equal(picked.profile.name, 'sonnet');
   assert.equal(picked.zerosubAccount, 'acc-b');
 });
 
 test('at warnPct and above: quota line, chain and pick prefer the roomiest account', () => {
-  for (const pct of [75, 90]) {
+  for (const pct of [93, 94]) {
     const zerosub = normalizeZerosubState({
       accounts: [account('acc-a', pct), account('acc-b', 40)],
       agents: [route('steer-d', 'acc-a'), route('steer-e', 'acc-b')],

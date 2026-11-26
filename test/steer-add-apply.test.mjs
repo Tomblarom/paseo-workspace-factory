@@ -276,7 +276,7 @@ test('apply stops recovery on ambiguous or failed receipts', async () => {
 
 test('apply reports a blocked plan with the earliest reset', async () => {
   const zerosub = normalizeZerosubState(
-    { accounts: [acc('acc-x', 'fake-x', 80), acc('acc-y', 'fake-y', 90)], agents: [] },
+    { accounts: [acc('acc-x', 'fake-x', 95), acc('acc-y', 'fake-y', 99)], agents: [] },
     { now: NOW },
   );
   const { execute } = executor();

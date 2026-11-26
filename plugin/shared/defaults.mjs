@@ -2,7 +2,7 @@
 //
 // Pure module: zero imports, no node APIs, no Date.now() defaults in exported
 // signatures except an explicit opt-in. It is the single source for the quota
-// thresholds (documented: warn 75, exhausted 95), the quota sampling cadence
+// thresholds (documented: warn 93, exhausted 95), the quota sampling cadence
 // and staleness rule, the drain-marker predicate, and the built-in
 // catalog-exceptions table. It lives in plugin/shared/ so the plugin client,
 // the plugin server and the CLI (via the core in plugin/server/core/) all
@@ -12,7 +12,7 @@
 // (patterns are strings, compiled at use), no process/env access.
 
 /** Quota thresholds (percents). Documented in docs/configuration.md. */
-export const QUOTA_DEFAULTS = { warnPct: 75, exhaustedPct: 95 };
+export const QUOTA_DEFAULTS = { warnPct: 93, exhaustedPct: 95 };
 
 /** Default quota sampling cadence in minutes (also the enforced floor). */
 export const QUOTA_SAMPLE_MINUTES = 10;

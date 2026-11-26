@@ -1,7 +1,4 @@
-// Turn-end proactive ZeroSub switch hint: at/above the account window's
-// warnPct (with room elsewhere) a completed steer turn sends the handoff
-// text, debounced to once per account window. Fake-state tests through
-// handleTurnAfter against a fake Paseo client; the live RPC is never touched.
+// Turn, continuation and delivery tests with a fake Paseo client.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
@@ -462,68 +459,12 @@ test("a superseded same-slot steer cannot save a scope checkpoint", async () => 
   assert.equal(ws.metadata[`${METADATA_KEY}.checkpoint`], undefined);
 });
 
-test("steer turn at warnPct sends the proactive handoff and records the stamp", async () => {
-  const world = makeWorld();
-  const { steers } = provisioned(world);
-  await completedSteerTurn(world, steers, { getConfig: async () => config, zerosub: zerosubFor(steers, 80) });
-  const texts = sendsTo(world, steers.A.id);
-  assert.equal(texts.length, 1);
-  assert.match(texts[0], /Account acc-a is at 80% of its window \(warn 75%\)/);
-  assert.match(texts[0], new RegExp(`switch ${REPO.replace(/[./-]/g, (c) => `\\${c}`)} --to B --apply`));
-  assert.equal(world.workspaces[0].metadata[AGENTS_KEY][steers.A.id].proactiveHint.accountId, "acc-a");
-});
-
-test("no hint below warnPct, without room, or without ZeroSub", async () => {
-  for (const [name, pctA, pctB, zerosub] of [["below-warn", 74, 20, null], ["no-room", 80, 99, null]]) {
+test("a completed steer turn never sends a quota-only prompt", async () => {
+  for (const pct of [74, 75, 89, 90, 99]) {
     const world = makeWorld();
     const { steers } = provisioned(world);
-    await completedSteerTurn(world, steers, { getConfig: async () => config, zerosub: zerosub ?? zerosubFor(steers, pctA, pctB) });
-    assert.equal(sendsTo(world, steers.A.id).length, 0, name);
+    await completedSteerTurn(world, steers, { getConfig: async () => config, zerosub: zerosubFor(steers, pct) });
+    assert.equal(sendsTo(world, steers.A.id).length, 0, `${pct}%`);
+    assert.ok(world.calls.some((c) => c[0] === "workspace.setMetadata"), "turn still recorded");
   }
-  const world = makeWorld();
-  const { steers } = provisioned(world);
-  await completedSteerTurn(world, steers, { getConfig: async () => config });
-  assert.equal(sendsTo(world, steers.A.id).length, 0, "no-zerosub");
-  assert.ok(world.calls.some((c) => c[0] === "workspace.setMetadata"), "turn still recorded");
-});
-
-test("hint debounces to once per account window", async () => {
-  const world = makeWorld();
-  const { steers } = provisioned(world);
-  const hinted = {
-    [steers.A.id]: {
-      proactiveHint: { accountId: "acc-a", at: new Date(Date.now() - 1_000).toISOString(), resetsAt: new Date(Date.now() + 3_600_000).toISOString() },
-    },
-  };
-  world.workspaces[0].metadata[AGENTS_KEY] = structuredClone(hinted);
-  await completedSteerTurn(world, steers, { getConfig: async () => config, zerosub: zerosubFor(steers, 80) });
-  assert.equal(sendsTo(world, steers.A.id).length, 0, "same window stays quiet");
-  // A fresh window (reset passed) re-hints.
-  world.workspaces[0].metadata[AGENTS_KEY][steers.A.id].proactiveHint.resetsAt = new Date(Date.now() - 1_000).toISOString();
-  await completedSteerTurn(world, steers, { getConfig: async () => config, zerosub: zerosubFor(steers, 80) });
-  assert.equal(sendsTo(world, steers.A.id).length, 1, "re-hint after the reset");
-});
-
-test("worker turns and failing ZeroSub reads never hint", async () => {
-  const world = makeWorld();
-  const { ws, steers } = provisioned(world);
-  const worker = addAgent(world, {
-    title: "Worker", workspaceId: ws.id,
-    labels: { [LABEL.role]: "worker", [LABEL.scope]: REPO, [LABEL.owner]: "A" },
-  });
-  setTurn(world, worker.id, checkpointOf("do it", "done"));
-  await handleTurnAfter(
-    { agent: { id: worker.id }, turnId: "t1", outcome: { kind: "completed" } },
-    { paseo: fakeClient(world) },
-    { getConfig: async () => config, zerosub: zerosubFor(steers, 80) },
-  );
-  assert.equal(world.calls.filter((c) => c[0] === "agent.send").length, 0, "workers get no switch hint");
-  setTurn(world, steers.A.id, checkpointOf("ship it", null));
-  await handleTurnAfter(
-    { agent: { id: steers.A.id }, turnId: "t1", outcome: { kind: "completed" } },
-    { paseo: fakeClient(world) },
-    { getConfig: async () => config, getZerosub: async () => { throw new Error("offline"); } },
-  );
-  assert.equal(sendsTo(world, steers.A.id).length, 0, "failing reader stays silent");
-  assert.ok(world.calls.some((c) => c[0] === "workspace.setMetadata"), "turn still recorded");
 });
