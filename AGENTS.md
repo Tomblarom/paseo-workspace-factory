@@ -60,8 +60,9 @@ provider-configuration or capability layer. SLP is a pattern reference, not a te
 
 ## Steer rules (temporary)
 
-Until the plugin's role prompt is proven on the native path (identifier `wsf-role-1` in
-the plugin log and in a fresh steer), steers here also follow this block.
+Until the plugin's role prompt is proven on the native path (plugin log line plus the
+role-rules identifier found by a steer that cannot know it from this file or its chat),
+steers here also follow this block.
 
 Check whether you are the active steer: `node plugin/cli.mjs status <owner>/<repo>`. If
 another steer is active, do not coordinate; answer only explicit questions. A handoff
