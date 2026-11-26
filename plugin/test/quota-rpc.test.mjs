@@ -4,9 +4,12 @@ import { register } from "node:module";
 register("./ts-resolve-hooks.mjs", import.meta.url);
 const { shapeQuotaView } = await import("../server/quota-rpc.ts");
 const { shapeWorkspaceResources } = await import("../server/resources-rpc.ts");
+const { factoryWorkspaceResources } = await import("../shared/factory.ts");
 const { parseFactoryArgs, FACTORY_COMMANDS, factoryHelp } = await import("../shared/factory-args.ts");
 const { validateQuotaSettings } = await import("../shared/settings-validate.ts");
 import { parseUsageJson } from "../server/core/quota.mjs";
+import { AGENTS_KEY } from "../server/core/agent-state.mjs";
+import { resolveWorkerPick } from "../server/core/models.mjs";
 import { normalizeZerosubState } from "../server/core/zerosub.mjs";
 
 const NOW = Date.parse("2026-06-01T12:00:00.000Z");
@@ -178,9 +181,7 @@ test("workspace Resources exposes current, stale and unavailable provider and ac
   assert.deepEqual(view.pools.find(({ provider }) => provider === "codex").windows.map(windowState), [
     ["stale", null, pastReset], ["available", 0, weekReset],
   ]);
-  assert.deepEqual(view.pools.find(({ provider }) => provider === "claude").windows.map(windowState), [
-    ["unavailable", null, null], ["unavailable", null, null],
-  ]);
+  assert.deepEqual(view.pools.find(({ provider }) => provider === "claude").windows, []);
   assert.deepEqual(view.accounts.map(({ windows }) => windows.map(windowState)), [
     [["stale", null, pastReset], ["available", 20, futureReset]],
     [["stale", null, futureReset]],
@@ -223,6 +224,115 @@ test("workspace Resources exposes current, stale and unavailable provider and ac
   assert.deepEqual(shapeQuotaView({ ...input, sampledAt: SAMPLED }).pools[0], {
     pool: "codex", sessionPct: 99, weeklyPct: 0, resetAt: pastReset, sampledAt: SAMPLED, state: "exhausted",
   });
+});
+
+test("resources distinguish empty API, subscription and unknown quotas and align observed windows", () => {
+  const account = (id, auth, ids) => ({
+    id, family: "claude", auth, usage: {
+      fetchedAt: SAMPLED,
+      windows: ids.map((id) => ({ id, usedPercent: 11 })),
+    },
+  });
+  const zerosub = normalizeZerosubState({ accounts: [
+    account("api-id", "api", []),
+    account("subscription-id", "subscription", []),
+    account("unknown-id", undefined, []),
+    account("windows-a", undefined, ["private-window-a", "private-window-b"]),
+    account("windows-b", "subscription", ["private-window-c", "private-window-a"]),
+    account("windows-c", "subscription", ["5h", "weekly"]),
+    account("windows-d", "subscription", ["seven_day", "five_hour"]),
+  ] }, { now: NOW });
+  const view = shapeWorkspaceResources({
+    workspaceId: "wks_quota", config: fakeConfig(), agents: [], zerosub,
+    snapshot: { codex: { weeklyPct: 18 } }, quotaSampledAt: Date.parse(SAMPLED), nowMs: NOW,
+    repoPublic: null, selectedIndex: null, selectedAccount: null, exclusions: new Map(),
+  });
+  assert.deepEqual(factoryWorkspaceResources.output.parse(view), view);
+  assert.deepEqual(view.accounts.map(({ quotaKind, windows }) => [quotaKind, windows.map(({ alias }) => alias)]), [
+    ["api", []],
+    ["subscription", []],
+    ["unknown", []],
+    ["reported", ["Window 1", "Window 2"]],
+    ["subscription", ["Window 3", "Window 1"]],
+    ["subscription", ["5-hour", "Weekly"]],
+    ["subscription", ["Weekly", "5-hour"]],
+  ]);
+  assert.equal(view.accounts[1].sampledAt, SAMPLED);
+  assert.equal(view.pools[0].quotaKind, "unknown");
+  assert.equal(view.pools[1].quotaKind, "reported");
+  assert.deepEqual(view.pools[1].windows.map(({ alias }) => alias), ["Weekly"]);
+  assert.doesNotMatch(JSON.stringify(view), /private-window|api-id|subscription-id/);
+});
+
+test("resources report the quota candidate actually chosen by worker priority", () => {
+  const config = { ...fakeConfig(), workers: { priority: ["missing", "claude-sonnet", "codex-high"] } };
+  const providers = [{
+    provider: "claude", enabled: true, status: "ready", models: [{ id: "claude-sonnet-5-5" }],
+  }];
+  const zerosub = normalizeZerosubState({ accounts: [
+    { id: "at-limit", family: "claude", auth: "subscription", usage: { fetchedAt: SAMPLED, windows: [
+      { id: "5h", usedPercent: 90 },
+    ] } },
+    { id: "preferred", family: "claude", auth: "subscription", usage: { fetchedAt: SAMPLED, windows: [
+      { id: "5h", usedPercent: 12 },
+      { id: "opus-weekly", model: "opus", usedPercent: 99 },
+    ] } },
+    { id: "api", family: "claude", auth: "api" },
+  ] }, { now: NOW });
+  const exclusions = new Map();
+  const selection = resolveWorkerPick(config, providers, {
+    zerosub, now: NOW, onSkip: (index, reason) => exclusions.set(index, reason),
+  });
+  const input = {
+    workspaceId: "wks_quota", config, agents: [], providers, zerosub,
+    snapshot: null, quotaSampledAt: null, nowMs: NOW, repoPublic: null,
+    selectedIndex: selection.skipped.length, selectedAccount: selection.zerosubAccount, exclusions,
+  };
+  const { workerSelection } = shapeWorkspaceResources(input);
+  assert.equal(selection.zerosubAccount, "preferred");
+  assert.deepEqual(workerSelection.accountEvidence, { state: "available", usedPct: 12, quotaKind: "subscription" });
+  assert.deepEqual(workerSelection.candidates.map(({ decision }) => decision), [
+    { state: "excluded", reason: "unknown-profile" },
+    { state: "selected", accountAlias: "Subscription 3" },
+    { state: "unevaluated" },
+  ]);
+  const stale = shapeWorkspaceResources({ ...input, nowMs: NOW + 21 * 60_000 });
+  assert.deepEqual(stale.workerSelection.accountEvidence, { state: "stale", usedPct: 12, quotaKind: "subscription" });
+  const noAccount = shapeWorkspaceResources({ ...input, selectedAccount: null, zerosub: null });
+  assert.equal(noAccount.workerSelection.accountEvidence, null);
+});
+
+test("resources expose the newest retained steer decision and only safe evidence", () => {
+  const route = {
+    intent: { mode: "automatic", agentId: "private-agent" },
+    strategy: "efficiency", reason: "only eligible route", kind: "continue", preparation: "send",
+    observation: { holderId: "private-agent", epoch: 2, accountId: "private-account" },
+    evidence: { uncachedInputTokens: null, preparationTurns: 0, latencyMs: null, preferenceRank: 0 },
+    confidence: "estimated",
+  };
+  const input = {
+    workspaceId: "wks_quota", config: fakeConfig(), agents: [],
+    zerosub: normalizeZerosubState({ accounts: [{ id: "private-account", family: "codex", auth: "subscription" }] }),
+    snapshot: null, quotaSampledAt: null, nowMs: NOW, repoPublic: null,
+    selectedIndex: null, selectedAccount: null, exclusions: new Map(),
+  };
+  assert.equal(shapeWorkspaceResources(input).steerRouting, null);
+  const view = shapeWorkspaceResources({
+    ...input,
+    workspaceMetadata: { [AGENTS_KEY]: {
+      "private-agent": { action: { phase: "done", queuedAt: SAMPLED, routing: route, note: "private-note" } },
+      "earlier-agent": { action: { queuedAt: "2026-06-01T11:54:00.000Z", routing: {
+        ...route, kind: "renewal", confidence: "observed", preparation: "rewind",
+      } } },
+      "no-route-agent": { action: { queuedAt: "2026-06-01T11:56:00.000Z" } },
+    } },
+  });
+  assert.deepEqual(view.steerRouting, {
+    queuedAt: SAMPLED, intent: "automatic", strategy: "efficiency", reason: "only eligible route",
+    kind: "continue", preparation: "send", confidence: "estimated", evidence: route.evidence,
+    epoch: 2, accountAlias: "Subscription 1",
+  });
+  assert.doesNotMatch(JSON.stringify(view.steerRouting), /private-|earlier-agent|no-route-agent/);
 });
 
 test("quota args take no scope, flags, or positionals", () => {

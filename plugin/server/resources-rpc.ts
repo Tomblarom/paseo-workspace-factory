@@ -1,18 +1,21 @@
 import type { RpcOutput } from "@getpaseo/plugin";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
-import { factoryWorkspaceResources, resourceWorkerExclusion } from "../shared/factory.js";
+import { factoryWorkspaceResources, resourceSteerRouting, resourceWorkerExclusion } from "../shared/factory.js";
 import { isQuotaSampleStale, QUOTA_SAMPLE_MINUTES } from "../shared/defaults.mjs";
+import { AGENTS_KEY } from "./core/agent-state.mjs";
 import { workerPriority } from "./core/config.mjs";
 import { LABEL, parentOf } from "./core/paseo.mjs";
 import {
-  familyAccounts, liveAgentPool, profileFamily, profilePool,
+  familyAccounts, freshMaxUsedPct, liveAgentPool, profileFamily, profilePool,
   QUOTA_DEFAULTS, quotaEntry, quotaPct, windowAppliesToModel,
 } from "./core/quota.mjs";
+import { readSteerAction } from "./core/steer-action.mjs";
 import { resolveFactoryLabels } from "./core/zerosub.mjs";
 import type { ZerosubState } from "./zerosub-runtime.js";
 
 export type WorkspaceResources = RpcOutput<typeof factoryWorkspaceResources>;
 type ResourceWindow = WorkspaceResources["pools"][number]["windows"][number];
+type QuotaKind = WorkspaceResources["accounts"][number]["quotaKind"];
 type ProviderCatalog = Awaited<ReturnType<PluginHandlerContext["paseo"]["providers"]["snapshot"]>>["entries"];
 
 // ZeroSub's normalized windows keep the ID, which can also be provider-supplied.
@@ -39,11 +42,54 @@ function iso(ms: number | null): string | null {
   return ms === null ? null : new Date(ms).toISOString();
 }
 
+function retainedSteerRouting(
+  metadata: Record<string, unknown> | null,
+  accountAliases: ReadonlyMap<string, string>,
+): WorkspaceResources["steerRouting"] {
+  const entries = metadata?.[AGENTS_KEY];
+  if (!entries || typeof entries !== "object" || Array.isArray(entries)) return null;
+  let latest: WorkspaceResources["steerRouting"] = null;
+  let latestMs = -Infinity;
+  for (const entry of Object.values(entries)) {
+    const action = readSteerAction(entry);
+    const route = action?.routing;
+    if (!route) continue;
+    const queuedAt = stampMs(action.queuedAt);
+    if (latest && (queuedAt ?? -Infinity) <= latestMs) continue;
+    const reason = resourceSteerRouting.shape.reason.safeParse(route.reason);
+    const epoch = resourceSteerRouting.shape.epoch.safeParse(route.observation?.epoch);
+    const evidence = route.evidence;
+    const parsed = resourceSteerRouting.safeParse({
+      queuedAt: iso(queuedAt),
+      intent: route.intent?.mode,
+      strategy: route.strategy,
+      reason: reason.success ? reason.data : null,
+      kind: route.kind,
+      preparation: route.preparation,
+      confidence: route.confidence ?? "unknown",
+      evidence: {
+        uncachedInputTokens: evidence?.uncachedInputTokens ?? null,
+        preparationTurns: evidence?.preparationTurns ?? null,
+        latencyMs: evidence?.latencyMs ?? null,
+        preferenceRank: evidence?.preferenceRank ?? null,
+      },
+      epoch: epoch.success ? epoch.data : null,
+      accountAlias: accountAliases.get(route.observation?.accountId) ?? null,
+    });
+    if (parsed.success) {
+      latest = parsed.data;
+      latestMs = queuedAt ?? -Infinity;
+    }
+  }
+  return latest;
+}
+
 export function shapeWorkspaceResources({
-  workspaceId, config, agents, providers = [], zerosub, snapshot, quotaSampledAt, quotaSampleMinutes,
+  workspaceId, workspaceMetadata = null, config, agents, providers = [], zerosub, snapshot, quotaSampledAt, quotaSampleMinutes,
   nowMs, repoPublic, selectedIndex, selectedAccount, exclusions,
 }: {
   workspaceId: string;
+  workspaceMetadata?: Record<string, unknown> | null;
   config: any;
   agents: any[];
   providers?: ProviderCatalog;
@@ -110,7 +156,7 @@ export function shapeWorkspaceResources({
     addPool(provider, liveAgentPool(agent, config));
     const accountIds = [zerosub?.agentAccount?.[agent.id], zerosub?.pending?.[agent.id]];
     for (const account of familyAccounts(zerosub, provider)) {
-      if (accountIds.includes(account.id)) addAccount(account, agent.model);
+      if (accountIds.includes(account.id)) addAccount(account, agent.model ?? null);
     }
   }
 
@@ -130,6 +176,7 @@ export function shapeWorkspaceResources({
   // Aliases belong to this snapshot. ZeroSub display labels can hold personal
   // data, and pool keys and window IDs can carry account identifiers.
   const accountAliases = new Map<string, string>();
+  const unknownWindowsByProvider = new Map<string, Map<string, string>>();
   const accounts = [...relevantAccounts.values()]
     .sort((a, b) => a.account.id.localeCompare(b.account.id))
     .map(({ account, models }, index) => {
@@ -137,23 +184,42 @@ export function shapeWorkspaceResources({
       const alias = `${kind} ${index + 1}`;
       accountAliases.set(account.id, alias);
       const sampledAt = stampMs(account.sampledAt);
-      const windows: ResourceWindow[] = (account.windows ?? [])
-        .filter((item: any) => [...models].some((model) => windowAppliesToModel(item, model)))
-        .map((item: any, index: number) => window(
-          windowAliases.get(item.id) ?? `Window ${index + 1}`, item.usedPct, sampledAt, item.resetsAt,
-        ));
-      if (windows.length === 0) {
-        const pct = account.windows?.length ? null : account.maxUsedPct;
-        windows.push(window("Reported usage", pct, sampledAt, null));
-      }
-      const limitedUntil = activeLimit(account.limitedUntil);
       const provider = account.family.toLowerCase();
+      const unknownWindows = unknownWindowsByProvider.get(provider) ?? new Map<string, string>();
+      unknownWindowsByProvider.set(provider, unknownWindows);
+      const aliasCount = new Map<string, number>();
+      const applicableModels = [...models];
+      const windows = (account.windows ?? [])
+        .filter((item: any) => applicableModels.some((model) => windowAppliesToModel(item, model)))
+        .map((item: any) => {
+          let name = windowAliases.get(item.id) ?? unknownWindows.get(item.id);
+          if (!name) {
+            name = `Window ${unknownWindows.size + 1}`;
+            unknownWindows.set(item.id, name);
+          }
+          const count = (aliasCount.get(name) ?? 0) + 1;
+          aliasCount.set(name, count);
+          return window(count === 1 ? name : `${name} (${count})`, item.usedPct, sampledAt, item.resetsAt);
+        });
+      if (!account.windows?.length && Number.isFinite(account.maxUsedPct)) {
+        windows.push(window("Reported usage", account.maxUsedPct, sampledAt, null));
+      }
+      const quotaKind: QuotaKind = account.auth === "api" || account.auth === "subscription" ? account.auth
+        : account.windows?.length || windows.length ? "reported" : "unknown";
+      const limitedUntil = activeLimit(account.limitedUntil);
       return {
-        provider, providerLabel: providerLabel(provider), alias, windows, limitedUntil,
+        provider, providerLabel: providerLabel(provider), alias, windows, limitedUntil, quotaKind, sampledAt: iso(sampledAt),
         limited: account.exhausted === true || limitedUntil !== null,
       };
     });
   const accountAlias = selectedAccount ? accountAliases.get(selectedAccount) ?? null : null;
+  const pickedAccount = selectedAccount ? relevantAccounts.get(selectedAccount)?.account : null;
+  const pickedModel = selectedIndex === null ? null : candidates[selectedIndex]?.model ?? null;
+  // The account rank uses the retained peak with unexpired resets. Its age
+  // affects presentation, while the worker picker can still rank by it.
+  const peakUsedPct = freshMaxUsedPct(pickedAccount, nowMs, pickedModel);
+  const peak = pickedAccount && window("Reported usage", peakUsedPct, stampMs(pickedAccount.sampledAt), null);
+  const pickedQuota = accounts.find(({ alias }) => alias === accountAlias);
 
   return {
     workspaceId,
@@ -164,19 +230,28 @@ export function shapeWorkspaceResources({
       const entry = quotaEntry(snapshot, pool);
       const sampledAt = !entry ? null : entry.sampledAt === undefined ? quotaSampledAt : stampMs(entry.sampledAt);
       const limitedUntil = activeLimit(entry?.limitUntil ?? entry?.limitedUntil);
+      const sessionPct = quotaPct(entry);
+      const weeklyPct = entry?.weeklyPct ?? entry?.weeklyUsedPct;
+      const sessionReset = entry?.resetsAt ?? entry?.resetAt;
+      const weeklyReset = entry?.weeklyResetAt;
+      const windows = [
+        ...(sessionPct !== null || stampMs(sessionReset) !== null ? [window("Session", sessionPct, sampledAt, sessionReset)] : []),
+        ...(Number.isFinite(weeklyPct) || stampMs(weeklyReset) !== null ? [window("Weekly", weeklyPct, sampledAt, weeklyReset)] : []),
+      ];
       return {
         provider, providerLabel: providerLabel(provider), alias, limitedUntil,
+        sampledAt: iso(sampledAt), quotaKind: windows.length > 0 ? "reported" : "unknown",
         limited: entry?.exhausted === true || limitedUntil !== null,
-        windows: [
-          window("Session", quotaPct(entry), sampledAt, entry?.resetsAt ?? entry?.resetAt),
-          window("Weekly", entry?.weeklyPct ?? entry?.weeklyUsedPct, sampledAt, entry?.weeklyResetAt),
-        ],
+        windows,
       };
     }),
     accounts,
     zeroSubState: zerosub === null ? "unavailable" : "available",
     workerSelection: {
       scopeVisibility: repoPublic === null ? "unknown" : repoPublic ? "public" : "private",
+      accountEvidence: peak && pickedQuota
+        ? { state: peak.state, usedPct: peakUsedPct !== null && peakUsedPct >= 0 ? peakUsedPct : null, quotaKind: pickedQuota.quotaKind }
+        : null,
       candidates: candidates.map((candidate: typeof candidates[number], index: number) => {
         const reason = exclusions.get(index);
         if (reason) return { ...candidate, decision: { state: "excluded", reason: resourceWorkerExclusion.parse(reason) } };
@@ -184,5 +259,6 @@ export function shapeWorkspaceResources({
         return { ...candidate, decision: { state: "unevaluated" } };
       }),
     },
+    steerRouting: retainedSteerRouting(workspaceMetadata, accountAliases),
   };
 }

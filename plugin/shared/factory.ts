@@ -832,6 +832,8 @@ const resourceQuota = z.object({
   alias: z.string(),
   limited: z.boolean(),
   limitedUntil: z.string().nullable(),
+  sampledAt: z.string().nullable(),
+  quotaKind: z.enum(["api", "subscription", "reported", "unknown"]),
   windows: z.array(resourceWindow),
 });
 
@@ -839,6 +841,28 @@ export const resourceWorkerExclusion = z.enum([
   "unknown-profile", "recent-failure", "accounts-exhausted", "pool-exhausted",
   "role-mismatch", "scope-requires-public", "profile-in-use", "catalog-rejected",
 ]);
+
+export const resourceSteerRouting = z.object({
+  queuedAt: z.string().nullable(),
+  intent: z.enum(["automatic", "explicit"]),
+  strategy: z.enum(["efficiency", "balanced", "preference"]),
+  reason: z.enum([
+    "only eligible route", "equal evidence; retained candidate order",
+    "selected by uncachedInputTokens", "selected by preparationTurns",
+    "selected by latencyMs", "selected by preferenceRank",
+  ]).nullable(),
+  kind: z.enum(["continue", "move", "handover", "renewal", "create"]),
+  preparation: z.enum(["send", "clear", "rewind"]),
+  confidence: z.enum(["observed", "estimated", "unknown"]),
+  evidence: z.object({
+    uncachedInputTokens: z.number().nonnegative().nullable(),
+    preparationTurns: z.number().nonnegative().nullable(),
+    latencyMs: z.number().nonnegative().nullable(),
+    preferenceRank: z.number().nonnegative().nullable(),
+  }),
+  epoch: z.number().int().nonnegative().nullable(),
+  accountAlias: z.string().nullable(),
+});
 
 /** Read-only Resources snapshot for an exact enrolled workspace. */
 export const factoryWorkspaceResources = defineRpc({
@@ -854,6 +878,9 @@ export const factoryWorkspaceResources = defineRpc({
     zeroSubState: z.enum(["available", "unavailable"]),
     workerSelection: z.object({
       scopeVisibility: z.enum(["public", "private", "unknown"]),
+      accountEvidence: resourceWindow.pick({ state: true, usedPct: true }).extend({
+        quotaKind: resourceQuota.shape.quotaKind,
+      }).nullable(),
       candidates: z.array(z.object({
         profile: z.string(),
         provider: z.string().nullable(),
@@ -868,6 +895,7 @@ export const factoryWorkspaceResources = defineRpc({
         ]),
       })),
     }),
+    steerRouting: resourceSteerRouting.nullable(),
   }),
 });
 

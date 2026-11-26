@@ -1418,8 +1418,9 @@ export async function getWorkspaceResources(
     resolveWorkerSelection(paseo, loader, { exactWorkspaceId: workspaceId }, extra),
     extra?.getQuotaSettings?.().catch(() => null),
   ]);
+  const workspaceMetadata = listScopes(snapshot).find((scope) => scope.workspaceId === workspaceId)?.workspace.metadata ?? null;
   return shapeWorkspaceResources({
-    workspaceId, config, repoPublic, zerosub, nowMs, exclusions, agents: snapshot.agents, providers: entries,
+    workspaceId, workspaceMetadata, config, repoPublic, zerosub, nowMs, exclusions, agents: snapshot.agents, providers: entries,
     snapshot: getQuotaSnapshot(), quotaSampledAt: getQuotaSampledAt(), quotaSampleMinutes: quotaSettings?.quotaSampleMinutes,
     selectedIndex: selection.profile ? selection.skipped.length : null,
     selectedAccount: selection.zerosubAccount,
