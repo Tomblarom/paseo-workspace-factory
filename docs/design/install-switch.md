@@ -64,6 +64,9 @@ out-of-package assets, and verify the registry comparison still renders.
 
 ## Switch to git install
 
+Status 2026-11-26: not pursued (decision Steer C after a user note); findings
+stay a development-checkout function. The design below is kept for reference.
+
 ### Options
 
 | Option | Evidence and consequence |

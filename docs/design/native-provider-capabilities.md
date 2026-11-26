@@ -60,7 +60,7 @@ store/auth; heavy, not recommended. Keys verified against installed 0.171.0 via
 | setting | installed? | Paseo path | per-agent scope | default | evidence |
 |---|---|---|---|---|---|
 | `model_auto_compact_token_limit` (+`_scope`) | yes | `config.toml` only (no `-c` from Paseo) | only via per-agent `CODEX_HOME` | unknown | generated schema `v2/ConfigReadResponse.json` |
-| `tool_output_token_limit` | no (absent from 0.171.0 schema) | — | — | — | generated schema |
+| `tool_output_token_limit` | yes (key present in the 0.171.0 binary; missing from the generated schema checked first) | not passable: Paseo forwards `providerOptions` as per-thread `config` (`buildCodexInnerConfig`, thread/start and thread/resume), but `CodexProviderOptionsSchema` is `.strict()` and admits only sandbox/approval/web_search/features keys | would be per agent if admitted | — | `codex/options.js`, `codex-app-server-agent.js:3406,3547` |
 | `model_post_turn_compact_threshold_percent` | no (absent) | — | — | — | generated schema |
 | MCP output limits | none found | — | — | — | generated schema |
 | `/compact` | yes (prompt command) | factory already sends it | n/a | manual | factory `COMPACT_COMMAND` |
@@ -142,3 +142,12 @@ Open questions: Codex `model_auto_compact_token_limit` default; Muse compaction 
 names/defaults; Copilot compaction disable knob; instruction persistence across
 clear/compact/resume/adoption for all four (needs live scratch-agent runs);
 Claude SDK-bundled-CLI vs installed-CLI env-var parity.
+
+## Codex: per-agent config is a Paseo schema gap (checked 2026-11-26)
+
+Paseo 0.17.4 already sends each agent's `providerOptions` to Codex as per-thread `config`
+on start and resume, so `tool_output_token_limit` and `model_auto_compact_token_limit`
+could be set per factory agent without `CODEX_HOME` or a global `config.toml`. Only the
+strict `CodexProviderOptionsSchema` rejects them. A Codex update (0.172.0 available) does
+not change this. Decision: no factory workaround; an upstream proposal to admit these
+context keys is the native path.

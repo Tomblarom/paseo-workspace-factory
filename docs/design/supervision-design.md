@@ -26,6 +26,8 @@ While the steer is working through a backlog, it stays in the turn, checks the w
 - `paseo wait <id> [--timeout]` blocks inside one turn: fine for short waits, but it dies with the waiting turn (restart, interruption).
 - `paseo heartbeat create --cron … <prompt>` sends a recurring prompt to one agent. It stays with that agent, so it does not follow a `switch` or `fresh`. Verified live (2026-11-23, scratch agent, archived): with `PASEO_AGENT_ID=<target>` the CLI creates a heartbeat for another agent; it fired on time and arrived as a `[Heartbeat]` prompt that the agent answered. So `switch`/`fresh` could move a factory-managed heartbeat (delete on the old steer, create on the new one) when the plugin is not installed.
 - No public API mutes Paseo's attention or notifications ([plugin design](plugin-design.md#notification-suppression-for-workers-research)). A turn the plugin starts on a steer probably raises the normal "agent finished" attention; see Limits.
+- `agent.*.after` and `workspace.*.after` (0.17.4) are async with no journal or replay: every event-driven consumer pairs with a bounded deadline fallback from the central factory scheduler instead of adding its own timer.
+- `PluginHookAgent` (0.17.4) carries metadata but no labels: scope resolution for label-based workers falls back in order metadata → refreshed snapshot → register scan.
 
 ## Ownership and state
 

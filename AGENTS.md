@@ -26,7 +26,11 @@ standalone Paseo plugin, installable from the plugin registry. Background: READM
   not on claims. A reasoned decision against a feature is a valid result.
 - **Guidelines over enforcement**, except for critical invariants: one active steer per
   epoch, ownership, quota and privacy rules.
-- **Deletion over abstraction.** Remove logic rather than wrap it; no new layers.
+- **Authoritative state over remembered state.** Dynamic facts (settings, worker order,
+  quota, active steer) have one source, read live; memory, checkpoints and old messages
+  never override it.
+- **Deletion over abstraction**, in code and in documents: remove logic rather than wrap
+  it; documents serve their current purpose and do not grow with history (git keeps it).
 - **Progressive disclosure.** Briefs carry state and pointers; details are read on demand.
 - **Strategy over TODOs.** Check that an item still serves the mission before working on
   it; propose dropping or merging outdated items with a reason. Approval limits stay.
@@ -44,8 +48,9 @@ provider-configuration or capability layer. SLP is a pattern reference, not a te
   TODO.md section 22 — settings only in the plugin, role rules from the plugin, CLI kept
   (measured in docs/design/native-plugin-spike.md: native agent tools would add the full
   Paseo catalog, about 5.8k tokens, to every agent), CLI ships inside the plugin package.
-- Open work: TODO.md (newest section first). Factory observations: FINDINGS.md.
-  Both are local files on the development host.
+- Open work: TODO.md (open items only; remove done or obsolete items, git keeps history).
+  FINDINGS.md: compact, still unassessed observations only. Both are local files on the
+  development host.
 
 ## Working in this repository
 
@@ -76,7 +81,7 @@ are not for you; do the task in your brief and end with a CHECKPOINT.
   (format in docs/steer-instructions.md).
 - Keep working through actionable TODO items (after the strategy check above); work on
   independent items while a worker runs; end the turn only when done or every remaining
-  item needs user input. Mark completed items `[x]` and keep them.
+  item needs user input. Remove completed items from TODO.md.
 - Supervise workers until each result is handled; a worker without a CHECKPOINT is not
   done. Archive your own accepted workers. Escalate worker → steer → advisor → user.
 - Advisors only through the `paseo-advisor` skill, read-only, sanitized context.

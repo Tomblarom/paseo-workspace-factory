@@ -239,3 +239,129 @@ Caveats that must stay visible:
 4. Positive live proof of tool delivery with injection on (deliberately not
    enabled on the shared daemon during this spike).
 5. Muse upstream fix version for MCP tools.
+
+## Delivery on resume/refresh (follow-up 2026-11-26)
+
+Read-only follow-up: code paths in v0.17.4 sources plus session artifacts, no
+model calls. Observation: plugin log `[factory] role prompt wsf-role-1
+appended: agent 3ce624e0, reason refresh, role steer` (plugin/index.server.ts:303)
+for a Claude agent, yet the role text and identifier are absent from the
+following turns. The earlier working probe was a fresh agent (reason create).
+
+Refresh plumbing (all providers): `reloadAgentSessionInternal` runs
+`buildLaunchContext` with `reason: refresh`, the hook result becomes
+`launchContext.appendSystemPrompt`, and `resolveProviderLaunchConfig` puts it on
+the overrides as `pluginAppendSystemPrompt` before
+`client.resumeSession(handle, overrides, launchContext)`
+(agent-manager.ts:1976-2044, :6592). The hook result reaches every provider
+resume call; what happens next differs per provider.
+
+### Claude: passed by Paseo, ignored by the CLI on resume
+
+- `resumeSession` merges overrides over persisted metadata, which never contains
+  the key (`describePersistence` strips it, claude/agent.ts:3270-3274); the new
+  session keeps `claudeSessionId` from the handle (:2576). `buildOptions` then
+  sends **both** `resume: <id>` and `systemPrompt: { preset: claude_code,
+  append: <fresh> }` (:3999-4004, :4019-4023, :4057-4058).
+- Artifact proof: agent `3ce624e0` → Claude session `d91066da`
+  (`~/.paseo/agents/.../3ce624e0....json`; persistence metadata has no
+  pluginAppend key). Its `~/.claude/projects/.../d91066da....jsonl` (1226 lines)
+  holds 10 system-role `api-request-blob`s, all written **before** the 07:34:37Z
+  refresh; blobs are content-addressed, so identical content writes nothing new.
+  The first post-refresh `api-request` (07:34:38Z) rebuilds the full message
+  list (`base: null`, `keep: 0`) reusing system blob `396f53212cd6` (line 31,
+  42 KB, created at session start); `shapeHash` is constant across all 136
+  requests. The 28 `wsf-role-1` occurrences in the file are all conversation
+  content (`tool_use`/`tool_result`/`thinking`/`text`), none in system records.
+  Conclusion: on resume the CLI reuses the session's original system prompt
+  byte-identically; the fresh append Paseo passes is dropped outside Paseo.
+- Same for daemon-restart resume and import (import funnels into
+  `resumeSession`, provider-session-import.ts:37), so imported sessions never
+  receive the append either.
+- Side effect of the byte-reuse: even CLAUDE.md/AGENTS.md edits cannot reach a
+  resumed Claude session; only content present at creation is baked in.
+
+### Codex: works (reference implementation)
+
+- Resume sends fresh `developerInstructions` with `thread/resume`
+  (`ensureThreadLoaded`, codex-app-server-agent.ts:4564) and then
+  `instructionSnapshot.apply` injects a `thread/inject_items` developer message
+  ("complete current set of Paseo-supplied instructions ... supersedes all
+  earlier") whenever the digest differs (codex/instruction-snapshot.ts:41-68,
+  applied :4600-4604; requires Codex ≥0.121.0, enforced :4052-4060; receipt
+  persisted as `paseoInstructionReceipt`). Create uses `thread/start` (:6085).
+
+### Muse: composed by Paseo, dropped by its own provider plugin
+
+- `mapSessionConfig` composes `systemPrompt` including plugin appends
+  (plugin-provider.ts:2121-2124), but `session/resume` sets `firstTurn = false`
+  (plugins/muse-provider/server/session.ts:108-124) while the only injection
+  point (`<system_instructions>` first-turn input, session.ts:244-248)
+  requires `firstTurn`. Fixable Paseo-side; hooks.md already assigns this duty
+  to the provider ("Plugin providers receive the composed prompt, but must
+  apply it themselves").
+
+### Copilot: no channel, documented
+
+- Zero `systemPrompt` references in acp-agent.ts; hooks.md: "The ACP adapter
+  does not send system instructions to its providers."
+
+### Clear, compact, rewind, provider switch
+
+- Claude `/clear`, `/compact`: CLI root-only commands (claude/agent.ts:441-442)
+  inside the live query — the spawn-time prompt survives, hook changes do not
+  apply. Partial rewind keeps session + original prompt. Rewind-to-start calls
+  `startFreshConversationSession` (`revertConversation`, :3399-3403; fresh id,
+  :3636-3645), so the next query has no `resume` and the **current** append
+  applies — the only in-place way to pick up new instructions on Claude.
+- Codex rewind passes fresh `developerInstructions` (:5529); snapshots may
+  repeat (documented, hooks.md:343). Muse instructions are transcript input
+  text, so compaction can degrade them like any history.
+- Provider switch: no `setProvider` in `@getpaseo/client` → always a new agent
+  → create path → appends apply.
+
+### Classification
+
+| Provider | Verdict |
+| --- | --- |
+| codex | Intended behaviour, delivered (snapshot injection). |
+| claude | Agent SDK/CLI limitation (system prompt fixed at session creation for resumed transcripts), contradicting Paseo's documented contract (`agent.open.before` contributes "instructions ... each time", hooks.md:34; "apply new instructions on the next reopen", :341). Paseo gap: docs promise what the Claude path cannot deliver. |
+| muse | Paseo provider-plugin bug (resume discards the composed prompt). |
+| copilot | Documented limitation (ACP sends no system instructions). |
+
+No newer release changes this: npm `@getpaseo/cli` latest is 0.17.4
+(checked 2026-11-26); the examined sources are exactly tag v0.17.4.
+
+### Recommendation (slimmest fallback until native delivery works)
+
+Keep the factory's steer block in managed repos' AGENTS.md as the **single**
+carrier (baked at session creation, survives resume), and pause the hook's
+`appendSystemPrompt` for role rules until resume delivery works — on create
+both would otherwise land in context (duplication), on resume only AGENTS.md
+does. Rule changes need a fresh session (recreate the steer); document that
+neither hook nor AGENTS.md edits reach a live Claude session. Of the weighed
+options — AGENTS.md-only (recommended), rules in a new steer's first brief
+(transcript content: survives resume but degrades under compaction, new steers
+only), recreate-instead-of-resume (history loss; reserve for rule changes) —
+only AGENTS.md-only is duplication-free with zero factory workaround for the
+Paseo gap. No injected reminder messages or polling; that would be a factory
+workaround for a Paseo gap.
+
+### Draft upstream issue (not filed)
+
+> Title: `appendSystemPrompt` from `agent.open.before` does not reach resumed
+> Claude sessions (docs promise "each time")
+>
+> Since 0.17.1 (#9781) plugins can append instructions via `agent.open.before`,
+> documented as contributing "instructions ... each time" and applying "new
+> instructions on the next reopen" (hooks.md). On the Claude path Paseo passes
+> the fresh append together with `resume` (Agent SDK `systemPrompt:
+> { preset, append }`), but the CLI reuses the resumed session's original
+> system prompt byte-identically (verified in the session transcript: the
+> post-refresh request reuses the session-start system blob; no new system
+> content appears). Codex handles this via instruction-snapshot injection; the
+> Claude path has no equivalent, so resume/refresh/import silently drop new
+> instructions. Either deliver appends on Claude resume (if the SDK/CLI offers
+> a channel) or scope the hooks.md promise per provider. Related: the
+> muse-provider drops the composed prompt on resume (`firstTurn = false` on
+> `session/resume`).

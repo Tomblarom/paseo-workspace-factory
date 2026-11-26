@@ -221,6 +221,17 @@ fixture checksums. Keep a report for partial, null or adverse results.
    the same aggregate and interval. Run the live pilot, then freeze and run
    the scored manifest. Update the README only from the resulting report.
 
+## Steer initialization baseline (2026-11-26)
+
+First measured steer start after a resume (Claude steer): the first request
+carried 41.3k tokens of context; 13 requests in about 2 minutes passed before
+the first question to the user, growing context from 41.3k to 77.5k tokens.
+The turn totalled about 0.93M input tokens, of which about 865k were cache
+reads and 67k cache writes. Causes: a checkpoint without file paths, three
+conflicting sources for the worker order, and a mission the steer never
+referenced. Later steer switches are compared against this baseline from
+existing session data only, without dedicated benchmark sessions.
+
 ## Open questions
 
 1. Which provider, model and auth path should the first README number represent?
