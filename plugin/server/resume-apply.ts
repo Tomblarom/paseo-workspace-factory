@@ -97,7 +97,7 @@ async function applyWorkerResume(paseo: any, mainId: string, agentId: string, sc
     if (!partial && alreadyRenewed && asRecord(actionFact(entry, "refreshed"))?.briefMessageId) {
       return { agentId, status: "sent", cleared: false, renewed: true, detail: "The renewed worker already received its brief." };
     }
-    const mode = decideSteerDelivery({ warmth: warmth.warmth, large, recovery: true, settings: null, keepChatHistory: true });
+    const mode = decideSteerDelivery({ warmth: warmth.warmth, large, recovery: true, settings: null, keepChatHistory: false });
     if (!alreadyRenewed && mode !== "send") {
       if (!deps.refreshWorker) throw new Error("Worker context renewal is unavailable. Use fresh --worker for this worker.");
       const refreshed = await deps.refreshWorker(mainId, agentId);

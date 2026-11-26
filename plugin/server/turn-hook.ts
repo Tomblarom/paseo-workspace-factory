@@ -539,7 +539,11 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
         epoch: wsf.epoch,
         note: typeof pending.note === "string" ? pending.note : "",
       };
-      if (queued.renewal === "clear") {
+      if (pending.kind === "compact" && queued.renewal === "send") {
+        // Compaction is optional preparation. Release the original packet even if the provider failed.
+        readyDelivery = true;
+        merged.action = { ...queued, cleanup: null, phase: "ready" };
+      } else if (queued.renewal === "clear") {
         readyDelivery = decision.entryUpdate?.actionVerified === true;
         if (!readyDelivery) {
           merged.cleared = actionFact(prev, "cleared") ?? null;
@@ -598,7 +602,7 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
     }
   }
 
-  if (decision.effectFailed) {
+  if (decision.effectFailed && !(pending?.kind === "compact" && pending.reason === RESUME_PENDING_REASON)) {
     noteEffectFailure(
       `a cleanup command to ${agentId} completed without effect (see wsf.agents.${agentId}.lastActionFailed)`,
     );

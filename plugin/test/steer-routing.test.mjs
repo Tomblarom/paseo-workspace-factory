@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
 register("./ts-resolve-hooks.mjs", import.meta.url);
-const { readRoutingSnapshot, steerRouteCandidate, planSteerRoutes } = await import("../server/steer-routing.ts");
+const { decideSteerDelivery, readRoutingSnapshot, steerRouteCandidate, planSteerRoutes } = await import("../server/steer-routing.ts");
 const { quotaAdmission, steerQuotaAdmission, readPrivacyAdmission } = await import("../server/steer-admission.ts");
 const { AGENTS_KEY } = await import("../server/core/agent-state.mjs");
 const { LABEL, METADATA_KEY } = await import("../server/core/paseo.mjs");
@@ -13,6 +13,18 @@ const NOW = Date.parse("2026-11-26T17:00:00Z");
 const agent = { id: "a", provider: "claude", model: "m" };
 const account = (id, usedPct) => ({ id, family: "claude", sampledAt: new Date(NOW).toISOString(),
   windows: [{ id: "5h", usedPct, resetsAt: new Date(NOW + 3600_000).toISOString() }] });
+
+test("automatic delivery keeps the chat even when cold, large, or recovering", () => {
+  for (const provider of ["claude", "claude-api", "codex", "unknown"]) {
+    for (const context of [{ warmth: "cold" }, { warmth: "warm", large: true }, { recovery: true }, { warmth: "warm", retry: true }]) {
+      assert.equal(decideSteerDelivery({ provider, ...context, settings: null, keepChatHistory: true }), "send");
+    }
+  }
+  const context = { warmth: "cold", settings: null };
+  assert.equal(decideSteerDelivery({ ...context, provider: "claude", manual: true, keepChatHistory: true }), "rewind");
+  assert.equal(decideSteerDelivery({ ...context, provider: "claude-api", keepChatHistory: false }), "clear");
+  assert.equal(decideSteerDelivery({ ...context, provider: "codex", keepChatHistory: false }), "rewind");
+});
 
 test("one live observation supplies config, account quota and preparation to all candidates", async () => {
   const calls = { config: 0, zerosub: 0, cleanup: 0, resume: 0, history: 0 };

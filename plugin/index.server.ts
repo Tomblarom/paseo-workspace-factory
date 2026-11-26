@@ -347,7 +347,7 @@ export default function contribute(server: PluginServerContext) {
     console.log(`[factory] role prompt ${ROLE_RULES_ID as unknown as string} appended: agent ${shortId}, reason ${request.reason}, role ${isAdvisor ? "advisor" : "steer"}`);
     return { ...request, appendSystemPrompt: [...(request.appendSystemPrompt ?? []), rendered] };
   });
-  const stopCleanupTimer = startCleanupTimer({ readSettings, getZerosub, getQuotaSettings: readQuotaSettings });
+  const stopCleanupTimer = startCleanupTimer({ readSettings, getZerosub, getQuotaSettings: readQuotaSettings, keepChatHistory: delivery.keepChatHistory });
   const stopSupervisionTimer = startSupervisionTimer({ getSettings: readSupervision, getConfig: () => loader.loadEffectiveConfig(), delivery, getZerosub, buildBrief: buildResumeBrief });
   const stopQuotaTimer = startQuotaTimer({ getSettings: readQuotaSettings });
   return () => {

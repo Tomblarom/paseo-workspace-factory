@@ -1,7 +1,7 @@
 import { planRoutes } from "./core/routing.mjs";
 import { privacyAdmission, quotaAdmission, readAdmissionSnapshot, readPrivacyScopes, type AdmissionDeps, type AdmissionSnapshot } from "./steer-admission.js";
 import { collectSteerStates, type SteerFeedRow } from "./steer-feed.js";
-import { mayResumeClear, type CleanupSettings, type ResumeClearSettings } from "../shared/idle-cleanup.js";
+import { isClaudeProvider, mayResumeClear, type CleanupSettings, type ResumeClearSettings } from "../shared/idle-cleanup.js";
 
 export interface RoutingDeps extends AdmissionDeps {
   getCleanupSettings?: () => Promise<CleanupSettings | null>;
@@ -49,7 +49,8 @@ export function decideSteerDelivery({
   warmth?: string; large?: boolean; provider?: string; manual?: boolean; recovery?: boolean; retry?: boolean;
   settings: ResumeClearSettings | null; keepChatHistory: boolean;
 }): "send" | "clear" | "rewind" {
-  const mode = provider === "claude" && !keepChatHistory && mayResumeClear(provider, settings)
+  if (keepChatHistory && !manual) return "send";
+  const mode = isClaudeProvider(provider) && !keepChatHistory && mayResumeClear(provider, settings)
     ? "clear" : "rewind";
   if (large || warmth === "cold" || retry || (manual && mode === "rewind")) return mode;
   if (warmth === "warm" || warmth === "cooling") return "send";

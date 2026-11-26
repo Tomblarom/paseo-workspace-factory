@@ -11,7 +11,7 @@ import { SettingsSaveError, useAutosave } from "./settings-autosave.js";
 
 const SECTION_TITLE = "Steer menu";
 const SECTION_INFO =
-  "How the steer pill delivers a new or replaced steer's brief, and whether Refresh keeps the chat history.";
+  "Brief delivery for new steers and chat history for automatic actions.";
 
 export function SteerMenuSettingsSection() {
   const { state, change, errors } = useAutosave(factorySteerMenuSettings);
@@ -55,7 +55,7 @@ export function SteerMenuSettingsSection() {
         />
         <SettingsSwitch
           label="Keep chat history"
-          hint="Refresh rewinds instead of clearing. Codex has no native clear, so a Codex refresh always rewinds."
+          hint="Preserve steer chats during automatic delivery and cleanup, using native compaction when needed and supported."
           value={values.keepChatHistory}
           onValueChange={(keepChatHistory) =>
             void save((current) => ({ ...current, keepChatHistory }))

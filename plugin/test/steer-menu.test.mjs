@@ -220,7 +220,7 @@ test("resume uses the verified in-place clear for Claude", () => {
     { kind: "resume-apply" },
   );
   assert.deepEqual(
-    menu.resumeRouteFor(row("a", { provider: "claude", state: "large" }), {
+    menu.resumeRouteFor(row("a", { provider: "claude-api", state: "large" }), {
       keepChatHistory: false,
       clearProviders: ["claude", "other"],
     }),
@@ -228,18 +228,18 @@ test("resume uses the verified in-place clear for Claude", () => {
   );
 });
 
-test("resume with Keep chat history rewinds instead of clearing", () => {
+test("manual refresh with Keep chat history uses the Fresh preview", () => {
   assert.deepEqual(
     menu.resumeRouteFor(row("a", { provider: "claude" }), { keepChatHistory: true }),
-    { kind: "fresh", note: "Keep chat history is on, so refresh rewinds instead of clearing." },
+    { kind: "fresh" },
   );
 });
 
-test("a Codex refresh always rewinds and says so", () => {
+test("a Codex refresh uses the Fresh preview for the actual route", () => {
   for (const keepChatHistory of [false, true]) {
     assert.deepEqual(
       menu.resumeRouteFor(row("a", { provider: "codex", state: "needs-resume" }), { keepChatHistory }),
-      { kind: "fresh", note: "Codex has no native clear, so refresh rewinds the chat." },
+      { kind: "fresh" },
     );
   }
 });
@@ -247,10 +247,7 @@ test("a Codex refresh always rewinds and says so", () => {
 test("providers without a verified clear go through fresh planning", () => {
   assert.deepEqual(
     menu.resumeRouteFor(row("a", { provider: "mystery" }), { keepChatHistory: false }),
-    {
-      kind: "fresh",
-      note: "This provider has no verified in-place clear, so refresh rewinds or replaces the tab.",
-    },
+    { kind: "fresh" },
   );
   assert.equal(
     menu.resumeRouteFor(row("a", { provider: null }), { keepChatHistory: false }).kind,

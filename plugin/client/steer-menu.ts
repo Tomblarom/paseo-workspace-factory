@@ -7,6 +7,7 @@
 import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
 import type { PluginComposer } from "@getpaseo/plugin/client";
 import type { factorySteerBrief } from "../shared/factory.js";
+import { mayResumeClear, isClaudeProvider, RESUME_CLEAR_DEFAULTS } from "../shared/idle-cleanup.js";
 import { STEER_STATE_LABELS, type SteerFaceState } from "../shared/steer-state.js";
 import type { SteerPillRow } from "./steer-pill.js";
 
@@ -214,26 +215,16 @@ export function handoffTargets(
 // ---------------------------------------------------------------------------
 
 export type ResumeRoute =
-  /** Verified safe in-place route: /factory resume clears and briefs. */
+  /** In-place resume in a Claude chat. */
   | { kind: "resume-apply" }
   /** Rewind or replacement: /factory fresh planning, then confirm and apply. */
-  | { kind: "fresh"; note: string | null }
+  | { kind: "fresh" }
   /** Quota depleted: show reset details instead of refreshing. */
   | { kind: "reset-details" }
   /** Refresh is unsafe right now; the reason says why. */
   | { kind: "blocked"; reason: string };
 
-function isCodexProvider(provider: string | null): boolean {
-  return typeof provider === "string" && /codex/i.test(provider);
-}
-
-/**
- * Safe route for "Resume… / Refresh context…" from the face state. A verified
- * safe in-place route (a provider with native clear, history not kept)
- * reuses /factory resume; everything else goes through /factory fresh
- * planning for a rewind or a replacement. Codex has no native clear, so a
- * Codex refresh always rewinds.
- */
+/** Route manual refresh to in-place resume or the Fresh preview. */
 export function resumeRouteFor(
   row: SteerPillRow,
   opts: { keepChatHistory: boolean; clearProviders?: string[] },
@@ -257,21 +248,11 @@ export function resumeRouteFor(
   if (row.state === "limited" || row.limited) {
     return { kind: "reset-details" };
   }
-  const providers = Array.isArray(opts.clearProviders) && opts.clearProviders.length
-    ? opts.clearProviders
-    : ["claude"];
-  const clearable = typeof row.provider === "string" && providers.includes(row.provider);
+  const clearable = isClaudeProvider(row.provider) && mayResumeClear(row.provider, {
+    ...RESUME_CLEAR_DEFAULTS, providers: opts.clearProviders ?? RESUME_CLEAR_DEFAULTS.providers,
+  });
   if (clearable && !opts.keepChatHistory) return { kind: "resume-apply" };
-  if (isCodexProvider(row.provider)) {
-    return { kind: "fresh", note: "Codex has no native clear, so refresh rewinds the chat." };
-  }
-  if (clearable && opts.keepChatHistory) {
-    return { kind: "fresh", note: "Keep chat history is on, so refresh rewinds instead of clearing." };
-  }
-  return {
-    kind: "fresh",
-    note: "This provider has no verified in-place clear, so refresh rewinds or replaces the tab.",
-  };
+  return { kind: "fresh" };
 }
 
 // ---------------------------------------------------------------------------

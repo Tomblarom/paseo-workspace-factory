@@ -194,9 +194,7 @@ export const factoryResumeSettings = defineSettings({
   }),
 });
 
-// Steer menu (step 3): how a new or replaced steer's brief is delivered, and
-// whether Refresh keeps the chat history (rewind) or clears it in place.
-// Defaults: the brief goes into the Paseo composer, refresh clears.
+// Brief delivery for a new steer and history preservation for automatic actions.
 export const factorySteerMenuSettings = defineSettings({
   id: "factory-steer-menu",
   scope: "host",

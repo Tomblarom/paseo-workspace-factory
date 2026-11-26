@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
+import { setTimeout as wait } from "node:timers/promises";
+import type { PaseoAgentTimelineHandle, PaseoAgentTimelineSubscription } from "@getpaseo/client";
 import { AGENTS_KEY } from "./core/agent-state.mjs";
 import { readSteerAction, readCleanupAction, unsettledAccountMove, admittedAccountMoveReplan, actionEntry, newSteerAction, reconcileSteerSend } from "./core/steer-action.mjs";
 import { reconcileSteerAccountMove } from "./core/steer-account-move.mjs";
@@ -21,7 +23,7 @@ import { routeMatchesIntent } from "./core/routing.mjs";
 import { readRoutingSnapshot, routingProjection, steerRouteCandidate, planSteerRoutes, type RoutingIntent } from "./steer-routing.js";
 export { decideSteerDelivery } from "./steer-routing.js";
 import {
-  cleanupIdentity, formatResumeMessage, RESUME_PENDING_REASON,
+  cleanupIdentity, formatResumeMessage, isClaudeProvider, RESUME_PENDING_REASON,
   type CleanupSettings, type ResumeClearSettings,
 } from "../shared/idle-cleanup.js";
 
@@ -242,6 +244,7 @@ function blocked(detail: string, cleared = false): DeliveryResult {
 
 const STEER_BUSY = "The steer is busy. Delivery waits until the current turn ends.";
 const CLEAR_UNCONFIRMED = "Claude context clear could not be confirmed. Retry recovery or use Fresh.";
+const COMPACTION_WAIT_MS = 60_000;
 
 function deferred(detail: string = STEER_BUSY): DeliveryResult {
   return { status: "pending", cleared: false, detail };
@@ -637,9 +640,20 @@ async function staleBatchStillValid(paseo: any, batch: EventBatch | undefined): 
 
 const finishing = new Set<string>();
 
-/** Releases a staged brief after the rewind RPC or the clear hook confirmed renewal. */
+function releaseDeliveryCompaction(paseo: any, input: DeliveryInput, lock: Lock, wakeId: string) {
+  return changeEntry(paseo, input, lock, (entry) => {
+    const action = readSteerAction(entry);
+    const cleanup = readCleanupAction(entry);
+    if (action?.wakeId !== wakeId || action.renewal !== "send" || cleanup?.kind !== "compact" ||
+        cleanup.reason !== RESUME_PENDING_REASON) return null;
+    return { action: { ...action, cleanup: null } };
+  });
+}
+
+/** Releases a queued brief once the target is idle and any preparation has settled. */
 export async function finishSteerDelivery(
   paseo: any, input: DeliveryInput, deps: SteerDeliveryDeps = {},
+  compactBeforeSend = false,
 ): Promise<DeliveryResult | null> {
   const key = `${input.workspaceId}/${input.agentId}`;
   if (finishing.has(key)) return { status: "pending", cleared: false, detail: "The steer brief is being delivered." };
@@ -715,8 +729,32 @@ export async function finishSteerDelivery(
       }
       const admission = await steerQuotaAdmission(snapshot, entry, { ...deps, paseo }, meta[AGENTS_KEY]);
       if (!admission.allowed) return deferred(`Delivery waits: ${admission.reason}.`);
+      const cleanup = readCleanupAction(entry);
+      if (pending.renewal === "send" && cleanup?.kind === "compact" && cleanup.reason === RESUME_PENDING_REASON &&
+          Date.now() - Date.parse(cleanup.at) >= COMPACTION_WAIT_MS && !hasActiveAgentWork(snapshot, entry)) {
+        const wakeId = pending.wakeId;
+        await releaseDeliveryCompaction(paseo, input, lock, wakeId);
+        entry = (await paseo.workspaces.ref(input.workspaceId).refresh())?.metadata?.[AGENTS_KEY]?.[input.agentId];
+        pending = pendingSteerDelivery(entry);
+        if (pending?.wakeId !== wakeId) return deferred("Steer state changed while recovering the brief.");
+      }
       if (pending.phase === "renewing" || readCleanupAction(entry)) {
         return { status: "pending", cleared, detail: "Context renewal is in progress. The brief follows confirmation." };
+      }
+      if (pending.phase === "blocked" && pending.renewal === "rewind" && !pending.rewindAttempt && !pending.attemptedAt &&
+          !input.manual && pending.routing?.intent?.mode !== "explicit" && await deps.keepChatHistory?.()) {
+        // A failed preparation that never reached the provider can still deliver its brief.
+        const retained = await changeEntry(paseo, input, lock, (current) => {
+          const action = readSteerAction(current);
+          if (action?.wakeId !== pending?.wakeId || action.phase !== "blocked" || action.renewal !== "rewind" || action.attemptedAt ||
+              action.rewindAttempt || readCleanupAction(current)) return null;
+          const { lastError: _error, ...ready } = action;
+          return { action: { ...ready, phase: "ready", renewal: "send" } };
+        });
+        if (!retained) return deferred("Steer state changed while recovering the brief.");
+        entry = (await paseo.workspaces.ref(input.workspaceId).refresh())?.metadata?.[AGENTS_KEY]?.[input.agentId];
+        pending = pendingSteerDelivery(entry);
+        if (!pending) return deferred("Steer state changed while recovering the brief.");
       }
       const batch = pending.batch;
       if (!pending.attemptedAt && batch?.events.some(({ state }) => state === "stale")) {
@@ -747,6 +785,61 @@ export async function finishSteerDelivery(
           action: { ...pending, phase: "blocked", lastError: CLEAR_UNCONFIRMED },
         });
         return blocked(CLEAR_UNCONFIRMED);
+      }
+      if (compactBeforeSend && pending.renewal === "send" && pending.phase === "ready" && !pending.attemptedAt) {
+        const beforeSend = async () => {
+          const current = (await paseo.workspaces.ref(input.workspaceId).refresh())?.metadata ?? {};
+          const currentEntry = current[AGENTS_KEY]?.[input.agentId];
+          const live = (await agent.refresh())?.agent;
+          return !!live && !live.archivedAt && !hasActiveAgentWork(live, currentEntry) &&
+            live.provider === snapshot.provider && readSteerAction(currentEntry)?.wakeId === pending?.wakeId &&
+            scopeState(current)?.epoch === targetScope.epoch && !!await deps.keepChatHistory?.() &&
+            !await assignmentIsQuiet(paseo, pending, input.workspaceId, deps) &&
+            await staleBatchStillValid(paseo, pending?.batch) &&
+            (await steerQuotaAdmission(live, currentEntry, { ...deps, paseo }, current[AGENTS_KEY])).allowed &&
+            (await readPrivacyAdmission(live, { ...deps, paseo }, input.workspaceId)).allowed;
+        };
+        const claude = isClaudeProvider(snapshot.provider);
+        const commands = claude ? null : await agent.commands?.().catch(() => null);
+        const nativeCompact = claude || commands?.commands?.some((command: any) => command.name === "compact" && command.kind === "command");
+        if (nativeCompact) {
+          // Codex and other providers can compact out of band, without a turn hook.
+          const timeout = new AbortController();
+          let complete: () => void = () => {};
+          const observed = new Promise<void>((resolve) => { complete = resolve; });
+          let dispatched = false;
+          let subscription: PaseoAgentTimelineSubscription | null = null;
+          try {
+            if (!claude) {
+              const timeline: PaseoAgentTimelineHandle = agent.timeline;
+              subscription = timeline.subscribe(({ event }) => {
+                if (dispatched && event.type === "timeline" && event.item.type === "compaction" &&
+                    event.item.status === "completed" && event.item.trigger !== "auto") complete();
+              });
+              await subscription.ready;
+            }
+            await (deps.runCleanupFn ?? runCleanup)(paseo, input.agentId, "compact", RESUME_PENDING_REASON, {
+              workspaceId: input.workspaceId, lock, deliveryId: pending.wakeId,
+              ...(!claude ? { compactCommand: "/compact" } : {}),
+              beforeSend: async () => {
+                dispatched = await beforeSend();
+                return dispatched;
+              },
+            });
+            if (subscription) {
+              await Promise.race([observed, wait(COMPACTION_WAIT_MS, undefined, { signal: timeout.signal, ref: false })]);
+              await releaseDeliveryCompaction(paseo, input, lock, pending.wakeId);
+            }
+          } catch (error) {
+            if (!(error instanceof AgentBusyError)) console.warn(`[factory] delivery compact: ${String(error)}`);
+          } finally {
+            timeout.abort();
+            subscription?.();
+          }
+          const current = (await paseo.workspaces.ref(input.workspaceId).refresh())?.metadata ?? {};
+          entry = current[AGENTS_KEY]?.[input.agentId];
+          if (readCleanupAction(entry)) return deferred("The brief is queued behind native compaction.");
+        }
       }
     }
     let sent = pending;
@@ -1024,7 +1117,8 @@ export async function deliverSteer(
       return { ...(stagedBrief ? { stagedBrief } : {}), action: { ...pending, ...(prior?.phase === "done" ? { lastDeliveryId: prior.wakeId } : prior?.lastDeliveryId ? { lastDeliveryId: prior.lastDeliveryId } : {}) } };
     });
     if (!reserved) return deferred("A steer operation is already queued.");
-    return (await finishSteerDelivery(paseo, input, deps)) ?? deferred();
+    return (await finishSteerDelivery(paseo, input, deps,
+      routing.keepChatHistory && !input.manual && (projected?.warmth === "cold" || projected?.large === true))) ?? deferred();
   }
   const original = existing?.epoch === (scope.epoch ?? null) ? existing : null;
   const eventBatch = input.batch ?? original?.batch;
@@ -1096,6 +1190,7 @@ export async function deliverSteer(
       if (!await replacePending(paseo, input, lock, pending, { action: pending })) return deferred("Steer state changed while recording worker events.");
     }
     const stillIdle = async () => {
+      if (!input.manual && await deps.keepChatHistory?.()) return false;
       if (!await staleBatchStillValid(paseo, batch)) return false;
       const current = (await paseo.workspaces.ref(input.workspaceId).refresh())?.metadata ?? {};
       const latest = (await paseo.agents.ref(input.agentId).refresh())?.agent;

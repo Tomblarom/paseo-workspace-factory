@@ -11,10 +11,11 @@ const supervise = await import("../server/supervise.ts");
 const turnHook = await import("../server/turn-hook.ts");
 const { collectSteerStates } = await import("../server/steer-feed.ts");
 const { applyResume } = await import("../server/resume-apply.ts");
-const { deliverSteer, finishSteerDelivery } = await import("../server/steer-delivery.ts");
+const { deliverSteer, finishSteerDelivery, dispatchAssignmentReport } = await import("../server/steer-delivery.ts");
 const { LockBusy } = await import("../server/core/lock.mjs");
 import { LABEL, METADATA_KEY } from "../server/core/paseo.mjs";
 import { AGENTS_KEY } from "../server/core/agent-state.mjs";
+import { ASSIGNMENT_KEY } from "../server/core/assign.mjs";
 import { WORKERS_KEY } from "../server/core/supervision.mjs";
 import { CHECKPOINT_KEY } from "../server/core/steer.mjs";
 
@@ -97,8 +98,13 @@ function fakeClient(world) {
         setMetadata: async (patch) => {
           Object.assign(findAgent(id).metadata, structuredClone(patch));
         },
+        commands: async () => ({ commands: world.commands ?? [] }),
         timeline: {
           refetch: async () => ({ entries: structuredClone(world.timelines[id] ?? []) }),
+          subscribe: (handler) => {
+            world.onTimeline = handler;
+            return Object.assign(() => { world.onTimeline = null; }, { ready: Promise.resolve() });
+          },
         },
       }),
     },
@@ -607,11 +613,10 @@ test("a stored stale-worker brief cannot wake a steer after its worker is archiv
   assert.equal(ws.metadata[AGENTS_KEY][steer.id].action.phase, "done");
 });
 
-for (const [name, provider, minutesIdle, tokens, keepChatHistory] of [
-  ["cold Claude with Keep chat history", "claude", 6, 1000, true],
-  ["cold Codex", "codex", 31, 1000, false],
-  ["warm Codex with a large context", "codex", 1, 100_000, false],
-  ["an oversized context with unknown warmth", "codex", null, 100_000, false],
+for (const [name, provider, minutesIdle, tokens] of [
+  ["cold Codex", "codex", 31, 1000],
+  ["warm Codex with a large context", "codex", 1, 100_000],
+  ["an oversized context with unknown warmth", "codex", null, 100_000],
 ]) {
   test(`${name} rewinds before delivering a wake and assigns the next brief anchor`, async () => {
     const { wake, recheck, ws, steer, workerId, world } = deliveryFixture({ provider, minutesIdle, tokens });
@@ -630,7 +635,7 @@ for (const [name, provider, minutesIdle, tokens, keepChatHistory] of [
         world.calls.push(["rewind", ...args]);
       },
     });
-    const result = await wake({ keepChatHistory: async () => keepChatHistory, rewindClient });
+    const result = await wake({ rewindClient });
     assert.equal(result.sent, true);
     assert.equal(result.resumed, true);
     const [rewind, send] = world.calls.filter(([kind]) => kind === "rewind" || kind === "agent.send");
@@ -643,6 +648,98 @@ for (const [name, provider, minutesIdle, tokens, keepChatHistory] of [
     assert.equal(sendsTo(world, steer.id).length, 1);
   });
 }
+
+for (const [provider, minutesIdle, tokens, outcome] of [
+  ["claude", 6, 1000, "completed"], ["claude-api", 1, 100_000, "completed"], ["claude-api", 1, 100_000, "failed"],
+]) {
+  test(`${provider} delivers the original wake after native compaction ${outcome}`, async () => {
+    const { wake, ws, steer, workerId, world, client } = deliveryFixture({ provider, minutesIdle, tokens });
+    ws.metadata[WORKERS_KEY][workerId].pendingWake = { state: "done", queuedAt: at(NOW) };
+    const delivery = { keepChatHistory: async () => true, rewindClient: async () => assert.fail("must not rewind") };
+    assert.equal((await wake(delivery)).sent, false);
+    const [[, , command, { messageId }]] = world.calls.filter(([kind]) => kind === "agent.send");
+    assert.match(command, /^\/compact\b/);
+    assert.equal(ws.metadata[AGENTS_KEY][steer.id].action.renewal, "send");
+    assert.ok(ws.metadata[WORKERS_KEY][workerId].pendingWake);
+    const turnId = "t-compact";
+    world.timelines[steer.id] = [
+      { turnId, item: { type: "user_message", text: command, messageId } },
+      ...(outcome === "completed" ? [{ turnId, item: { type: "compaction", status: "completed" } }] : []),
+    ];
+    await turnHook.handleTurnAfter({ agent: { id: steer.id }, turnId, outcome: { kind: outcome } },
+      { paseo: client }, { lock: noLock, log: () => {}, delivery });
+    const sends = sendsTo(world, steer.id);
+    assert.equal(sends.length, 2);
+    assert.match(sends[1], /^\[factory\].*worker worker-1 done/s);
+    assert.equal(ws.metadata[WORKERS_KEY][workerId].pendingWake, null);
+  });
+}
+
+test("a Codex wake waits for out-of-band native compaction without a turn hook", async () => {
+  const { wake, ws, steer, world } = deliveryFixture({ provider: "codex", minutesIdle: 31 });
+  world.commands = [{ name: "compact", kind: "command" }];
+  const { promise: compactSent, resolve } = Promise.withResolvers();
+  world.onSend = (_id, command) => { if (command === "/compact") resolve(); };
+  const deliver = wake({ keepChatHistory: async () => true, rewindClient: async () => assert.fail("must not rewind") });
+  await compactSent;
+  assert.deepEqual(sendsTo(world, steer.id), ["/compact"]);
+  world.onTimeline({ agentId: steer.id, event: { type: "timeline", item: { type: "compaction", status: "completed", trigger: "manual" } } });
+  assert.equal((await deliver).sent, true);
+  assert.match(sendsTo(world, steer.id)[1], /^\[factory\].*worker worker-1 done/s);
+  assert.equal(ws.metadata[AGENTS_KEY][steer.id].action.cleanup, null);
+  assert.equal(world.onTimeline, null);
+});
+
+test("recovery delivers directly when Keep chat history is on and the provider cannot compact", async () => {
+  const { wake, ws, steer, world } = deliveryFixture({ provider: "unknown", minutesIdle: null, tokens: 100_000 });
+  world.commands = [{ name: "compact", kind: "skill" }];
+  ws.metadata[AGENTS_KEY][steer.id].needsResume = { reason: "daemon-restart", at: at(NOW - MIN) };
+  assert.equal((await wake({ keepChatHistory: async () => true, rewindClient: async () => assert.fail("must not rewind") })).sent, true);
+  assert.match(sendsTo(world, steer.id)[0], /^\[factory\].*worker worker-1 done/s);
+  assert.equal(sendsTo(world, steer.id).length, 1);
+});
+
+test("an assignment report to the warm active holder keeps the chat and records the send", async () => {
+  const { ws, steer, world, client } = deliveryFixture({ provider: "codex", minutesIdle: 1, tokens: 100_000 });
+  const source = addWorkspace(world, { metadata: {
+    [ASSIGNMENT_KEY]: { by: steer.id, requesterWorkspaceId: ws.id, epoch: 3, reportActionId: "report",
+      reportText: "completed assignment", reportedAt: null },
+  } });
+  const deps = { lock: noLock, now: () => at(NOW), keepChatHistory: async () => true,
+    rewindClient: async () => assert.fail("must not rewind") };
+  assert.equal((await dispatchAssignmentReport(client, source.id, deps)).status, "sent");
+  assert.deepEqual(sendsTo(world, steer.id), ["completed assignment"]);
+  assert.ok(source.metadata[ASSIGNMENT_KEY].reportedAt);
+  assert.equal(ws.metadata[AGENTS_KEY][steer.id].action.renewal, "send");
+});
+
+test("recovery sends a brief from a previously blocked rewind without attempting it again", async () => {
+  const { ws, steer, world, client } = deliveryFixture({ provider: "codex", minutesIdle: 31 });
+  ws.metadata[AGENTS_KEY][steer.id].action = {
+    kind: "delivery", wakeId: "old-wake", epoch: 3, phase: "blocked", renewal: "rewind",
+    note: "worker finished", queuedAt: at(NOW), lastError: "no usable rewind point",
+  };
+  const result = await finishSteerDelivery(client, { workspaceId: ws.id, agentId: steer.id }, {
+    lock: noLock, keepChatHistory: async () => true, buildBrief: async () => "Checkpoint",
+    rewindClient: async () => assert.fail("must not rewind"),
+  });
+  assert.equal(result.status, "sent");
+  assert.deepEqual(sendsTo(world, steer.id), ["[Factory resume]\nCheckpoint\n\nworker finished"]);
+});
+
+test("recovery releases an expired optional compact and does not restore its cleanup record", async () => {
+  const { ws, steer, world, client } = deliveryFixture({ minutesIdle: 6 });
+  ws.metadata[AGENTS_KEY][steer.id].action = {
+    kind: "activate", wakeId: "activation", epoch: 3, phase: "ready", renewal: "send", queuedAt: at(NOW),
+    note: "Continue as active steer", cleanup: { kind: "compact", reason: "resume", at: at(Date.now() - 2 * MIN) },
+  };
+  const result = await finishSteerDelivery(client, { workspaceId: ws.id, agentId: steer.id }, {
+    lock: noLock, keepChatHistory: async () => true, buildBrief: async () => "Checkpoint",
+  });
+  assert.equal(result.status, "sent");
+  assert.deepEqual(sendsTo(world, steer.id), ["[Factory resume]\nCheckpoint\n\nContinue as active steer"]);
+  assert.equal(ws.metadata[AGENTS_KEY][steer.id].action.cleanup, null);
+});
 
 test("resume without a rewind point exposes the fallback in the result and the steer pill", async () => {
   const { ws, client, steer, world, deps, buildBrief } = deliveryFixture({ provider: "codex", minutesIdle: 31, tokens: 110_000 });

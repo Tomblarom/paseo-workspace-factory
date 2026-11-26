@@ -929,6 +929,24 @@ test("sweepOnce records fresh-recommended once per idle period, without sending"
   assert.deepEqual(second, []);
 });
 
+test("idle cleanup keeps steer history even when clear and rewind are enabled", async () => {
+  const claude = sweepWorld();
+  const codex = sweepWorld({ provider: "codex", model: "gpt-6.2-sol", idleMs: 45 * MIN });
+  let rewinds = 0;
+  for (const { world, agent, nowMs } of [claude, codex]) {
+    const results = await sweep.sweepOnce({
+      paseo: fakeClient(world),
+      settings: { ...CLEANUP_DEFAULTS, mode: "clear", idleMinutes: 30, clearAcknowledged: true,
+        providers: ["claude", "codex"], rewindFresh: true },
+      nowMs, log: () => {}, lock: noLock, keepChatHistory: async () => true,
+      rewindFn: async () => { rewinds++; return { status: "rewound" }; },
+    });
+    assert.deepEqual(sendsTo(world, agent.id), []);
+    if (agent.provider === "codex") assert.equal(results[0]?.action, "fresh-recommended");
+  }
+  assert.equal(rewinds, 0);
+});
+
 test("sweepOnce maps mode clear to /compact for Codex, never /clear", async () => {
   const { world, agent, nowMs } = sweepWorld({
     provider: "codex",

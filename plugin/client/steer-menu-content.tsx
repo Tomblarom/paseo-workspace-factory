@@ -19,7 +19,7 @@ import {
   factorySwitch,
   factorySwitchPreview,
 } from "../shared/factory.js";
-import { factorySteerMenuSettings } from "../shared/settings.js";
+import { factoryResumeSettings, factorySteerMenuSettings } from "../shared/settings.js";
 import {
   STEER_MENU_LABELS,
   isExpiredPreviewError,
@@ -40,7 +40,7 @@ type SwitchFlow = {
   preview: RpcOutput<typeof factorySwitchPreview>;
 };
 type ResumeFlow = { kind: "resume"; brief: RpcOutput<typeof factoryResume> };
-type FreshFlow = { kind: "fresh"; preview: RpcOutput<typeof factoryFreshPreview>; note: string | null };
+type FreshFlow = { kind: "fresh"; preview: RpcOutput<typeof factoryFreshPreview> };
 type SettingsFlow = {
   kind: "settings";
   choices: RpcOutput<typeof factorySteerSettingsPreview>;
@@ -121,6 +121,7 @@ export function SteerMenu({
   const callSettings = useRpc(factorySteerSettings);
   const callRevert = useRpc(factorySteerSettingsRevert);
   const menuSettings = useSettings(factorySteerMenuSettings);
+  const resumeSettings = useSettings(factoryResumeSettings);
 
   const [rows, setRows] = useState<SteerPillRow[] | null>(null);
   const onEvent = useCallback((event: unknown) => {
@@ -143,6 +144,7 @@ export function SteerMenu({
   );
   const keepChatHistory =
     menuSettings.status === "ready" ? menuSettings.values.keepChatHistory === true : false;
+  const resumeOptions = { keepChatHistory, clearProviders: resumeSettings.status === "ready" ? resumeSettings.values.providers : undefined };
 
   const composerAgentId = postStage?.target.agentId ?? agentId;
   const [destComposer] = useComposers({ agentId: composerAgentId });
@@ -395,7 +397,7 @@ export function SteerMenu({
 
   const startResume = (current: SteerPillRow): void => {
     void run(async () => {
-      const route = resumeRouteFor(current, { keepChatHistory });
+      const route = resumeRouteFor(current, resumeOptions);
       if (route.kind === "blocked") {
         setError(route.reason);
         return;
@@ -413,7 +415,7 @@ export function SteerMenu({
         throw new Error("This tab has no steer slot.");
       }
       const preview = await callFreshPreview({ workspaceId, slot: current.slot });
-      setFlow({ kind: "fresh", preview, note: route.note });
+      setFlow({ kind: "fresh", preview });
     });
   };
 
@@ -733,7 +735,7 @@ export function SteerMenu({
     if (flow.kind === "switch") {
       const preview = flow.preview;
       const targetRow = rows?.find((entry) => entry.agentId === flow.toAgentId) ?? null;
-      const recoveryRoute = targetRow ? resumeRouteFor(targetRow, { keepChatHistory }) : null;
+      const recoveryRoute = targetRow ? resumeRouteFor(targetRow, resumeOptions) : null;
       const canRecover = targetRow?.state === "needs-resume" &&
         (recoveryRoute?.kind === "resume-apply" || recoveryRoute?.kind === "fresh");
       return (
@@ -762,7 +764,7 @@ export function SteerMenu({
           <Text style={styles.warn}>
             {self && !self.large && (self.warmth === "warm" || self.warmth === "cooling")
               ? "The resume brief goes into this chat."
-              : "Resuming may clear the context in this tab."}
+              : "This clears the context in this tab and sends a resume brief."}
           </Text>
           <Text style={styles.label}>{flow.brief.brief.slice(0, 400)}</Text>
           {actionButton("confirm-resume", STEER_MENU_LABELS.confirmResume, "Confirm resume", () =>
@@ -776,13 +778,12 @@ export function SteerMenu({
     }
     if (flow.kind === "fresh") {
       const preview = flow.preview;
-      const rewind = preview.refreshMode !== "new-agent";
+      const rewind = preview.refreshMode === "rewind";
       return (
         <View style={{ gap: 4 }}>
           <Text style={styles.section}>
             {rewind ? "Refresh this chat (rewind)" : "Refresh with a new agent"}
           </Text>
-          {flow.note ? <Text style={styles.body}>{flow.note}</Text> : null}
           <Text style={styles.warn}>
             {rewind
               ? "This resets the chat and removes later messages from this tab."

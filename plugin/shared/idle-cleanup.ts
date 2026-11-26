@@ -97,6 +97,11 @@ export const RESUME_CLEAR_DEFAULTS: ResumeClearSettings = {
   recentHours: 24,
 };
 
+export function isClaudeProvider(provider: unknown): provider is "claude" | "claude-api" {
+  // The claude-api provider extends Claude Code with different authentication.
+  return provider === "claude" || provider === "claude-api";
+}
+
 export type BootResumeReason = "open-turn" | "active-recent" | "recent";
 
 /**
@@ -164,7 +169,8 @@ export function mayResumeClear(
   settings: ResumeClearSettings | null | undefined,
 ): boolean {
   if (typeof provider !== "string" || !provider) return false;
-  return (settings?.providers ?? RESUME_CLEAR_DEFAULTS.providers).includes(provider);
+  const providers = settings?.providers ?? RESUME_CLEAR_DEFAULTS.providers;
+  return providers.includes(provider) || (provider === "claude-api" && providers.includes("claude"));
 }
 
 /**

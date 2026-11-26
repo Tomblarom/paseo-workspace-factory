@@ -188,6 +188,7 @@ export interface SweepDeps {
   zerosub?: ZerosubState;
   /** Fail-soft ZeroSub supplier for the per-account compact check. */
   getZerosub?: () => Promise<ZerosubState>;
+  keepChatHistory?: () => Promise<boolean>;
   /** Exhaustion threshold for the compact check; the quota default applies. */
   exhaustedPct?: number;
   /** Lock for the entry write; tests only (defaults to the real one). */
@@ -262,6 +263,7 @@ export async function sweepOnce({
   exhaustedPct,
   lock,
   rewindFn,
+  keepChatHistory,
 }: SweepDeps): Promise<SweepResult[]> {
   // A mode change re-probes after an effect failure.
   if (lastMode !== null && lastMode !== settings.mode) effectBlock = null;
@@ -290,7 +292,7 @@ export async function sweepOnce({
   const quotaCtx = { zerosub, exhaustedPct };
   for (const agent of state.agents ?? []) {
     try {
-      const result = await sweepAgent(paseo, agent, state, lookup, liveIds, settings, nowMs, log, quota, quotaCtx, lock, rewindFn);
+      const result = await sweepAgent(paseo, agent, state, lookup, liveIds, settings, nowMs, log, quota, quotaCtx, lock, rewindFn, keepChatHistory);
       if (result) results.push(result);
     } catch (error) {
       log(
@@ -335,6 +337,7 @@ async function sweepAgent(
   quotaCtx: { zerosub?: ZerosubState; exhaustedPct?: number } = {},
   lock?: (name: string, fn: (held: { verify: () => void }) => Promise<any>) => Promise<any>,
   rewindFn?: SweepRewind,
+  keepChatHistory?: SweepDeps["keepChatHistory"],
 ): Promise<SweepResult | null> {
   const scope = scopeForAgent(agent, lookup);
   const reads = scope ? scopeReads(scope) : null;
@@ -367,12 +370,14 @@ async function sweepAgent(
   }
   const modelOf = (snapshot: any): string | null =>
     typeof snapshot?.model === "string" ? snapshot.model : null;
+  const preserveChat = async () => cleanupIdentity(agent.labels)?.role === "steer" && !!await keepChatHistory?.();
+  if (first.action === "clear" && await preserveChat()) return null;
   const wantRewind = shouldRewindFresh({
     action: first.action,
     provider: agent?.provider,
     model: modelOf(agent),
     settings,
-  });
+  }) && !await preserveChat();
   if (first.action === "fresh-recommended" && !wantRewind) {
     // Hint only: record it (once per idle period, via the decision's
     // cooldown) without sending, capping, or re-checking — the write is
@@ -467,6 +472,7 @@ async function sweepAgent(
       outcome = await run(agent.id, {
         previousBriefId: typeof briefId === "string" ? briefId : null,
         beforeRewind: async () => {
+          if (await preserveChat()) return false;
           const latest = (await paseo.agents.ref(agent.id).refresh().catch(() => null))?.agent;
           return !!latest && !latest.archivedAt && latest.status === "idle" && !hasActiveAgentWork(latest);
         },
@@ -548,6 +554,7 @@ async function sweepAgent(
       workspaceId: reads.mainId,
       liveIds,
       sessionId,
+      ...(kind === "clear" ? { beforeSend: async () => !await preserveChat() } : {}),
       ...(lock ? { lock } : {}),
     });
   } catch (error) {
@@ -573,6 +580,9 @@ export interface RunCleanupOptions {
   note?: string;
   /** Revalidate the delivery that requested cleanup before dispatch. */
   beforeSend?: () => Promise<boolean>;
+  /** Add a compact to this queued send without replacing it. */
+  deliveryId?: string;
+  compactCommand?: string;
   /** Lock for the entry write; tests only (defaults to the real one). */
   lock?: (name: string, fn: (held: { verify: () => void }) => Promise<any>) => Promise<any>;
 }
@@ -632,9 +642,12 @@ export async function runCleanup(
     agentId,
     patch: (latest: any) => {
       const action = readSteerAction(latest);
+      const clearing = action?.renewal === "clear" && action.phase === "renewing";
+      const compacting = kind === "compact" && !!opts.deliveryId && action?.wakeId === opts.deliveryId &&
+        action?.renewal === "send" && action.phase === "ready" && !action.attemptedAt;
       if (readCleanupAction(latest) || hasActiveAgentWork(live, latest) ||
-          (action && action.phase !== "done" && !(action.renewal === "clear" && action.phase === "renewing"))) return null;
-      return { ...patch, action: { ...(action?.renewal === "clear" && action.phase === "renewing" ? action : { kind: "cleanup", wakeId: messageId, phase: "renewing" }), cleanup: pendingAction } };
+          (opts.deliveryId ? !compacting : action && action.phase !== "done" && !clearing)) return null;
+      return { ...patch, action: { ...(clearing || compacting ? action : { kind: "cleanup", wakeId: messageId, phase: "renewing" }), cleanup: pendingAction } };
     },
     liveIds,
     guard: async ({ held, metadata }: any) => {
@@ -657,7 +670,7 @@ export async function runCleanup(
       throw new AgentBusyError("The agent changed while preparing cleanup.");
     }
     dispatched = true;
-    await sendCleanupCommand(paseo, agentId, kind === "clear" ? CLEAR_COMMAND : COMPACT_COMMAND, messageId);
+    await sendCleanupCommand(paseo, agentId, kind === "clear" ? CLEAR_COMMAND : opts.compactCommand ?? COMPACT_COMMAND, messageId);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await updateEntry({
@@ -685,6 +698,7 @@ export interface TimerDeps {
   getZerosub?: () => Promise<ZerosubState>;
   /** Quota settings supplier for the exhaustion threshold (defaults apply). */
   getQuotaSettings?: () => Promise<any>;
+  keepChatHistory?: SweepDeps["keepChatHistory"];
 }
 
 /** Fail-soft exhaustion threshold from the quota settings, else the default. */
@@ -708,6 +722,7 @@ export function startCleanupTimer({
   log = console.log,
   getZerosub,
   getQuotaSettings,
+  keepChatHistory,
 }: TimerDeps): () => void {
   let stopped = false;
   let sweeping = false;
@@ -724,6 +739,7 @@ export function startCleanupTimer({
           paseo,
           settings,
           log,
+          keepChatHistory,
           ...(getZerosub ? { getZerosub } : {}),
           ...(exhaustedPct !== undefined ? { exhaustedPct } : {}),
         });
