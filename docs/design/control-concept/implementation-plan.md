@@ -777,8 +777,20 @@ without overflow, edge move actions and the empty advisor picker were
 disabled, and closing the daemon WebSocket showed the offline label, disabled
 refresh in Activity and Resources and recovered on reconnect. Playwright's
 `setOffline` leaves an open localhost WebSocket connected, so the check routes
-and closes the socket instead. P1/P3 mutation acceptance (successful creation,
-standby activation, Fresh recovery) remains open for an isolated workspace.
+and closes the socket instead.
+
+P6 acceptance (2026-11-27, Paseo 0.17.4): the reworked Overview, Steers,
+Resources and Activity views passed the same 1366/390-pixel light and dark
+comparison and the WebSocket-close offline check. Model labels use the catalog
+name, and Resources reads the routing evidence from workspace metadata. Keep
+chat history was saved on the host as `keepChatHistory: true`. P1/P3 mutation
+acceptance in an isolated scratch workspace passed through the real UI:
+activation of a standby without a controller, Create Steer followed by
+activation against an idle live controller, and Fresh with a rewind receipt
+without a staging error. Activate sends the continuation directly, as
+section 6 of the concept requires. One pill click reached the server twice, and
+the second call failed on the workspace lock. Overlapping activations of the
+same tab and epoch now share one result.
 
 Track read-only dispatch receipt recovery with the existing
 [Paseo issue #9947](https://github.com/getpaseo/paseo/issues/9947) and
