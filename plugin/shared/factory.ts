@@ -828,6 +828,7 @@ const resourceWindow = z.object({
 
 const resourceQuota = z.object({
   provider: z.string(),
+  providerLabel: z.string(),
   alias: z.string(),
   limited: z.boolean(),
   limitedUntil: z.string().nullable(),
@@ -847,6 +848,7 @@ export const factoryWorkspaceResources = defineRpc({
     workspaceId: z.string(),
     warnPct: z.number(),
     exhaustedPct: z.number(),
+    quotaSampleMinutes: z.number(),
     pools: z.array(resourceQuota),
     accounts: z.array(resourceQuota),
     zeroSubState: z.enum(["available", "unavailable"]),
@@ -855,7 +857,9 @@ export const factoryWorkspaceResources = defineRpc({
       candidates: z.array(z.object({
         profile: z.string(),
         provider: z.string().nullable(),
+        providerLabel: z.string().nullable(),
         model: z.string().nullable(),
+        modelLabel: z.string().nullable(),
         poolAlias: z.string().nullable(),
         decision: z.discriminatedUnion("state", [
           z.object({ state: z.literal("selected"), accountAlias: z.string().nullable() }),

@@ -1412,12 +1412,12 @@ export async function getWorkspaceResources(
   loader: ConfigLoader,
   extra?: ZerosubHandlerExtra & { getQuotaSettings?: () => Promise<{ quotaSampleMinutes?: number } | null> },
 ): Promise<WorkspaceResources> {
-  const [{ config, snapshot, repoPublic, selection, zerosub, nowMs, exclusions }, quotaSettings] = await Promise.all([
+  const [{ config, snapshot, entries, repoPublic, selection, zerosub, nowMs, exclusions }, quotaSettings] = await Promise.all([
     resolveWorkerSelection(paseo, loader, { exactWorkspaceId: workspaceId }, extra),
     extra?.getQuotaSettings?.().catch(() => null),
   ]);
   return shapeWorkspaceResources({
-    workspaceId, config, repoPublic, zerosub, nowMs, exclusions, agents: snapshot.agents,
+    workspaceId, config, repoPublic, zerosub, nowMs, exclusions, agents: snapshot.agents, providers: entries,
     snapshot: getQuotaSnapshot(), quotaSampledAt: getQuotaSampledAt(), quotaSampleMinutes: quotaSettings?.quotaSampleMinutes,
     selectedIndex: selection.profile ? selection.skipped.length : null,
     selectedAccount: selection.zerosubAccount,

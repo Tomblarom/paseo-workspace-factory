@@ -159,15 +159,15 @@ test("workspace Resources exposes current, stale and unavailable provider and ac
     { id: "weekly", usedPct: 0, resetsAt: weekReset },
   ] } }]);
   const zerosub = normalizeZerosubState({ accounts: [
-    { id: "a-current", family: "claude", usage: { fetchedAt: SAMPLED, windows: [
-      { id: "5h", usedPercent: 98, resetsAt: pastReset },
-      { id: "weekly", usedPercent: 20, resetsAt: futureReset },
+    { id: "a-current", family: "claude", auth: "subscription", usage: { fetchedAt: SAMPLED, windows: [
+      { id: "five_hour", usedPercent: 98, resetsAt: pastReset },
+      { id: "seven_day_sonnet", usedPercent: 20, resetsAt: futureReset },
       { id: "model-only", model: "opus", usedPercent: 50, resetsAt: futureReset },
     ] } },
-    { id: "b-old", family: "claude", usage: { fetchedAt: olderSample, windows: [
+    { id: "b-old", family: "claude", limitedUntil: weekReset, usage: { fetchedAt: olderSample, windows: [
       { id: "5h", usedPercent: 70, resetsAt: futureReset },
     ] } },
-    { id: "c-unknown", family: "claude", usage: { windows: [{ id: "5h", usedPercent: 11 }] } },
+    { id: "c-unknown", family: "claude", auth: "api", usage: { windows: [{ id: "5h", usedPercent: 11 }] } },
   ] }, { now: NOW });
   const input = {
     workspaceId: "wks_app", config: fakeConfig(), nowMs: NOW, agents: [], snapshot, zerosub,
@@ -186,6 +186,16 @@ test("workspace Resources exposes current, stale and unavailable provider and ac
     [["stale", null, futureReset]],
     [["unavailable", null, null]],
   ]);
+  assert.deepEqual(view.accounts.map(({ alias, windows }) => [alias, windows.map((item) => item.alias)]), [
+    ["Subscription 1", ["5-hour", "Sonnet weekly"]],
+    ["Account 2", ["5-hour"]],
+    ["API account 3", ["5-hour"]],
+  ]);
+  assert.ok(view.pools.every(({ alias }) => alias === "Provider pool"));
+  assert.deepEqual(view.accounts.map(({ limited, limitedUntil }) => [limited, limitedUntil]), [
+    [false, null], [true, weekReset], [false, null],
+  ]);
+  assert.equal(view.quotaSampleMinutes, 10);
   assert.equal(view.zeroSubState, "available");
 
   const old = shapeWorkspaceResources({ ...input, quotaSampledAt: Date.parse(olderSample), zerosub: null });
@@ -207,6 +217,7 @@ test("workspace Resources exposes current, stale and unavailable provider and ac
   assert.equal(uncertain.pools.find(({ provider }) => provider === "codex").windows[0].state, "unavailable");
 
   const slowerCadence = shapeWorkspaceResources({ ...input, quotaSampledAt: Date.parse(olderSample), quotaSampleMinutes: 15 });
+  assert.equal(slowerCadence.quotaSampleMinutes, 15);
   assert.equal(slowerCadence.pools.find(({ provider }) => provider === "codex").windows[1].state, "available");
   assert.equal(slowerCadence.accounts[1].windows[0].state, "available");
   assert.deepEqual(shapeQuotaView({ ...input, sampledAt: SAMPLED }).pools[0], {

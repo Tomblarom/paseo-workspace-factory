@@ -631,6 +631,10 @@ test("pickWorker, listWorkersModels and startWorkerRpc agree and record --failed
 
 test("workspace Resources binds an exact enrolled workspace even with shared paths and scope IDs", async () => {
   const world = makeWorld();
+  world.providers[0].label = "Codex";
+  world.providers[0].models[0].label = "GPT-6.2 Sol";
+  world.providers[0].models[0].description = "private-catalog-details";
+  world.providers[1].models[0].label = "personal@example.com";
   const [workspace] = world.workspaces;
   const otherId = "wks_other";
   const other = structuredClone(workspace);
@@ -645,7 +649,7 @@ test("workspace Resources binds an exact enrolled workspace even with shared pat
   world.agents.push({ ...world.agents[0], id: "foreign-agent", workspaceId: otherId, provider: "foreign-provider" });
   const now = Date.now();
   const account = (id, family) => ({
-    id, family, label: "personal@example.com", sampledAt: new Date(now).toISOString(),
+    id, family, auth: "subscription", label: "personal@example.com", sampledAt: new Date(now).toISOString(),
     windows: [{ id: "private-window-id", usedPct: 12, resetsAt: new Date(now + 60_000).toISOString() }],
   });
   const zerosub = {
@@ -662,12 +666,17 @@ test("workspace Resources binds an exact enrolled workspace even with shared pat
   assert.deepEqual(factoryWorkspaceResources.output.parse(view), view);
   assert.equal(view.workspaceId, MAIN);
   assert.deepEqual(view.pools.map(({ provider }) => provider).sort(), ["claude", "codex"]);
+  assert.equal(view.pools.find(({ provider }) => provider === "codex").providerLabel, "Codex");
   assert.deepEqual(view.accounts.map(({ provider }) => provider), ["codex"]);
+  assert.equal(view.accounts[0].alias, "Subscription 1");
   assert.equal(view.accounts[0].windows[0].usedPct, 12);
+  assert.equal(view.accounts[0].windows[0].alias, "Window 1");
+  assert.equal(view.workerSelection.candidates[0].modelLabel, "GPT-6.2 Sol");
+  assert.equal(view.workerSelection.candidates[1].modelLabel, null);
   assert.deepEqual(view.workerSelection.candidates[0].decision, {
     state: "selected", accountAlias: view.accounts[0].alias,
   });
-  assert.doesNotMatch(JSON.stringify(view), /wks_other|foreign-|private-codex-id|personal@|private-window-id/);
+  assert.doesNotMatch(JSON.stringify(view), /wks_other|foreign-|private-codex-id|personal@|private-window-id|private-catalog-details/);
 
   const otherView = await read(otherId);
   assert.equal(otherView.workspaceId, otherId);

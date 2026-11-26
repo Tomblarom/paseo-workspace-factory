@@ -1,6 +1,7 @@
 import type { RpcOutput } from "@getpaseo/plugin";
+import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import { factoryWorkspaceResources, resourceWorkerExclusion } from "../shared/factory.js";
-import { isQuotaSampleStale } from "../shared/defaults.mjs";
+import { isQuotaSampleStale, QUOTA_SAMPLE_MINUTES } from "../shared/defaults.mjs";
 import { workerPriority } from "./core/config.mjs";
 import { LABEL, parentOf } from "./core/paseo.mjs";
 import {
@@ -12,6 +13,22 @@ import type { ZerosubState } from "./zerosub-runtime.js";
 
 export type WorkspaceResources = RpcOutput<typeof factoryWorkspaceResources>;
 type ResourceWindow = WorkspaceResources["pools"][number]["windows"][number];
+type ProviderCatalog = Awaited<ReturnType<PluginHandlerContext["paseo"]["providers"]["snapshot"]>>["entries"];
+
+// ZeroSub's normalized windows keep the ID, which can also be provider-supplied.
+const windowAliases = new Map([
+  ["5h", "5-hour"], ["five_hour", "5-hour"],
+  ["weekly", "Weekly"], ["seven_day", "Weekly"],
+  ["seven_day_opus", "Opus weekly"], ["seven_day_sonnet", "Sonnet weekly"],
+  ["weekly_fable", "Fable weekly"],
+  ["primary", "Primary"], ["secondary", "Secondary"],
+]);
+
+function catalogLabel(value: unknown): string | null {
+  const label = typeof value === "string" ? value.trim() : "";
+  // Catalog names are display text. Paths, handles and control characters stay out.
+  return /^[\p{L}\p{N}][\p{L}\p{N} .,_+()'&·–—-]{0,79}$/u.test(label) ? label : null;
+}
 
 function stampMs(value: unknown): number | null {
   const ms = typeof value === "string" ? Date.parse(value) : NaN;
@@ -23,12 +40,13 @@ function iso(ms: number | null): string | null {
 }
 
 export function shapeWorkspaceResources({
-  workspaceId, config, agents, zerosub, snapshot, quotaSampledAt, quotaSampleMinutes,
+  workspaceId, config, agents, providers = [], zerosub, snapshot, quotaSampledAt, quotaSampleMinutes,
   nowMs, repoPublic, selectedIndex, selectedAccount, exclusions,
 }: {
   workspaceId: string;
   config: any;
   agents: any[];
+  providers?: ProviderCatalog;
   zerosub: ZerosubState;
   snapshot: Record<string, any> | null;
   quotaSampledAt: number | null;
@@ -39,14 +57,20 @@ export function shapeWorkspaceResources({
   selectedAccount: string | null;
   exclusions: ReadonlyMap<number, string>;
 }): WorkspaceResources {
+  const sampleMinutes = typeof quotaSampleMinutes === "number" && Number.isFinite(quotaSampleMinutes) && quotaSampleMinutes > 0
+    ? quotaSampleMinutes : QUOTA_SAMPLE_MINUTES;
+  const catalog = new Map(providers.map((entry) => [entry.provider.toLowerCase(), entry]));
+  const providerLabel = (provider: string) => catalogLabel(catalog.get(provider)?.label)
+    ?? provider.charAt(0).toUpperCase() + provider.slice(1);
+
   function window(alias: string, pct: unknown, sampledAt: number | null, reset: unknown): ResourceWindow {
     const resetMs = stampMs(reset);
     const expired = resetMs !== null && resetMs <= nowMs;
-    const usedPct = typeof pct === "number" && Number.isFinite(pct) ? pct : null;
+    const usedPct = typeof pct === "number" && Number.isFinite(pct) && pct >= 0 ? pct : null;
     const state = usedPct === null ? "unavailable"
       : expired ? "stale"
       : sampledAt === null ? "unavailable"
-      : isQuotaSampleStale(sampledAt, nowMs, quotaSampleMinutes) ? "stale"
+      : isQuotaSampleStale(sampledAt, nowMs, sampleMinutes) ? "stale"
       : "available";
     return { alias, usedPct: state === "available" ? usedPct : null,
       sampledAt: iso(sampledAt), resetsAt: iso(resetMs), state };
@@ -63,7 +87,7 @@ export function shapeWorkspaceResources({
     const key = JSON.stringify([provider, pool]);
     const existing = pools.get(key);
     if (existing) return existing.alias;
-    const alias = `Quota pool ${pools.size + 1}`;
+    const alias = pool === provider ? "Provider pool" : `Quota pool ${pools.size + 1}`;
     pools.set(key, { provider, pool, alias });
     return alias;
   }
@@ -94,9 +118,13 @@ export function shapeWorkspaceResources({
     const configured = config.profiles?.[profile];
     const provider = profileFamily(configured);
     const model = configured?.model ?? null;
+    const modelLabel = catalogLabel(catalog.get(provider)?.models?.find(({ id }) => id === model)?.label);
     const poolAlias = provider ? addPool(provider, profilePool(configured)) : null;
     for (const account of familyAccounts(zerosub, provider)) addAccount(account, model);
-    return { profile, provider: provider || null, model, poolAlias };
+    return {
+      profile, provider: provider || null, providerLabel: provider ? providerLabel(provider) : null,
+      model, modelLabel, poolAlias,
+    };
   });
 
   // Aliases belong to this snapshot. ZeroSub display labels can hold personal
@@ -105,18 +133,25 @@ export function shapeWorkspaceResources({
   const accounts = [...relevantAccounts.values()]
     .sort((a, b) => a.account.id.localeCompare(b.account.id))
     .map(({ account, models }, index) => {
-      const alias = `Account ${index + 1}`;
+      const kind = account.auth === "subscription" ? "Subscription" : account.auth === "api" ? "API account" : "Account";
+      const alias = `${kind} ${index + 1}`;
       accountAliases.set(account.id, alias);
       const sampledAt = stampMs(account.sampledAt);
       const windows: ResourceWindow[] = (account.windows ?? [])
         .filter((item: any) => [...models].some((model) => windowAppliesToModel(item, model)))
-        .map((item: any, index: number) => window(`Window ${index + 1}`, item.usedPct, sampledAt, item.resetsAt));
+        .map((item: any, index: number) => window(
+          windowAliases.get(item.id) ?? `Window ${index + 1}`, item.usedPct, sampledAt, item.resetsAt,
+        ));
       if (windows.length === 0) {
         const pct = account.windows?.length ? null : account.maxUsedPct;
         windows.push(window("Reported usage", pct, sampledAt, null));
       }
       const limitedUntil = activeLimit(account.limitedUntil);
-      return { provider: account.family, alias, limited: account.exhausted === true || limitedUntil !== null, limitedUntil, windows };
+      const provider = account.family.toLowerCase();
+      return {
+        provider, providerLabel: providerLabel(provider), alias, windows, limitedUntil,
+        limited: account.exhausted === true || limitedUntil !== null,
+      };
     });
   const accountAlias = selectedAccount ? accountAliases.get(selectedAccount) ?? null : null;
 
@@ -124,14 +159,19 @@ export function shapeWorkspaceResources({
     workspaceId,
     warnPct: config.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct,
     exhaustedPct: config.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct,
+    quotaSampleMinutes: sampleMinutes,
     pools: [...pools.values()].map(({ provider, pool, alias }) => {
       const entry = quotaEntry(snapshot, pool);
       const sampledAt = !entry ? null : entry.sampledAt === undefined ? quotaSampledAt : stampMs(entry.sampledAt);
       const limitedUntil = activeLimit(entry?.limitUntil ?? entry?.limitedUntil);
-      return { provider, alias, limited: entry?.exhausted === true || limitedUntil !== null, limitedUntil, windows: [
-        window("Session", quotaPct(entry), sampledAt, entry?.resetsAt ?? entry?.resetAt),
-        window("Weekly", entry?.weeklyPct ?? entry?.weeklyUsedPct, sampledAt, entry?.weeklyResetAt),
-      ] };
+      return {
+        provider, providerLabel: providerLabel(provider), alias, limitedUntil,
+        limited: entry?.exhausted === true || limitedUntil !== null,
+        windows: [
+          window("Session", quotaPct(entry), sampledAt, entry?.resetsAt ?? entry?.resetAt),
+          window("Weekly", entry?.weeklyPct ?? entry?.weeklyUsedPct, sampledAt, entry?.weeklyResetAt),
+        ],
+      };
     }),
     accounts,
     zeroSubState: zerosub === null ? "unavailable" : "available",
