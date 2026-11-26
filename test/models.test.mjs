@@ -3,13 +3,10 @@
 // and reuse validateConfig()/validateProfilesAgainstCatalog() from plugin/server/core/config.mjs.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { validateConfig } from '../plugin/server/core/config.mjs';
 import {
   flagValue, formatCatalog, parseProviderModel, planSteerRemove, planSteerSet,
-  planWorkerSet, previewConfig, writeConfigAtomic,
+  planWorkerSet,
 } from '../plugin/server/core/models.mjs';
 
 const CONFIG = {
@@ -184,24 +181,4 @@ test('worker set 1 with provider/model creates the profile and inserts it', () =
   assert.deepEqual(moved.after, ['muse'], 're-inserting the same profile moves it, no duplicate');
   const stored = planWorkerSet(CONFIG, PROVIDERS, { n: 1, spec: 'codex/nope' });
   assert.match(stored.warnings.join('\n'), /not startable/);
-});
-
-test('atomic write keeps the file mode and leaves no tmp file', async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), 'wsf-models-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const file = join(dir, 'config.json');
-  writeFileSync(file, '{}\n');
-  chmodSync(file, 0o640);
-  const planned = planSteerSet(CONFIG, PROVIDERS, {
-    target: 'B', spec: 'codex/gpt-6.2-sol', thinking: 'low', mode: 'auto',
-  });
-  await writeConfigAtomic(file, planned.config);
-  assert.equal(statSync(file).mode & 0o777, 0o640);
-  assert.equal(readFileSync(file, 'utf8'), previewConfig(planned.config));
-  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), planned.config);
-  assert.ok(!readdirSync(dir).some((name) => name.includes('.tmp.')), 'no tmp file left');
-
-  const fresh = join(dir, 'new.json');
-  await writeConfigAtomic(fresh, CONFIG);
-  assert.equal(statSync(fresh).mode & 0o777, 0o600);
 });

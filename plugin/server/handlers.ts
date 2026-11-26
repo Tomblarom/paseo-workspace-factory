@@ -1520,7 +1520,7 @@ export async function previewSteerAdd(
   loader: ConfigLoader,
   hostSettings: HostSettingsReader | null,
 ): Promise<any> {
-  if (!hostSettings) throw new Error("Factory settings are not available; edit the config file instead");
+  if (!hostSettings) throw new Error("Factory settings are not available; open Factory settings and save them again");
   const state = await hostSettings.read();
   if (state.status !== "ready") {
     throw new Error(`Factory settings are ${state.status}: ${(state as any).error ?? "unreadable"}; open the settings page and save them again`);

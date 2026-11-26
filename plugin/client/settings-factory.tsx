@@ -39,10 +39,10 @@ const WORKERS_INFO =
   "The factory starts workers using the first available profile in this order.";
 
 const EFFECTIVE_INFO =
-  "The factory uses the effective lists below. Editing the factory configuration here sets the steer slots and worker order from this page. Profiles from the config file remain available.";
+  "The factory uses the effective lists below. This page is the only source of the factory configuration: steer slots, worker order and profiles.";
 
 const HOST_INFO =
-  "An empty field uses the value from the config file. Fill in both fields when setting up a host without a config file.";
+  "Both fields are required. Fill in the GitHub owner and the checkout root to run the factory on this host.";
 
 const PROFILES_INFO =
   "A profile is a named choice of provider, model, thinking level and permission mode. Steers and workers refer to profiles by name, so you change a model in one place.";
@@ -141,7 +141,7 @@ function FactoryConfigSections({ theme, layout }: PluginSurfaceProps) {
 
   const settingsRevision = configState.status === "ready" ? configState.revision : null;
   useEffect(() => {
-    // Effective lists come from the server (file + saved settings + live
+    // Effective lists come from the server (saved settings + live
     // catalog); refresh after every successful save.
     if (settingsRevision === null) return;
     let cancelled = false;

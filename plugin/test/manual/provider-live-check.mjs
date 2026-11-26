@@ -15,7 +15,6 @@ import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import { connect } from "../../server/core/paseo.mjs";
 import { configureRuntime } from "../../server/core/runtime.mjs";
-import { loadConfig } from "../../server/core/config.mjs";
 
 const STEPS = ["checkpoint", "interruption", "handoff", "compact", "clear", "wake", "advisor", "limits", "all"];
 const step = process.argv.find((arg) => arg.startsWith("--step="))?.slice(7) ?? null;
@@ -161,8 +160,7 @@ async function runStep(client, scratchDir, name) {
 
 async function run() {
   console.warn("WARNING: provider live checks create real turns and may consume paid quota.");
-  const config = await loadConfig();
-  const { scratchDir } = configureRuntime(config);
+  const { scratchDir } = configureRuntime({});
   mkdirSync(scratchDir, { recursive: true, mode: 0o700 });
   const client = await connect({ clientId: "wsf-provider-live-check" });
   const names = step === "all" ? STEPS.slice(0, -1) : [step];

@@ -29,15 +29,27 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { connect, readPaseoState, lookupCreationReceipt, METADATA_KEY, LABEL } from '../plugin/server/core/paseo.mjs';
 import { applyPlans, createAuthorization, createExecutors, fileProgress, storeAuthorization, withApplyLock } from '../plugin/server/core/apply.mjs';
-import { loadConfig } from '../plugin/server/core/config.mjs';
 import { configureRuntime } from '../plugin/server/core/runtime.mjs';
 const SELF = fileURLToPath(import.meta.url);
+
+// Live-only minimal config (see integration-live.mjs): no plugin host here.
+const LIVE_CONFIG = {
+  version: 1,
+  github: { owner: 'live-test', cloneProtocol: 'https', upstreamRemote: 'upstream' },
+  checkoutRoot: '/tmp/wsf-live-test',
+  workspaceTitle: 'Main',
+  profiles: {
+    live: { provider: 'codex', model: 'gpt-6.2-sol', thinking: null, mode: null },
+  },
+  steers: { slots: { A: 'live' }, prepare: ['A'], initialActive: 'A' },
+  workers: { priority: ['live'], defaultProfile: 'live' },
+};
 
 if (process.env.WSF_LIVE_CRASH !== 'approved') {
   console.error('Refusing: the live crash test needs WSF_LIVE_CRASH=approved (explicit user approval).');
   process.exit(2);
 }
-const { integrationDir: MANIFEST_DIR, scratchDir: SCRATCH_BASE } = configureRuntime(await loadConfig());
+const { integrationDir: MANIFEST_DIR, scratchDir: SCRATCH_BASE } = configureRuntime({});
 
 /** Minimal observation of the scratch workspace, shaped like a planner result. */
 function observerFor(manifest, adoptOp, steerOp) {
@@ -64,7 +76,7 @@ function observerFor(manifest, adoptOp, steerOp) {
 
 async function child(role, manifestFile) {
   const manifest = JSON.parse(readFileSync(manifestFile, 'utf8'));
-  const config = await loadConfig();
+  const config = LIVE_CONFIG;
   const authorization = JSON.parse(readFileSync(manifest.authorizationFile, 'utf8'));
   const adoptOp = authorization.plans[0].ops.find((o) => o.key === 'workspace.main.adopt');
   const steerOp = authorization.plans[0].ops.find((o) => o.key === 'steer.A');
@@ -124,7 +136,7 @@ async function main() {
         idempotencyKey: manifest.keys.steer,
       },
     };
-    const config = await loadConfig();
+    const config = LIVE_CONFIG;
     const plans = [{ repo: manifest.repo, input: 'scratch', status: 'pending', ops: [adoptOp, steerOp], conflicts: [], notes: [] }];
     const stored = storeAuthorization(join(dir, 'plans'), createAuthorization(plans, config, { entries: ['scratch'] }), config);
     manifest.authorizationFile = stored.file;

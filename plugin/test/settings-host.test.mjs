@@ -1,7 +1,7 @@
-// Host setup in factory-config: optional githubOwner/checkoutRoot overlays in
-// the settings document, and a settings-only minimal config when no file
-// exists. Offline: the file path is steered with PASEO_FACTORY_CONFIG into a
-// temp dir, host settings are faked, no daemon.
+// Host setup in factory-config: githubOwner/checkoutRoot are required settings,
+// and the effective config is built from the settings only. A legacy config
+// file on disk (even an invalid one) has no effect. Offline: host settings
+// are faked, no daemon.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
@@ -16,13 +16,12 @@ const validate = await import("../shared/settings-validate.ts");
 const {
   validateFactorySettings,
   validateHostSettings,
-  mergeFactoryConfig,
+  configFromSettings,
   settingsFromConfig,
-  minimalFileConfigBase,
   missingHostSettings,
   isAbsolutePath,
 } = validate;
-const { createConfigLoader, isMissingFileError, loadFileConfig } = await import("../server/config.ts");
+const { createConfigLoader } = await import("../server/config.ts");
 const { validateConfig } = await import("../server/core/config.mjs");
 const { runtime } = await import("../server/core/runtime.mjs");
 
@@ -32,40 +31,6 @@ function settingsDoc(overrides = {}) {
 
 function readySettings(values) {
   return { read: async () => ({ status: "ready", revision: "r1", values }) };
-}
-
-function validFileConfig(overrides = {}) {
-  return {
-    version: 1,
-    github: { owner: "file-owner", cloneProtocol: "https", upstreamRemote: "upstream" },
-    checkoutRoot: "/file/root",
-    workspaceTitle: "Main",
-    profiles: {
-      "factory-default": {
-        provider: "codex",
-        model: "gpt-6.2-sol",
-        thinking: "high",
-        mode: "full-access",
-        advisor: false,
-        sensitive: false,
-      },
-    },
-    steers: { slots: { A: "factory-default" }, prepare: ["A"], initialActive: "A" },
-    workers: { defaultProfile: "factory-default" },
-    ...overrides,
-  };
-}
-
-async function withConfigPath(path, fn) {
-  const prev = process.env.PASEO_FACTORY_CONFIG;
-  if (path === undefined) delete process.env.PASEO_FACTORY_CONFIG;
-  else process.env.PASEO_FACTORY_CONFIG = path;
-  try {
-    return await fn();
-  } finally {
-    if (prev === undefined) delete process.env.PASEO_FACTORY_CONFIG;
-    else process.env.PASEO_FACTORY_CONFIG = prev;
-  }
 }
 
 function tempDir() {
@@ -87,7 +52,7 @@ test("schema: {} parses with null host fields, version stays 2", () => {
   assert.equal(explicit.checkoutRoot, "/tmp/x");
 });
 
-test("validateHostSettings: unset is valid, explicit must be well-formed", () => {
+test("validateHostSettings: unset passes structurally, explicit must be well-formed", () => {
   for (const doc of [
     {},
     { githubOwner: null, checkoutRoot: null },
@@ -118,166 +83,101 @@ test("validateFactorySettings includes host errors", () => {
   assert.deepEqual(validateFactorySettings(good), []);
 });
 
-test("merge keeps file host values unless explicit settings are saved", () => {
-  const file = validFileConfig();
-  const snapshot = JSON.parse(JSON.stringify(file));
-  const unset = mergeFactoryConfig(file, settingsDoc());
-  assert.deepEqual(file, snapshot, "merge must not mutate the file config");
-  assert.deepEqual(unset.github, snapshot.github);
-  assert.equal(unset.checkoutRoot, "/file/root");
-  const blank = mergeFactoryConfig(file, settingsDoc({ githubOwner: "  ", checkoutRoot: "" }));
-  assert.deepEqual(blank.github, snapshot.github);
-  assert.equal(blank.checkoutRoot, "/file/root");
-
-  const owner = mergeFactoryConfig(file, settingsDoc({ githubOwner: "  ui-owner " }));
-  assert.equal(owner.github.owner, "ui-owner");
-  assert.equal(owner.github.cloneProtocol, "https", "protocol stays file-owned");
-  assert.equal(owner.github.upstreamRemote, "upstream", "remote stays file-owned");
-  assert.equal(owner.checkoutRoot, "/file/root");
-
-  const root = mergeFactoryConfig(file, settingsDoc({ checkoutRoot: "/ui/root" }));
-  assert.equal(root.github.owner, "file-owner");
-  assert.equal(root.checkoutRoot, "/ui/root");
-});
-
-test("settingsFromConfig preserves host fields instead of pinning the file", () => {
-  const current = settingsDoc({ githubOwner: "ui-owner", checkoutRoot: null });
-  const next = settingsFromConfig(validFileConfig(), current);
-  assert.equal(next.githubOwner, "ui-owner");
-  assert.equal(next.checkoutRoot, null);
-  const fresh = settingsFromConfig(validFileConfig(), settingsDoc());
-  assert.equal(fresh.githubOwner, null);
-  assert.equal(fresh.checkoutRoot, null);
-});
-
-test("minimal base plus settings passes the CLI validator", () => {
+test("configFromSettings builds a complete config that passes the validator", () => {
   const settings = settingsDoc({ githubOwner: "octocat", checkoutRoot: "/tmp/x" });
   assert.deepEqual(missingHostSettings(settings), []);
   assert.deepEqual(missingHostSettings(settingsDoc()), ["githubOwner", "checkoutRoot"]);
   assert.deepEqual(missingHostSettings(settingsDoc({ githubOwner: "o" })), ["checkoutRoot"]);
-  const merged = mergeFactoryConfig(minimalFileConfigBase(settings), settings);
-  assert.deepEqual(validateConfig(merged), []);
-  assert.equal(merged.version, 1);
-  assert.deepEqual(merged.github, { owner: "octocat", cloneProtocol: "https", upstreamRemote: "upstream" });
-  assert.equal(merged.checkoutRoot, "/tmp/x");
-  assert.equal(merged.workspaceTitle, "Main");
-  assert.deepEqual(merged.steers.slots, { A: "factory-default" });
-  assert.deepEqual(merged.workers.priority, ["factory-default"]);
+  const snapshot = JSON.parse(JSON.stringify(settings));
+  const config = configFromSettings(settings);
+  assert.deepEqual(settings, snapshot, "building the config must not mutate the settings");
+  assert.deepEqual(validateConfig(config), []);
+  assert.equal(config.version, 1);
+  assert.deepEqual(config.github, { owner: "octocat", cloneProtocol: "https", upstreamRemote: "upstream" });
+  assert.equal(config.checkoutRoot, "/tmp/x");
+  assert.equal(config.workspaceTitle, "Main");
+  assert.deepEqual(config.steers.slots, { A: "factory-default" });
+  assert.deepEqual(config.workers.priority, ["factory-default"]);
+  assert.equal(config.workers.defaultProfile, "factory-default");
 });
 
-test("isMissingFileError matches only the not-found failure", () => {
-  assert.equal(isMissingFileError(new Error("No factory config at /tmp/x; copy config.example.json there")), true);
-  assert.equal(isMissingFileError(new Error("Invalid factory config /tmp/x:\n- version must be 1")), false);
-  assert.equal(isMissingFileError(new SyntaxError("Unexpected token")), false);
-  assert.equal(isMissingFileError(null), false);
+test("settingsFromConfig preserves host fields from the current settings", () => {
+  const current = settingsDoc({ githubOwner: "ui-owner", checkoutRoot: null });
+  const config = configFromSettings(settingsDoc({ githubOwner: "octocat", checkoutRoot: "/tmp/x" }));
+  const next = settingsFromConfig(config, current);
+  assert.equal(next.githubOwner, "ui-owner");
+  assert.equal(next.checkoutRoot, null);
+  const fresh = settingsFromConfig(config, settingsDoc());
+  assert.equal(fresh.githubOwner, null);
+  assert.equal(fresh.checkoutRoot, null);
 });
 
-test("loader without a file builds a complete config from valid host settings", async () => {
+test("loader builds the effective config from valid host settings", async () => {
+  const settings = settingsDoc({ githubOwner: "octocat", checkoutRoot: "/tmp/x" });
+  const config = await createConfigLoader(readySettings(settings)).loadEffectiveConfig();
+  assert.deepEqual(validateConfig(config), []);
+  assert.equal(config.github.owner, "octocat");
+  assert.equal(config.checkoutRoot, "/tmp/x");
+  assert.deepEqual(config.steers.slots, { A: "factory-default" });
+  assert.equal(runtime().handoffLanguage, "en");
+});
+
+test("loader names the missing host piece", async () => {
+  await assert.rejects(
+    createConfigLoader(readySettings(settingsDoc())).loadEffectiveConfig(),
+    /Set the GitHub owner and checkout root in Factory settings/,
+  );
+  await assert.rejects(
+    createConfigLoader(readySettings(settingsDoc({ githubOwner: "o" }))).loadEffectiveConfig(),
+    /Set the checkout root in Factory settings/,
+  );
+  await assert.rejects(
+    createConfigLoader(readySettings(settingsDoc({ checkoutRoot: "/tmp/x" }))).loadEffectiveConfig(),
+    /Set the GitHub owner in Factory settings/,
+  );
+});
+
+test("loader fails clearly on invalid or unreadable settings", async () => {
+  await assert.rejects(
+    createConfigLoader(readySettings(settingsDoc({ githubOwner: "-bad", checkoutRoot: "/tmp/x" }))).loadEffectiveConfig(),
+    /Factory settings are invalid/,
+  );
+  await assert.rejects(
+    createConfigLoader({ read: async () => ({ status: "error", error: "boom" }) }).loadEffectiveConfig(),
+    /Factory settings are error: boom/,
+  );
+  await assert.rejects(
+    createConfigLoader(null).loadEffectiveConfig(),
+    /Factory settings are not available/,
+  );
+});
+
+test("a legacy config file has no effect, even when invalid", async () => {
   const dir = tempDir();
   try {
-    const settings = settingsDoc({ githubOwner: "octocat", checkoutRoot: "/tmp/x" });
-    const config = await withConfigPath(join(dir, "missing", "config.json"), () =>
-      createConfigLoader(readySettings(settings)).loadEffectiveConfig(),
-    );
-    assert.deepEqual(validateConfig(config), []);
-    assert.equal(config.github.owner, "octocat");
-    assert.equal(config.checkoutRoot, "/tmp/x");
-    assert.deepEqual(config.steers.slots, { A: "factory-default" });
-  } finally {
-    cleanup(dir);
-  }
-});
-
-test("loader without a file names the missing host piece", async () => {
-  const dir = tempDir();
-  try {
-    const missing = join(dir, "missing", "config.json");
-    await assert.rejects(
-      withConfigPath(missing, () => createConfigLoader(readySettings(settingsDoc())).loadEffectiveConfig()),
-      /No factory config at .*; set the GitHub owner and checkout root in Factory settings/,
-    );
-    await assert.rejects(
-      withConfigPath(
-        missing,
-        () => createConfigLoader(readySettings(settingsDoc({ githubOwner: "o" }))).loadEffectiveConfig(),
-      ),
-      /set the checkout root in Factory settings/,
-    );
-    await assert.rejects(
-      withConfigPath(
-        missing,
-        () => createConfigLoader(readySettings(settingsDoc({ githubOwner: "-bad", checkoutRoot: "/tmp/x" }))).loadEffectiveConfig(),
-      ),
-      /No factory config file; factory settings are invalid/,
-    );
-    await assert.rejects(
-      withConfigPath(
-        missing,
-        () => createConfigLoader({ read: async () => ({ status: "error", error: "boom" }) }).loadEffectiveConfig(),
-      ),
-      /No factory config at .*; factory settings are error \(boom\)/,
-    );
-    await assert.rejects(
-      withConfigPath(missing, () => createConfigLoader(null).loadEffectiveConfig()),
-      /No factory config at /,
-    );
-  } finally {
-    cleanup(dir);
-  }
-});
-
-test("loader still fails clearly on malformed existing files", async () => {
-  const dir = tempDir();
-  try {
-    const settings = settingsDoc({ githubOwner: "octocat", checkoutRoot: "/tmp/x" });
-    const badJson = join(dir, "bad.json");
-    writeFileSync(badJson, "{not json");
-    await assert.rejects(
-      withConfigPath(badJson, () => createConfigLoader(readySettings(settings)).loadEffectiveConfig()),
-      /./,
-      "JSON syntax errors propagate instead of falling back to settings",
-    );
+    const legacy = join(dir, "config.json");
+    writeFileSync(legacy, "{not json");
     const invalid = join(dir, "invalid.json");
     writeFileSync(invalid, JSON.stringify({ version: 1 }));
-    await assert.rejects(
-      withConfigPath(invalid, () => createConfigLoader(readySettings(settings)).loadEffectiveConfig()),
-      /Invalid factory config/,
-    );
-  } finally {
-    cleanup(dir);
-  }
-});
-
-test("loader with a file keeps file host values unless settings override them", async () => {
-  const dir = tempDir();
-  try {
-    const file = join(dir, "config.json");
-    writeFileSync(file, JSON.stringify(validFileConfig({ handoffLanguage: "de" })));
-    const kept = await withConfigPath(file, () =>
-      createConfigLoader(readySettings(settingsDoc())).loadEffectiveConfig(),
-    );
-    assert.equal(kept.github.owner, "file-owner");
-    assert.equal(kept.checkoutRoot, "/file/root");
-    assert.equal(kept.handoffLanguage, "de");
-    assert.equal(runtime().handoffLanguage, "en");
-    const over = await withConfigPath(file, () =>
-      createConfigLoader(readySettings(settingsDoc({ githubOwner: "ui-owner", checkoutRoot: "/ui/root" }))).loadEffectiveConfig(),
-    );
-    assert.equal(over.github.owner, "ui-owner");
-    assert.equal(over.checkoutRoot, "/ui/root");
-    assert.deepEqual(validateConfig(over), []);
-  } finally {
-    cleanup(dir);
-  }
-});
-
-test("loadFileConfig keeps the CLI file behavior", async () => {
-  const dir = tempDir();
-  try {
-    await assert.rejects(
-      withConfigPath(join(dir, "missing", "config.json"), () => loadFileConfig()),
-      /No factory config at /,
-    );
+    const prevConfig = process.env.PASEO_FACTORY_CONFIG;
+    const prevXdg = process.env.XDG_CONFIG_HOME;
+    process.env.PASEO_FACTORY_CONFIG = legacy;
+    process.env.XDG_CONFIG_HOME = dir;
+    try {
+      const settings = settingsDoc({ githubOwner: "octocat", checkoutRoot: "/tmp/x" });
+      const config = await createConfigLoader(readySettings(settings)).loadEffectiveConfig();
+      assert.equal(config.github.owner, "octocat");
+      assert.equal(config.checkoutRoot, "/tmp/x");
+      assert.deepEqual(validateConfig(config), []);
+      process.env.PASEO_FACTORY_CONFIG = invalid;
+      const again = await createConfigLoader(readySettings(settings)).loadEffectiveConfig();
+      assert.equal(again.github.owner, "octocat");
+    } finally {
+      if (prevConfig === undefined) delete process.env.PASEO_FACTORY_CONFIG;
+      else process.env.PASEO_FACTORY_CONFIG = prevConfig;
+      if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = prevXdg;
+    }
   } finally {
     cleanup(dir);
   }

@@ -11,7 +11,6 @@ import { applyPlans, createExecutors, createAuthorization, memoryProgress, store
 import { verifyCleanup, performCleanup } from './integration-cleanup.mjs';
 import { switchSteer, steerStatus, SwitchRefused, writeCheckpoint, CHECKPOINT_KEY, parseCheckpointBlock, buildHandoff } from '../plugin/server/core/steer.mjs';
 import { configureRuntime, daemonHost } from '../plugin/server/core/runtime.mjs';
-import { defaultConfigPath } from '../plugin/server/core/config.mjs';
 import { acquireLock, withLock, LockBusy } from '../plugin/server/core/lock.mjs';
 import { mkdtempSync, writeFileSync as writeFile, rmSync, mkdirSync, symlinkSync, renameSync, lstatSync, realpathSync, readFileSync, readdirSync, closeSync, openSync } from 'node:fs';
 import { tmpdir, hostname } from 'node:os';
@@ -1244,7 +1243,7 @@ test('knownLimits entries are validated', () => {
   assert.ok(validateConfig({ ...structuredClone(CONFIG), knownLimits: {} }).some((e) => /knownLimits must be an array/.test(e)));
 });
 
-test('runtime settings: environment beats config beats defaults; config path lookup', () => {
+test('runtime settings: environment beats config beats defaults', () => {
   const saved = { ...process.env };
   try {
     delete process.env.PASEO_FACTORY_STATE_DIR;
@@ -1260,11 +1259,6 @@ test('runtime settings: environment beats config beats defaults; config path loo
     assert.deepEqual([r.stateDir, r.paseo.bin, daemonHost(), r.handoffLanguage], ['/cfg/state', '/opt/paseo', '10.0.0.5:7000', 'de']);
     process.env.PASEO_FACTORY_STATE_DIR = '/env/state';
     assert.equal(configureRuntime({ runtime: { stateDir: '/cfg/state' } }).stateDir, '/env/state');
-    process.env.PASEO_FACTORY_CONFIG = '/env/config.json';
-    assert.equal(defaultConfigPath(), '/env/config.json');
-    delete process.env.PASEO_FACTORY_CONFIG;
-    process.env.XDG_CONFIG_HOME = '/xdg/config';
-    assert.equal(defaultConfigPath(), '/xdg/config/paseo-workspace-factory/config.json');
     assert.deepEqual(validateConfig({ ...CONFIG, handoffLanguage: 'fr' }).filter((e) => /handoffLanguage/.test(e)).length, 1);
   } finally {
     for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
@@ -1733,11 +1727,6 @@ test('adopt accepts any defined slot outside prepare and plans only the adoption
 });
 
 test('default factory starts with exactly one steer', async () => {
-  const example = JSON.parse(readFileSync(new URL('../config.example.json', import.meta.url), 'utf8'));
-  assert.deepEqual(Object.keys(example.steers.slots), ['A']);
-  assert.deepEqual(example.steers.prepare, ['A']);
-  assert.equal(example.steers.initialActive, 'A');
-  assert.deepEqual(validateConfig({ ...example, checkoutRoot: '/p' }), []);
   const config = structuredClone(CONFIG);
   config.steers = { slots: { A: 'sol' }, prepare: ['A'], initialActive: 'A' };
   const world = makeWorld();

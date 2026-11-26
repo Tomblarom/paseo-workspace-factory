@@ -53,9 +53,8 @@ const defaultProfile = {
 // v1 -> v2: workerDefault becomes workerPriority, profiles gain
 // advisor/sensitive (see migrateFactoryConfig above).
 // Defaults mirror the single-steer example config; {} parses into this
-// document. Host fields default to null, which means "from the config file":
-// a saved value replaces the matching file value, and without a file both
-// are required to form the complete configuration.
+// document. Host fields default to null, which means unset: both are
+// required to form the complete configuration.
 export const factoryConfigSettings = defineSettings({
   id: "factory-config",
   scope: "host",

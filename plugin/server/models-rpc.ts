@@ -114,7 +114,7 @@ export async function setModels(
   hostSettings: HostSettingsReader | null,
   now: () => number = Date.now,
 ) {
-  if (!hostSettings) throw new Error("Factory settings are not available; edit the config file instead");
+  if (!hostSettings) throw new Error("Factory settings are not available; open Factory settings and save them again");
   const state = await hostSettings.read();
   if (state.status !== "ready") {
     throw new Error(`Factory settings are ${state.status}: ${(state as any).error ?? "unreadable"}; open the settings page and save them again`);

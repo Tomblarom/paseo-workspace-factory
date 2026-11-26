@@ -1,4 +1,4 @@
-// factory-config v2: migration, validation, merge, settings-from-config, and the
+// factory-config v2: migration, validation, settings-to-config, and the
 // factory.models.list/set RPC handlers (fake loader and catalog, no daemon).
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -7,7 +7,7 @@ import { register } from "node:module";
 register("./ts-resolve-hooks.mjs", import.meta.url);
 
 const { factoryConfigSettings, migrateFactoryConfig } = await import("../shared/settings.ts");
-const { validateFactorySettings, mergeFactoryConfig, settingsFromConfig } = await import("../shared/settings-validate.ts");
+const { validateFactorySettings, configFromSettings, settingsFromConfig } = await import("../shared/settings-validate.ts");
 const { listModels, setModels, resetCatalogCache } = await import("../server/models-rpc.ts");
 const { formatModelList, formatModelChange } = await import("../shared/models-format.ts");
 
@@ -53,6 +53,8 @@ function v2doc() {
   const d = factoryConfigSettings.schema.parse(migrateFactoryConfig(v1(), 1));
   d.slots = { A: "codex", B: "anti" };
   d.prepare = ["A", "B"];
+  d.githubOwner = "octocat";
+  d.checkoutRoot = "/tmp/x";
   return d;
 }
 
@@ -76,24 +78,25 @@ test("validation: worker priority and advisor rules", () => {
   assert.match(JSON.stringify(validateFactorySettings(all)), /non-advisor/);
 });
 
-test("merge writes workers.priority, defaultProfile and flags", () => {
+test("configFromSettings writes workers.priority, defaultProfile and flags", () => {
   const d = v2doc();
   d.workerPriority = ["muse", "codex"];
-  const merged = mergeFactoryConfig({ version: 1, profiles: {}, workers: { other: 1 } }, d);
-  assert.deepEqual(merged.workers, { other: 1, priority: ["muse", "codex"], defaultProfile: "muse" });
-  assert.equal(merged.profiles.muse.sensitive, true);
-  assert.equal(merged.profiles.codex.advisor, false);
+  const config = configFromSettings(d);
+  assert.deepEqual(config.workers, { priority: ["muse", "codex"], defaultProfile: "muse" });
+  assert.equal(config.profiles.muse.sensitive, true);
+  assert.equal(config.profiles.codex.advisor, false);
 });
 
 test("settingsFromConfig keeps stored profiles and adds used ones", () => {
   const d = v2doc();
-  const config = mergeFactoryConfig({ version: 1, profiles: { filed: { provider: "x", model: "y", thinking: null, mode: null } } }, d);
-  config.workers.priority = ["filed", "codex"];
+  const config = configFromSettings(d);
+  config.profiles.added = { provider: "x", model: "y", thinking: null, mode: null };
+  config.workers.priority = ["added", "codex"];
   config.profiles.codex.advisor = false;
   config.profiles.anti.advisor = true;
   const next = settingsFromConfig(config, d);
-  assert.deepEqual(next.workerPriority, ["filed", "codex"]);
-  assert.equal(next.profiles.filed.provider, "x", "used file profile is copied in");
+  assert.deepEqual(next.workerPriority, ["added", "codex"]);
+  assert.equal(next.profiles.added.provider, "x", "used planned profile is copied in");
   assert.equal(next.profiles.anti.advisor, true);
   assert.equal(next.profiles.muse.sensitive, true, "stored profile kept");
 });
@@ -112,8 +115,7 @@ function fixture(doc = v2doc()) {
   const ctx = { paseo: { providers: { snapshot: async () => (calls += 1, { entries: catalog() }) } } };
   const hostSettings = { read: async () => ({ status: "ready", revision: "r1", values: doc }) };
   const loader = {
-    loadEffectiveConfig: async () =>
-      mergeFactoryConfig({ version: 1, github: { owner: "o", cloneProtocol: "https", upstreamRemote: "upstream" }, checkoutRoot: "/tmp/x", workspaceTitle: "{repo}", profiles: {} }, doc),
+    loadEffectiveConfig: async () => configFromSettings(doc),
   };
   return { ctx, hostSettings, loader, calls: () => calls };
 }

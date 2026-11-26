@@ -545,7 +545,7 @@ const modelRow = z.looseObject({
   reasons: z.array(z.string()),
 });
 
-// Effective worker priority and steer slots (config file + settings document)
+// Effective worker priority and steer slots (settings document)
 // with catalog availability. `revision` is the settings revision the lists were
 // read at; `selected` is the profile a worker would start with now.
 export const factoryModelsList = defineRpc({

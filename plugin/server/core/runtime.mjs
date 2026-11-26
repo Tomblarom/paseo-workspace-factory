@@ -1,5 +1,5 @@
 // Host-specific settings. Precedence: environment variable > `runtime` section of
-// the config file > defaults (XDG locations, local Paseo daemon, `paseo` on PATH).
+// the effective config (Factory settings) > defaults (XDG locations, local Paseo daemon, `paseo` on PATH).
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 

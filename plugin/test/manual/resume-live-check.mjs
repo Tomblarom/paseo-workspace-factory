@@ -22,7 +22,6 @@ import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import { connect } from "../../server/core/paseo.mjs";
 import { configureRuntime } from "../../server/core/runtime.mjs";
-import { loadConfig } from "../../server/core/config.mjs";
 
 const step = process.argv.find((a) => a.startsWith("--step="))?.slice(7) ?? null;
 const agentArg = process.argv.find((a) => a.startsWith("--agent="))?.slice(8) ?? null;
@@ -65,8 +64,7 @@ async function waitForIdle(client, agentId, timeoutMs = 180_000) {
 }
 
 async function run() {
-  const config = await loadConfig();
-  const { scratchDir } = configureRuntime(config);
+  const { scratchDir } = configureRuntime({});
   const client = await connect({ clientId: "wsf-resume-live-check" });
   try {
     if (step === "clear") {

@@ -18,12 +18,26 @@ import { randomUUID } from 'node:crypto';
 import { connect, parentOf, readPaseoState, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
 import { verifyCleanup, performCleanup } from './integration-cleanup.mjs';
 import { configureRuntime } from '../plugin/server/core/runtime.mjs';
-import { loadConfig, validateProfilesAgainstCatalog } from '../plugin/server/core/config.mjs';
+import { validateProfilesAgainstCatalog } from '../plugin/server/core/config.mjs';
+
+// Live-only minimal config: the plugin settings own the real config, but this
+// standalone script has no plugin host, so it uses a fixed scratch profile.
+const LIVE_CONFIG = {
+  version: 1,
+  github: { owner: 'live-test', cloneProtocol: 'https', upstreamRemote: 'upstream' },
+  checkoutRoot: '/tmp/wsf-live-test',
+  workspaceTitle: 'Main',
+  profiles: {
+    live: { provider: 'codex', model: 'gpt-6.2-sol', thinking: null, mode: null },
+  },
+  steers: { slots: { A: 'live' }, prepare: ['A'], initialActive: 'A' },
+  workers: { priority: ['live'], defaultProfile: 'live' },
+};
 
 let MANIFEST_DIR;
 let SCRATCH_BASE;
 async function init() {
-  ({ integrationDir: MANIFEST_DIR, scratchDir: SCRATCH_BASE } = configureRuntime(await loadConfig()));
+  ({ integrationDir: MANIFEST_DIR, scratchDir: SCRATCH_BASE } = configureRuntime({}));
 }
 
 function saveManifest(manifest) {
@@ -65,7 +79,7 @@ async function run() {
 
     // Functional assertions. Every created id is recorded before the next step.
     try {
-      const config = await loadConfig();
+      const config = LIVE_CONFIG;
       const profileName = config.workers.defaultProfile;
       const profile = config.profiles[profileName];
       assert.deepEqual(validateProfilesAgainstCatalog(config, (await client.providers.snapshot()).entries, [profileName]), {}, 'profile must be startable');

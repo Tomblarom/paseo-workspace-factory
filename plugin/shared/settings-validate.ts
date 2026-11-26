@@ -19,19 +19,19 @@ export interface FactorySettingsValues {
   initialActive: string;
   workerPriority: string[];
   quota: { exhaustedPct: number; warnPct: number };
-  /** Null/empty means "from the config file"; a saved value replaces it. */
+  /** Null/empty means unset; both host fields are required to run. */
   githubOwner: string | null;
-  /** Null/empty means "from the config file"; a saved value replaces it. */
+  /** Null/empty means unset; both host fields are required to run. */
   checkoutRoot: string | null;
 }
 
 /**
  * Settings document that equals `config` for everything the plugin owns.
  * Profiles keep the stored ones and add every profile `config` references or
- * changed, so file-only profiles are copied only when they become used.
+ * changed, so planner-added profiles are copied only when they become used.
  * The host setup (githubOwner, checkoutRoot) is preserved from `current` and
- * never copied from the file, so a models edit cannot pin file values into
- * the settings and change later resolution.
+ * never copied from the planned config, so a models edit cannot pin derived
+ * values into the settings and change later resolution.
  */
 export function settingsFromConfig(config: any, current: FactorySettingsValues): FactorySettingsValues {
   const slots: Record<string, string> = { ...(config.steers?.slots ?? {}) };
@@ -153,9 +153,9 @@ export function normalizeCheckoutRoot(value: unknown): string | null {
 }
 
 /**
- * Structural check of the optional host setup. Null/blank means "from the
- * config file" and is valid; an explicit value must be well-formed. Empty
- * means valid.
+ * Structural check of the host setup. Null/blank is allowed here and reported
+ * separately as missing by the loader; an explicit value must be well-formed.
+ * Empty means valid.
  */
 export function validateHostSettings(values: Pick<FactorySettingsValues, "githubOwner" | "checkoutRoot">): string[] {
   const errors: string[] = [];
@@ -180,13 +180,12 @@ export function missingHostSettings(values: Pick<FactorySettingsValues, "githubO
 }
 
 /**
- * File-owned half of a minimal config for hosts without a config file, using
- * the native defaults (https/upstream, workspace title "Main"). The caller
- * layers the settings on top with mergeFactoryConfig and re-validates with
- * the CLI validator. Assumes validateFactorySettings passed and both host
- * fields are explicit; blank values stay blank so validation fails clearly.
+ * Effective config built from the plugin settings only (no config file).
+ * Uses the native defaults (https/upstream, workspace title "Main").
+ * Assumes validateFactorySettings passed and both host fields are explicit;
+ * blank values stay blank so validation fails clearly.
  */
-export function minimalFileConfigBase(settings: FactorySettingsValues): any {
+export function configFromSettings(settings: FactorySettingsValues): any {
   return {
     version: 1,
     github: {
@@ -196,9 +195,17 @@ export function minimalFileConfigBase(settings: FactorySettingsValues): any {
     },
     checkoutRoot: normalizeCheckoutRoot(settings.checkoutRoot) ?? "",
     workspaceTitle: "Main",
-    profiles: {},
-    steers: {},
-    workers: {},
+    profiles: JSON.parse(JSON.stringify(settings.profiles ?? {})),
+    steers: {
+      slots: { ...(settings.slots ?? {}) },
+      prepare: [...(settings.prepare ?? [])],
+      initialActive: settings.initialActive,
+    },
+    workers: {
+      priority: [...(settings.workerPriority ?? [])],
+      defaultProfile: settings.workerPriority?.[0],
+    },
+    quota: { ...(settings.quota ?? {}) },
   };
 }
 
@@ -307,40 +314,6 @@ export function validateFactorySettings(values: FactorySettingsValues): string[]
     errors.push(`initialActive ${values.initialActive} is an advisor slot; pick a coordinating steer`);
   }
   return errors;
-}
-
-/**
- * Layers the host-scope settings document over the config file: profiles merge
- * per name, slots/prepare/initialActive/workerPriority replace the file values
- * (workers.defaultProfile follows priority[0] for older readers). An explicit
- * githubOwner/checkoutRoot (non-blank) replaces the matching file value;
- * unset host fields leave the file alone. Everything else (github protocol
- * and remotes, runtime, knownLimits) stays file-owned.
- */
-export function mergeFactoryConfig(fileConfig: any, settings: FactorySettingsValues): any {
-  const next = JSON.parse(JSON.stringify(fileConfig));
-  next.profiles = { ...(fileConfig.profiles ?? {}), ...settings.profiles };
-  next.steers = {
-    ...(fileConfig.steers ?? {}),
-    slots: { ...settings.slots },
-    prepare: [...settings.prepare],
-    initialActive: settings.initialActive,
-  };
-  next.workers = {
-    ...(fileConfig.workers ?? {}),
-    priority: [...settings.workerPriority],
-    defaultProfile: settings.workerPriority[0],
-  };
-  next.quota = { ...(fileConfig.quota ?? {}), ...settings.quota };
-  const owner = normalizeGithubOwner(settings?.githubOwner);
-  if (owner !== null) {
-    next.github = { ...(next.github ?? {}), owner };
-  }
-  const root = normalizeCheckoutRoot(settings?.checkoutRoot);
-  if (root !== null) {
-    next.checkoutRoot = root;
-  }
-  return next;
 }
 
 /**

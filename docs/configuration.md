@@ -2,7 +2,7 @@
 
 New to the factory? Start with [Getting started](getting-started.md); this page is the detailed reference.
 
-On the Paseo host, the plugin reads optional file config from `$PASEO_FACTORY_CONFIG` or `$XDG_CONFIG_HOME/paseo-workspace-factory/config.json` (default `~/.config/paseo-workspace-factory/config.json`) beneath the native plugin settings. Start from [`config.example.json`](../config.example.json). Keep it outside the repository; it is personal.
+All factory configuration lives in the Paseo plugin settings (Settings → Plugins → Factory): profiles, steer slots, prepare list, start steer, worker order, quota thresholds, GitHub owner and checkout root. There is no configuration file; a legacy file on disk is ignored.
 
 ## Fields
 
@@ -10,27 +10,25 @@ On the Paseo host, the plugin reads optional file config from `$PASEO_FACTORY_CO
 |---|---|
 | `version` | `1` |
 | `github.owner` | Account that owns the forks (scope identity and visibility checks). |
-| `github.cloneProtocol`, `github.upstreamRemote`, `workspaceTitle`, `workspaceTitleMultiRepo` | Retired (bulk provisioning): still accepted when present so old configs load, otherwise ignored. |
+| `github.cloneProtocol`, `github.upstreamRemote`, `workspaceTitle`, `workspaceTitleMultiRepo` | Retired (bulk provisioning): ignored. |
 | `checkoutRoot` | Absolute directory that scopes checkouts against; also a scan root for discovery. |
-| `handoffLanguage` | `en` (default) or `de`. |
+| `handoffLanguage` | Fixed `en` (override per switch with `--language`). |
 | `profiles.<name>` | `provider`, `model`, `thinking` (or `null` for the provider default), `mode`, `advisor` (boolean, default `false`), `sensitive` (boolean, default `false`; `muse` profiles migrate to `true` unless set). Validated against the live provider catalog before a steer is planned. Advisor-tagged profiles are second-opinion candidates; they are never picked for workers or non-advisor slots (see [Advisors](#advisors) and [Managing models](#managing-models-from-the-cli)). Sensitive profiles only get sanitized technical tasks (see [Privacy](#privacy-sensitive-profiles)). |
-| `knownLimits` | Optional extra catalog exceptions (same shape as the built-in list, see below). |
-| `steers.slots` | Slot letter (A–Z) → profile name, in priority order: A first, then B, C, … (priority = slot order, 1=A, 2=B). Changing a slot's profile does not change an existing steer; the live model is authoritative. Default is a single steer `A`; add `B`, `C`, … with their profiles as needed. Steer slots never shift: `steer set` replaces the slot's profile, a number addresses an existing position (2 is B), and only a free letter within reach creates a slot — no new gaps (existing configs still load). |
+| `knownLimits` | Built-in catalog exceptions only (see below); not configurable. |
+| `steers.slots` | Slot letter (A–Z) → profile name, in priority order: A first, then B, C, … (priority = slot order, 1=A, 2=B). Changing a slot's profile does not change an existing steer; the live model is authoritative. Default is a single steer `A`; add `B`, `C`, … with their profiles as needed. Steer slots never shift: `steer set` replaces the slot's profile, a number addresses an existing position (2 is B), and only a free letter within reach creates a slot — no new gaps. |
 | `steers.prepare` | Slots created on enrollment (default `["A"]`). Overridden per run with `plan --slots` (must be a subset of defined slots). Advisor slots are only planned when they are in `prepare`. |
 | `steers.initialActive` | Active steer after enrollment (must be in `prepare` and must not be an advisor slot; with `--slots` it falls back to the first slot when needed). At least one non-advisor slot is required. |
 | `steers.activeMarker` | Tab-title prefix on the active steer (`▷ Steer E`; default `"▷"`). `switch --apply`, `fresh` and resume-takeover move it to the new active steer and strip it from the old one (best-effort renames via `paseo agent update --name`); empty disables the marker. Title matching tolerates the prefix. |
 | `workers.priority` | Ordered profile-name list for workers, highest priority first. A missing `priority` reads as `[defaultProfile]`; writing sets `defaultProfile` to `priority[0]` for older readers. |
 | `workers.defaultProfile` | First entry of `workers.priority`, kept for backwards compatibility. Prefer `workers.priority`. |
-| `usage.warnContextTokens` | Optional positive integer (default off): `status` warns for agents above it, with a switch/fresh recommendation. |
+| `usage.warnContextTokens` | Retired: no longer read. |
 | `quota.warnPct` / `quota.exhaustedPct` | Session quota warning/exhaustion thresholds (defaults `75` and `95`). |
-| `profiles.<name>.pool` | Optional quota-pool name. Defaults to the profile's provider; profiles in one pool share availability and failover preference. |
+| `profiles.<name>.pool` | Retired: pools default to the profile's provider; profiles in one pool share availability and failover preference. |
 | `wsf.profileHealth` (workspace metadata) | Runtime-only profile failure marks, written under the workspace lock from a fresh read as their own top-level key (never inside the `wsf` scope state, so a concurrent switch/epoch is kept). `worker pick --failed <profile> --reason <text>` records the failure; the profile is skipped for 10 minutes with its classified reason, without changing config or the provider catalog. A legacy nested `profileHealth` field inside the `wsf` scope state is still read. |
-| `runtime.stateDir` | Plans, progress, journals and locks (default `$XDG_STATE_HOME/paseo-workspace-factory`). |
-| `runtime.paseo.url` | Daemon WebSocket URL (default `ws://127.0.0.1:6767/ws`). |
-| `runtime.paseo.bin` | `paseo` CLI (default `paseo` on PATH); its installation also provides the SDK. |
-| `runtime.paseo.passwordFile` | File with the daemon password, if the daemon requires one. |
-
-Environment overrides: `PASEO_FACTORY_STATE_DIR`, `PASEO_WS_URL`, `PASEO_FACTORY_PASEO_BIN`, `PASEO_PASSWORD_FILE`, `PASEO_PASSWORD`.
+| `runtime.stateDir` | Plans, progress, journals and locks (default `$XDG_STATE_HOME/paseo-workspace-factory`, override with `PASEO_FACTORY_STATE_DIR`). Not in the plugin settings. |
+| `runtime.paseo.url` | Daemon WebSocket URL (default `ws://127.0.0.1:6767/ws`, override with `PASEO_WS_URL`). Not in the plugin settings. |
+| `runtime.paseo.bin` | `paseo` CLI (default `paseo` on PATH, override with `PASEO_FACTORY_PASEO_BIN`); its installation also provides the SDK. Not in the plugin settings. |
+| `runtime.paseo.passwordFile` | File with the daemon password, if the daemon requires one (override with `PASEO_PASSWORD_FILE` or `PASEO_PASSWORD`). Not in the plugin settings. |
 
 Per-run slot selection: `plan <repo> --slots D` (comma-separated, e.g. `--slots B,D`) plans only those slots instead of `steers.prepare`. `--adopt X=<agent-id>` accepts any slot defined in `steers.slots`; adopting a slot outside `prepare` plans only the adopted slot(s), not the rest of `prepare`.
 
@@ -190,13 +188,13 @@ Use these commands in the Paseo composer. See [Agent CLI](#agent-cli) for the co
 
 Use `/factory steer add [slot] [profile|provider/model]` to create a steer in the current scope. Omit the slot to suggest a free one. Omit the profile to use the configured profile for the slot or pick an eligible one by priority. The preview shows the model, any selected ZeroSub account, and why alternatives were skipped. Confirm in the panel to save the slot and create the agent. Use `/factory switch` to activate it. The default slots for other scopes stay unchanged.
 
-Model lists are ordered by priority, highest first. `worker set <n> <model>` inserts the model at position n; the entries from n onwards move down by one, and an existing copy of the same model is removed, so every model appears once. `worker rm <n>` removes an entry and closes the gap. Steer slots never shift: `steer set <n|slot>` replaces the slot's profile (`steer set 2 X` is `steer set B X`); a number past the end is refused, a free letter within reach creates the slot without opening a gap. `set` creates or updates a profile (named by `--profile`, otherwise the slot's/entry's current profile, or `<provider>-<model>` for a new entry) after validating against the live catalog including `knownLimits`. Omitted `--thinking`/`--mode` keep the stored value (new profiles default to `"thinking": null` and no mode); use `--thinking null` for the provider default. A temporarily unavailable model is still stored, but with a warning — a fallback list may hold such entries; an unknown provider/model syntax is an error. When a model is not available in the live catalog, the next entry that is available and allowed for the role and repository (advisor and sensitive rules) is used. `rm` keeps the profile; `steer rm` also repairs `prepare`/`initialActive`. Writes act directly (reversible, no hash), like saving in Settings; plan and apply only concern agents. CLI writes are atomic (tmp + rename, file mode kept); `--dry-run` prints the new config instead of writing it. From the plugin, `/factory worker|steer|model …` calls an RPC that writes the host settings document, which overlays the file and is therefore the effective source.
+Model lists are ordered by priority, highest first. `worker set <n> <model>` inserts the model at position n; the entries from n onwards move down by one, and an existing copy of the same model is removed, so every model appears once. `worker rm <n>` removes an entry and closes the gap. Steer slots never shift: `steer set <n|slot>` replaces the slot's profile (`steer set 2 X` is `steer set B X`); a number past the end is refused, a free letter within reach creates the slot without opening a gap. `set` creates or updates a profile (named by `--profile`, otherwise the slot's/entry's current profile, or `<provider>-<model>` for a new entry) after validating against the live catalog including the built-in exceptions. Omitted `--thinking`/`--mode` keep the stored value (new profiles default to `"thinking": null` and no mode); use `--thinking null` for the provider default. A temporarily unavailable model is still stored, but with a warning — a fallback list may hold such entries; an unknown provider/model syntax is an error. When a model is not available in the live catalog, the next entry that is available and allowed for the role and repository (advisor and sensitive rules) is used. `rm` keeps the profile; `steer rm` also repairs `prepare`/`initialActive`. Writes act directly (reversible, no hash), like saving in Settings; plan and apply only concern agents. `--dry-run` shows the change instead of saving it. `/factory worker|steer|model …` saves in the host settings document, which is the effective source.
 
 Resolution with availability fallback: the factory picks the first list entry that passes the catalog check and matches the role. Workers use `workers.priority` and always skip advisor profiles; sensitive profiles are skipped unless the repository is provably public. Steer slot S uses `[slots[S], then the profiles of the following slots, then the previous ones]`; a non-advisor slot takes only non-advisor profiles, an advisor slot only advisor profiles, and a fallback never picks a profile a living steer of the same scope already uses (no duplicates). Skipped profiles appear as notes (`B: muse not available → copilot-sonnet`); when nothing is available, steers get a plan conflict and workers an error listing the reasons. The fallback applies only when creating (`plan`, `fresh`, `worker pick`): running agents never change their model — a failed steer is taken over by the next slot via failover. When `fresh` creates with a fallback profile, the result suggests the `steer set` command that would point the slot at the created model. The plugin caches the catalog for 60 s.
 
 `worker pick` prints the chosen profile plus the matching `paseo run` flags (`--provider … --model … [--thinking …] [--mode …]`). Steers start workers with that model (see [steer instructions](steer-instructions.md#worker-instructions)); the resume brief carries it as `Worker model: …`.
 
-Migration: configs with only `workers.defaultProfile` read as `workers.priority: [defaultProfile]`. Every write sets `defaultProfile` to `priority[0]`, so older readers keep working. The plugin settings document migrates v1 → v2 the same way (`workerPriority: [workerDefault]`, plus `profiles[*].advisor` and `profiles[*].sensitive`) and writes both `workers.priority` and `workers.defaultProfile`.
+Migration: the plugin settings document migrates v1 → v2 (`workerPriority: [workerDefault]`, plus `profiles[*].advisor` and `profiles[*].sensitive`). The effective config keeps both `workers.priority` and `workers.defaultProfile` (`priority[0]`) for older readers.
 
 ## Privacy: sensitive profiles
 
@@ -210,17 +208,7 @@ Some settings appear in the catalog but are rejected when an agent is created. T
 
 - Copilot with Claude models rejects a thinking level — use `"thinking": null`.
 
-Paseo's public provider catalog and diagnostics expose availability, models, and settings. A provider may still reject a combination at creation time. Factory uses the catalog and known exceptions during preview. A live provider test creates a separate scratch agent. [Paseo SDK reference](https://paseo.sh/docs/sdk/reference.md#clientproviders)
-
-Extend the built-in list with optional `knownLimits` (validated on load; an entry needs `provider`, `model` and/or `modelPattern`, `field` (`thinking` or `mode`), and `reason`):
-
-```json
-"knownLimits": [
-  { "provider": "example", "modelPattern": "^large-", "field": "thinking", "reason": "Example provider rejects thinking for large models; use thinking: null" }
-]
-```
-
-`model` matches exactly, `modelPattern` is a regular expression against the model id; when both are given, both must match. A rule only fires when the profile actually sets that field.
+Paseo's public provider catalog and diagnostics expose availability, models, and settings. A provider may still reject a combination at creation time. Factory uses the catalog and the built-in exceptions during preview. A live provider test creates a separate scratch agent. [Paseo SDK reference](https://paseo.sh/docs/sdk/reference.md#clientproviders)
 
 ## Version binding
 

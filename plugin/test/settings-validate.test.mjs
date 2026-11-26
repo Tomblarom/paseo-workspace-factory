@@ -9,7 +9,7 @@ register("./ts-resolve-hooks.mjs", import.meta.url);
 const {
   validateCleanupSettings,
   validateFactorySettings,
-  mergeFactoryConfig,
+  configFromSettings,
   validateProfilesAgainstCatalogLocal,
 } = await import("../shared/settings-validate.ts");
 
@@ -82,30 +82,27 @@ test("validateFactorySettings reports structural problems", () => {
   assert.match(JSON.stringify(validateFactorySettings(badThinking)), /thinking must be a string or null/);
 });
 
-test("mergeFactoryConfig overlays profiles and replaces slots", () => {
-  const file = {
-    version: 1,
-    github: { owner: "o" },
-    profiles: {
-      keep: { provider: "a", model: "m", thinking: null, mode: null },
-      shared: { provider: "old", model: "m", thinking: null, mode: null },
-    },
-    steers: { slots: { Z: "keep" }, prepare: ["Z"], initialActive: "Z" },
-    workers: { defaultProfile: "keep" },
-    runtime: { stateDir: "/tmp/x" },
+test("configFromSettings builds the effective config from settings only", () => {
+  const settings = {
+    ...validSettings(),
+    githubOwner: "octocat",
+    checkoutRoot: "/tmp/x",
+    quota: { exhaustedPct: 95, warnPct: 75 },
   };
-  const snapshot = JSON.parse(JSON.stringify(file));
-  const merged = mergeFactoryConfig(file, validSettings());
-  assert.deepEqual(file, snapshot);
-  assert.deepEqual(merged.profiles.keep, { provider: "a", model: "m", thinking: null, mode: null });
-  assert.deepEqual(merged.profiles.shared, { provider: "old", model: "m", thinking: null, mode: null });
-  assert.equal(merged.profiles["factory-default"].provider, "codex");
-  assert.deepEqual(merged.steers.slots, { A: "factory-default", B: "spare" });
-  assert.deepEqual(merged.steers.prepare, ["A", "B"]);
-  assert.equal(merged.steers.initialActive, "A");
-  assert.equal(merged.workers.defaultProfile, "spare");
-  assert.deepEqual(merged.github, { owner: "o" });
-  assert.deepEqual(merged.runtime, { stateDir: "/tmp/x" });
+  const snapshot = JSON.parse(JSON.stringify(settings));
+  const config = configFromSettings(settings);
+  assert.deepEqual(settings, snapshot);
+  assert.equal(config.version, 1);
+  assert.deepEqual(config.github, { owner: "octocat", cloneProtocol: "https", upstreamRemote: "upstream" });
+  assert.equal(config.checkoutRoot, "/tmp/x");
+  assert.equal(config.workspaceTitle, "Main");
+  assert.equal(config.profiles["factory-default"].provider, "codex");
+  assert.deepEqual(config.steers.slots, { A: "factory-default", B: "spare" });
+  assert.deepEqual(config.steers.prepare, ["A", "B"]);
+  assert.equal(config.steers.initialActive, "A");
+  assert.equal(config.workers.defaultProfile, "spare");
+  assert.deepEqual(config.workers.priority, ["spare"]);
+  assert.deepEqual(config.quota, { exhaustedPct: 95, warnPct: 75 });
 });
 
 function catalog() {

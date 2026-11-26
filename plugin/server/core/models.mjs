@@ -1,7 +1,7 @@
-// Model catalog listing and config editing for steer slots and workers.
+// Model catalog listing and config planning for steer slots and workers.
 // Validation reuses validateProfilesAgainstCatalog() from config.mjs, the same
-// check the planner runs (live catalog shape plus knownLimits).
-import { chmod, rename, stat, unlink, writeFile } from 'node:fs/promises';
+// check the planner runs (live catalog shape plus known limits). Plans return
+// a new config object; the caller persists it in the plugin settings.
 import { isAdvisorProfile, isAdvisorSlot, isSensitiveProfile, slotOrder, validateConfig, validateProfilesAgainstCatalog, workerPriority } from './config.mjs';
 import { QUOTA_DEFAULTS, profileIsUnhealthy, quotaExhausted, profilePool, profileFamily, familyAccounts, familyExhausted, bestFamilyAccount, earliestFamilyReset, readProfileHealth } from './quota.mjs';
 import { suggestAccountPin } from './zerosub.mjs';
@@ -733,30 +733,4 @@ export function planAdvisorTag(config, providerEntries, { spec, on }) {
 /** Plan `model sensitive <profile|provider/model> on|off`. */
 export function planSensitiveTag(config, providerEntries, { spec, on }) {
   return planProfileTag(config, providerEntries, { flag: 'sensitive', spec, on });
-}
-
-/** File text for a config object (also used for --dry-run previews). */
-export function previewConfig(newConfig) {
-  return `${JSON.stringify(newConfig, null, 2)}\n`;
-}
-
-/** Atomically replace the config file (tmp + rename), keeping its mode. */
-export async function writeConfigAtomic(configPath, newConfig) {
-  const text = previewConfig(newConfig);
-  let mode = 0o600;
-  try {
-    mode = (await stat(configPath)).mode & 0o777;
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
-  }
-  const tmp = `${configPath}.tmp.${process.pid}.${Date.now()}`;
-  try {
-    await writeFile(tmp, text, { mode });
-    await chmod(tmp, mode);
-    await rename(tmp, configPath);
-  } catch (error) {
-    await unlink(tmp).catch(() => {});
-    throw error;
-  }
-  return configPath;
 }

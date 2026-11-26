@@ -1,19 +1,12 @@
-// Central factory configuration: loading, structural validation and validation
-// against the live provider catalog. Roles never carry provider data; slots only
-// reference a named profile, so a model change is a one-line config edit.
-import { readFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+// Central factory configuration: structural validation and validation
+// against the live provider catalog. The effective config is built from the
+// plugin settings only (see plugin/server/config.ts); there is no config file.
+// Roles never carry provider data; slots only reference a named profile.
+import { isAbsolute } from 'node:path';
 import { KNOWN_UNSUPPORTED, knownUnsupportedReason } from '../../shared/defaults.mjs';
 import { profilePool } from './quota.mjs';
 
 export { KNOWN_UNSUPPORTED };
-
-/** --config > PASEO_FACTORY_CONFIG > $XDG_CONFIG_HOME/paseo-workspace-factory/config.json */
-export function defaultConfigPath() {
-  if (process.env.PASEO_FACTORY_CONFIG) return process.env.PASEO_FACTORY_CONFIG;
-  return join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'paseo-workspace-factory', 'config.json');
-}
 
 export const KNOWN_LIMIT_FIELDS = ['thinking', 'mode'];
 
@@ -101,26 +94,6 @@ export function providerIsSensitive(config, provider) {
 /** Slot letters in priority order (A first, then B, C, …). */
 export function slotOrder(config) {
   return Object.keys(config?.steers?.slots ?? {}).sort();
-}
-
-export async function loadConfig(path = defaultConfigPath()) {
-  let text;
-  try {
-    text = await readFile(path, 'utf8');
-  } catch (error) {
-    if (error.code === 'ENOENT') throw new Error(`No factory config at ${path}; copy config.example.json there or pass --config`);
-    throw error;
-  }
-  const config = JSON.parse(text);
-  const errors = validateConfig(config);
-  if (errors.length) throw new Error(`Invalid factory config ${path}:\n- ${errors.join('\n- ')}`);
-  if (!Array.isArray(config.workers?.priority)) {
-    const fallback = config.workers?.defaultProfile;
-    if (typeof fallback === 'string' && fallback) {
-      config.workers = { ...config.workers, priority: [fallback] };
-    }
-  }
-  return config;
 }
 
 export function validateConfig(config) {
@@ -253,7 +226,7 @@ export function validateConfig(config) {
 }
 
 /**
- * Non-blocking config warnings (never thrown by loadConfig):
+ * Non-blocking config warnings (advisory only, never thrown):
  * advisor-tagged worker entries (never picked) and advisor profiles that
  * are also sensitive.
  */
