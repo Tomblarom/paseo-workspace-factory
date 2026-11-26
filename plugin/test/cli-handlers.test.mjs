@@ -12,8 +12,10 @@ register("./ts-resolve-hooks.mjs", import.meta.url);
 const handlers = await import("../server/handlers.ts");
 const { createConfigLoader } = await import("../server/config.ts");
 const { collectSteerStates } = await import("../server/steer-feed.ts");
+const { factoryWorkspaceResources } = await import("../shared/factory.ts");
 import { LABEL, METADATA_KEY, PARENT_LABEL } from "../server/core/paseo.mjs";
 import { AGENTS_KEY } from "../server/core/agent-state.mjs";
+import { PROFILE_HEALTH_KEY } from "../server/core/quota.mjs";
 import { formatStatus, scopeCandidates } from "../server/core/scopes-view.mjs";
 import { formatSlotProfileSuggestion, resolveWorkerPick, workerListRows } from "../server/core/models.mjs";
 import { formatWorkersPruneText, formatWorkersText, workersReport, WORKERS_KEY } from "../server/core/supervision.mjs";
@@ -625,6 +627,101 @@ test("pickWorker, listWorkersModels and startWorkerRpc agree and record --failed
   }, { paseo }, loader, noZerosub);
   assert.equal(started.profile, "sonnet");
   assert.match(started.text, /^Started worker w-created-4 \(claude\/claude-sonnet\) in app$/);
+});
+
+test("workspace Resources binds an exact enrolled workspace even with shared paths and scope IDs", async () => {
+  const world = makeWorld();
+  const [workspace] = world.workspaces;
+  const otherId = "wks_other";
+  const other = structuredClone(workspace);
+  other.id = otherId;
+  other.metadata[PROFILE_HEALTH_KEY] = {
+    sol: { class: "foreign-diagnostic", unhealthyUntil: "2099-11-26T23:00:00Z" },
+  };
+  const retired = { ...workspace, id: "wks_retired", metadata: {
+    [METADATA_KEY]: { ...workspace.metadata[METADATA_KEY], retired: true },
+  } };
+  world.workspaces.push(other, retired, { ...workspace, id: "wks_unenrolled", metadata: {} });
+  world.agents.push({ ...world.agents[0], id: "foreign-agent", workspaceId: otherId, provider: "foreign-provider" });
+  const now = Date.now();
+  const account = (id, family) => ({
+    id, family, label: "personal@example.com", sampledAt: new Date(now).toISOString(),
+    windows: [{ id: "private-window-id", usedPct: 12, resetsAt: new Date(now + 60_000).toISOString() }],
+  });
+  const zerosub = {
+    accounts: [account("private-codex-id", "codex"), account("foreign-account-id", "foreign-provider")],
+    agentAccount: { "steer-a": "private-codex-id", "foreign-agent": "foreign-account-id" },
+    pending: {},
+  };
+  const before = structuredClone(world);
+  const context = { paseo: fakePaseo(world) };
+  const read = (workspaceId) => handlers.getWorkspaceResources({ workspaceId }, context, loader, {
+    getZerosub: async () => zerosub,
+  });
+  const view = await read(MAIN);
+  assert.deepEqual(factoryWorkspaceResources.output.parse(view), view);
+  assert.equal(view.workspaceId, MAIN);
+  assert.deepEqual(view.pools.map(({ provider }) => provider).sort(), ["claude", "codex"]);
+  assert.deepEqual(view.accounts.map(({ provider }) => provider), ["codex"]);
+  assert.equal(view.accounts[0].windows[0].usedPct, 12);
+  assert.deepEqual(view.workerSelection.candidates[0].decision, {
+    state: "selected", accountAlias: view.accounts[0].alias,
+  });
+  assert.doesNotMatch(JSON.stringify(view), /wks_other|foreign-|private-codex-id|personal@|private-window-id/);
+
+  const otherView = await read(otherId);
+  assert.equal(otherView.workspaceId, otherId);
+  assert.ok(otherView.accounts.some(({ provider }) => provider === "foreign-provider"));
+  assert.deepEqual(otherView.workerSelection.candidates.map(({ decision }) => decision), [
+    { state: "excluded", reason: "recent-failure" }, { state: "selected", accountAlias: null },
+  ]);
+  assert.doesNotMatch(JSON.stringify(otherView), /foreign-diagnostic|foreign-agent|foreign-account-id/);
+  assert.throws(() => factoryWorkspaceResources.input.parse({ repo: SCOPE }));
+  for (const id of [SCOPE, "wks_unknown", "wks_unenrolled", "wks_retired"]) {
+    await assert.rejects(read(id), /require an enrolled, active Factory workspace/);
+  }
+  assert.deepEqual(world, before);
+});
+
+test("workspace Resources reports the scoped worker decision and leaves later alternatives unevaluated", async () => {
+  const world = makeWorld();
+  const sol = CONFIG.profiles.sol;
+  const config = {
+    ...CONFIG,
+    profiles: {
+      ...CONFIG.profiles,
+      sensitive: { ...sol, sensitive: true },
+      unsupported: { ...sol, thinking: "catalog-detail" },
+      late: { ...sol, sensitive: true },
+    },
+    workers: { priority: ["sensitive", "unsupported", "sol", "late", "sonnet"] },
+  };
+  const zerosub = {
+    accounts: [{ id: "synthetic-claude", family: "claude", exhausted: true, windows: [] }],
+    agentAccount: {}, pending: {},
+  };
+  const context = { paseo: fakePaseo(world) };
+  const selectionLoader = { ...loader, loadEffectiveConfig: async () => config };
+  const source = { getZerosub: async () => zerosub };
+  const input = { workspaceId: MAIN };
+  const view = await handlers.getWorkspaceResources(input, context, selectionLoader, source);
+  const cli = await handlers.pickWorker(input, context, selectionLoader, source);
+  assert.equal(view.workerSelection.scopeVisibility, "unknown");
+  assert.deepEqual(view.workerSelection.candidates.map(({ decision }) => decision), [
+    { state: "excluded", reason: "scope-requires-public" },
+    { state: "excluded", reason: "catalog-rejected" },
+    { state: "selected", accountAlias: null },
+    { state: "unevaluated" },
+    { state: "unevaluated" },
+  ]);
+  assert.equal(view.workerSelection.candidates.find(({ decision }) => decision.state === "selected").profile, cli.profile);
+  assert.doesNotMatch(JSON.stringify(view), /catalog-detail|synthetic-claude/);
+
+  zerosub.accounts.push({ id: "synthetic-limit", family: "codex", exhausted: true, windows: [] });
+  const limited = await handlers.getWorkspaceResources(input, context, selectionLoader, source);
+  assert.ok(limited.workerSelection.candidates.every(({ decision }) => decision.state === "excluded"));
+  assert.ok(limited.workerSelection.candidates.every(({ decision }) => decision.reason === "accounts-exhausted"));
+  assert.ok(limited.accounts.every(({ limited, limitedUntil }) => limited && limitedUntil === null));
 });
 
 test("checkpoint, self-takeover switch, and assign preserve caller guards", async () => {

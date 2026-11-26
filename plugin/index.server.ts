@@ -20,6 +20,7 @@ import {
   getScopes,
   getStatus,
   getWorkers,
+  getWorkspaceResources,
   listWorkersModels,
   openHistory,
   pickWorker,
@@ -107,6 +108,7 @@ import {
   factoryWorkerPick,
   factoryWorkerStart,
   factoryWorkers,
+  factoryWorkspaceResources,
 } from "./shared/factory.js";
 import {
   factoryCleanupSettings,
@@ -208,6 +210,9 @@ export default function contribute(server: PluginServerContext) {
   server.handle(factoryWorkerStart, (input, ctx) => startWorkerRpc(input, ctx, loader));
   server.handle(factoryDrain, runDrain);
   server.handle(factoryQuota, (input, ctx) => getQuota(input, ctx, loader, { getZerosub }));
+  server.handle(factoryWorkspaceResources, (input, ctx) => getWorkspaceResources(input, ctx, loader, {
+    getZerosub, getQuotaSettings: readQuotaSettings,
+  }));
   server.handle(factoryAssignPreview, (input, ctx) => previewAssign(input, ctx, loader));
   server.handle(factoryAssign, (input, ctx) => applyAssign(input, ctx, loader));
   server.handle(factoryModelsList, (input, ctx) => listModels(input, ctx, loader, hostSettings));

@@ -34,6 +34,7 @@ import {
   factoryWorkerPick,
   factoryWorkerStart,
   factoryWorkers,
+  factoryWorkspaceResources,
 } from "../shared/factory.js";
 import {
   assignFingerprint,
@@ -95,7 +96,7 @@ import { applyResume } from "./resume-apply.js";
 import { deliverSteer, finishSteerDelivery, type SteerDeliveryDeps } from "./steer-delivery.js";
 import { readAdmissionSnapshot, readPrivacyAdmission, scopePublic, steerQuotaAdmission } from "./steer-admission.js";
 import { hasActiveAgentWork } from "./agent-context.js";
-import { defaultPickAddress, listScopes } from "./core/scope.mjs";
+import { defaultPickAddress, listScopes, scopeToEntry } from "./core/scope.mjs";
 import { AGENTS_KEY } from "./core/agent-state.mjs";
 import {
   buildResumeBrief,
@@ -113,6 +114,7 @@ import {
 } from "./core/steer.mjs";
 import type { ConfigLoader, HostSettingsReader, HostSettingsState } from "./config.js";
 import { getQuotaSampledAt, getQuotaSnapshot } from "./quota.js";
+import { shapeWorkspaceResources, type WorkspaceResources } from "./resources-rpc.js";
 import { withWorkspaceLock } from "./core/lock.mjs";
 import { readZerosubStateSafe, resolveZerosub, type ZerosubSource } from "./zerosub-runtime.js";
 import { readZerosubState } from "./core/zerosub.mjs";
@@ -1300,18 +1302,32 @@ async function readHandlerZerosub(extra?: ZerosubHandlerExtra): Promise<any> {
 async function resolveWorkerSelection(
   paseo: any,
   loader: ConfigLoader,
-  input: { repo?: string; workspaceId?: string; agentId?: string; cwd?: string; failed?: string; reason?: string },
+  request: { repo?: string; workspaceId?: string; agentId?: string; cwd?: string; failed?: string; reason?: string }
+    | { exactWorkspaceId: string },
   extra?: ZerosubHandlerExtra,
-): Promise<any> {
+) {
+  const exactWorkspaceId = "exactWorkspaceId" in request ? request.exactWorkspaceId : null;
+  const input = "exactWorkspaceId" in request ? {} : request;
   if (input.failed !== undefined && !input.reason) {
     throw new Error("worker pick --failed needs --reason <text>");
   }
   if (input.reason !== undefined && input.failed === undefined) {
     throw new Error("worker pick --reason needs --failed <profile>");
   }
-  const config = await loader.loadEffectiveConfig();
-  const snapshot: any = await readPaseoState(paseo);
-  const scopeAddress = input.repo?.trim() || (defaultPickAddress as any)(snapshot, {
+  const config = await loader.loadEffectiveConfig().catch((error) => {
+    if (exactWorkspaceId === null) throw error;
+    throw new Error("Factory settings are unavailable.");
+  });
+  const snapshot: any = await readPaseoState(paseo).catch((error) => {
+    if (exactWorkspaceId === null) throw error;
+    throw new Error("Workspace evidence is unavailable.");
+  });
+  const exactScope = exactWorkspaceId === null ? null
+    : listScopes(snapshot).find((scope) => scope.workspaceId === exactWorkspaceId);
+  if (exactWorkspaceId !== null && (!exactScope || exactScope.workspace.metadata?.[METADATA_KEY]?.retired === true)) {
+    throw new Error("Resources require an enrolled, active Factory workspace.");
+  }
+  const scopeAddress = exactScope ? `workspace:${exactWorkspaceId}` : input.repo?.trim() || (defaultPickAddress as any)(snapshot, {
     agentId: input.agentId,
     workspaceId: input.workspaceId,
     cwd: input.cwd ?? null,
@@ -1321,13 +1337,26 @@ async function resolveWorkerSelection(
   let discovery: any = null;
   let scope: any = null;
   if (scopeAddress) {
-    const resolved: any = resolveTargetEntry(scopeAddress, snapshot);
+    const resolved: any = exactScope ? { scope: exactScope, entry: scopeToEntry(exactScope) }
+      : resolveTargetEntry(scopeAddress, snapshot);
     scope = resolved.scope;
     const runner = createRunner({ config, client: paseo, gh: createGh(), git: createGit() } as any);
-    [discovery] = await runner.discoverAll([resolved.entry], { state: snapshot });
-    entries = discovery.providers ?? [];
-    let priv = discovery.github?.fork?.repo?.private;
-    const parent = scope?.parent ?? discovery.scope?.parent;
+    // Restrict primary discovery to the selected workspace. A shared checkout
+    // or an alias on another workspace must not supply the selection evidence.
+    const state = exactScope ? {
+      ...snapshot,
+      workspaces: [exactScope.workspace],
+      agents: snapshot.agents.filter((agent: any) => agent.workspaceId === exactWorkspaceId),
+    } : snapshot;
+    try {
+      [discovery] = await runner.discoverAll([resolved.entry], { state });
+    } catch (error) {
+      if (!exactScope) throw error;
+    }
+    const scopeDiscovery = !exactScope || discovery?.mainWorkspace?.id === exactWorkspaceId ? discovery : null;
+    entries = exactScope ? snapshot.providers ?? [] : discovery.providers ?? [];
+    let priv = scopeDiscovery?.github?.fork?.repo?.private;
+    const parent = scope?.parent ?? scopeDiscovery?.scope?.parent;
     const parentAddress = parent?.kind === "github"
       ? parent.id
       : typeof parent === "string"
@@ -1335,7 +1364,7 @@ async function resolveWorkerSelection(
         : scopeAddress.includes("@")
           ? scopeAddress.split("@")[0]
           : null;
-    if (priv === undefined && parentAddress && parentAddress !== scopeAddress) {
+    if (scopeDiscovery && priv === undefined && parentAddress && parentAddress !== scopeAddress) {
       try {
         const parentResolved: any = resolveTargetEntry(parentAddress, snapshot);
         const [parentDiscovery] = await runner.discoverAll([parentResolved.entry], { state: snapshot });
@@ -1348,7 +1377,7 @@ async function resolveWorkerSelection(
   } else {
     entries = snapshot.providers ?? [];
   }
-  let profileHealth = readProfileHealth(discovery?.mainWorkspace?.metadata);
+  let profileHealth = readProfileHealth((exactScope?.workspace ?? discovery?.mainWorkspace)?.metadata);
   if (input.failed !== undefined) {
     if (!scopeAddress) throw new Error("worker pick --failed needs a scope so the failure can be recorded");
     const failed = config.profiles?.[input.failed];
@@ -1365,12 +1394,34 @@ async function resolveWorkerSelection(
     profileHealth = { ...(profileHealth ?? {}), [record.profile]: record };
   }
   const zerosub = await readHandlerZerosub(extra);
+  const nowMs = Date.now();
+  const exclusions = new Map<number, string>();
   const selection: any = (resolveWorkerPick as any)(config, entries, {
     repoPublic,
     profileHealth,
     zerosub,
+    now: nowMs,
+    ...(exactScope ? { onSkip: (index: number, code: string) => exclusions.set(index, code) } : {}),
   });
-  return { config, snapshot, discovery, scope, entries, repoPublic, selection };
+  return { config, snapshot, discovery, scope, entries, repoPublic, selection, zerosub, nowMs, exclusions };
+}
+
+export async function getWorkspaceResources(
+  { workspaceId }: RpcInput<typeof factoryWorkspaceResources>,
+  { paseo }: PluginHandlerContext,
+  loader: ConfigLoader,
+  extra?: ZerosubHandlerExtra & { getQuotaSettings?: () => Promise<{ quotaSampleMinutes?: number } | null> },
+): Promise<WorkspaceResources> {
+  const [{ config, snapshot, repoPublic, selection, zerosub, nowMs, exclusions }, quotaSettings] = await Promise.all([
+    resolveWorkerSelection(paseo, loader, { exactWorkspaceId: workspaceId }, extra),
+    extra?.getQuotaSettings?.().catch(() => null),
+  ]);
+  return shapeWorkspaceResources({
+    workspaceId, config, repoPublic, zerosub, nowMs, exclusions, agents: snapshot.agents,
+    snapshot: getQuotaSnapshot(), quotaSampledAt: getQuotaSampledAt(), quotaSampleMinutes: quotaSettings?.quotaSampleMinutes,
+    selectedIndex: selection.profile ? selection.skipped.length : null,
+    selectedAccount: selection.zerosubAccount,
+  });
 }
 
 export async function pickWorker(

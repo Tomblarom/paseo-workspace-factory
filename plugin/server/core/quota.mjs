@@ -351,10 +351,14 @@ export function parseUsageJson(input) {
     const { session, weekly } = selectUsageWindows(report);
     const pct = windowPctOf(session);
     const weeklyPct = windowPctOf(weekly);
+    const cached = record.lastSuccessful?.report != null;
+    const sampledAt = cached ? record.lastSuccessful.fetchedAt : record.fetchedAt;
     pools.set(pool, pct === null ? null : {
       sessionPct: pct,
+      ...(typeof sampledAt === 'string' ? { sampledAt } : cached ? { sampledAt: null } : {}),
       ...(session?.resetsAt ? { resetsAt: session.resetsAt } : {}),
       ...(weeklyPct !== null ? { weeklyPct } : {}),
+      ...(weeklyPct !== null && weekly?.resetsAt ? { weeklyResetAt: weekly.resetsAt } : {}),
     });
   }
   return Object.fromEntries([...pools].filter(([, entry]) => entry !== null));

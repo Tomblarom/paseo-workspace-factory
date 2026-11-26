@@ -127,18 +127,24 @@ export function usedProfilesByLiveSteers(config, steers) {
  * the actual account when opening the agent.
  * Accounts and pools use the same `quotaExhaustedPct`.
  */
-export function resolveProfile(config, providerEntries, list, { role = 'worker', advisorSlot = false, usedProfiles = [], repoPublic = /** @type {boolean | null} */ (null), quotaSnapshot = null, quotaExhaustedPct = config?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct, profileHealth = null, now = Date.now(), zerosub = null, liveProviderPrivacy = false } = {}) {
+export function resolveProfile(config, providerEntries, list, { role = 'worker', advisorSlot = false, usedProfiles = [], repoPublic = /** @type {boolean | null} */ (null), quotaSnapshot = null, quotaExhaustedPct = config?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct, profileHealth = null, now = Date.now(), zerosub = null, liveProviderPrivacy = false, onSkip = /** @type {((index: number, code: string) => void) | null} */ (null) } = {}) {
   const skipped = [];
   const used = new Set(usedProfiles ?? []);
   const names = Array.isArray(list) ? list : [];
   for (const [index, name] of names.entries()) {
+    // The Resources RPC consumes bounded decision codes. Keep diagnostic
+    // text for CLI callers, where catalog and profile details are useful.
+    const skip = (code, reason) => {
+      onSkip?.(index, code);
+      skipped.push({ name, reason });
+    };
     if (typeof name !== 'string' || !config?.profiles?.[name]) {
-      skipped.push({ name, reason: `unknown profile ${JSON.stringify(name)}` });
+      skip('unknown-profile', `unknown profile ${JSON.stringify(name)}`);
       continue;
     }
     const advisor = isAdvisorProfile(config, name);
     if (profileIsUnhealthy(profileHealth, name, now)) {
-      skipped.push({ name, reason: `recently failed: ${profileHealth[name].class ?? 'other'}` });
+      skip('recent-failure', `recently failed: ${profileHealth[name].class ?? 'other'}`);
       continue;
     }
     const family = profileFamily(config.profiles[name]);
@@ -146,43 +152,43 @@ export function resolveProfile(config, providerEntries, list, { role = 'worker',
       const model = config.profiles[name].model ?? null;
       if (familyExhausted(zerosub, family, { exhaustedPct: quotaExhaustedPct, now, model })) {
         const reset = earliestFamilyReset(zerosub, family, { now, model });
-        skipped.push({ name, reason: reset ? `accounts exhausted, earliest reset ${reset}` : 'accounts exhausted' });
+        skip('accounts-exhausted', reset ? `accounts exhausted, earliest reset ${reset}` : 'accounts exhausted');
         continue;
       }
     } else {
       const pool = profilePool(config.profiles[name]);
       if (quotaExhausted(quotaSnapshot, pool, quotaExhaustedPct, now)) {
-        skipped.push({ name, reason: 'pool exhausted' });
+        skip('pool-exhausted', 'pool exhausted');
         continue;
       }
     }
     if (role === 'worker' && advisor) {
-      skipped.push({ name, reason: `profile "${name}" is tagged as advisor` });
+      skip('role-mismatch', `profile "${name}" is tagged as advisor`);
       continue;
     }
     if ((role === 'worker' || role === 'steer') && repoPublic !== true &&
         (isSensitiveProfile(config, name) || (liveProviderPrivacy && providerIsSensitive(config, config.profiles[name].provider)))) {
       const reason = role === 'worker' ? 'private repo' : (repoPublic === false ? 'scope is private; public scope required' : 'scope publicity is unknown; public scope required');
-      skipped.push({ name, reason: `sensitive profile "${name}": ${reason}` });
+      skip('scope-requires-public', `sensitive profile "${name}": ${reason}`);
       continue;
     }
     if (role === 'steer') {
       if (advisorSlot && !advisor) {
-        skipped.push({ name, reason: `profile "${name}" is not tagged as advisor` });
+        skip('role-mismatch', `profile "${name}" is not tagged as advisor`);
         continue;
       }
       if (!advisorSlot && advisor) {
-        skipped.push({ name, reason: `profile "${name}" is tagged as advisor` });
+        skip('role-mismatch', `profile "${name}" is tagged as advisor`);
         continue;
       }
       if (index > 0 && used.has(name)) {
-        skipped.push({ name, reason: `profile "${name}" is already used by a live steer` });
+        skip('profile-in-use', `profile "${name}" is already used by a live steer`);
         continue;
       }
     }
     const problems = validateProfilesAgainstCatalog(config, providerEntries, [name]);
     if (problems[name]) {
-      skipped.push({ name, reason: problems[name].join('; ') });
+      skip('catalog-rejected', problems[name].join('; '));
       continue;
     }
     const pickModel = config.profiles[name].model ?? null;

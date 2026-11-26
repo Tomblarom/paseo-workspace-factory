@@ -818,6 +818,55 @@ export const factoryQuota = defineRpc({
   }),
 });
 
+const resourceWindow = z.object({
+  alias: z.string(),
+  state: z.enum(["available", "unavailable", "stale"]),
+  usedPct: z.number().nullable(),
+  sampledAt: z.string().nullable(),
+  resetsAt: z.string().nullable(),
+});
+
+const resourceQuota = z.object({
+  provider: z.string(),
+  alias: z.string(),
+  limited: z.boolean(),
+  limitedUntil: z.string().nullable(),
+  windows: z.array(resourceWindow),
+});
+
+export const resourceWorkerExclusion = z.enum([
+  "unknown-profile", "recent-failure", "accounts-exhausted", "pool-exhausted",
+  "role-mismatch", "scope-requires-public", "profile-in-use", "catalog-rejected",
+]);
+
+/** Read-only Resources snapshot for an exact enrolled workspace. */
+export const factoryWorkspaceResources = defineRpc({
+  name: "factory.workspace.resources",
+  input: z.strictObject({ workspaceId: z.string().min(1) }),
+  output: z.object({
+    workspaceId: z.string(),
+    warnPct: z.number(),
+    exhaustedPct: z.number(),
+    pools: z.array(resourceQuota),
+    accounts: z.array(resourceQuota),
+    zeroSubState: z.enum(["available", "unavailable"]),
+    workerSelection: z.object({
+      scopeVisibility: z.enum(["public", "private", "unknown"]),
+      candidates: z.array(z.object({
+        profile: z.string(),
+        provider: z.string().nullable(),
+        model: z.string().nullable(),
+        poolAlias: z.string().nullable(),
+        decision: z.discriminatedUnion("state", [
+          z.object({ state: z.literal("selected"), accountAlias: z.string().nullable() }),
+          z.object({ state: z.literal("excluded"), reason: resourceWorkerExclusion }),
+          z.object({ state: z.literal("unevaluated") }),
+        ]),
+      })),
+    }),
+  }),
+});
+
 const steerAddArgs = {
   repo: z.string().min(1).optional(),
   workspaceId: z.string().min(1).optional(),

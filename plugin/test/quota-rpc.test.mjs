@@ -3,8 +3,11 @@ import assert from "node:assert/strict";
 import { register } from "node:module";
 register("./ts-resolve-hooks.mjs", import.meta.url);
 const { shapeQuotaView } = await import("../server/quota-rpc.ts");
+const { shapeWorkspaceResources } = await import("../server/resources-rpc.ts");
 const { parseFactoryArgs, FACTORY_COMMANDS, factoryHelp } = await import("../shared/factory-args.ts");
 const { validateQuotaSettings } = await import("../shared/settings-validate.ts");
+import { parseUsageJson } from "../server/core/quota.mjs";
+import { normalizeZerosubState } from "../server/core/zerosub.mjs";
 
 const NOW = Date.parse("2026-06-01T12:00:00.000Z");
 const SAMPLED = "2026-06-01T11:55:00.000Z";
@@ -144,6 +147,71 @@ test("quota view ignores expired ZeroSub windows", () => {
 test("quota view has no accounts without ZeroSub", () => {
   const view = shapeQuotaView({ snapshot: null, sampledAt: null, config: fakeConfig(), nowMs: NOW });
   assert.deepEqual(view.accounts, []);
+});
+
+test("workspace Resources exposes current, stale and unavailable provider and account windows", () => {
+  const pastReset = "2026-06-01T11:59:00.000Z";
+  const futureReset = "2026-06-01T15:00:00.000Z";
+  const weekReset = "2026-06-08T12:00:00.000Z";
+  const olderSample = "2026-06-01T11:35:00.000Z";
+  const snapshot = parseUsageJson([{ sourceId: "codex", report: { windows: [
+    { id: "5h", usedPct: 99, resetsAt: pastReset },
+    { id: "weekly", usedPct: 0, resetsAt: weekReset },
+  ] } }]);
+  const zerosub = normalizeZerosubState({ accounts: [
+    { id: "a-current", family: "claude", usage: { fetchedAt: SAMPLED, windows: [
+      { id: "5h", usedPercent: 98, resetsAt: pastReset },
+      { id: "weekly", usedPercent: 20, resetsAt: futureReset },
+      { id: "model-only", model: "opus", usedPercent: 50, resetsAt: futureReset },
+    ] } },
+    { id: "b-old", family: "claude", usage: { fetchedAt: olderSample, windows: [
+      { id: "5h", usedPercent: 70, resetsAt: futureReset },
+    ] } },
+    { id: "c-unknown", family: "claude", usage: { windows: [{ id: "5h", usedPercent: 11 }] } },
+  ] }, { now: NOW });
+  const input = {
+    workspaceId: "wks_app", config: fakeConfig(), nowMs: NOW, agents: [], snapshot, zerosub,
+    quotaSampledAt: Date.parse(SAMPLED), repoPublic: null, selectedIndex: null, selectedAccount: null, exclusions: new Map(),
+  };
+  const view = shapeWorkspaceResources(input);
+  const windowState = ({ state, usedPct, resetsAt }) => [state, usedPct, resetsAt];
+  assert.deepEqual(view.pools.find(({ provider }) => provider === "codex").windows.map(windowState), [
+    ["stale", null, pastReset], ["available", 0, weekReset],
+  ]);
+  assert.deepEqual(view.pools.find(({ provider }) => provider === "claude").windows.map(windowState), [
+    ["unavailable", null, null], ["unavailable", null, null],
+  ]);
+  assert.deepEqual(view.accounts.map(({ windows }) => windows.map(windowState)), [
+    [["stale", null, pastReset], ["available", 20, futureReset]],
+    [["stale", null, futureReset]],
+    [["unavailable", null, null]],
+  ]);
+  assert.equal(view.zeroSubState, "available");
+
+  const old = shapeWorkspaceResources({ ...input, quotaSampledAt: Date.parse(olderSample), zerosub: null });
+  assert.equal(old.pools.find(({ provider }) => provider === "codex").windows[1].state, "stale");
+  assert.deepEqual(old.accounts, []);
+  assert.equal(old.zeroSubState, "unavailable");
+
+  const cached = parseUsageJson([{ sourceId: "codex", fetchedAt: SAMPLED, lastSuccessful: {
+    fetchedAt: olderSample, report: { windows: [{ id: "5h", usedPct: 90, resetsAt: futureReset }] },
+  } }]);
+  const retained = shapeWorkspaceResources({ ...input, snapshot: cached });
+  assert.deepEqual(retained.pools.find(({ provider }) => provider === "codex").windows[0], {
+    alias: "Session", state: "stale", usedPct: null, sampledAt: olderSample, resetsAt: futureReset,
+  });
+  const timeless = parseUsageJson([{ sourceId: "codex", fetchedAt: SAMPLED, lastSuccessful: {
+    report: { windows: [{ id: "5h", usedPct: 90, resetsAt: futureReset }] },
+  } }]);
+  const uncertain = shapeWorkspaceResources({ ...input, snapshot: timeless });
+  assert.equal(uncertain.pools.find(({ provider }) => provider === "codex").windows[0].state, "unavailable");
+
+  const slowerCadence = shapeWorkspaceResources({ ...input, quotaSampledAt: Date.parse(olderSample), quotaSampleMinutes: 15 });
+  assert.equal(slowerCadence.pools.find(({ provider }) => provider === "codex").windows[1].state, "available");
+  assert.equal(slowerCadence.accounts[1].windows[0].state, "available");
+  assert.deepEqual(shapeQuotaView({ ...input, sampledAt: SAMPLED }).pools[0], {
+    pool: "codex", sessionPct: 99, weeklyPct: 0, resetAt: pastReset, sampledAt: SAMPLED, state: "exhausted",
+  });
 });
 
 test("quota args take no scope, flags, or positionals", () => {
