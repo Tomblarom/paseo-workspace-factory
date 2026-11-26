@@ -61,6 +61,8 @@ import {
 } from "./server/supervise.js";
 import { startQuotaTimer } from "./server/quota.js";
 import { getQuota } from "./server/quota-rpc.js";
+import { getWorkspaceActivity } from "./server/workspace-activity.js";
+import { factoryWorkspaceActivity } from "./shared/workspace-activity.js";
 import { readZerosubStateSafe } from "./server/zerosub-runtime.js";
 import { isAdvisorSteer } from "./server/core/config.mjs";
 import { ROLE_RULES_ID, rolePromptForOpen, withFactoryCli, workerEnvAdditions } from "./server/core/role-prompts.mjs";
@@ -179,6 +181,7 @@ export default function contribute(server: PluginServerContext) {
     return getStatus(input, ctx, loader);
   });
   server.handle(factoryPlan, (input, ctx) => getPlan(input, ctx, loader));
+  server.handle(factoryWorkspaceActivity, getWorkspaceActivity);
   server.handle(factorySwitchPreview, (input, ctx) => previewSwitch(input, ctx, loader));
   server.handle(factorySwitch, (input, ctx) => applySwitch(input, ctx, loader, delivery));
   server.handle(factorySteerDelivery, (input, { paseo }) => deliverSteer(paseo, input, delivery));

@@ -1,7 +1,10 @@
+import type { RpcInput } from "@getpaseo/plugin";
+import type { PluginHandlerContext } from "@getpaseo/plugin/server";
+import type { factoryWorkspaceActivity } from "../shared/workspace-activity.js";
 import { actionFact } from "./core/action-facts.mjs";
 import { AGENTS_KEY } from "./core/agent-state.mjs";
 import { ASSIGNMENT_KEY } from "./core/assign.mjs";
-import { METADATA_KEY } from "./core/paseo.mjs";
+import { LABEL, METADATA_KEY, readPaseoAgents } from "./core/paseo.mjs";
 import { sameScopeId } from "./core/scope.mjs";
 import { readStagedSteerBrief, readSteerAction } from "./core/steer-action.mjs";
 import { readWorkers } from "./core/supervision.mjs";
@@ -36,6 +39,7 @@ const recoveryReasons = {
 type DeliveryPhase = (typeof deliveryPhases)[keyof typeof deliveryPhases];
 type ActivityDetails =
   | { kind: "holder-change"; state: "recorded"; reason: "slot-changed" | "holder-replaced" }
+  | { kind: "creation"; state: "recorded"; reason: "steer-created" | "worker-created" }
   | { kind: "renewal"; state: "confirmed"; reason: "context-cleared" | "context-compacted" | "context-rewound" }
   | { kind: "renewal"; state: "uncertain"; reason: "renewal-unconfirmed" }
   | { kind: "recovery"; state: "pending"; reason: (typeof recoveryReasons)[keyof typeof recoveryReasons] }
@@ -51,10 +55,10 @@ export interface WorkspaceActivity {
   events: WorkspaceActivityEvent[];
 }
 
-/** The workspace and agent membership come from the same host observation. */
+/** The workspace and agent membership come from the same host. */
 export interface WorkspaceActivityObservation {
   workspace: { id: string; metadata?: Record<string, unknown> | null } | null;
-  agents: readonly { id: string; workspaceId?: string | null }[];
+  agents: readonly { id: string; workspaceId?: string | null; createdAt?: string; labels?: Record<string, string> | null }[];
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -143,10 +147,10 @@ export function projectWorkspaceActivity(
     else record({ kind: "assignment", state: "recorded", reason: "assignment-recorded" }, assignment.at);
   }
 
-  const members = new Set(agents.filter((agent) => agent.workspaceId === workspaceId).map((agent) => agent.id));
+  const members = new Map(agents.filter((agent) => agent.workspaceId === workspaceId).map((agent) => [agent.id, agent]));
   const entries = asRecord(metadata?.[AGENTS_KEY]);
   const workers = readWorkers(metadata);
-  for (const agentId of [...members].sort()) {
+  for (const agentId of [...members.keys()].sort()) {
     const entry = asRecord(entries && lookup(entries, agentId));
     if (entry) {
       recordRenewal(entry, record);
@@ -161,6 +165,11 @@ export function projectWorkspaceActivity(
       }
     }
     const worker = asRecord(lookup(workers, agentId));
+    const agent = members.get(agentId);
+    if (recordedTime(agent?.createdAt)) {
+      if (worker) record({ kind: "creation", state: "recorded", reason: "worker-created" }, agent?.createdAt);
+      else if (agent?.labels?.[LABEL.role] === "steer") record({ kind: "creation", state: "recorded", reason: "steer-created" }, agent.createdAt);
+    }
     const pendingWake = asRecord(worker?.pendingWake);
     if (pendingWake) {
       const reason = lookup(wakeReasons, pendingWake.state ?? worker?.state) ?? "worker-update";
@@ -172,4 +181,17 @@ export function projectWorkspaceActivity(
 
   events.sort((a, b) => (b.observedAt ?? "").localeCompare(a.observedAt ?? ""));
   return { kind: "recent-recorded-activity", events: events.slice(0, WORKSPACE_ACTIVITY_LIMIT) };
+}
+
+export async function getWorkspaceActivity(
+  { workspaceId }: RpcInput<typeof factoryWorkspaceActivity>,
+  { paseo }: PluginHandlerContext,
+) {
+  const [workspace, agents] = await Promise.all([
+    paseo.workspaces.ref(workspaceId).refresh(),
+    readPaseoAgents(paseo),
+  ]);
+  const activity = projectWorkspaceActivity(workspaceId, { workspace, agents });
+  if (!activity) throw new Error("Activity requires an enrolled Factory workspace.");
+  return { workspaceId, ...activity };
 }

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { projectWorkspaceActivity, WORKSPACE_ACTIVITY_LIMIT } from '../server/workspace-activity.ts';
+import { getWorkspaceActivity, projectWorkspaceActivity, WORKSPACE_ACTIVITY_LIMIT } from '../server/workspace-activity.ts';
 
 const workspaceId = 'wks_main';
 const otherWorkspaceId = 'wks_other';
@@ -146,4 +146,30 @@ test('caps the view at the most recent recorded events', () => {
   assert.equal(events.length, WORKSPACE_ACTIVITY_LIMIT);
   assert.deepEqual(events.map(({ observedAt }) => observedAt),
     Array.from({ length: WORKSPACE_ACTIVITY_LIMIT }, (_, index) => at(count - 1 - index)));
+});
+
+test('the activity RPC reads the exact workspace and native creation timestamps without writing', async () => {
+  const { workspace } = observation({ 'wsf.workers': { worker: { state: 'done' } } });
+  const agents = [
+    { ...member('worker'), createdAt: at(1), archivedAt: at(3) },
+    { ...member('steer'), createdAt: at(2), labels: { 'wsf.role': 'steer' } },
+    { ...member('unrelated'), createdAt: at(3) },
+    { ...member('foreign', otherWorkspaceId), createdAt: at(4), labels: { 'wsf.role': 'steer' } },
+  ];
+  const paseo = {
+    workspaces: { ref: (id) => ({ refresh: async () => id === workspaceId ? workspace : null }) },
+    agents: { list: async ({ filter }) => {
+      assert.equal(filter.includeArchived, true);
+      return { entries: agents.map((agent) => ({ agent })) };
+    } },
+  };
+  assert.deepEqual(await getWorkspaceActivity({ workspaceId }, { paseo }), {
+    workspaceId,
+    kind: 'recent-recorded-activity',
+    events: [
+      { kind: 'creation', state: 'recorded', reason: 'steer-created', observedAt: at(2) },
+      { kind: 'creation', state: 'recorded', reason: 'worker-created', observedAt: at(1) },
+    ],
+  });
+  await assert.rejects(getWorkspaceActivity({ workspaceId: otherWorkspaceId }, { paseo }), /enrolled Factory workspace/);
 });
