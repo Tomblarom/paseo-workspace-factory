@@ -35,9 +35,10 @@ import type {
   SteerAddPreviewInputs,
 } from "./factory-store.js";
 import { record, type FactorySteerFeed } from "./factory-workspace-state.js";
+import { FactoryWorkspaceActivity } from "./factory-workspace-activity.js";
 import { FactoryWorkspaceStatus } from "./factory-workspace-status.js";
 
-const factoryViews = ["Overview", "Steers", "Tools"] as const;
+const factoryViews = ["Overview", "Steers", "Activity", "Tools"] as const;
 type FactoryView = typeof factoryViews[number];
 
 function text(value: unknown): string {
@@ -558,7 +559,9 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
           </Pressable>
         ))}
       </View>
-      {view !== "Tools" ? (
+      {view === "Activity" ? (
+        <FactoryWorkspaceActivity workspaceId={workspaceId} layout={layout} host={host} styles={styles} />
+      ) : view !== "Tools" ? (
         <FactoryWorkspaceStatus
           view={view}
           workspaceId={workspaceId}
