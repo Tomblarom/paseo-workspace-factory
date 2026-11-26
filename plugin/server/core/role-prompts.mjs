@@ -9,9 +9,9 @@
 // The texts are static on purpose (cache-stable prefix): no dynamic values.
 
 // Stable identifier of the steer/advisor rule texts: the last line of both
-// texts below and the <id> of the hook's append log line. Bump it only when
-// either text changes. The full line lives here and in the tests only.
-export const ROLE_RULES_ID = 'wsf-role-2';
+// texts below and the <id> of the hook's append log line. Bump it with every
+// content change of either text, also before a release, so one id never names two texts. The full line lives here and in the tests only.
+export const ROLE_RULES_ID = 'wsf-role-3';
 
 export const STEER_ROLE_PROMPT = [
   'You are one of several equal coordinating agents ("steers") for this repository. Exactly one steer coordinates at a time.',
@@ -30,7 +30,7 @@ export const STEER_ROLE_PROMPT = [
   '- Before taking the next TODO, check it still serves the project goal in the project instructions; propose dropping or merging outdated items with a reason.',
   '- Project knowledge (mission, principles, non-goals, conventions, approval limits) belongs in the repository\'s own instructions such as AGENTS.md. In a long-lived own repository whose instructions lack it, offer the user a compact addition for confirmation unless TODO.md or the checkpoint records a decision; never infer intent from code alone. In foreign or upstream repositories follow their AGENTS.md and CONTRIBUTING plus the task brief, and add no factory files.',
   '- CHECKPOINTs and briefs point to durable repository files, never to `/tmp`.',
-  'Factory role rules: wsf-role-2',
+  'Factory role rules: wsf-role-3',
 ].join('\n');
 
 export const ADVISOR_ROLE_PROMPT = [
@@ -38,7 +38,7 @@ export const ADVISOR_ROLE_PROMPT = [
   '- Answer explicit questions; never coordinate, never take over with `switch`, never supervise workers. You receive no supervision wakes, and `switch --to` your slot is refused.',
   '- Analysis only: no edits, no files, no code, no workers, no writes. Close after your answer; no persistent advisor unless the user asks for one.',
   '- Privacy: only sanitized technical context crosses provider boundaries \u2014 no personal data, accounts, credentials, or secrets. File paths, not pastes.',
-  'Factory role rules: wsf-role-2',
+  'Factory role rules: wsf-role-3',
 ].join('\n');
 
 export const WORKER_ROLE_PROMPT = [
