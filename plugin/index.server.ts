@@ -60,7 +60,8 @@ import { startQuotaTimer } from "./server/quota.js";
 import { getQuota } from "./server/quota-rpc.js";
 import { readZerosubStateSafe } from "./server/zerosub-runtime.js";
 import { isAdvisorSlot } from "./server/core/config.mjs";
-import { rolePromptForOpen, withFactoryCli } from "./server/core/role-prompts.mjs";
+import { ROLE_RULES_ID, rolePromptForOpen, withFactoryCli, workerEnvAdditions } from "./server/core/role-prompts.mjs";
+import { shortHolderId } from "./server/core/steer-create.mjs";
 import {
   factoryApply,
   factoryAssign,
@@ -261,7 +262,20 @@ export default function contribute(server: PluginServerContext) {
   // `worker start`; history opens and non-factory agents stay unchanged).
   // The text is static (cache-stable); only the advisor choice reads config.
   const removeRoleHook = server.addHook("agent.open.before", async ({ request }, context) => {
-    if (request.purpose !== "interactive" || request.labels?.["wsf.role"] !== "steer") return;
+    if (request.purpose !== "interactive") return;
+    // Workers get output limits via env (their role text comes via `worker
+    // start`); steers get the appended prompt below; the rest is untouched.
+    if (request.labels?.["wsf.role"] === "worker") {
+      const additions = (workerEnvAdditions as unknown as (args: { labels: unknown; purpose: unknown; env: unknown }) => Record<string, string> | null)({
+        labels: request.labels, purpose: request.purpose, env: request.env,
+      });
+      const count = additions ? Object.keys(additions).length : 0;
+      const workerShortId = (shortHolderId as unknown as (id: unknown) => string)(request.agentId);
+      console.log(`[factory] worker env limits set: agent ${workerShortId}, reason ${request.reason}, env ${count}`);
+      if (!additions || count === 0) return;
+      return { ...request, env: { ...request.env, ...additions } };
+    }
+    if (request.labels?.["wsf.role"] !== "steer") return;
     let isAdvisor = false;
     const slot = request.labels["wsf.slot"];
     if (typeof slot === "string" && slot) {
@@ -284,6 +298,9 @@ export default function contribute(server: PluginServerContext) {
     } catch {
       rendered = text;
     }
+    // Evidence trail that the role rules were delivered (no prompt text).
+    const shortId = (shortHolderId as unknown as (id: unknown) => string)(request.agentId);
+    console.log(`[factory] role prompt ${ROLE_RULES_ID as unknown as string} appended: agent ${shortId}, reason ${request.reason}, role ${isAdvisor ? "advisor" : "steer"}`);
     return { ...request, appendSystemPrompt: [...(request.appendSystemPrompt ?? []), rendered] };
   });
   const stopCleanupTimer = startCleanupTimer({ readSettings, getZerosub, getQuotaSettings: readQuotaSettings });

@@ -431,6 +431,6 @@ test('fresh preview carries the brief when interrupted', async () => {
 });
 
 test('CLI usage documents resume', () => {
-  const out = execFileSync('node', ['src/cli.mjs', '--help'], { encoding: 'utf8' });
+  const out = execFileSync('node', ['plugin/cli.mjs', '--help'], { encoding: 'utf8' });
   assert.match(out, /resume \[scope\] \[--agent <id>\] \[--json\]/);
 });

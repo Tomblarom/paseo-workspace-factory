@@ -7,6 +7,12 @@
 // copy the steer text from here into their project instructions.
 // Docs point here; there is no second hand-maintained copy.
 // The texts are static on purpose (cache-stable prefix): no dynamic values.
+
+// Stable identifier of the steer/advisor rule texts: the last line of both
+// texts below and the <id> of the hook's append log line. Bump it only when
+// either text changes. The full line lives here and in the tests only.
+export const ROLE_RULES_ID = 'wsf-role-1';
+
 export const STEER_ROLE_PROMPT = [
   'You are one of several equal coordinating agents ("steers") for this repository. Exactly one steer coordinates at a time.',
   '- Before coordinating, check whether you are active: `paseo-factory status <owner>/<repo>`. If another steer is active, do not coordinate; answer only explicit questions. If your brief says you are an advisor steer, answer only; never coordinate or take over.',
@@ -20,7 +26,10 @@ export const STEER_ROLE_PROMPT = [
   '- `assign <scope> --apply` records you as requester; the factory reports that steer\'s done/blocked CHECKPOINT back to you automatically. Do not unset PASEO_AGENT_ID for `assign`, or pass `--report-to <your-agent-id>`. Until the report arrives, keep a background watcher on that steer like on a worker.',
   '- Address the user informally by default (German: "du", never "Sie"; same register in other languages) unless the user asks for formal address.',
   '- Keep this chat short: end each work package with a CHECKPOINT so the next switch/fresh starts clean; delegate routine work to a cheap worker. Batch tool calls, filter big outputs, write big artifacts to files and paste only summary + path.',
-  '- When your brief includes the findings reminder, record Factory observations in its indicated FINDINGS.md and propose moving them to TODO.md only when needed, with the user\u2019s consent.',
+  '- When your brief includes the findings reminder, record Factory observations in its indicated FINDINGS.md and propose moving them to TODO.md only with the user\u2019s consent.',
+  '- Before taking the next TODO, check it still serves the project goal in the project instructions; propose dropping or merging outdated items with a reason.',
+  '- CHECKPOINTs and briefs point to durable repository files, never to `/tmp`.',
+  'Factory role rules: wsf-role-1',
 ].join('\n');
 
 export const ADVISOR_ROLE_PROMPT = [
@@ -28,6 +37,7 @@ export const ADVISOR_ROLE_PROMPT = [
   '- Answer explicit questions; never coordinate, never take over with `switch`, never supervise workers. You receive no supervision wakes, and `switch --to` your slot is refused.',
   '- Analysis only: no edits, no files, no code, no workers, no writes. Close after your answer; no persistent advisor unless the user asks for one.',
   '- Privacy: only sanitized technical context crosses provider boundaries \u2014 no personal data, accounts, credentials, or secrets. File paths, not pastes.',
+  'Factory role rules: wsf-role-1',
 ].join('\n');
 
 export const WORKER_ROLE_PROMPT = [
@@ -39,14 +49,42 @@ export const WORKER_ROLE_PROMPT = [
   '- Run tests/builds with a quiet reporter, show only failures; write long logs to a file and give the path.',
 ].join('\n');
 
+// Per-agent output limits for factory workers (native provider env vars,
+// delivered via the `agent.open.before` hook for interactive worker opens
+// only). Both sit below the provider defaults (Claude 30000 chars, Copilot
+// 20 KiB) and complement the prompt-level short reporters.
+export const WORKER_ENV_LIMITS = {
+  BASH_MAX_OUTPUT_LENGTH: '15000',
+  COPILOT_LARGE_OUTPUT_THRESHOLD_BYTES: '10240',
+};
+
 /**
- * Runnable factory CLI for this host: the checkout CLI when the plugin runs
- * from a factory checkout, else the `paseo-factory` binary name (release
- * snapshots ship no CLI, and it may not be on PATH).
+ * Env additions for one `agent.open.before` request, or null when the hook
+ * must leave the env unchanged. Only interactive opens of factory workers
+ * get limits, and only for vars not already set (explicit config wins).
  */
-export function factoryCliCommand({ factoryRoot = null } = {}) {
-  return typeof factoryRoot === 'string' && factoryRoot
-    ? `node ${factoryRoot}/src/cli.mjs`
+export function workerEnvAdditions({ labels = null, purpose = null, env = null } = {}) {
+  if (purpose !== 'interactive') return null;
+  if (!labels || typeof labels !== 'object' || labels['wsf.role'] !== 'worker') return null;
+  const additions = {};
+  for (const [key, value] of Object.entries(WORKER_ENV_LIMITS)) {
+    if (env && typeof env === 'object' && env[key] !== undefined) continue;
+    additions[key] = value;
+  }
+  return additions;
+}
+
+/**
+ * Runnable factory CLI for this host: `node <installed plugin dir>/cli.mjs`.
+ * The CLI ships inside the plugin package, so checkout, release snapshot and
+ * registry installs all contain it. `pluginDir` is the daemon's install path
+ * for this plugin (same source as `paseo plugin ls --json`), never a compile
+ * cache. Falls back to the `paseo-factory` binary name when the install path
+ * is unknown (it may not be on PATH).
+ */
+export function factoryCliCommand({ pluginDir = null } = {}) {
+  return typeof pluginDir === 'string' && pluginDir
+    ? `node ${pluginDir}/cli.mjs`
     : 'paseo-factory';
 }
 

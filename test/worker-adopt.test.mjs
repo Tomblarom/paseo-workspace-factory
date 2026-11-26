@@ -282,6 +282,6 @@ test('status and handoff show the foreign worker workspace', async () => {
 });
 
 test('CLI usage points plan/setup to /factory', () => {
-  const out = execFileSync('node', ['src/cli.mjs', '--help'], { encoding: 'utf8' });
+  const out = execFileSync('node', ['plugin/cli.mjs', '--help'], { encoding: 'utf8' });
   assert.match(out, /\/factory in the Paseo composer/);
 });

@@ -6,7 +6,7 @@
   "description": "Enroll one existing Paseo workspace per scope and steer its coordinator agents.",
   "type": "module",
   "bin": {
-    "paseo-factory": "src/cli.mjs"
+    "paseo-factory": "plugin/cli.mjs"
   },
   "scripts": {
     "test": "node --experimental-strip-types --test --test-reporter=dot --test-timeout=30000 test/*.test.mjs plugin/test/*.test.mjs",

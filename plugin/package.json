@@ -5,6 +5,7 @@
   "license": "MIT",
   "description": "Drive the Paseo workspace factory from inside Paseo: slash commands, panel, settings.",
   "files": [
+    "cli.mjs",
     "paseo-plugin.json",
     "OVERVIEW.md",
     "OVERVIEW.*.md",

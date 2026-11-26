@@ -233,6 +233,6 @@ test('buildAssignment is deterministic and complete', () => {
 });
 
 test('CLI usage documents assign', () => {
-  const out = execFileSync('node', ['src/cli.mjs', '--help'], { encoding: 'utf8' });
+  const out = execFileSync('node', ['plugin/cli.mjs', '--help'], { encoding: 'utf8' });
   assert.match(out, /assign <scope> --task <text>/);
 });

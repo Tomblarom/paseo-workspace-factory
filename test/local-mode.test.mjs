@@ -329,6 +329,6 @@ test('ambiguous local/<folder> lookup is a conflict', async () => {
 });
 
 test('CLI usage points plan to /factory', () => {
-  const out = execFileSync('node', ['src/cli.mjs', '--help'], { encoding: 'utf8' });
+  const out = execFileSync('node', ['plugin/cli.mjs', '--help'], { encoding: 'utf8' });
   assert.match(out, /Setup and management commands .*\/factory/);
 });

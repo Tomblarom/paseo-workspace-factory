@@ -402,7 +402,7 @@ test('adopt maps by slot for the single entry ("*" fallback or exact scope id)',
 });
 
 test('CLI usage points plan to /factory and omits retired flags', () => {
-  const out = execFileSync('node', ['src/cli.mjs', '--help'], { encoding: 'utf8' });
+  const out = execFileSync('node', ['plugin/cli.mjs', '--help'], { encoding: 'utf8' });
   assert.match(out, /\/factory in the Paseo composer/);
   assert.doesNotMatch(out, /--repos-file|--allow-fork|--checkout/);
 });

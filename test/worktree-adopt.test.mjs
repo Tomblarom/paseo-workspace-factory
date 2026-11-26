@@ -429,7 +429,7 @@ test('apply adopts the worktree with fakes and creates no project or workspace',
 });
 
 test('CLI rejects removed plan command', () => {
-  assert.throws(() => execFileSync('node', ['src/cli.mjs', 'plan', 'workspace:wks_1'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), /\/factory plan/);
+  assert.throws(() => execFileSync('node', ['plugin/cli.mjs', 'plan', 'workspace:wks_1'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), /\/factory plan/);
 });
 
 // --------------------------------- github --main adoption (#3): a worktree
@@ -488,7 +488,7 @@ function githubMainWorld() {
   return world;
 }
 
-const CLI = fileURLToPath(new URL('../src/cli.mjs', import.meta.url));
+const CLI = fileURLToPath(new URL('../plugin/cli.mjs', import.meta.url));
 
 function runCli(_t, args) {
   try {

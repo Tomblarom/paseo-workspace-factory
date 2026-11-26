@@ -2,21 +2,48 @@
 // interactive opens, and `worker start` appends the worker block while the
 // idempotency key still covers the raw task only.
 import assert from 'node:assert/strict';
+import { readdirSync, readFileSync } from 'node:fs';
 import test from 'node:test';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { LABEL, METADATA_KEY, PARENT_LABEL } from '../server/core/paseo.mjs';
 import {
   ADVISOR_ROLE_PROMPT,
+  ROLE_RULES_ID,
   STEER_ROLE_PROMPT,
+  WORKER_ENV_LIMITS,
   WORKER_ROLE_PROMPT,
   factoryCliCommand,
   rolePromptForOpen,
   withFactoryCli,
+  workerEnvAdditions,
 } from '../server/core/role-prompts.mjs';
 import { idempotencyKey, requestDigest } from '../server/core/steer-create.mjs';
 import { startScopedWorker } from '../server/core/workers.mjs';
 
 const STEER = { [LABEL.scope]: 'o/r', [LABEL.role]: 'steer', [LABEL.slot]: 'B' };
 const WORKER = { [LABEL.scope]: 'o/r', [LABEL.role]: 'worker', [LABEL.owner]: 'B' };
+const ROOT = dirname(fileURLToPath(import.meta.url));
+
+function filesContainingId(dir, prefix = '') {
+  const hits = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === 'node_modules' || entry.name === '.git') continue;
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) hits.push(...filesContainingId(full, rel));
+    else if (entry.isFile()) {
+      let text;
+      try {
+        text = readFileSync(full, 'utf8');
+      } catch {
+        continue;
+      }
+      if (text.includes(`Factory role rules: ${ROLE_RULES_ID}`)) hits.push(rel);
+    }
+  }
+  return hits;
+}
 
 test('hook targeting: interactive steer gets the steer text, advisor slot the advisor text', () => {
   assert.equal(rolePromptForOpen({ labels: STEER, purpose: 'interactive' }), STEER_ROLE_PROMPT);
@@ -31,6 +58,23 @@ test('hook targeting: workers, non-factory agents and history opens get nothing'
   assert.equal(rolePromptForOpen({ purpose: 'interactive' }), null);
   assert.equal(rolePromptForOpen({ labels: STEER, purpose: 'history' }), null);
   assert.equal(rolePromptForOpen({ labels: STEER }), null);
+});
+
+test('worker env limits target interactive factory workers without overwriting', () => {
+  assert.deepEqual(WORKER_ENV_LIMITS, {
+    BASH_MAX_OUTPUT_LENGTH: '15000',
+    COPILOT_LARGE_OUTPUT_THRESHOLD_BYTES: '10240',
+  });
+  assert.deepEqual(workerEnvAdditions({ labels: WORKER, purpose: 'interactive', env: {} }), { ...WORKER_ENV_LIMITS });
+  assert.deepEqual(
+    workerEnvAdditions({ labels: WORKER, purpose: 'interactive', env: { BASH_MAX_OUTPUT_LENGTH: '999' } }),
+    { COPILOT_LARGE_OUTPUT_THRESHOLD_BYTES: '10240' },
+  );
+  assert.deepEqual(workerEnvAdditions({ labels: WORKER, purpose: 'interactive', env: { ...WORKER_ENV_LIMITS } }), {});
+  assert.equal(workerEnvAdditions({ labels: STEER, purpose: 'interactive', env: {} }), null);
+  assert.equal(workerEnvAdditions({ labels: {}, purpose: 'interactive', env: {} }), null);
+  assert.equal(workerEnvAdditions({ labels: WORKER, purpose: 'history', env: {} }), null);
+  assert.equal(workerEnvAdditions({ labels: WORKER, env: {} }), null);
 });
 
 test('role texts are static and name the real CLI', () => {
@@ -71,21 +115,39 @@ function setup() {
         steers: [{ id: parentId, slot: 'B', workspaceId }] },
       callerId: parentId,
       profile: { name: 'worker', provider: 'codex', model: 'example', mode: 'full-access' },
-      accountId: null, title: 'Check unit tests', prompt: 'Review the synthetic fixture.', promptOptions: { factoryRoot: '/srv/factory' },
+      accountId: null, title: 'Check unit tests', prompt: 'Review the synthetic fixture.', promptOptions: { factoryRoot: '/srv/factory', pluginDir: '/srv/factory/plugin' },
     },
   };
 }
 
-test('CLI name renders once per host: checkout CLI when known, else paseo-factory', () => {
-  assert.equal(factoryCliCommand({ factoryRoot: '/srv/factory' }), 'node /srv/factory/src/cli.mjs');
-  assert.equal(factoryCliCommand({ factoryRoot: null }), 'paseo-factory');
+test('CLI name renders once per host: installed plugin CLI when known, else paseo-factory', () => {
+  assert.equal(factoryCliCommand({ pluginDir: '/srv/factory/plugin' }), 'node /srv/factory/plugin/cli.mjs');
+  assert.equal(factoryCliCommand({ pluginDir: null }), 'paseo-factory');
   assert.equal(factoryCliCommand({}), 'paseo-factory');
   assert.equal(factoryCliCommand(), 'paseo-factory');
   assert.equal(withFactoryCli(STEER_ROLE_PROMPT), STEER_ROLE_PROMPT);
-  const rendered = withFactoryCli(STEER_ROLE_PROMPT, { factoryRoot: '/srv/factory' });
-  assert.match(rendered, /node \/srv\/factory\/src\/cli\.mjs resume/);
+  const rendered = withFactoryCli(STEER_ROLE_PROMPT, { pluginDir: '/srv/factory/plugin' });
+  assert.match(rendered, /node \/srv\/factory\/plugin\/cli\.mjs resume/);
   assert.doesNotMatch(rendered, /paseo-factory/);
-  assert.equal(withFactoryCli(ADVISOR_ROLE_PROMPT, { factoryRoot: '/srv/factory' }), ADVISOR_ROLE_PROMPT);
+  assert.equal(withFactoryCli(ADVISOR_ROLE_PROMPT, { pluginDir: '/srv/factory/plugin' }), ADVISOR_ROLE_PROMPT);
+});
+
+test('steer and advisor texts end with the stable role-rules identifier', () => {
+  assert.equal(ROLE_RULES_ID, 'wsf-role-1');
+  assert.ok(STEER_ROLE_PROMPT.includes('Factory role rules: wsf-role-1'));
+  for (const text of [STEER_ROLE_PROMPT, ADVISOR_ROLE_PROMPT]) {
+    assert.equal(text.split(`Factory role rules: ${ROLE_RULES_ID}`).length - 1, 1);
+    assert.ok(text.endsWith(`Factory role rules: ${ROLE_RULES_ID}`));
+  }
+  assert.doesNotMatch(WORKER_ROLE_PROMPT, /Factory role rules:/);
+});
+
+test('the identifier line lives only in the role module and its tests', () => {
+  const holders = filesContainingId(join(ROOT, '..', '..')).sort();
+  assert.deepEqual(holders, [
+    'plugin/server/core/role-prompts.mjs',
+    'plugin/test/role-prompts.test.mjs',
+  ]);
 });
 
 test('worker start appends the role block after the task, before findings', async () => {
@@ -101,7 +163,7 @@ test('worker start appends the role block after the task, before findings', asyn
 test('worker start names the runnable CLI per host in both forms', async () => {
   const { options, requests } = setup();
   await startScopedWorker({ ...options, apply: true });
-  assert.match(requests[0].prompt, /node \/srv\/factory\/src\/cli\.mjs resume/);
+  assert.match(requests[0].prompt, /node \/srv\/factory\/plugin\/cli\.mjs resume/);
   assert.doesNotMatch(requests[0].prompt, /paseo-factory/);
   await startScopedWorker({ ...options, apply: true, promptOptions: {} });
   assert.match(requests[1].prompt, /`paseo-factory resume`/);

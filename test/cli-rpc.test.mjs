@@ -2,7 +2,7 @@
 // commands point to /factory, and missing plugin/daemon fails with a one-line fix.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { runCli } from '../src/cli.mjs';
+import { runCli } from '../plugin/cli.mjs';
 
 function makeFakeRpc(responses = {}) {
   const calls = [];

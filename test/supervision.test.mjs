@@ -516,7 +516,7 @@ test('workers report sorts entries; text prints header and lines', () => {
 });
 
 test('CLI usage documents workers', () => {
-  const out = execFileSync('node', ['src/cli.mjs', '--help'], { encoding: 'utf8' });
+  const out = execFileSync('node', ['plugin/cli.mjs', '--help'], { encoding: 'utf8' });
   assert.match(out, /workers \[scope\] \[--prune\] \[--apply\] \[--json\]/);
   assert.match(out, /--prune removes entries whose agent is gone/);
 });

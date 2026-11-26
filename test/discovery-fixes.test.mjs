@@ -187,7 +187,7 @@ test('#2: a retired entry "checkout" is refused with a pointer to direct enrollm
 
 // ---------------------------------------------------------------- #2 retired --checkout flag (CLI validation)
 
-const CLI = fileURLToPath(new URL('../src/cli.mjs', import.meta.url));
+const CLI = fileURLToPath(new URL('../plugin/cli.mjs', import.meta.url));
 
 function runCli(_t, args) {
   try {

@@ -26,17 +26,18 @@ test("the prompt settings RPC reports the git-checkout install and the display p
     return { config: { plugins: { "workspace-factory": { path: pluginDir } } } };
   } } };
 
-  // Snapshot/registry install (no git checkout around the plugin): no passage.
-  assert.deepEqual(await handler({}, { paseo }), { steerDelivery: true, findingsInPrompts: false, factoryRoot: null });
-  assert.deepEqual(await loadPromptOptions(paseo), { findingsInPrompts: false, factoryRoot: null });
+  // Snapshot/registry install (no git checkout around the plugin): no passage,
+  // but the install dir is always reported for the CLI path.
+  assert.deepEqual(await handler({}, { paseo }), { steerDelivery: true, findingsInPrompts: false, factoryRoot: null, pluginDir });
+  assert.deepEqual(await loadPromptOptions(paseo), { findingsInPrompts: false, factoryRoot: null, pluginDir });
   writeFileSync(join(root, ".git"), "gitdir: /example/worktrees/factory\n");
   writeFileSync(join(root, "FINDINGS.md"), "# Findings\n");
   // Git-checkout install: the passage follows the setting.
-  assert.deepEqual(await handler({}, { paseo }), { steerDelivery: true, findingsInPrompts: true, factoryRoot: realpathSync(root) });
-  assert.deepEqual(await loadPromptOptions(paseo), { findingsInPrompts: true, factoryRoot: realpathSync(root) });
+  assert.deepEqual(await handler({}, { paseo }), { steerDelivery: true, findingsInPrompts: true, factoryRoot: realpathSync(root), pluginDir });
+  assert.deepEqual(await loadPromptOptions(paseo), { findingsInPrompts: true, factoryRoot: realpathSync(root), pluginDir });
 
   values = { findingsInPrompts: false };
-  assert.deepEqual(await handler({}, { paseo }), { steerDelivery: true, findingsInPrompts: false, factoryRoot: realpathSync(root) });
-  assert.deepEqual(await loadPromptOptions(paseo), { findingsInPrompts: false, factoryRoot: realpathSync(root) });
+  assert.deepEqual(await handler({}, { paseo }), { steerDelivery: true, findingsInPrompts: false, factoryRoot: realpathSync(root), pluginDir });
+  assert.deepEqual(await loadPromptOptions(paseo), { findingsInPrompts: false, factoryRoot: realpathSync(root), pluginDir });
   assert.equal(configReads, 6);
 });

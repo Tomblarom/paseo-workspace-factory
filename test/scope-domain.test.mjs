@@ -183,7 +183,7 @@ function runnerFor(world, config = CONFIG) {
 const keys = (p) => p.ops.map((op) => op.key);
 const noLock = (_name, fn) => fn({ verify() {} });
 
-const CLI = fileURLToPath(new URL('../src/cli.mjs', import.meta.url));
+const CLI = fileURLToPath(new URL('../plugin/cli.mjs', import.meta.url));
 
 function runCli(_t, args) {
   try {

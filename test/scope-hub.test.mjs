@@ -243,5 +243,5 @@ test('convert keeps the stored id unless --name renames; other kinds refuse', as
 });
 
 test('CLI rejects removed plan command with /factory pointer', () => {
-  assert.throws(() => execFileSync('node', ['src/cli.mjs', 'plan', '--hub', '/tmp/hub'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), /\/factory plan/);
+  assert.throws(() => execFileSync('node', ['plugin/cli.mjs', 'plan', '--hub', '/tmp/hub'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), /\/factory plan/);
 });

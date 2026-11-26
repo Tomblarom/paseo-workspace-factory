@@ -2,8 +2,8 @@
 // Paseo Workspace Factory — thin RPC client of the running Paseo plugin.
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
-import { connectPluginRpc } from '../plugin/server/core/paseo.mjs';
-import { FACTORY_PLUGIN_ID } from '../plugin/server/core/findings.mjs';
+import { connectPluginRpc } from './server/core/paseo.mjs';
+import { FACTORY_PLUGIN_ID } from './server/core/findings.mjs';
 
 const USAGE = `Usage: paseo-factory <command> [options]
   status [scope] [--json]

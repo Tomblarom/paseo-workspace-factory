@@ -23,7 +23,7 @@ function hostFieldLabel(field: string): string {
  */
 export function createConfigLoader(
   hostSettings: HostSettingsReader | null,
-  loadPromptOptions: PromptOptionsReader = async () => ({ findingsInPrompts: true, factoryRoot: null }),
+  loadPromptOptions: PromptOptionsReader = async () => ({ findingsInPrompts: true, factoryRoot: null, pluginDir: null }),
 ) {
   async function loadEffectiveConfig(): Promise<any> {
     if (!hostSettings) {

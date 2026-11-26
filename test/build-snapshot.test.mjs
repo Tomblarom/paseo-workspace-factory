@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import {
   SNAPSHOT_PATTERN,
   buildSnapshot,
@@ -129,6 +131,17 @@ test('buildSnapshot refuses to overwrite a same-named foreign directory', () => 
   mkdirSync(join(foreign, 'server'), { recursive: true });
   writeFileSync(join(foreign, 'server', 'handlers.ts'), 'different content\n');
   assert.throws(() => buildSnapshot({ pluginDir, releasesDir }), /refusing to overwrite/);
+});
+
+test('release snapshot of the real plugin ships the CLI and it runs --help', () => {
+  const root = makeTempRoot();
+  const pluginDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'plugin');
+  const built = buildSnapshot({ pluginDir, releasesDir: join(root, 'releases') });
+  assert.ok(built.files.includes('cli.mjs'));
+  const cli = join(built.snapshotDir, 'cli.mjs');
+  assert.ok(existsSync(cli));
+  const out = execFileSync('node', [cli, '--help'], { encoding: 'utf8' });
+  assert.match(out, /Usage: paseo-factory/);
 });
 
 test('snapshot ships the single-copy core directly (no generated mirror)', () => {
