@@ -10,7 +10,7 @@ import { readCleanupAction, readSteerAction } from "./core/steer-action.mjs";
 import { ACTION_FACTS, actionFact, mergeActionFacts } from "./core/action-facts.mjs";
 import { pushPreviousSession } from "../shared/idle-cleanup.js";
 import { createGit } from "./core/local.mjs";
-import { withLock, withWorkspaceLock, workspaceLockName } from "./core/lock.mjs";
+import { retryOnLockBusy, withLock, withWorkspaceLock, workspaceLockName } from "./core/lock.mjs";
 import {
   agentUsage,
   lastAssistantText,
@@ -29,10 +29,7 @@ import { firstUserText, workerIdentityFromMetadata } from "../shared/supervise.j
 import { decideAssignmentReport } from "../shared/assignment-report.js";
 import { ASSIGNMENT_KEY } from "./core/assign.mjs";
 import { extractTurnUsage, mergeTurnUsage } from "./quota.js";
-import {
-  retryOnLockBusy,
-  requestQuotaFailover,
-} from "./supervise.js";
+import { requestQuotaFailover } from "./supervise.js";
 import { resolveZerosub, type ZerosubSource } from "./zerosub-runtime.js";
 import { earliestResetOf } from "./core/quota.mjs";
 import {
@@ -122,6 +119,7 @@ export async function handleTurnAfter(
 async function runTurnBefore(payload: TurnBeforePayload, paseo: any, deps: TurnHookDeps): Promise<void> {
   const agentId = payload?.agent?.id;
   if (!agentId) return;
+  const now = deps.now ? deps.now() : new Date().toISOString();
   const snap: any = await paseo.agents.ref(agentId).refresh().catch(() => null);
   const agent: any = snap?.agent ?? null;
   if (!agent || agent.archivedAt) return;
@@ -149,14 +147,16 @@ async function runTurnBefore(payload: TurnBeforePayload, paseo: any, deps: TurnH
   const wsf = asRecord(meta[METADATA_KEY]);
   if (!wsf) return;
   if (identity.role === "worker" && asRecord(asRecord(meta[AGENTS_KEY])?.[agentId])?.replacedBy) return;
-  const now = deps.now ? deps.now() : new Date().toISOString();
   const update = updateAgentEntry as unknown as (args: any) => Promise<any>;
   // turn.after may already have ended this turn (fast failures such as a
   // provider limit); reopening it would leave the steer busy for good.
   await update({ client: paseo, workspaceId: mainId, agentId,
-    patch: (entry: any) => payload.turnId && entry?.lastTurnId === payload.turnId
+    patch: (entry: any) => (payload.turnId && entry?.lastTurnId === payload.turnId) ||
+      Date.parse(entry?.turnStartedAt) > Date.parse(now)
       ? null : { openTurnId: payload.turnId ?? null, turnStartedAt: now },
-    liveIds: null, lock: lockOf(deps) });
+    // Paseo fires this as a notification. Give slow workspace writes more
+    // time to settle within the hook deadline without blocking turn start.
+    liveIds: null, lock: lockOf(deps, 10_000) });
 }
 
 function failureText(outcome: TurnPayload["outcome"]): string | null {
@@ -177,7 +177,7 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function lockOf(deps: TurnHookDeps): (
+function lockOf(deps: TurnHookDeps, timeoutMs?: number): (
   name: string,
   fn: (held: { verify: () => void }) => Promise<any>,
 ) => Promise<any> {
@@ -185,7 +185,7 @@ function lockOf(deps: TurnHookDeps): (
     name: string,
     fn: (held: { verify: () => void }) => Promise<any>,
   ) => Promise<any>);
-  return async (name, fn) => retryOnLockBusy(() => lock(name, fn));
+  return async (name, fn) => retryOnLockBusy(() => lock(name, fn), { timeoutMs });
 }
 
 async function withWorkspaceLockRetry(

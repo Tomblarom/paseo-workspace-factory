@@ -939,7 +939,7 @@ async function applySteerActivation(
   } as any);
   return {
     status: switched.delivered ? "sent" : switched.deliveryBlocked ? "blocked" : "pending",
-    detail: switched.delivered ? `Steer ${target.slot} is active and received the continuation brief.` :
+    detail: switched.delivered && !switched.deliveryDetail ? `Steer ${target.slot} is active and received the continuation brief.` :
       `Steer ${target.slot} is active. ${switched.deliveryDetail ?? switched.deliveryError ?? "Continuation is pending."}`,
   };
 }

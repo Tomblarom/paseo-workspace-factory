@@ -29,6 +29,7 @@ const { factoryResumeSettings } = await import("../shared/settings.ts");
 const { steerQuotaAdmission } = await import("../server/steer-admission.ts");
 import { LABEL, METADATA_KEY } from "../server/core/paseo.mjs";
 import { AGENTS_KEY } from "../server/core/agent-state.mjs";
+import { LockBusy } from "../server/core/lock.mjs";
 import { WORKERS_KEY } from "../server/core/supervision.mjs";
 import { CHECKPOINT_KEY } from "../server/core/steer.mjs";
 
@@ -244,6 +245,32 @@ test("boot rule: closed steer with an old turn is not marked", async () => {
   const { marks, entries } = await boot(world);
   assert.equal(marks.length, 0);
   assert.equal(entries[made.b.id].needsResume, undefined);
+});
+
+test("boot check can finish on the next handle after a held workspace lock", async (t) => {
+  const { world, made } = bootWorld({
+    agents: { a: { slot: "A", entry: { openTurnId: "interrupted-turn", turnStartedAt: at(NOW - 30 * MIN) } } },
+  });
+  bootCheck.resetBootCheckForTests();
+  t.after(bootCheck.resetBootCheckForTests);
+  let busy = true;
+  const deps = {
+    getDaemonStartedAt: () => at(NOW - MIN),
+    now: () => at(NOW),
+    lock: async (_name, run) => {
+      if (busy) throw new LockBusy("workspace held");
+      return run({ verify() {} });
+    },
+    readExcerpt: async () => null,
+    readGit: () => null,
+    log: () => {},
+  };
+  const paseo = fakeClient(world);
+  assert.equal(await bootCheck.ensureBootChecked(paseo, deps), null);
+  busy = false;
+  const marks = await bootCheck.ensureBootChecked(paseo, deps);
+  assert.equal(marks[0]?.agentId, made.a.id);
+  assert.equal(world.workspaces[0].metadata[AGENTS_KEY][made.a.id].openTurnId, null);
 });
 
 test("boot rule: every recently active steer is marked, not only the active one", async () => {

@@ -169,14 +169,15 @@ export default function contribute(server: PluginServerContext) {
   // hint; without ZeroSub every call resolves null and keeps legacy behavior.
   const bootOnce = (paseo: unknown): void => {
     captureSupervisionPaseo(paseo);
-    if (bootChained) {
-      void ensureBootChecked(paseo, bootDeps);
-      return;
-    }
+    if (bootChained) return;
     bootChained = true;
-    void ensureBootChecked(paseo, bootDeps).then((marks) =>
-      handleBootFinished(paseo, marks, { getSettings: readSupervision, getConfig: () => loader.loadEffectiveConfig(), delivery, getZerosub, buildBrief: buildResumeBrief }),
-    );
+    void ensureBootChecked(paseo, bootDeps).then((marks) => {
+      if (marks === null) {
+        bootChained = false;
+        return;
+      }
+      return handleBootFinished(paseo, marks, { getSettings: readSupervision, getConfig: () => loader.loadEffectiveConfig(), delivery, getZerosub, buildBrief: buildResumeBrief });
+    });
   };
   server.handle(factoryStatus, (input, ctx) => {
     bootOnce(ctx.paseo);

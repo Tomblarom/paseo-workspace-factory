@@ -2,7 +2,7 @@
 // message receipt can only be replayed with the same recipient, bytes and options.
 import { randomUUID } from 'node:crypto';
 import { AGENTS_KEY } from './agent-state.mjs';
-import { withLock, workspaceLockName } from './lock.mjs';
+import { LockBusy, retryOnLockBusy, withLock, workspaceLockName } from './lock.mjs';
 import { METADATA_KEY } from './paseo.mjs';
 import { guardScope } from './scope-guard.mjs';
 import { mergeActionFacts } from './action-facts.mjs';
@@ -88,15 +88,21 @@ export async function reconcileSteerSend({ client, workspaceId, agentId, actionI
     }).catch(() => {});
     return { status: 'uncertain', action: claim.action, detail };
   }
-  return lock(workspaceLockName(workspaceId), async (held) => {
-    const current = (await workspace.refresh())?.metadata ?? {};
-    const entries = current[AGENTS_KEY] ?? {};
-    const action = readSteerAction(entries[agentId]);
-    if (action?.wakeId !== actionId) return { status: 'uncertain', action: claim.action, detail: 'Delivery accepted but its record changed.' };
-    if (action.phase === 'done' || action.phase === 'sent') return { status: 'sent', action };
-    const sent = { ...action, phase: 'sent', observedAt: now() };
-    held.verify();
-    await workspace.setMetadata({ [AGENTS_KEY]: { ...entries, [agentId]: actionEntry(entries[agentId], sent) } });
-    return { status: 'sent', action: sent };
-  });
+  try {
+    return await retryOnLockBusy(() => lock(workspaceLockName(workspaceId), async (held) => {
+      const current = (await workspace.refresh())?.metadata ?? {};
+      const entries = current[AGENTS_KEY] ?? {};
+      const action = readSteerAction(entries[agentId]);
+      if (action?.wakeId !== actionId) return { status: 'uncertain', action: claim.action, detail: 'Delivery accepted but its record changed.' };
+      if (action.phase === 'done' || action.phase === 'sent') return { status: 'sent', action };
+      const sent = { ...action, phase: 'sent', observedAt: now() };
+      held.verify();
+      await workspace.setMetadata({ [AGENTS_KEY]: { ...entries, [agentId]: actionEntry(entries[agentId], sent) } });
+      return { status: 'sent', action: sent };
+    }));
+  } catch (error) {
+    if (!(error instanceof LockBusy)) throw error;
+    return { status: 'sent', action: claim.action,
+      recordingError: `Message sent. Factory receipt is still pending (${error.message}).` };
+  }
 }

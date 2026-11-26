@@ -13,11 +13,25 @@
 import { spawnSync } from 'node:child_process';
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync } from 'node:fs';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { runtime } from './runtime.mjs';
 
 
 export class LockBusy extends Error {}
 export class LockError extends Error {}
+
+/** Retry a short metadata operation on lock contention. Never wrap a native effect in this retry. */
+export async function retryOnLockBusy(fn, { timeoutMs = 2_000, delayMs = 50 } = {}) {
+  const retryUntil = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (!(error instanceof LockBusy) || Date.now() >= retryUntil) throw error;
+      await delay(delayMs);
+    }
+  }
+}
 
 /** Shared lock name for one workspace's factory metadata (switch, checkpoint, fresh, retire, scope top-up). */
 export function workspaceLockName(workspaceId) {

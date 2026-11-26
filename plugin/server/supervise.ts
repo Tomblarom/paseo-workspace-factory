@@ -21,7 +21,6 @@ import { readRoutingSnapshot, routingProjection, steerRouteCandidate, planSteerR
 import { hasActiveAgentWork } from "./agent-context.js";
 import { canMarkWorkerStale, filterStaleWorkerEvents } from "./worker-wakes.js";
 import * as paseoCore from "./core/paseo.mjs";
-import { setTimeout as delay } from "node:timers/promises";
 import * as scopeCore from "./core/scope.mjs";
 import * as lockCore from "./core/lock.mjs";
 import * as supervisionCore from "./core/supervision.mjs";
@@ -41,7 +40,8 @@ const ST = steerCore as unknown as Record<string, any>;
 const Q = quotaCore as unknown as Record<string, any>;
 const { METADATA_KEY, readPaseoState } = P;
 const { listScopes, sameScopeId } = SC;
-const { LockBusy, withLock, workspaceLockName } = L;
+const { withLock, workspaceLockName } = L;
+const { retryOnLockBusy } = lockCore;
 const {
   canWakeAgent,
   clipTask,
@@ -215,27 +215,6 @@ async function resolveSettings(deps: SettingsSource): Promise<SupervisionSetting
   if (deps.settings !== undefined) return deps.settings;
   if (typeof deps.getSettings === "function") return deps.getSettings();
   return null;
-}
-
-/**
- * Retries a lock-guarded operation on LockBusy for 2 s (50 ms backoff).
- * Shared by supervision and the turn-after follow-up so a busy workspace
- * lock ("Workspace lock … is held by another process") never drops a wake
- * or a resume brief.
- */
-export async function retryOnLockBusy<T>(
-  fn: () => Promise<T>,
-  opts?: { timeoutMs?: number; delayMs?: number },
-): Promise<T> {
-  const retryUntil = Date.now() + (opts?.timeoutMs ?? 2_000);
-  for (;;) {
-    try {
-      return await fn();
-    } catch (error) {
-      if (!(error instanceof LockBusy) || Date.now() >= retryUntil) throw error;
-      await delay(opts?.delayMs ?? 50);
-    }
-  }
 }
 
 function lockOf(deps: SuperviseDeps): (
@@ -692,6 +671,7 @@ async function deliverScopeWake(paseo: any, args: ScopeWakeInput, deps: Supervis
       epoch: freshWsf.epoch ?? null,
       events,
       factoryCmd: args.factoryCmd ?? deps.factoryCmd ?? FACTORY_CMD,
+      metadata: freshMeta,
     }) ?? "",
     selectDoneIds(register).filter((id) => !register[id]?.pendingWake || events.some((event) => event.workerId === id)),
   );

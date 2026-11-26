@@ -13,7 +13,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { isDeepStrictEqual } from 'node:util';
 import { LABEL, METADATA_KEY, parentOf, readPaseoAgents, agentUsage, isRestartReason, restartMessage } from './paseo.mjs';
-import { LockBusy, withLock, workspaceLockName } from './lock.mjs';
+import { LockBusy, retryOnLockBusy, withLock, workspaceLockName } from './lock.mjs';
 import { discoveryScopeAliases, guardScope, scopeHolder, ScopeGuardError } from './scope-guard.mjs';
 import { runtime } from './runtime.mjs';
 import { isAdvisorSlot, isAdvisorSteer, providerIsSensitive, steerPrivacyAdmission } from './config.mjs';
@@ -23,7 +23,7 @@ import { createExecutors } from './apply.mjs';
 import { resolveScope, scopeToEntry, sameScopeId, domainOfScope } from './scope.mjs';
 import { STEER_TITLE, activeMarker, discoveredRepoPublic, liveSlotHolders, markSteerTitle, stripActiveMarker } from './discovery.mjs';
 import { AGENTS_KEY, currentFreshHint, updateAgentEntry } from './agent-state.mjs';
-import { WORKERS_KEY, collectPendingWakes, openWorkers as openRegisterWorkers, readWorkers } from './supervision.mjs';
+import { WORKERS_KEY, clipTask, collectPendingWakes, nextStepNeedsUser, openWorkers as openRegisterWorkers, readWorkers } from './supervision.mjs';
 import { QUOTA_DEFAULTS, formatQuotaLine } from './quota.mjs';
 import { readRewindPoint, rewindAndBrief } from './rewind.mjs';
 import { findingsPassage } from './findings.mjs';
@@ -143,6 +143,7 @@ export function steerStatus(discovery, { warnContextTokens, daemonStartedAt = nu
       slot: (a.title ?? '').trim().match(STEER_TITLE)?.[1] ?? null,
     });
   }
+  const workerRegister = readWorkers(main?.metadata ?? null);
   const workers = discovery.workers.map((w) => {
     const parent = parentOf(w);
     return {
@@ -150,6 +151,7 @@ export function steerStatus(discovery, { warnContextTokens, daemonStartedAt = nu
       parentSlot: (parent && steerById.get(parent)?.slot) ?? null, parent, usage: agentUsage(w),
       parentCandidate: parent && !steerById.has(parent) ? (candidateById.get(parent) ?? null) : null,
       workspaceId: w.workspaceId ?? null, owner: w.labels?.[LABEL.owner] ?? null,
+      hasAssignment: Boolean(clipTask(workerRegister[w.id]?.task)),
       ...(w.continuedFrom ? { continuedFrom: w.continuedFrom } : {}),
       ...(w.parentContinuedFrom ? { parentContinuedFrom: w.parentContinuedFrom } : {}),
       ...withInterruption(w.id),
@@ -178,7 +180,6 @@ export function steerStatus(discovery, { warnContextTokens, daemonStartedAt = nu
       warnings.push(`Active Steer ${state.activeSteer} is an advisor; advisors never coordinate`);
     }
   }
-  const workerRegister = readWorkers(main?.metadata ?? null);
   return {
     repo: discovery.forkName,
     domain,
@@ -259,7 +260,8 @@ const TEXT = {
     noCheckpoint: 'Aufgaben-Checkpoint: KEINER DOKUMENTIERT. Aktuellen Auftrag nicht aus dem Verlauf ableiten, sondern beim Nutzer bestätigen.',
     checkpoint: (cp, stale) => `Aufgaben-Checkpoint (Epoch ${cp.epoch ?? '?'}, ${cp.updatedAt ?? 'ohne Zeit'}${stale ? ', NICHT aus der aktuellen Epoch – auf Aktualität prüfen' : ''}):`,
     task: 'Auftrag', tests: 'Tests', blockers: 'Offene Blocker', next: 'Nächster Schritt', none: 'keine dokumentiert',
-    noNext: 'nicht dokumentiert – vor neuer Arbeit beim Nutzer bestätigen',
+    noNext: 'Nutzerentscheidung erforderlich',
+    noAssignment: 'Auftrag fehlt – mit dem Owner klären.',
     workers: 'Worker (per Agent-ID weiterverwenden, nicht neu anlegen):', noWorkers: 'Worker: keine.', parent: 'Parent Steer',
     hint: (slot) => `Unverifizierter Hinweis – letzte Antwort von Steer ${slot}, gekürzt, keine Auftragsquelle:`,
     notice: (to, e) => `Hinweis: Steer ${to.slot} (${to.id}) ist ab Epoch ${e} aktiv. Du koordinierst nicht mehr; nur auf ausdrückliche Anfrage antworten.`,
@@ -283,7 +285,8 @@ const TEXT = {
     noCheckpoint: 'Task checkpoint: NONE RECORDED. Do not infer the current task from history; confirm it with the user.',
     checkpoint: (cp, stale) => `Task checkpoint (epoch ${cp.epoch ?? '?'}, ${cp.updatedAt ?? 'no time'}${stale ? ', NOT from the current epoch – check whether it is still valid' : ''}):`,
     task: 'Task', tests: 'Tests', blockers: 'Open blockers', next: 'Next step', none: 'none recorded',
-    noNext: 'not recorded – confirm with the user before starting new work',
+    noNext: 'User decision needed',
+    noAssignment: 'Missing assignment. Confirm it with the owner.',
     workers: 'Workers (reuse by agent id, do not recreate):', noWorkers: 'Workers: none.', parent: 'parent Steer',
     hint: (slot) => `Unverified hint – last answer of Steer ${slot}, shortened, not a task source:`,
     notice: (to, e) => `Note: Steer ${to.slot} (${to.id}) is active as of epoch ${e}. You no longer coordinate; reply only when asked explicitly.`,
@@ -357,7 +360,7 @@ function packetCheckpoint(lines, cp, epoch, t) {
   const fields = { task: cp.task, tests: cp.tests?.join('; ') ?? '', blockers: cp.blockers?.join('; ') ?? '', next: cp.next ?? '' };
   const bounded = Object.fromEntries(Object.entries(fields).map(([key, value]) => [key, clip(value, key === 'task' ? 500 : 300)]));
   lines.push(t.checkpoint(cp, cp.epoch != null && cp.epoch !== epoch));
-  lines.push(`- ${t.task}: ${bounded.task}`, `- ${t.tests}: ${bounded.tests || t.none}`, `- ${t.blockers}: ${bounded.blockers || t.none}`, `- ${t.next}: ${bounded.next || t.noNext}`);
+  lines.push(`- ${t.task}: ${bounded.task}`, `- ${t.tests}: ${bounded.tests || t.none}`, `- ${t.blockers}: ${bounded.blockers || t.none}`, `- ${t.next}: ${nextStepNeedsUser(cp.next) ? t.noNext : bounded.next}`);
   if (cp.source === 'failover' && cp.failover) lines.push(clip(`- Failover: takeover from ${cp.failover.previousSteer ?? '?'} (${cp.failover.reason ?? 'no reason recorded'})`, 240));
   lines.push(formatCheckpointBlock({ ...bounded, tests: bounded.tests ? [bounded.tests] : [], blockers: bounded.blockers ? [bounded.blockers] : [], status: cp.status }));
   return Object.keys(fields).some((key) => fields[key].trim().length > (key === 'task' ? 500 : 300));
@@ -366,7 +369,8 @@ function packetCheckpoint(lines, cp, epoch, t) {
 function workerCheckpoint(status, id, { note, lastMessage, interrupted } = {}) {
   const entry = status.openWorkers?.find((worker) => worker.id === id);
   return {
-    task: entry?.task || null,
+    task: clipTask(entry?.task) || null,
+    hasAssignment: status.workers?.find((worker) => worker.id === id)?.hasAssignment === true,
     block: parseCheckpointBlock(lastMessage) ?? parseCheckpointBlock(interrupted?.excerpt) ?? parseCheckpointBlock(note),
     interrupted: interrupted ?? (entry?.state === 'interrupted' ? {} : null),
   };
@@ -374,10 +378,10 @@ function workerCheckpoint(status, id, { note, lastMessage, interrupted } = {}) {
 
 function appendWorkerCheckpoint(lines, worker, t, epoch) {
   if (worker.task) lines.push(`${t.task}: ${worker.task}`);
+  else if (!worker.hasAssignment) lines.push(t.noAssignment);
   if (worker.interrupted) lines.push(`! Worker interrupted${worker.interrupted.at ? ` at ${worker.interrupted.at}` : ''}.`);
   if (worker.block) return packetCheckpoint(lines, worker.block, epoch, t);
   lines.push('Worker CHECKPOINT: none recorded.');
-  if (!worker.task) lines.push(t.noCheckpoint);
   return false;
 }
 
@@ -507,8 +511,15 @@ export async function reconcileFreshDelivery({ client, workspaceId, agentId, act
     if (error instanceof SwitchRefused) return { status: 'blocked', detail: error.message };
     throw error;
   }
-  if (result.status === 'sent') await updateAgentEntry({ client, workspaceId, agentId, lock, patch: (entry) =>
-    entry?.action?.wakeId === actionId && entry.action.phase !== 'done' ? { action: { ...entry.action, phase: 'done' } } : null });
+  if (result.status === 'sent' && !result.recordingError) {
+    try {
+      await retryOnLockBusy(() => updateAgentEntry({ client, workspaceId, agentId, lock, patch: (entry) =>
+        entry?.action?.wakeId === actionId && entry.action.phase === 'sent' ? { action: { ...entry.action, phase: 'done' } } : null }));
+    } catch (error) {
+      if (!(error instanceof LockBusy)) throw error;
+      return { ...result, recordingError: `Message sent. Factory completion record is still pending (${error.message}).` };
+    }
+  }
   return result;
 }
 
@@ -647,7 +658,7 @@ export function buildResumeBrief(status, { agentId = null, agentState = null, wo
     lines.push(`- Task: ${clip(cp.task, 500)}`);
     lines.push(`- Tests: ${cp.tests?.length ? clip(cp.tests.join('; '), 300) : 'none recorded'}`);
     lines.push(`- Open blockers: ${cp.blockers?.length ? clip(cp.blockers.join('; '), 300) : 'none recorded'}`);
-    lines.push(`- Next step: ${cp.next ? clip(cp.next, Math.max(300, Math.min(2000, budget - 1500))) : 'not recorded'}`);
+    lines.push(`- Next step: ${nextStepNeedsUser(cp.next) ? TEXT.en.noNext : clip(cp.next, Math.max(300, Math.min(2000, budget - 1500)))}`);
     if (cp.source === 'failover' && cp.failover) lines.push(`Failover from ${cp.failover.previousSteer ?? '?'}: ${cp.failover.reason ?? 'no reason recorded'}`);
     if (cp.epoch !== null && cp.epoch !== undefined && status.state?.epoch !== null && status.state?.epoch !== undefined && cp.epoch !== status.state.epoch) {
       lines.push(`! Checkpoint is stale: from epoch ${cp.epoch}, scope is at epoch ${status.state.epoch} — verify before continuing.`);
@@ -699,12 +710,16 @@ export function buildResumeBrief(status, { agentId = null, agentState = null, wo
     lines.push('Workers (reuse by agent id):');
     for (const w of workers.slice(0, BRIEF_WORKERS_SHOWN)) {
       const note = agents[w.id]?.note;
-      const firstLine = typeof note === 'string' && note.trim() ? clip(note.trim().split('\n')[0], 120) : 'no note';
+      const firstLine = typeof note === 'string' && note.trim() ? clip(note.trim().split('\n')[0], 120) : null;
       const e = supervised.get(w.id);
-      lines.push(`- ${w.id} "${w.title}" ${w.status} · ${firstLine}${e ? ` · supervised: ${e.state} ${clip(e.task ?? '', 120)}` : ''}`);
+      const task = clipTask(e?.task);
+      const missing = !task && w.hasAssignment !== true;
+      const details = [firstLine, missing ? 'missing assignment' : firstLine ? null : 'no note',
+        e ? `supervised: ${[e.state, clip(task, 120)].filter(Boolean).join(' ')}` : null];
+      lines.push([`- ${w.id} "${w.title}" ${w.status}`, ...details.filter(Boolean)].join(' · '));
     }
     if (workers.length > BRIEF_WORKERS_SHOWN) lines.push(`- … +${workers.length - BRIEF_WORKERS_SHOWN} more workers`);
-    for (const e of registerOnly) lines.push(`- ${e.id} (agent not live) · supervised: ${e.state} ${clip(e.task ?? '', 120)}`);
+    for (const e of registerOnly) lines.push(`- ${e.id} (agent not live) · supervised: ${e.state} ${clip(clipTask(e.task) || 'missing assignment', 120)}`);
   }
   const escalations = (cp?.blockers ?? []).filter((b) => typeof b === 'string' && b.startsWith('hub:'));
   if (escalations.length) {
@@ -1012,7 +1027,7 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
         deliveryId = outcome.deliveryId ?? null;
         result.deliveryPending = outcome.status === 'pending';
         result.deliveryBlocked = outcome.status === 'blocked';
-        if (activation) result.deliveryDetail = outcome.detail;
+        if (activation) result.deliveryDetail = outcome.recordingError ?? (result.delivered ? null : outcome.detail);
         if (result.deliveryBlocked) result.deliveryError = outcome.detail;
       } else {
         await updateAgentEntry({ client, workspaceId: status.workspace.id, agentId: to.id, lock,
@@ -1146,20 +1161,12 @@ async function runTabRewind({ client, workspaceId, agentId, packet, checkpoint, 
     };
   } });
   // Retry the journal write only. The native rewind and any send already ran.
-  const settleDeadline = Date.now() + 1_000;
-  for (;;) {
-    try {
-      await settle();
-      break;
-    } catch (error) {
-      if (error instanceof LockBusy && Date.now() < settleDeadline) {
-        await delay(50);
-        continue;
-      }
-      if (outcome.status !== 'rewound') throw error;
-      const detail = error instanceof Error ? error.message : String(error);
-      return { outcome, recordingError: `Rewind applied. Factory could not confirm its record (${detail}).` };
-    }
+  try {
+    await retryOnLockBusy(settle);
+  } catch (error) {
+    if (outcome.status !== 'rewound') throw error;
+    const detail = error instanceof Error ? error.message : String(error);
+    return { outcome, recordingError: `Rewind applied. Factory could not confirm its record (${detail}).` };
   }
   if (privacyError) throw privacyError;
   if (outcome.status === 'failed') {
@@ -1635,6 +1642,7 @@ export async function freshSteer({ client, discovery, config, apply = false, sen
     try {
       const delivery = await deliverFreshPacket({ client, workspaceId: status.workspace.id, agentId: freshId, packet: result.packet, epoch: result.epoch, lock, checkPrivacy, authority: { scopeId: expected.scope?.id ?? status.repo, agentId: freshId } });
       result.delivered = delivery.status === 'sent';
+      if (delivery.recordingError) result.recordingError = delivery.recordingError;
       if (!result.delivered) result.deliveryError = delivery.detail ?? `Fresh delivery ${delivery.status}`;
     } catch (error) {
       result.deliveryError = error.message; // the fresh steer stands; resend the packet manually
@@ -1775,6 +1783,7 @@ async function freshNonActiveSteer({ client, discovery, status, expected, slot, 
     try {
       const delivery = await deliverFreshPacket({ client, workspaceId: status.workspace.id, agentId: freshId, packet: result.packet, epoch: expected.epoch, lock, checkPrivacy });
       result.delivered = delivery.status === 'sent';
+      if (delivery.recordingError) result.recordingError = delivery.recordingError;
       if (!result.delivered) result.deliveryError = delivery.detail ?? `Fresh delivery ${delivery.status}`;
     } catch (error) {
       result.deliveryError = error.message; // the fresh steer stands; resend the packet manually
@@ -1871,6 +1880,7 @@ async function freshWorkerAgent({ client, discovery, status, expected, workerId,
     try {
       const delivery = await deliverFreshPacket({ client, workspaceId: status.workspace.id, agentId: freshId, packet: result.packet, epoch: expected.epoch, lock, checkPrivacy, messageId: resumeMessageId });
       result.delivered = delivery.status === 'sent';
+      if (delivery.recordingError) result.recordingError = delivery.recordingError;
       if (!result.delivered) result.deliveryError = delivery.detail ?? `Fresh delivery ${delivery.status}`;
     } catch (error) {
       result.deliveryError = error.message; // the fresh worker stands; resend the packet manually

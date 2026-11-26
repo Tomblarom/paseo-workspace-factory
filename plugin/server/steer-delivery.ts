@@ -5,7 +5,7 @@ import { AGENTS_KEY } from "./core/agent-state.mjs";
 import { readSteerAction, readCleanupAction, unsettledAccountMove, admittedAccountMoveReplan, actionEntry, newSteerAction, reconcileSteerSend } from "./core/steer-action.mjs";
 import { reconcileSteerAccountMove } from "./core/steer-account-move.mjs";
 import { actionFact, mergeActionFacts } from "./core/action-facts.mjs";
-import { withLock, workspaceLockName } from "./core/lock.mjs";
+import { LockBusy, retryOnLockBusy, withLock, workspaceLockName } from "./core/lock.mjs";
 import { METADATA_KEY, readPaseoState } from "./core/paseo.mjs";
 import { guardScope, scopeHolder } from "./core/scope-guard.mjs";
 import { ASSIGNMENT_KEY } from "./core/assign.mjs";
@@ -54,6 +54,7 @@ export interface DeliveryResult {
   cleared: boolean;
   renewed?: boolean;
   deliveryId?: string;
+  recordingError?: string;
   detail: string;
 }
 
@@ -120,7 +121,7 @@ const rewindRecord = buildRewindRecord as unknown as (
 ) => Record<string, unknown>;
 const markSent = markWakeSent as unknown as (worker: any, options: { at: string; clearPending: boolean }) => any;
 const formatWorkerWake = formatWakeMessage as unknown as (args: {
-  scopeId: string; epoch: number | null; events: WakeEvent[];
+  scopeId: string; epoch: number | null; events: WakeEvent[]; metadata: Record<string, unknown>;
 }) => string | null;
 const reconcileSend = reconcileSteerSend as unknown as (args: {
   client: any; workspaceId: string; agentId: string; actionId: string; lock: Lock;
@@ -769,7 +770,7 @@ export async function finishSteerDelivery(
           const next = {
             ...unpinned, batch: { ...batch, events },
             note: formatWorkerWake({
-              scopeId: cleanupIdentity(snapshot.labels)?.scopeId ?? batch.workspaceId, epoch: batch.epoch, events,
+              scopeId: cleanupIdentity(snapshot.labels)?.scopeId ?? batch.workspaceId, epoch: batch.epoch, events, metadata: source,
             }) ?? "",
           };
           if (!await replacePending(paseo, input, lock, pending, { action: next })) {
@@ -923,10 +924,10 @@ ${pending.note}` : brief;
           return { status: result.status === "pending" ? "pending" : "blocked", cleared,
             deliveryId: pending.wakeId, detail: result.status === "uncertain" ? `Delivery outcome is uncertain (${result.detail}).` : result.detail ?? "Delivery is pending." };
         }
+        if (result.recordingError) return {
+          status: "sent", cleared, deliveryId: pending.wakeId, detail: result.recordingError, recordingError: result.recordingError,
+        };
         sent = result.action;
-        if (pending.renewal === "rewind") await replacePending(paseo, input, lock, pending, {
-          refreshed: { ...actionFact(entry, "refreshed"), briefMessageId: pending.wakeId },
-        });
       }
       const batch = pending.batch;
       if (batch) {
@@ -949,17 +950,21 @@ ${pending.note}` : brief;
       for (const ref of assignmentRefs(pending)) {
         await markAssignmentReported(paseo, ref, lock, sent.observedAt ?? deps.now?.() ?? new Date().toISOString());
       }
-      await replacePending(paseo, input, lock, pending, (current) => ({
+      await retryOnLockBusy(() => replacePending(paseo, input, lock, pending, (current) => ({
         action: afterDelivery(sent, true),
+        ...(pending.renewal === "rewind" ? { refreshed: { ...actionFact(current, "refreshed"), briefMessageId: pending.wakeId } } : {}),
         ...((pending.needsResumeAt === undefined ? entry?.needsResume?.at : pending.needsResumeAt) && current.needsResume?.at === (pending.needsResumeAt === undefined ? entry?.needsResume?.at : pending.needsResumeAt) ? { needsResume: null } : {}),
-      }));
+      })));
       return {
         status: "sent", cleared, renewed: pending.renewal !== "send",
         detail: cleared ? "Context cleared and resume brief sent." : pending.renewal === "send" ? "Message sent." : "Context rewound and resume brief sent.",
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-
+      if (error instanceof LockBusy && ["sent", "done"].includes(sent.phase)) {
+        const detail = `Message sent. Factory completion record is still pending (${message}).`;
+        return { status: "sent", cleared, deliveryId: pending.wakeId, detail, recordingError: detail };
+      }
       return { status: "pending", cleared, detail: `Brief delivery is queued (${message}).` };
     }
   } finally {
@@ -1247,10 +1252,15 @@ export async function deliverSteer(
       }));
       return blocked(detail);
     }
-    await replacePending(paseo, input, lock, pending, {
-      ...rewindRecord({ messageId: outcome.messageId, now: () => new Date(deps.now?.() ?? Date.now()) }),
-      action: { ...pending, phase: "ready" },
-    });
+    try {
+      await retryOnLockBusy(() => replacePending(paseo, input, lock, pending, {
+        ...rewindRecord({ messageId: outcome.messageId, now: () => new Date(deps.now?.() ?? Date.now()) }),
+        action: { ...pending, phase: "ready" },
+      }));
+    } catch (error) {
+      if (!(error instanceof LockBusy)) throw error;
+      return deferred(`Context rewound. Factory confirmation is still pending (${error.message}).`);
+    }
     const delivery = await finishSteerDelivery(paseo, input, deps);
     if (delivery && delivery.status !== "pending") return delivery;
     return {

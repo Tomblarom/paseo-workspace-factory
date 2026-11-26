@@ -17,7 +17,7 @@ import { LABEL, METADATA_KEY } from "../server/core/paseo.mjs";
 import { AGENTS_KEY } from "../server/core/agent-state.mjs";
 import { ASSIGNMENT_KEY } from "../server/core/assign.mjs";
 import { WORKERS_KEY } from "../server/core/supervision.mjs";
-import { CHECKPOINT_KEY } from "../server/core/steer.mjs";
+import { buildResumeBrief, CHECKPOINT_KEY } from "../server/core/steer.mjs";
 
 const REPO = "example-owner/example-repo";
 const NOW = new Date("2026-11-24T12:00:00.000Z").getTime();
@@ -405,6 +405,37 @@ function deliveryFixture({ provider = "claude", minutesIdle = 0, tokens = 1000 }
   const recheck = () => supervise.retryPendingWakeBrief(client, scope, deps);
   return { ws, steer, workerId, world, client, wake, recheck, deps, buildBrief };
 }
+
+test("worker wake says when the assignment and an executable next step are missing", async () => {
+  const { ws, steer, workerId, world, wake } = deliveryFixture();
+  ws.metadata[WORKERS_KEY][workerId].task = " ";
+  ws.metadata[CHECKPOINT_KEY].next = "Nutzerangabe abwarten";
+  assert.equal((await wake()).sent, true);
+  const [text] = sendsTo(world, steer.id);
+  assert.match(text, /worker worker-1 done \(missing assignment\)/);
+  assert.match(text, /user decision needed/i);
+  assert.doesNotMatch(text, /and continue/);
+});
+
+test("resume brief replaces empty or waiting-only steps and names missing worker assignments", () => {
+  const { steer, workerId } = deliveryFixture();
+  const status = {
+    repo: REPO, state: { activeSteer: "A", epoch: 3 }, steers: [{ ...steer, slot: "A" }],
+    workers: [{ id: workerId, title: "Worker", status: "idle" }],
+    openWorkers: [{ id: "stale-worker", task: "", state: "stale" }],
+    checkpoint: { task: "Test handover", next: null },
+  };
+  for (const next of [null, " ", "Wait for user", "Nutzerangabe abwarten", "Auf Rückmeldung des Nutzers warten."]) {
+    status.checkpoint.next = next;
+    const brief = buildResumeBrief(status, { agentId: steer.id, budget: 650 });
+    assert.match(brief, /Next step: User decision needed/);
+    assert.match(brief, new RegExp(workerId + ".*missing assignment"));
+    assert.match(brief, /stale-worker.*missing assignment/);
+    assert.ok(brief.length <= 650);
+  }
+  status.checkpoint.next = "Wait for user approval, then run npm test.";
+  assert.match(buildResumeBrief(status, { agentId: steer.id }), /Next step: Wait for user approval, then run npm test/);
+});
 
 for (const [label, minutesIdle] of [["warm", 1], ["cooling", 4.5], ["unknown", null]]) {
   test(`a ${label} steer receives the original wake`, async () => {

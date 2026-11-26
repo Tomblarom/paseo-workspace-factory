@@ -349,11 +349,24 @@ export function resolveWakeTarget(scopeState, steers) {
   return holders.length === 1 ? (holders[0].id ?? null) : null;
 }
 
+/** Empty steps and steps that only wait for the user provide no work to execute. */
+export function nextStepNeedsUser(next) {
+  const text = typeof next === 'string' ? next.trim().replace(/[.!]+$/, '').replace(/\s+/g, ' ') : '';
+  return /^(?:none|keine?|n\/a|-)?$/i.test(text) ||
+    /^(?:wait(?:ing)?|await(?:ing)?)(?: for)? (?:the )?user(?:['’]s)?(?: (?:input|decision|response|reply|confirmation|approval|instructions))?$/i.test(text) ||
+    /^(?:auf )?(?:nutzerangabe|nutzereingabe|nutzerentscheidung|nutzerantwort|nutzerfreigabe|(?:antwort|rückmeldung|freigabe|entscheidung)(?: (?:des nutzers|vom nutzer))?|den nutzer) (?:ab)?warten$/i.test(text);
+}
+
 /** Wake text from the design; null without events (nothing to say). */
-export function formatWakeMessage({ scopeId, epoch, events, factoryCmd = 'paseo-factory' } = {}) {
+export function formatWakeMessage({ scopeId, epoch, events, factoryCmd = 'paseo-factory', metadata = null } = {}) {
   if (!events?.length) return null;
-  const parts = events.map((e) => `worker ${e.workerId} ${e.state}`).join('; ');
-  return `[factory] Scope ${scopeId}, epoch ${epoch}: ${parts}.\nRun \`${factoryCmd} resume\` (or \`workers\`) and continue. Ignore if your epoch is newer.`;
+  const parts = events.map(({ workerId, state }) => {
+    const missing = metadata && !clipTask(metadata[WORKERS_KEY]?.[workerId]?.task);
+    return `worker ${workerId} ${state}${missing ? ' (missing assignment)' : ''}`;
+  }).join('; ');
+  const needsUser = metadata && nextStepNeedsUser(metadata[`${METADATA_KEY}.checkpoint`]?.next);
+  const next = needsUser ? `User decision needed. Run \`${factoryCmd} resume\`.` : `Run \`${factoryCmd} resume\` (or \`workers\`) and continue.`;
+  return `[factory] Scope ${scopeId}, epoch ${epoch}: ${parts}.\n${next} Ignore if your epoch is newer.`;
 }
 
 /** A steer ignores a wake whose epoch is older than the current one. */

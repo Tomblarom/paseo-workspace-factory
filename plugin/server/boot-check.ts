@@ -9,7 +9,7 @@ import { actionEntry, readSteerAction } from "./core/steer-action.mjs";
 import { execFileSync } from "node:child_process";
 import { METADATA_KEY, paseoBinary, readPaseoState } from "./core/paseo.mjs";
 import { listScopes } from "./core/scope.mjs";
-import { withWorkspaceLock } from "./core/lock.mjs";
+import { LockBusy, retryOnLockBusy, withWorkspaceLock } from "./core/lock.mjs";
 import { createGit } from "./core/local.mjs";
 import { lastAssistantText, readGitSnapshot } from "./core/steer.mjs";
 import {
@@ -149,7 +149,7 @@ export async function runBootCheck({
   getConfig,
   normalizeContinuation,
   reportContinuation,
-}: BootCheckDeps & { paseo: any }): Promise<BootMark[]> {
+}: BootCheckDeps & { paseo: any }, marked: BootMark[] = []): Promise<BootMark[]> {
   const logFn = log ?? console.log;
   const nowFn = now ?? (() => new Date().toISOString());
   let daemonStartedAt: string | null;
@@ -216,7 +216,7 @@ export async function runBootCheck({
   }
   if (!daemonStartedAt) {
     logFn("[factory] boot check: daemon start unknown; skip restart marks");
-    return [];
+    return marked;
   }
 
   // Candidates grouped by main workspace so each scope is locked once. A
@@ -295,10 +295,9 @@ export async function runBootCheck({
   }
   if (!grouped.size) {
     logFn("[factory] boot check: marked 0 steer(s) (open turn 0, active recent 0, recent 0); no stale flags");
-    return [];
+    return marked;
   }
 
-  const marked: BootMark[] = [];
   let staleTotal = 0;
   for (const [mainId, group] of grouped) {
     // Deterministic order: earliest turn start first, then agent id. The
@@ -340,7 +339,8 @@ export async function runBootCheck({
       prepared.push({ agentId: candidate.agentId, role: candidate.role, open: candidate.open, openTurnId, excerpt, git });
     }
     const at = nowFn();
-    await takeLock(mainId, async (held: any) => {
+    await retryOnLockBusy(() => takeLock(mainId, async (held: any) => {
+      const workspaceMarks: BootMark[] = [];
       const freshSnap: any = await paseo.workspaces.ref(mainId).refresh().catch(() => null);
       const freshMeta = freshSnap?.metadata ?? {};
       const freshAgents = asRecord(freshMeta[AGENTS_KEY]) ?? {};
@@ -361,7 +361,7 @@ export async function runBootCheck({
           needsResume: { reason: "daemon-restart", at },
         };
         resumeMarked += 1;
-        marked.push({ agentId, scopeId: group.scope.id, workspaceId: mainId, cause: "closed" });
+        workspaceMarks.push({ agentId, scopeId: group.scope.id, workspaceId: mainId, cause: "closed" });
       };
       for (const item of prepared) {
         const freshEntry = asRecord(nextAgents[item.agentId]);
@@ -396,7 +396,7 @@ export async function runBootCheck({
           turnStartedAt: null,
           interrupted,
         };
-        marked.push({ agentId: item.agentId, scopeId: group.scope.id, workspaceId: mainId, cause: "interrupted" });
+        workspaceMarks.push({ agentId: item.agentId, scopeId: group.scope.id, workspaceId: mainId, cause: "interrupted" });
         if (!firstMarked) firstMarked = item.agentId;
         // An interrupted steer resumes instead of continuing cold.
         if (item.role === "steer" && !asRecord(nextAgents[item.agentId])?.needsResume) {
@@ -447,7 +447,8 @@ export async function runBootCheck({
       }
       held.verify();
       await paseo.workspaces.ref(mainId).setMetadata(patch);
-    });
+      marked.push(...workspaceMarks);
+    }));
   }
   logFn(
     `[factory] boot check: marked ${marked.filter((m) => m.cause !== "closed").length} interrupted turn(s) (daemon-restart); needsResume steers: ${reasonCounts["open-turn"]} open turn, ${reasonCounts["active-recent"]} active recent, ${reasonCounts.recent} recent; ${staleTotal} stale flag(s) removed`,
@@ -456,27 +457,36 @@ export async function runBootCheck({
 }
 
 let checked = false;
+let checking = false;
+const bootMarks: BootMark[] = [];
 
 /**
  * Runs the boot check once per plugin process. The server entry receives no
  * PaseoApi of its own, so index.server.ts calls this on the first available
  * handle (first turn, RPC, or subscription) — effectively at plugin start,
- * before any new turn is recorded. Never throws.
+ * before any new turn is recorded. Null means the check still needs to finish.
  */
-export async function ensureBootChecked(paseo: any, deps: BootCheckDeps = {}): Promise<BootMark[]> {
+export async function ensureBootChecked(paseo: any, deps: BootCheckDeps = {}): Promise<BootMark[] | null> {
   if (checked) return [];
-  checked = true;
+  if (checking) return null;
+  checking = true;
   try {
-    return await runBootCheck({ paseo, ...deps });
+    await runBootCheck({ paseo, ...deps }, bootMarks);
   } catch (error) {
     console.error(
       `[factory] boot check failed (${error instanceof Error ? error.message : String(error)})`,
     );
-    return [];
+    if (error instanceof LockBusy) return null;
+  } finally {
+    checking = false;
   }
+  checked = true;
+  return bootMarks.splice(0);
 }
 
 /** Clears the once-flag; tests only. */
 export function resetBootCheckForTests(): void {
   checked = false;
+  checking = false;
+  bootMarks.length = 0;
 }

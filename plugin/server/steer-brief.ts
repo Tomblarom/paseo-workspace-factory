@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
 import type { factorySteerBrief } from "../shared/factory.js";
 import { AGENTS_KEY } from "./core/agent-state.mjs";
-import { withLock, workspaceLockName } from "./core/lock.mjs";
+import { retryOnLockBusy, withLock, workspaceLockName } from "./core/lock.mjs";
 import { METADATA_KEY, readPaseoState } from "./core/paseo.mjs";
 import { actionEntry, newSteerAction, readStagedSteerBrief, readSteerAction } from "./core/steer-action.mjs";
 import { deliverSteer, type SteerDeliveryDeps } from "./steer-delivery.js";
@@ -24,7 +24,7 @@ export async function stageSteerBrief(paseo: any, input: { workspaceId: string; 
   if (!input.packet?.trim()) throw new Error("Nothing to stage: the packet is empty.");
   steerOrThrow(await readPaseoState(paseo), input.agentId);
   const workspace = paseo.workspaces.ref(input.workspaceId);
-  return (deps.lock ?? takeLock)(workspaceLockName(input.workspaceId), async (held: any) => {
+  return retryOnLockBusy(() => (deps.lock ?? takeLock)(workspaceLockName(input.workspaceId), async (held: any) => {
     const meta = (await workspace.refresh())?.metadata ?? {};
     const entries = meta[AGENTS_KEY] ?? {};
     const entry = entries[input.agentId];
@@ -39,7 +39,7 @@ export async function stageSteerBrief(paseo: any, input: { workspaceId: string; 
     held.verify();
     await workspace.setMetadata({ [AGENTS_KEY]: { ...entries, [input.agentId]: actionEntry({ ...entry, stagedBrief: null }, action) } });
     return { stageId: action.wakeId, epoch };
-  });
+  }));
 }
 
 export async function deliverSteerBrief(paseo: any, input: RpcInput<typeof factorySteerBrief>, deps: SteerBriefDeps = {}): Promise<RpcOutput<typeof factorySteerBrief>> {

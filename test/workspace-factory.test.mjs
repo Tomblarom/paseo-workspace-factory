@@ -1178,7 +1178,7 @@ test('checkpoint next step is stored and shown; handoff is English by default', 
   assert.match(result.packet, /- Next step: only confirm the takeover/);
   const status = steerStatus(await discoveryOf(world));
   const noNext = buildHandoff({ ...status, checkpoint: { task: 'x', epoch: 1 } }, { from: status.steers[0], to: status.steers[1], epoch: 1, language: 'de' });
-  assert.match(noNext, /Nächster Schritt: nicht dokumentiert/);
+  assert.match(noNext, /Nächster Schritt: Nutzerentscheidung erforderlich/);
 });
 
 test('switch --wait returns the reply of the new steer; --notify-previous sends one notice', async () => {

@@ -57,7 +57,7 @@ async function resumeFreshDelivery(paseo: any, workspaceId: string, scopeId: str
   return {
     agentId, cleared: false, renewed: true,
     status: result.status === "sent" ? "sent" : result.status === "blocked" || result.status === "missing" ? "blocked" : "pending",
-    detail: result.status === "sent" ? "Fresh brief delivered." : result.detail ?? "Fresh brief needs receipt reconciliation.",
+    detail: result.status === "sent" ? result.recordingError ?? "Fresh brief delivered." : result.detail ?? "Fresh brief needs receipt reconciliation.",
   };
 }
 

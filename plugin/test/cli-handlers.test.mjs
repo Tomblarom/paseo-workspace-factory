@@ -15,7 +15,7 @@ const { collectSteerStates } = await import("../server/steer-feed.ts");
 const { factoryWorkspaceResources } = await import("../shared/factory.ts");
 import { LABEL, METADATA_KEY, PARENT_LABEL } from "../server/core/paseo.mjs";
 import { AGENTS_KEY } from "../server/core/agent-state.mjs";
-import { LockBusy } from "../server/core/lock.mjs";
+import { acquireLock, LockBusy, withLock, workspaceLockName } from "../server/core/lock.mjs";
 import { PROFILE_HEALTH_KEY } from "../server/core/quota.mjs";
 import { formatStatus, scopeCandidates } from "../server/core/scopes-view.mjs";
 import { formatSlotProfileSuggestion, resolveWorkerPick, workerListRows } from "../server/core/models.mjs";
@@ -185,6 +185,66 @@ function activationWorld() {
   return { world, workspace, active, target, worker, alternative, paseo, activate };
 }
 
+test("activation records the new open turn and settles transient contention after send", async () => {
+  const { workspace, target, paseo, activate } = activationWorld();
+  const { handleTurnBefore } = await import("../server/turn-hook.ts");
+  let contend = false;
+  let sends = 0;
+  const lock = (name, run) => {
+    if (contend) {
+      contend = false;
+      throw new LockBusy("turn metadata write");
+    }
+    return withLock(name, run);
+  };
+  const ref = paseo.agents.ref;
+  paseo.agents.ref = (id) => ({
+    ...ref(id),
+    async send() {
+      sends++;
+      await handleTurnBefore({ agent: { id }, turnId: "activated-turn" }, { paseo }, { lock });
+      assert.equal(workspace.metadata[AGENTS_KEY][id].openTurnId, "activated-turn");
+      contend = true;
+    },
+  });
+  assert.equal((await activate(target.id, 3, workspace.id, { lock })).status, "sent");
+  assert.equal(workspace.metadata[AGENTS_KEY][target.id].action.phase, "done");
+  assert.equal(sends, 1);
+});
+
+test("activation reports a confirmed send when its receipt lock stays busy", async (t) => {
+  const { workspace, target, paseo, activate } = activationWorld();
+  const started = Date.now();
+  let blocked = false;
+  let time = started;
+  t.mock.method(Date, "now", () => time);
+  const lock = async (name, run) => {
+    if (blocked) {
+      time = started + 2_500;
+      throw new LockBusy("receipt lock held");
+    }
+    return withLock(name, run);
+  };
+  const messageIds = [];
+  const ref = paseo.agents.ref;
+  paseo.agents.ref = (id) => ({
+    ...ref(id),
+    async send(_text, { messageId }) {
+      messageIds.push(messageId);
+      if (messageIds.length === 1) blocked = true;
+    },
+  });
+  const result = await activate(target.id, 3, workspace.id, { lock });
+  assert.equal(result.status, "sent");
+  assert.match(result.detail, /Message sent.*receipt is still pending/);
+  const pending = workspace.metadata[AGENTS_KEY][target.id].action;
+  assert.equal(pending.phase, "uncertain");
+  assert.equal(pending.wakeId, messageIds[0]);
+  blocked = false;
+  assert.equal((await activate(target.id, 3, workspace.id, { lock })).status, "sent");
+  assert.deepEqual(messageIds, [pending.wakeId, pending.wakeId]);
+});
+
 test("own-tab activation retries a lost delivery receipt with the same target, epoch, packet and message ID", async () => {
   const { world, workspace, active, target, paseo, activate } = activationWorld();
   const meta = workspace.metadata;
@@ -250,6 +310,36 @@ test("activation prepares the selected cold tab while another standby is ready",
   assert.deepEqual(world.sent, []);
   assert.equal(workspace.metadata[METADATA_KEY].activeAgentId, target.id);
   assert.equal(workspace.metadata[AGENTS_KEY][target.id].action.routing.intent.agentId, target.id);
+});
+
+test("cold activation settles transient contention after rewinding the selected tab", async () => {
+  const { world, workspace, active, target, activate } = activationWorld();
+  target.provider = active.provider;
+  target.model = active.model;
+  workspace.metadata[AGENTS_KEY] = { [target.id]: { lastTurnEndedAt: "2026-10-01T08:00:00Z" } };
+  let rewinds = 0;
+  let contend = false;
+  const result = await activate(target.id, 3, workspace.id, {
+    now: () => "2026-11-26T12:00:00Z",
+    lock: async (name, run) => {
+      if (contend) {
+        contend = false;
+        throw new LockBusy("rewind journal held");
+      }
+      return withLock(name, run);
+    },
+    rewindClient: async () => ({
+      fetchAgentTimeline: async () => ({ entries: [{ item: { type: "user_message", messageId: "point" } }] }),
+      rewindAgent: async () => { rewinds++; contend = true; },
+    }),
+  });
+  assert.equal(result.status, "sent", result.detail);
+  assert.equal(rewinds, 1);
+  assert.equal(world.sent.length, 1);
+  assert.equal(world.sent[0][0], target.id);
+  const action = workspace.metadata[AGENTS_KEY][target.id].action;
+  assert.equal(action.phase, "done");
+  assert.equal(action.facts.refreshed.briefMessageId, action.wakeId);
 });
 
 test("own-tab activation takes a vacant slot's authority once and preserves delegated work", async () => {
@@ -531,6 +621,70 @@ test("Fresh reports an applied rewind if its journal cannot be settled", async (
   assert.equal(result.staged, false);
   assert.match(result.stagingError, /Rewind applied.*Factory journal unavailable/);
   assert.equal(workspace.metadata[AGENTS_KEY][active.id].action.phase, "rewinding");
+  assert.equal(world.agents.length, 3);
+});
+
+test("Fresh retries staging contention after the rewind journal has settled", async () => {
+  const world = makeWorld();
+  const [workspace] = world.workspaces;
+  const [active] = world.agents;
+  const paseo = fakePaseo(world);
+  let rewinds = 0;
+  let contended = false;
+  const deps = {
+    lock: (name, run) => {
+      if (!contended && workspace.metadata[AGENTS_KEY]?.[active.id]?.action?.phase === "done") {
+        contended = true;
+        throw new LockBusy("assignment recovery owns the lock");
+      }
+      return withLock(name, run);
+    },
+    rewindClient: async () => ({
+      fetchAgentTimeline: async () => ({ entries: [{ item: { type: "user_message", messageId: "point" } }] }),
+      rewindAgent: async () => { rewinds++; },
+      sendMessage: async () => assert.fail("the staged brief must not be sent"),
+    }),
+  };
+  const preview = await handlers.previewFresh({ workspaceId: MAIN }, { paseo }, loader, deps);
+  const result = await handlers.applyFresh({ workspaceId: MAIN, fingerprint: preview.fingerprint, deliver: "stage" },
+    { paseo }, loader, deps);
+  assert.equal(result.applied, true);
+  assert.equal(result.staged, true);
+  assert.equal(result.stageId, workspace.metadata[AGENTS_KEY][active.id].action.wakeId);
+  assert.equal(result.stagingError, null);
+  assert.equal(rewinds, 1);
+  assert.equal(world.agents.length, 3);
+});
+
+test("Fresh sends outside the workspace lock and tracks the turn through slower contention", async () => {
+  const world = makeWorld();
+  const [workspace] = world.workspaces;
+  const [active] = world.agents;
+  const paseo = fakePaseo(world);
+  const { handleTurnBefore } = await import("../server/turn-hook.ts");
+  const deps = {
+    rewindClient: async () => ({
+      fetchAgentTimeline: async () => ({ entries: [{ item: { type: "user_message", messageId: "point" } }] }),
+      rewindAgent: async () => {},
+      sendMessage: async (id) => {
+        const held = await acquireLock(workspaceLockName(workspace.id));
+        const unlock = setTimeout(() => void held.release(), 2_150);
+        try {
+          await handleTurnBefore({ agent: { id }, turnId: "fresh-turn" }, { paseo });
+          assert.equal(workspace.metadata[AGENTS_KEY][id].openTurnId, "fresh-turn");
+        } finally {
+          clearTimeout(unlock);
+          await held.release();
+        }
+      },
+    }),
+  };
+  const preview = await handlers.previewFresh({ workspaceId: MAIN }, { paseo }, loader, deps);
+  const result = await handlers.applyFresh({ workspaceId: MAIN, fingerprint: preview.fingerprint, deliver: "send" },
+    { paseo }, loader, deps);
+  assert.equal(result.applied, true);
+  assert.equal(result.delivered, true, result.deliveryError);
+  assert.equal(result.to, active.id);
   assert.equal(world.agents.length, 3);
 });
 
