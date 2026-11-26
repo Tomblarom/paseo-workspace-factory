@@ -713,6 +713,21 @@ workspace's result and pending wake out of the second panel. The overview
 also rendered with dark mode requested by the browser. Resources and Activity
 still need their projections.
 
+The Resources and Activity source review identifies two independent read paths.
+Resources can use quota samples, ZeroSub aliases and windows, and the existing
+scoped selection logic. Label unsampled or stale windows explicitly. A configured
+alternative is only eligible if scope admission has evaluated it. Keep
+host-wide quota commands available for maintenance.
+
+Activity can start with the latest recorded holder change, preparation outcome,
+delivery, assignment receipt and worker updates, including completed workers
+with queued wakes. Label this as recent recorded activity. Current records
+overwrite earlier events and some creation steps have no recorded timestamp.
+Expose action kind, phase, verified timestamp and bounded reason labels. Exclude
+prompt bodies, checkpoint or report text, credentials, raw errors and records
+from other workspaces. Read the stored evidence without calling a reconciliation
+operation. Add a bounded event record only for missing transitions needed by the UI.
+
 Track read-only dispatch receipt recovery with the existing
 [Paseo issue #9947](https://github.com/getpaseo/paseo/issues/9947) and
 [PR #9548](https://github.com/getpaseo/paseo/pull/9548). Recheck the released
