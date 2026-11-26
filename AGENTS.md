@@ -61,8 +61,18 @@ provider-configuration or capability layer. SLP is a pattern reference, not a te
 - The development host runs the plugin from this checkout: after a change,
   `paseo plugin reload workspace-factory` affects every live factory agent. Check
   `paseo plugin logs workspace-factory` afterwards.
-- Do not commit, push, open pull requests, fork, archive or delete anything unless the
-  task asks for it (own accepted workers excepted, see the role rules).
+- For the control concept implementation, the active steer is authorized to commit
+  accepted work locally as it lands. Verify each package against its acceptance
+  criteria, integrate accepted worker results promptly and archive those workers
+  under the role rules. Commit the verified package before starting dependent work
+  or handing over. Use separate commits for independent backend, UI, documentation
+  and recovery changes. Keep tightly coupled changes and their tests together.
+  Continue with the next authorized package when work is ready.
+- For suitable workers on this implementation, verify that the live Factory pick
+  selects GPT-6.2 Sol with High reasoning before starting them.
+- Other commits, pushes, pull requests, forks, archives and deletions require
+  explicit task authorization. The worker archive exception is in the role rules.
+- Keep published history intact for this implementation.
 - Address the user informally (German: "du"); plugin UI text stays English.
 
 ## Steer rules
