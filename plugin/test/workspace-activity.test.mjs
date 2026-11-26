@@ -1,12 +1,19 @@
 import assert from 'node:assert/strict';
+import { register } from 'node:module';
 import test from 'node:test';
 
-import { getWorkspaceActivity, projectWorkspaceActivity, WORKSPACE_ACTIVITY_LIMIT } from '../server/workspace-activity.ts';
+register('./ts-resolve-hooks.mjs', import.meta.url);
+const { getWorkspaceActivity, projectWorkspaceActivity, WORKSPACE_ACTIVITY_LIMIT } = await import('../server/workspace-activity.ts');
+const { factoryWorkspaceActivity } = await import('../shared/workspace-activity.ts');
 
 const workspaceId = 'wks_main';
 const otherWorkspaceId = 'wks_other';
 const at = (minute) => new Date(Date.UTC(2026, 10, 26, 20, minute)).toISOString();
 const member = (id, workspace = workspaceId) => ({ id, workspaceId: workspace });
+const steer = (id, slot, workspace) => ({
+  ...member(id, workspace),
+  labels: { 'wsf.role': 'steer', 'wsf.slot': slot },
+});
 const observation = (metadata = {}, agents = []) => ({
   workspace: {
     id: workspaceId,
@@ -31,7 +38,7 @@ test('projects only the exact Factory workspace and its verified agent membershi
       foreignBatch: { action: { ...delivery, batch: { workspaceId: otherWorkspaceId }, observedAt: at(7) } },
     },
     'wsf.workers': { foreign: { state: 'done', pendingWake: { state: 'done', queuedAt: at(8) } } },
-  }, [member('local'), member('foreign', otherWorkspaceId), member('wrongScope'), member('wrongTarget'), member('foreignBatch')]);
+  }, [steer('local', 'B'), steer('foreign', 'D', otherWorkspaceId), member('wrongScope'), member('wrongTarget'), member('foreignBatch')]);
 
   assert.equal(projectWorkspaceActivity(otherWorkspaceId, snapshot), null);
   assert.equal(projectWorkspaceActivity(workspaceId, { ...snapshot, workspace: null }), null);
@@ -39,7 +46,7 @@ test('projects only the exact Factory workspace and its verified agent membershi
   assert.equal(project({ wsf: { main: true, scope: { kind: 'workspace', locator: otherWorkspaceId } } }), null);
   assert.deepEqual(projectWorkspaceActivity(workspaceId, snapshot), {
     kind: 'recent-recorded-activity',
-    events: [{ kind: 'delivery', state: 'delivered', reason: 'dispatch-acknowledged', observedAt: at(2) }],
+    events: [{ kind: 'delivery', state: 'delivered', reason: 'dispatch-acknowledged', observedAt: at(2), participant: 'Steer B' }],
   });
 });
 
@@ -76,8 +83,8 @@ test('projects a completed worker with a queued wake from an earlier epoch', () 
   };
   assert.deepEqual(project(metadata, ['completed', 'reported', 'steer'].map((id) => member(id))).events, [
     { kind: 'delivery', state: 'delivered', reason: 'dispatch-acknowledged', observedAt: at(5) },
-    { kind: 'worker-wake', state: 'pending', reason: 'worker-completed', observedAt: at(4) },
-    { kind: 'worker-wake', state: 'recorded', reason: 'wake-recorded', observedAt: at(3) },
+    { kind: 'worker-wake', state: 'pending', reason: 'worker-completed', observedAt: at(4), participant: 'Worker' },
+    { kind: 'worker-wake', state: 'recorded', reason: 'wake-recorded', observedAt: at(3), participant: 'Worker' },
     { kind: 'delivery', state: 'pending', reason: 'brief-staged', observedAt: at(2) },
   ]);
 });
@@ -94,11 +101,11 @@ test('uses unknown timestamps without substituting a queue time or the current t
     'wsf.workers': { worker: { state: 'done', pendingWake: { state: 'done' }, startedAt: at(0) } },
   };
   assert.deepEqual(project(metadata, Object.keys({ ...metadata['wsf.agents'], ...metadata['wsf.workers'] }).map((id) => member(id))).events, [
-    { kind: 'holder-change', state: 'recorded', reason: 'slot-changed', observedAt: null },
+    { kind: 'holder-change', state: 'recorded', reason: 'slot-changed', observedAt: null, from: 'Steer A', participant: 'Steer B' },
     { kind: 'delivery', state: 'uncertain', reason: 'delivery-unconfirmed', observedAt: null },
-    { kind: 'delivery', state: 'blocked', reason: 'delivery-blocked', observedAt: null },
+    { kind: 'delivery', state: 'blocked', reason: 'delivery-blocked', observedAt: null, renewal: 'rewind' },
     { kind: 'delivery', state: 'delivered', reason: 'dispatch-acknowledged', observedAt: null },
-    { kind: 'worker-wake', state: 'pending', reason: 'worker-completed', observedAt: null },
+    { kind: 'worker-wake', state: 'pending', reason: 'worker-completed', observedAt: null, participant: 'Worker' },
   ]);
 });
 
@@ -132,10 +139,164 @@ test('publishes allowlisted fields from the holder, renewal, recovery and assign
     { kind: 'delivery', state: 'uncertain', reason: 'delivery-unconfirmed', observedAt: at(5) },
     { kind: 'renewal', state: 'uncertain', reason: 'renewal-unconfirmed', observedAt: at(4) },
     { kind: 'renewal', state: 'confirmed', reason: 'context-rewound', observedAt: at(3) },
-    { kind: 'holder-change', state: 'recorded', reason: 'holder-replaced', observedAt: at(2) },
-    { kind: 'worker-wake', state: 'pending', reason: 'worker-update', observedAt: null },
+    { kind: 'holder-change', state: 'recorded', reason: 'holder-replaced', observedAt: at(2), participant: 'Steer B' },
+    { kind: 'worker-wake', state: 'pending', reason: 'worker-update', observedAt: null, participant: 'Worker' },
   ]);
   assert.equal(JSON.stringify(view).includes(sentinel), false);
+});
+
+test('groups a switch with the action reserved at its commit, even with an intervening event', () => {
+  const action = { kind: 'activate', epoch: 5, phase: 'uncertain', queuedAt: at(2), attemptedAt: at(4) };
+  const metadata = {
+    wsf: { main: true, epoch: 5, activeSteer: 'B', activeAgentId: 'local', previousSteer: 'A', switchedAt: at(2) },
+    'wsf.agents': { local: { action }, nearby: { action: { ...action, kind: 'switch' } } },
+    'wsf.workers': { worker: { lastWakeAt: at(3) } },
+  };
+  const agents = [steer('local', 'B'), steer('nearby', 'C'), member('worker')];
+  const events = project(metadata, agents).events;
+  const group = { kind: 'holder-change', index: 0 };
+  assert.deepEqual(events.map((event) => [event.kind, event.participant, event.group]), [
+    ['delivery', 'Steer B', group],
+    ['delivery', 'Steer C', undefined],
+    ['worker-wake', 'Worker', undefined],
+    ['holder-change', 'Steer B', group],
+  ]);
+  assert.equal(events[0].state, 'uncertain');
+  assert.equal(events[3].from, 'Steer A');
+
+  for (const patch of [{ epoch: 4 }, { queuedAt: at(1) }, { kind: 'delivery' }]) {
+    metadata['wsf.agents'].local.action = { ...action, ...patch };
+    assert.ok(project(metadata, agents).events.every((event) => !event.group));
+  }
+});
+
+test('groups only the exact replacement and its authority-bound Fresh brief', () => {
+  const brief = { kind: 'fresh-delivery', phase: 'done', epoch: 5, observedAt: at(4) };
+  const metadata = {
+    wsf: { main: true, epoch: 5, activeSteer: 'B', activeAgentId: 'replacement', previousSteer: 'retired', switchedAt: at(3) },
+    'wsf.agents': {
+      replacement: { action: { ...brief, authority: { agentId: 'replacement' } } },
+      other: { action: brief },
+    },
+  };
+  const agents = [
+    steer('retired', 'B', otherWorkspaceId),
+    { ...steer('replacement', 'B'), createdAt: at(2) },
+    { ...steer('other', 'B'), createdAt: at(2) },
+  ];
+  const events = project(metadata, agents).events;
+  const group = { kind: 'holder-change', index: 1 };
+  assert.deepEqual(events.map((event) => [event.kind, event.group]), [
+    ['delivery', undefined], ['delivery', group], ['holder-change', group], ['creation', undefined], ['creation', group],
+  ]);
+  assert.equal(events[2].from, undefined);
+});
+
+test('groups recovery by its saved reference and rewind by the acknowledged brief ID', () => {
+  const action = {
+    kind: 'delivery', phase: 'sent', renewal: 'rewind', wakeId: 'brief-ref', needsResumeAt: at(1), observedAt: at(4),
+    facts: {
+      cleared: { mode: 'rewind', at: at(3) },
+      refreshed: { mode: 'rewind', at: at(3), briefMessageId: 'brief-ref' },
+    },
+  };
+  const metadata = {
+    'wsf.agents': { target: { action, needsResume: { reason: 'daemon-restart', at: at(1) } } },
+  };
+  const agents = [steer('target', 'B')];
+  const events = project(metadata, agents).events;
+  assert.deepEqual(events.map(({ reason, group }) => [reason, group]), [
+    ['dispatch-acknowledged', { kind: 'recovery', index: 0 }],
+    ['context-rewound', { kind: 'recovery', index: 0 }],
+    ['daemon-restart', { kind: 'recovery', index: 0 }],
+  ]);
+  assert.equal(JSON.stringify(events).includes('brief-ref'), false);
+  action.needsResumeAt = at(0);
+  action.wakeId = 'different-brief';
+  action.queuedAt = at(3);
+  assert.ok(project(metadata, agents).events.every((event) => !event.group));
+});
+
+test('projects takeover cause and grouped rewind attempts without confirming delivery', () => {
+  const secret = 'sensitive-pool-name';
+  const reason = `quota exhausted for pool (${secret})`;
+  const action = {
+    phase: 'blocked', renewal: 'rewind', queuedAt: at(2), observedAt: at(5),
+    rewindAttempt: { at: at(3), phase: 'uncertain' },
+    batch: { workspaceId, epoch: 4, takeover: { scopeId: 'Main', activeSlot: 'A', reason } },
+  };
+  const metadata = {
+    'wsf.checkpoint': { source: 'failover', epoch: 4, updatedAt: at(5), failover: { previousSteer: 'A', reason }, task: secret },
+    'wsf.agents': { target: { action } },
+  };
+  const agents = [steer('target', 'B')];
+  const events = project(metadata, agents).events;
+  const group = { kind: 'takeover-request', index: 1 };
+  assert.deepEqual(events, [
+    { kind: 'takeover-request', state: 'recorded', reason: 'takeover-recorded', observedAt: at(5), from: 'Steer A', cause: 'quota-exhausted' },
+    { kind: 'renewal', state: 'uncertain', reason: 'renewal-unconfirmed', observedAt: at(3), participant: 'Steer B', group },
+    { kind: 'takeover-request', state: 'blocked', reason: 'delivery-blocked', observedAt: null, participant: 'Steer B', from: 'Steer A',
+      cause: 'quota-exhausted', renewal: 'rewind', group },
+  ]);
+  assert.equal(JSON.stringify(events).includes(secret), false);
+
+  action.phase = 'uncertain';
+  action.attemptedAt = at(4);
+  assert.deepEqual(project(metadata, agents).events.map(({ reason }) => reason), ['takeover-recorded', 'delivery-unconfirmed']);
+  action.phase = 'done';
+  assert.deepEqual(project(metadata, agents).events.map(({ reason }) => reason), ['dispatch-acknowledged']);
+  action.batch.epoch = 3;
+  assert.deepEqual(project(metadata, agents).events.map(({ reason }) => reason), ['dispatch-acknowledged', 'takeover-recorded']);
+  action.batch.workspaceId = otherWorkspaceId;
+  assert.deepEqual(project(metadata, agents).events.map(({ reason }) => reason), ['takeover-recorded']);
+});
+
+test('leaves a verified clear ungrouped when its receipt cannot identify the delivery', () => {
+  const action = {
+    phase: 'sent', renewal: 'clear', observedAt: at(4), attemptedAt: at(3), queuedAt: at(1),
+    facts: { actionVerified: true, cleared: { mode: 'clear', at: at(2), sessionId: 'private-session' } },
+  };
+  const events = project({ 'wsf.agents': { target: { action } } }, [steer('target', 'private label')]).events;
+  assert.deepEqual(events, [
+    { kind: 'delivery', state: 'delivered', reason: 'dispatch-acknowledged', observedAt: at(4), participant: 'Steer', renewal: 'clear' },
+    { kind: 'renewal', state: 'confirmed', reason: 'context-cleared', observedAt: at(2), participant: 'Steer' },
+  ]);
+});
+
+test('links a clear reservation nested in the delivery and omits its private fields', () => {
+  const action = {
+    phase: 'renewing', renewal: 'clear', queuedAt: at(1),
+    cleanup: { kind: 'clear', reason: 'resume', at: at(2), messageId: 'private-clear-id', sessionId: 'private-session' },
+  };
+  const metadata = { 'wsf.agents': { target: { action } } };
+  const agents = [steer('target', 'B')];
+  const group = { kind: 'renewal', index: 0 };
+  const events = project(metadata, agents).events;
+  assert.deepEqual(events.map(({ reason, group }) => [reason, group]), [
+    ['clear-reserved', group], ['waiting-for-renewal', group],
+  ]);
+  assert.equal(JSON.stringify(events).includes('private-'), false);
+
+  action.cleanup.uncertain = true;
+  assert.deepEqual(project(metadata, agents).events.map(({ state }) => state), ['uncertain', 'pending']);
+  action.cleanup.reason = 'idle';
+  assert.deepEqual(project(metadata, agents).events.map(({ reason }) => reason), ['waiting-for-renewal']);
+});
+
+test('assignment labels require exact workspace membership and use the recorded report target', () => {
+  const assignment = { by: 'requester', at: at(1), requesterWorkspaceId: otherWorkspaceId };
+  const metadata = { 'wsf.assignment': assignment };
+  const agents = [steer('requester', 'A'), steer('target', 'B')];
+  assert.equal(project(metadata, agents).events[0].from, undefined);
+  assignment.requesterWorkspaceId = workspaceId;
+  assert.equal(project(metadata, agents).events[0].from, 'Steer A');
+  assignment.reportedAt = at(2);
+  assignment.reportTarget = { workspaceId, agentId: 'target' };
+  const [report] = project(metadata, agents).events;
+  assert.equal(report.participant, 'Steer B');
+  assert.equal(report.from, undefined);
+  assignment.reportTarget.workspaceId = otherWorkspaceId;
+  assert.equal(project(metadata, agents).events[0].participant, undefined);
 });
 
 test('caps the view at the most recent recorded events', () => {
@@ -146,6 +307,28 @@ test('caps the view at the most recent recorded events', () => {
   assert.equal(events.length, WORKSPACE_ACTIVITY_LIMIT);
   assert.deepEqual(events.map(({ observedAt }) => observedAt),
     Array.from({ length: WORKSPACE_ACTIVITY_LIMIT }, (_, index) => at(count - 1 - index)));
+});
+
+test('applies the event cap before surfacing any group and keeps the contract bounded', () => {
+  const metadata = {
+    'wsf.agents': {
+      target: {
+        needsResume: { reason: 'failed', at: at(0) },
+        action: { kind: 'delivery', needsResumeAt: at(0), phase: 'sent', observedAt: at(30) },
+      },
+    },
+    'wsf.workers': Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`worker-${i}`, { lastWakeAt: at(i + 1) }])),
+  };
+  const agents = [member('target'), ...Object.keys(metadata['wsf.workers']).map((id) => member(id))];
+  const activity = project(metadata, agents);
+  assert.equal(activity.events.length, 20);
+  assert.ok(activity.events.every((event) => !event.group));
+  const payload = { workspaceId, ...activity };
+  assert.deepEqual(factoryWorkspaceActivity.output.parse(payload), payload);
+  assert.equal(factoryWorkspaceActivity.output.safeParse({ ...payload, events: [...payload.events, payload.events[0]] }).success, false);
+  assert.equal(factoryWorkspaceActivity.output.safeParse({
+    ...payload, events: [{ ...payload.events[0], participant: 'Steer A\n' }],
+  }).success, false);
 });
 
 test('the activity RPC reads the exact workspace and native creation timestamps without writing', async () => {
@@ -167,8 +350,8 @@ test('the activity RPC reads the exact workspace and native creation timestamps 
     workspaceId,
     kind: 'recent-recorded-activity',
     events: [
-      { kind: 'creation', state: 'recorded', reason: 'steer-created', observedAt: at(2) },
-      { kind: 'creation', state: 'recorded', reason: 'worker-created', observedAt: at(1) },
+      { kind: 'creation', state: 'recorded', reason: 'steer-created', observedAt: at(2), participant: 'Steer' },
+      { kind: 'creation', state: 'recorded', reason: 'worker-created', observedAt: at(1), participant: 'Worker' },
     ],
   });
   await assert.rejects(getWorkspaceActivity({ workspaceId: otherWorkspaceId }, { paseo }), /enrolled Factory workspace/);
