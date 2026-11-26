@@ -70,5 +70,5 @@ provider-configuration or capability layer. SLP is a pattern reference, not a te
 The plugin appends the factory role rules (last line `Factory role rules: <id>`) when a
 steer session is created. Claude and Muse keep the prompt their session started with, so a
 steer session opened before those rules existed may lack them: if that line is not in
-your system prompt, read `plugin/server/core/role-prompts.mjs` once and follow
-`STEER_ROLE_PROMPT`. Delivery details: docs/design/native-plugin-spike.md.
+your system prompt or names an older id than `ROLE_RULES_ID` in
+`plugin/server/core/role-prompts.mjs`, read that file once and follow `STEER_ROLE_PROMPT`. Delivery details: docs/design/native-plugin-spike.md.
