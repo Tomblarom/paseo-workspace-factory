@@ -7,7 +7,6 @@ import type {
   PluginClientContext,
   PluginWorkspaceCommandContext,
 } from "@getpaseo/plugin/client";
-import { ActivateSteer } from "./client/activate-steer.js";
 import {
   FactoryColdPanel,
   FactoryColdPillContent,
@@ -28,6 +27,7 @@ import { FactorySettings } from "./client/settings-factory.js";
 import { requestOpenFactory, subscribeOpenFactory } from "./client/steer-nav.js";
 import { SteerMenu, type SteerMenuAction } from "./client/steer-menu-content.js";
 import {
+  activationMenuBehavior,
   describeSteerMenu,
   menuKeyFor,
   type SteerMenuEntryDescriptor,
@@ -45,7 +45,7 @@ import {
 } from "./client/steer-pill.js";
 import { assertSteerContext } from "./shared/agent-guard.js";
 import { attentionStatus } from "./shared/context-continuation.js";
-import { factoryCold, factorySteers } from "./shared/factory.js";
+import { factoryCold, factorySteerActivate, factorySteers } from "./shared/factory.js";
 
 const SETTINGS_SCREEN_ID = "factory-settings";
 
@@ -95,7 +95,8 @@ function steerActionPopover(
 
 function toMenuEntries(
   descriptor: SteerMenuEntryDescriptor[],
-  ctx: { row: SteerPillRow; observed: SteerObservedState; composers: PluginClientContext["composers"] },
+  ctx: { row: SteerPillRow; observed: SteerObservedState; composers: PluginClientContext["composers"];
+    activate: Parameters<typeof activationMenuBehavior>[2] },
 ): PluginButtonMenuEntry[] {
   const popover = (action: SteerMenuAction, extra?: Parameters<typeof steerActionPopover>[2]) =>
     steerActionPopover(action, ctx.composers, extra);
@@ -112,11 +113,9 @@ function toMenuEntries(
         return { kind: "item", id: entry.id, title: entry.title, icon: entry.icon, behavior: { kind: "popover", Content: popover("create") } };
       case "activate": {
         const epoch = entry.activationEpoch;
-        return { kind: "item", id: entry.id, title: entry.title, icon: entry.icon, behavior: {
-          kind: "popover", Content: (props) => props.context === "agent" && epoch !== undefined &&
-              props.agentId === ctx.row.agentId && props.workspaceId === ctx.row.workspaceId
-            ? <ActivateSteer key={`${props.agentId}-${epoch}`} {...props} epoch={epoch} alternatives={entry.activationAlternatives} /> : null,
-        } };
+        return { kind: "item", id: entry.id, title: entry.title, icon: entry.icon,
+          ...(epoch === undefined ? { disabled: true, behavior: { kind: "action", onPress: () => {} } as const } :
+            { behavior: activationMenuBehavior(ctx.row, epoch, ctx.activate) }) };
       }
       case "handover-target":
         return { kind: "item", id: entry.id, title: entry.title, icon: entry.icon, behavior: { kind: "popover", Content: popover("handover", { targetSlot: entry.targetSlot, targetAgentId: entry.targetAgentId }) } };
@@ -150,6 +149,7 @@ function buildSteerMenuBehavior(
   rows: SteerPillRow[],
   observed: SteerObservedState,
   composers: PluginClientContext["composers"],
+  activate: Parameters<typeof activationMenuBehavior>[2],
 ): { behavior: PluginButtonBehavior; menuKey: string } {
   const descriptor = describeSteerMenu(row, rows, {
     keepChatHistory: false,
@@ -157,12 +157,20 @@ function buildSteerMenuBehavior(
     revertAllowed: observed.revertAllowed,
     revertReason: observed.revertReason,
   });
-  return { behavior: { kind: "menu", items: toMenuEntries(descriptor, { row, observed, composers }) }, menuKey: menuKeyFor(descriptor) };
+  return { behavior: { kind: "menu", items: toMenuEntries(descriptor, { row, observed, composers, activate }) }, menuKey: menuKeyFor(descriptor) };
 }
 
 export default function contribute(client: PluginClientContext) {
   const panelSteers = createFactorySteerFeed();
   const workspaceResults = createFactoryResultStores();
+  const activate: Parameters<typeof activationMenuBehavior>[2] = async (input) => {
+    const result = await client.rpc(factorySteerActivate, input);
+    const results = workspaceResults(input.workspaceId);
+    results.setResult({ kind: "info", at: new Date().toISOString(), text: result.detail });
+    const summary = result.status === "sent" ? "Steer active" :
+      result.status === "pending" ? "Activation pending" : "Continuation blocked";
+    showFactoryResultPill(client, { workspaceId: input.workspaceId, agentId: input.agentId, summary, results });
+  };
   client.addWorkspacePanel({
     id: "factory",
     title: "Factory",
@@ -275,7 +283,7 @@ export default function contribute(client: PluginClientContext) {
       panelSteers.update(rows);
       steerIds = steerAgentIds(rows);
       syncSteerPills(client, steerPills, rows, (row, allRows, observed) =>
-        buildSteerMenuBehavior(row, allRows, observed, (selector) => client.composers(selector)));
+        buildSteerMenuBehavior(row, allRows, observed, (selector) => client.composers(selector), activate));
       // A steer row that arrived here replaces its attention pill, if any.
       for (const [id, pill] of attentionPills) {
         if (!steerIds.has(id)) continue;

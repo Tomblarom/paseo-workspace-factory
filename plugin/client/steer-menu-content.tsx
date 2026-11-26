@@ -296,7 +296,7 @@ export function SteerMenu({
   }): void => {
     const tail = args.tail ? ` ${args.tail}` : "";
     if (args.delivered) {
-      setNotice(`${args.head}${tail}`);
+      setNotice(`${args.head}${tail}${args.deliveryError ? ` ${text(args.deliveryError)}` : ""}`);
       return;
     }
     if (args.stageId && args.epoch !== undefined) {

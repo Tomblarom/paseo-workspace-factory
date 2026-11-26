@@ -5,11 +5,19 @@
 // in the /factory RPCs, the menu only calls them. All UI text is English.
 // State words are lowercase, the way Paseo writes them.
 import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
-import type { PluginComposer } from "@getpaseo/plugin/client";
-import type { factorySteerBrief } from "../shared/factory.js";
+import type { PluginButtonBehavior, PluginComposer } from "@getpaseo/plugin/client";
+import type { factorySteerActivate, factorySteerBrief } from "../shared/factory.js";
 import { mayResumeClear, isClaudeProvider, RESUME_CLEAR_DEFAULTS } from "../shared/idle-cleanup.js";
 import { STEER_STATE_LABELS, type SteerFaceState } from "../shared/steer-state.js";
 import type { SteerPillRow } from "./steer-pill.js";
+
+export function activationMenuBehavior(
+  { agentId, workspaceId }: Pick<SteerPillRow, "agentId" | "workspaceId">,
+  epoch: number,
+  activate: (input: RpcInput<typeof factorySteerActivate>) => Promise<void>,
+): PluginButtonBehavior {
+  return { kind: "action", onPress: () => activate({ agentId, workspaceId, epoch }) };
+}
 
 // ---------------------------------------------------------------------------
 // Labels

@@ -14,6 +14,22 @@ const results = await import("../client/steer-results.ts");
 const nav = await import("../client/steer-nav.ts");
 const pill = await import("../client/steer-pill.ts");
 
+test("one native activation press sends exactly one RPC even when the menu is rebuilt", async () => {
+  const entry = readFileSync(new URL("../index.client.tsx", import.meta.url), "utf8");
+  assert.match(entry, /case "activate":[\s\S]*?behavior: activationMenuBehavior\(/);
+  const target = row("steer-b", { slot: "B", activationEpoch: 3 });
+  const requests = [];
+  const activate = async (input) => {
+    requests.push(input);
+    menu.activationMenuBehavior({ ...target, active: true }, 3, activate);
+  };
+  const behavior = menu.activationMenuBehavior(target, 3, activate);
+  assert.equal(behavior.kind, "action");
+  assert.deepEqual(requests, []);
+  await behavior.onPress();
+  assert.deepEqual(requests, [{ agentId: target.agentId, workspaceId: target.workspaceId, epoch: 3 }]);
+});
+
 const NOW = Date.parse("2026-11-25T12:00:00.000Z");
 const iso = (ms) => new Date(ms).toISOString();
 const MIN = 60_000;
