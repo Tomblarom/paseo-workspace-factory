@@ -870,12 +870,32 @@ function switchIdentityOf(dry: any): {
   };
 }
 
-export async function activateSteer(
+type ActivationResult = { status: "sent" | "pending" | "blocked"; detail: string };
+const pendingActivations = new Map<string, Promise<ActivationResult>>();
+
+export function activateSteer(
+  input: RpcInput<typeof factorySteerActivate>,
+  context: PluginHandlerContext,
+  loader: ConfigLoader,
+  delivery?: SteerDeliveryDeps,
+): Promise<ActivationResult> {
+  const key = JSON.stringify([input.workspaceId, input.agentId, input.epoch]);
+  const pending = pendingActivations.get(key);
+  if (pending) return pending;
+  // A pill can remount while activation is in progress. Both callers should
+  // receive the same outcome. Later retries use the durable activation receipt.
+  const activation = applySteerActivation(input, context, loader, delivery)
+    .finally(() => { pendingActivations.delete(key); });
+  pendingActivations.set(key, activation);
+  return activation;
+}
+
+async function applySteerActivation(
   input: RpcInput<typeof factorySteerActivate>,
   { paseo }: PluginHandlerContext,
   loader: ConfigLoader,
   delivery?: SteerDeliveryDeps,
-): Promise<{ status: "sent" | "pending" | "blocked"; detail: string }> {
+): Promise<ActivationResult> {
   const { workspaceId, agentId, epoch } = input;
   const { config, discovery, status, snapshot } = await discoverOne(paseo, loader, undefined, workspaceId);
   const scope = status.state;

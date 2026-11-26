@@ -277,6 +277,41 @@ test("own-tab activation takes a vacant slot's authority once and preserves dele
   assert.deepEqual(world.sent.map(([id]) => id), [target.id]);
 });
 
+test("overlapping activations of the same tab and epoch share one outcome", async () => {
+  const { world, workspace, target, paseo, activate } = activationWorld();
+  const workspaceRef = paseo.workspaces.ref;
+  const writingAuthority = Promise.withResolvers();
+  const allowWrite = Promise.withResolvers();
+  paseo.workspaces.ref = (id) => {
+    const handle = workspaceRef(id);
+    return {
+      ...handle,
+      async setMetadata(patch) {
+        if (patch[METADATA_KEY]?.epoch === 4) {
+          writingAuthority.resolve();
+          await allowWrite.promise;
+        }
+        await handle.setMetadata(patch);
+      },
+    };
+  };
+
+  const first = activate();
+  await Promise.race([writingAuthority.promise, first]);
+  const second = activate();
+  const completed = Promise.allSettled([first, second]);
+  await new Promise((resolve) => setImmediate(resolve));
+  allowWrite.resolve();
+  const outcomes = (await completed).map((result) => {
+    if (result.status === "rejected") throw result.reason;
+    return result.value;
+  });
+  assert.equal(outcomes[0].status, "sent");
+  assert.deepEqual(outcomes[0], outcomes[1]);
+  assert.equal(workspace.metadata[METADATA_KEY].epoch, 4);
+  assert.deepEqual(world.sent.map(([id]) => id), [target.id]);
+});
+
 test("activation refuses a busy live controller and a holder that appears after discovery", async () => {
   const { world, workspace, active, target, activate } = activationWorld();
   active.pendingPermissions = [{ id: "open" }];
