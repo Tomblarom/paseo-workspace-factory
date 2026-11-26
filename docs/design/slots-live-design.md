@@ -192,3 +192,18 @@ errors. Keep the CLI entry and the in-package core consistent (single copy under
 2. Legacy steers whose advisor or privacy classification is unclear default to neither advisor nor sensitive; the classification is optional and is configured in the Factory panel.
 3. A manual switch to a holder whose account is measured as exhausted asks for confirmation (warning with reset time and a better target) before it runs.
 4. Settings UI fields only for what is needed: GitHub owner, checkout root, steer and worker model priorities, quota thresholds. All other former file options use fixed defaults; fields are added later only on demand.
+5. (2026-11-26) A ZeroSub continuation of a factory agent is adopted by persisting the origin's
+   factory labels on it (`inheritContinuationLabels`, missing keys only) the first time one of
+   its turns ends. Conditions: the `zerosub.continued-from` chain ends at a labelled factory agent,
+   the continuation is not archived, has no parent and sits in the origin's workspace. Authority
+   stays with the live end of the chain (`scopeHolder` already resolves it), so the errored
+   origin can never act for the slot again. No manual adopt and no title matching.
+6. (2026-11-26) Every agent creation (plan/apply, steer add, fresh, worker start) pins the
+   ZeroSub account in the executor from live `zerosub.state` (`suggestAccountPin`) at create
+   time; a planned pin is only the fallback when the live read fails. Plan/apply passes ZeroSub
+   state to `resolveProfile` like `steer add`, so profiles whose accounts are all exhausted are
+   skipped. ZeroSub remains the only account switcher.
+7. (2026-11-26) An assignment report goes to the live recipient: the requester scope's active
+   holder when it is recorded and live, else the continuation end of `by`, else `by`. The
+   `reportedAt` stamp is reverted when sending fails, so a report is retried on the next turn
+   instead of being lost.

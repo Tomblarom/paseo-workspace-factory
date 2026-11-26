@@ -133,8 +133,8 @@ test('CLI name renders once per host: installed plugin CLI when known, else pase
 });
 
 test('steer and advisor texts end with the stable role-rules identifier', () => {
-  assert.equal(ROLE_RULES_ID, 'wsf-role-1');
-  assert.ok(STEER_ROLE_PROMPT.includes('Factory role rules: wsf-role-1'));
+  assert.equal(ROLE_RULES_ID, 'wsf-role-2');
+  assert.ok(STEER_ROLE_PROMPT.includes('Factory role rules: wsf-role-2'));
   for (const text of [STEER_ROLE_PROMPT, ADVISOR_ROLE_PROMPT]) {
     assert.equal(text.split(`Factory role rules: ${ROLE_RULES_ID}`).length - 1, 1);
     assert.ok(text.endsWith(`Factory role rules: ${ROLE_RULES_ID}`));

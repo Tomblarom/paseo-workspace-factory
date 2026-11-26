@@ -171,8 +171,11 @@ The composer pill and **Factory: context** panel show the reason the chat needs 
 ### Delivery policy
 
 Wakes, takeover requests, switch sends, and resume use the steer pill's cache
-projection and context-size threshold. With a known model window, the
-threshold is the greater of the configured token floor and 30% of the window.
+projection and context-size threshold. The threshold is the configured token floor and does
+not scale with the model window (2026-11-26): renewal costs about one initialization whatever
+the window, while every request re-reads the whole context, so a 1M window must not delay
+renewal to 300k tokens. The default floor is 100k, about twice a measured steer initialization
+(40–80k), so a fresh steer is not renewed on every wake. Context is task-bound, not agent-bound.
 Automatic wakes remain queued while the steer is busy. Factory rechecks the
 target before dispatching cleanup or a prepared brief. A warm or cooling steer can
 receive the original message. A cold or large steer gets a compact checkpoint
