@@ -168,7 +168,8 @@ export default function contribute(client: PluginClientContext) {
     title: "Factory",
     icon: "Factory",
     locations: ["workspace"],
-    Component: (props) => <FactoryPanel key={props.workspaceId} {...props} steerFeed={panelSteers} results={workspaceResults(props.workspaceId)} />,
+    Component: (props) => <FactoryPanel key={props.workspaceId} {...props} steerFeed={panelSteers}
+      results={workspaceResults(props.workspaceId)} composers={client.composers} />,
   });
   client.addAgentPanel({
     id: "factory-cold",

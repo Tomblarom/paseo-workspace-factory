@@ -90,7 +90,9 @@ test("handover needs the current tab and its scope", () => {
   assert.deepEqual(menu.handoffTargets([row("steer-a", { scopeId: null })], "steer-a"), []);
   // Foreign scopes are not listed.
   assert.deepEqual(
-    menu.handoffTargets([self(), row("steer-x", { slot: "B", scopeId: "o/other" })], "steer-a").map((t) => t.slot),
+    menu.handoffTargets([
+      self(), row("steer-x", { slot: "B", scopeId: "o/other" }), row("steer-y", { slot: "A", workspaceId: "wks_other" }),
+    ], "steer-a").map((t) => t.slot),
     ["A"],
   );
 });

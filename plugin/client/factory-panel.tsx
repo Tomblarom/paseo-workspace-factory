@@ -1,6 +1,7 @@
 import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
-import type { PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
+import type { PluginClientContext, PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
 import { useHosts, useRpc } from "@getpaseo/plugin/client";
+import { Icon } from "@getpaseo/plugin/client/ui";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
@@ -39,8 +40,13 @@ import { FactoryWorkspaceActivity } from "./factory-workspace-activity.js";
 import { FactoryWorkspaceResources } from "./factory-workspace-resources.js";
 import { FactoryWorkspaceStatus } from "./factory-workspace-status.js";
 
-const factoryViews = ["Overview", "Steers", "Resources", "Activity", "Tools"] as const;
-type FactoryView = typeof factoryViews[number];
+const factoryViews = [
+  { name: "Overview", icon: "LayoutDashboard" },
+  { name: "Steers", icon: "Compass" },
+  { name: "Resources", icon: "Gauge" },
+  { name: "Activity", icon: "Activity" },
+] as const;
+type FactoryView = typeof factoryViews[number]["name"] | "Diagnostics";
 
 function text(value: unknown): string {
   if (value === null || value === undefined) return "-";
@@ -73,6 +79,7 @@ function formatAge(ageMs: unknown): string {
 export function FactoryPanel(props: PluginWorkspacePanelProps & {
   steerFeed: FactorySteerFeed;
   results: FactoryResultStore;
+  composers: PluginClientContext["composers"];
 }) {
   const { theme, layout, workspaceId, host, steerFeed, results } = props;
   const connection = useHosts().find(({ serverId }) => serverId === host.id)?.status;
@@ -96,13 +103,13 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
   const [view, setView] = useState<FactoryView>(() => {
     const needsReview = result?.kind.endsWith("Preview") ||
       (result?.kind === "plan" && result.plan.plans.some((plan) => plan.ops.length > 0));
-    return needsReview ? "Tools" : "Overview";
+    return needsReview ? "Diagnostics" : "Overview";
   });
   const setFactoryResult = results.setResult;
   const lastResult = useRef(result);
   const scroll = useRef<ScrollView>(null);
   useEffect(() => {
-    if (result && result !== lastResult.current) setView("Tools");
+    if (result && result !== lastResult.current) setView("Diagnostics");
     lastResult.current = result;
   }, [result]);
   useEffect(() => { scroll.current?.scrollTo({ y: 0, animated: false }); }, [view, result]);
@@ -114,6 +121,7 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
       if (record(status.workspace)?.id !== workspaceId) throw new Error("Factory returned status for a different workspace.");
       return status;
     },
+    enabled: !offline,
     refetchOnMount: "always",
     refetchOnWindowFocus: false,
     retry: false,
@@ -123,30 +131,42 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
     () => ({
       screen: {
         flex: 1,
-        padding: layout.compact ? 16 : 24,
         gap: layout.compact ? 8 : 12,
         backgroundColor: theme.colors.surface0,
+      },
+      dashboard: {
+        alignSelf: "center" as const,
+        width: "100%" as const,
+        maxWidth: 1100,
+        padding: layout.compact ? 12 : 22,
+        gap: layout.compact ? 10 : 14,
+      },
+      header: {
+        flexDirection: "row" as const,
+        alignItems: "center" as const,
+        justifyContent: "space-between" as const,
+        gap: 8,
       },
       navigation: {
         flexDirection: "row" as const,
         flexWrap: "wrap" as const,
-        alignSelf: "flex-start" as const,
-        padding: 4,
-        gap: 4,
-        backgroundColor: theme.colors.surface1,
-        borderColor: theme.colors.border,
-        borderWidth: 1,
-        borderRadius: 10,
+        gap: layout.compact ? 2 : 10,
+        borderBottomColor: theme.colors.border,
+        borderBottomWidth: 1,
       },
       viewButton: {
-        paddingHorizontal: layout.compact ? 12 : 16,
-        minHeight: 40,
+        flexDirection: "row" as const,
+        alignItems: "center" as const,
         justifyContent: "center" as const,
-        borderRadius: 6,
+        paddingHorizontal: layout.compact ? 7 : 12,
+        minHeight: 42,
+        gap: 6,
+        borderBottomWidth: 2,
+        borderBottomColor: "transparent",
       },
-      selectedView: { backgroundColor: theme.colors.accent },
-      viewLabel: { color: theme.colors.foreground, fontSize: 14, fontWeight: "500" as const },
-      selectedViewLabel: { color: theme.colors.accentForeground },
+      selectedView: { borderBottomColor: theme.colors.accent },
+      viewLabel: { color: theme.colors.foregroundMuted, fontSize: 13, fontWeight: "500" as const },
+      selectedViewLabel: { color: theme.colors.foreground, fontWeight: "600" as const },
       label: { color: theme.colors.foregroundMuted, fontSize: 13 },
       body: { color: theme.colors.foreground, fontSize: 14 },
       hash: { color: theme.colors.foreground, fontSize: 14 },
@@ -433,7 +453,7 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
     });
   };
 
-  const tools = view === "Tools" ? (
+  const tools = view === "Diagnostics" ? (
     <>
       {busy ? <Text style={styles.label}>Working…</Text> : null}
       {result ? (
@@ -548,17 +568,33 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
   ) : null;
 
   return (
-    <ScrollView ref={scroll} style={styles.screen} contentContainerStyle={{ gap: styles.screen.gap }}>
+    <ScrollView ref={scroll} style={styles.screen}>
+      <View testID="factory-dashboard" style={styles.dashboard}>
+      <View style={styles.header}>
+        <View style={styles.row}>
+          <Icon name="Factory" size={18} color={theme.colors.foregroundMuted} />
+          <Text style={[styles.body, { fontWeight: "600" }]}>Workspace Factory</Text>
+        </View>
+        <Pressable accessibilityRole="button" accessibilityLabel="Diagnostics" aria-expanded={view === "Diagnostics"}
+          style={({ pressed }) => [{ flexDirection: "row", alignItems: "center", gap: 6, minHeight: 38,
+            borderRadius: 6, paddingHorizontal: 8 }, (pressed || view === "Diagnostics") && { backgroundColor: theme.colors.surface2 }]}
+          onPress={() => setView(view === "Diagnostics" ? "Overview" : "Diagnostics")}>
+          <Icon name="Terminal" size={15} color={theme.colors.foregroundMuted} />
+          {!layout.compact ? <Text style={styles.label}>Diagnostics</Text> : null}
+        </Pressable>
+      </View>
       <View accessibilityRole="tablist" style={styles.navigation}>
-        {factoryViews.map((section) => (
+        {factoryViews.map(({ name, icon }) => (
           <Pressable
-            key={section}
+            key={name}
             accessibilityRole="tab"
-            aria-selected={view === section}
-            style={[styles.viewButton, view === section && styles.selectedView]}
-            onPress={() => setView(section)}
+            aria-selected={view === name}
+            style={({ pressed }) => [styles.viewButton, view === name && styles.selectedView,
+              pressed && { backgroundColor: theme.colors.surface1 }]}
+            onPress={() => setView(name)}
           >
-            <Text style={[styles.viewLabel, view === section && styles.selectedViewLabel]}>{section}</Text>
+            {!layout.compact ? <Icon name={icon} size={15} color={view === name ? theme.colors.accent : theme.colors.foregroundMuted} /> : null}
+            <Text style={[styles.viewLabel, view === name && styles.selectedViewLabel]}>{name}</Text>
           </Pressable>
         ))}
       </View>
@@ -566,7 +602,7 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
         <FactoryWorkspaceResources workspaceId={workspaceId} layout={layout} host={host} offline={offline} styles={styles} />
       ) : view === "Activity" ? (
         <FactoryWorkspaceActivity workspaceId={workspaceId} layout={layout} host={host} offline={offline} styles={styles} />
-      ) : view !== "Tools" ? (
+      ) : view !== "Diagnostics" ? (
         <FactoryWorkspaceStatus
           view={view}
           workspaceId={workspaceId}
@@ -575,16 +611,19 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
           theme={theme}
           navigation={props.navigation}
           feed={steerFeed}
+          composers={props.composers}
           styles={styles}
           status={workspaceStatus.data}
-          statusUpdatedAt={workspaceStatus.dataUpdatedAt}
           statusError={workspaceStatus.error}
           statusFetching={workspaceStatus.isFetching}
+          offline={offline}
           refresh={() => { void workspaceStatus.refetch(); }}
           setup={planMutation.mutate}
           setupBusy={busy}
+          openView={setView}
         />
       ) : tools}
+      </View>
     </ScrollView>
   );
 }

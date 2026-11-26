@@ -6,7 +6,8 @@ import { factorySteerActivate } from "../shared/factory.js";
 import { STEER_MENU_LABELS } from "./steer-menu.js";
 
 type Alternative = { agentId: string; slot: string };
-type Props = Extract<PluginButtonContentProps, { context: "agent" }> & { epoch: number; alternatives?: Alternative[] };
+type Props = Pick<Extract<PluginButtonContentProps, { context: "agent" }>, "agentId" | "workspaceId" | "theme" | "close">
+  & { epoch: number; alternatives?: Alternative[] };
 
 function OpenSteer({ agentId, slot, color, close }: Alternative & { color: string; close: () => void }) {
   const [composer] = useComposers({ agentId });

@@ -72,6 +72,7 @@ export interface SteerMenuProps {
   initialAction: SteerMenuAction;
   initialSlot?: string;
   initialAgentId?: string;
+  expectedControllerId?: string;
   observed?: RevertFlow["observed"] | null;
   composers: PluginClientContext["composers"];
 }
@@ -102,6 +103,7 @@ export function SteerMenu({
   initialAction,
   initialSlot,
   initialAgentId,
+  expectedControllerId,
   observed,
   composers,
 }: SteerMenuProps) {
@@ -332,9 +334,16 @@ export function SteerMenu({
 
   // --- Hand over to… (one target, chosen in the menu submenu) ------------------
 
+  const matchesHandover = (preview: SwitchFlow["preview"], toAgentId: string) =>
+    preview.workspaceId === workspaceId && preview.toId === toAgentId &&
+    (expectedControllerId === undefined || preview.fromId === expectedControllerId);
+
   const startHandover = (toSlot: string, toAgentId: string): void => {
     void run(async () => {
       const preview = await callSwitchPreview({ workspaceId, to: toSlot });
+      if (!matchesHandover(preview, toAgentId)) {
+        throw new Error("The controller or destination changed. Choose the handover again.");
+      }
       setFlow({ kind: "switch", to: toSlot, toAgentId, preview });
     });
   };
@@ -354,6 +363,10 @@ export function SteerMenu({
       } catch (thrown) {
         if (isExpiredPreviewError(thrown)) {
           const preview = await callSwitchPreview({ workspaceId, to: current.to });
+          if (!matchesHandover(preview, current.toAgentId)) {
+            setFlow(null);
+            throw new Error("The controller or destination changed. Choose the handover again.");
+          }
           setFlow({ ...current, preview });
           setNotice("The preview expired. Review the new preview.");
           return;
@@ -620,7 +633,7 @@ export function SteerMenu({
     startedRef.current = true;
     if (initialAction === "handover") {
       const toSlot = initialSlot ?? "";
-      const toAgentId = initialAgentId ?? rows.find((entry) => entry.slot === toSlot)?.agentId ?? "";
+      const toAgentId = initialAgentId ?? rows.find((entry) => entry.workspaceId === workspaceId && entry.slot === toSlot)?.agentId ?? "";
       if (!toSlot || !toAgentId) {
         setError("Handover target is missing.");
         return;

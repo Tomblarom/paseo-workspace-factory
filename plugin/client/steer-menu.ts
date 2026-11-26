@@ -179,7 +179,7 @@ export function handoffTargets(
   const self = rows.find((row) => row.agentId === selfAgentId) ?? null;
   if (!self || !self.scopeId) return [];
   const holders = rows
-    .filter((row) => row.scopeId === self.scopeId && row.slot)
+    .filter((row) => row.workspaceId === self.workspaceId && row.scopeId === self.scopeId && row.slot)
     .sort(
       (a, b) =>
         (a.slot as string).localeCompare(b.slot as string) || a.agentId.localeCompare(b.agentId),
