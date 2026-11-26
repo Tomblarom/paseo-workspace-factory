@@ -46,7 +46,7 @@ test('projects only the exact Factory workspace and its verified agent membershi
   assert.equal(project({ wsf: { main: true, scope: { kind: 'workspace', locator: otherWorkspaceId } } }), null);
   assert.deepEqual(projectWorkspaceActivity(workspaceId, snapshot), {
     kind: 'recent-recorded-activity',
-    events: [{ kind: 'delivery', state: 'delivered', reason: 'dispatch-acknowledged', observedAt: at(2), participant: 'Steer B' }],
+    events: [{ kind: 'delivery', state: 'delivered', reason: 'dispatch-acknowledged', observedAt: at(2), participant: 'Steer B', participantAgentId: 'local' }],
   });
 });
 
@@ -55,16 +55,16 @@ test('keeps send attempts uncertain until the delivery phase records acknowledgm
   const metadata = { 'wsf.agents': { steer: { action } } };
   const snapshot = structuredClone(metadata);
   assert.deepEqual(project(metadata, [member('steer')]).events, [
-    { kind: 'delivery', state: 'uncertain', reason: 'delivery-unconfirmed', observedAt: at(2) },
+    { kind: 'delivery', state: 'uncertain', reason: 'delivery-unconfirmed', observedAt: at(2), participantAgentId: 'steer' },
   ]);
   assert.deepEqual(metadata, snapshot);
   action.phase = 'blocked';
   assert.deepEqual(project(metadata, [member('steer')]).events, [
-    { kind: 'delivery', state: 'uncertain', reason: 'delivery-blocked-after-attempt', observedAt: at(2) },
+    { kind: 'delivery', state: 'uncertain', reason: 'delivery-blocked-after-attempt', observedAt: at(2), participantAgentId: 'steer' },
   ]);
   action.phase = 'done';
   assert.deepEqual(project(metadata, [member('steer')]).events, [
-    { kind: 'delivery', state: 'delivered', reason: 'dispatch-acknowledged', observedAt: at(3) },
+    { kind: 'delivery', state: 'delivered', reason: 'dispatch-acknowledged', observedAt: at(3), participantAgentId: 'steer' },
   ]);
 });
 
@@ -82,10 +82,10 @@ test('projects a completed worker with a queued wake from an earlier epoch', () 
     },
   };
   assert.deepEqual(project(metadata, ['completed', 'reported', 'steer'].map((id) => member(id))).events, [
-    { kind: 'delivery', state: 'delivered', reason: 'dispatch-acknowledged', observedAt: at(5) },
-    { kind: 'worker-wake', state: 'pending', reason: 'worker-completed', observedAt: at(4), participant: 'Worker' },
-    { kind: 'worker-wake', state: 'recorded', reason: 'wake-recorded', observedAt: at(3), participant: 'Worker' },
-    { kind: 'delivery', state: 'pending', reason: 'brief-staged', observedAt: at(2) },
+    { kind: 'delivery', state: 'delivered', reason: 'dispatch-acknowledged', observedAt: at(5), participantAgentId: 'steer' },
+    { kind: 'worker-wake', state: 'pending', reason: 'worker-completed', observedAt: at(4), participant: 'Worker', participantAgentId: 'completed' },
+    { kind: 'worker-wake', state: 'recorded', reason: 'wake-recorded', observedAt: at(3), participant: 'Worker', participantAgentId: 'reported' },
+    { kind: 'delivery', state: 'pending', reason: 'brief-staged', observedAt: at(2), participantAgentId: 'steer' },
   ]);
 });
 
@@ -102,10 +102,10 @@ test('uses unknown timestamps without substituting a queue time or the current t
   };
   assert.deepEqual(project(metadata, Object.keys({ ...metadata['wsf.agents'], ...metadata['wsf.workers'] }).map((id) => member(id))).events, [
     { kind: 'holder-change', state: 'recorded', reason: 'slot-changed', observedAt: null, from: 'Steer A', participant: 'Steer B' },
-    { kind: 'delivery', state: 'uncertain', reason: 'delivery-unconfirmed', observedAt: null },
-    { kind: 'delivery', state: 'blocked', reason: 'delivery-blocked', observedAt: null, renewal: 'rewind' },
-    { kind: 'delivery', state: 'delivered', reason: 'dispatch-acknowledged', observedAt: null },
-    { kind: 'worker-wake', state: 'pending', reason: 'worker-completed', observedAt: null, participant: 'Worker' },
+    { kind: 'delivery', state: 'uncertain', reason: 'delivery-unconfirmed', observedAt: null, participantAgentId: 'attempted' },
+    { kind: 'delivery', state: 'blocked', reason: 'delivery-blocked', observedAt: null, participantAgentId: 'blocked', renewal: 'rewind' },
+    { kind: 'delivery', state: 'delivered', reason: 'dispatch-acknowledged', observedAt: null, participantAgentId: 'done' },
+    { kind: 'worker-wake', state: 'pending', reason: 'worker-completed', observedAt: null, participant: 'Worker', participantAgentId: 'worker' },
   ]);
 });
 
@@ -134,13 +134,13 @@ test('publishes allowlisted fields from the holder, renewal, recovery and assign
   };
   const view = project(metadata, ['steer', 'unverified', 'worker'].map((id) => member(id)));
   assert.deepEqual(view.events, [
-    { kind: 'recovery', state: 'pending', reason: 'provider-limit', observedAt: at(7) },
+    { kind: 'recovery', state: 'pending', reason: 'provider-limit', observedAt: at(7), participantAgentId: 'steer' },
     { kind: 'assignment', state: 'delivered', reason: 'assignment-report-delivered', observedAt: at(6) },
-    { kind: 'delivery', state: 'uncertain', reason: 'delivery-unconfirmed', observedAt: at(5) },
-    { kind: 'renewal', state: 'uncertain', reason: 'renewal-unconfirmed', observedAt: at(4) },
-    { kind: 'renewal', state: 'confirmed', reason: 'context-rewound', observedAt: at(3) },
+    { kind: 'delivery', state: 'uncertain', reason: 'delivery-unconfirmed', observedAt: at(5), participantAgentId: 'steer' },
+    { kind: 'renewal', state: 'uncertain', reason: 'renewal-unconfirmed', observedAt: at(4), participantAgentId: 'steer' },
+    { kind: 'renewal', state: 'confirmed', reason: 'context-rewound', observedAt: at(3), participantAgentId: 'steer' },
     { kind: 'holder-change', state: 'recorded', reason: 'holder-replaced', observedAt: at(2), participant: 'Steer B' },
-    { kind: 'worker-wake', state: 'pending', reason: 'worker-update', observedAt: null, participant: 'Worker' },
+    { kind: 'worker-wake', state: 'pending', reason: 'worker-update', observedAt: null, participant: 'Worker', participantAgentId: 'worker' },
   ]);
   assert.equal(JSON.stringify(view).includes(sentinel), false);
 });
@@ -152,7 +152,7 @@ test('groups a switch with the action reserved at its commit, even with an inter
     'wsf.agents': { local: { action }, nearby: { action: { ...action, kind: 'switch' } } },
     'wsf.workers': { worker: { lastWakeAt: at(3) } },
   };
-  const agents = [steer('local', 'B'), steer('nearby', 'C'), member('worker')];
+  const agents = [steer('local', 'B'), steer('nearby', 'C'), steer('A', 'A'), member('worker')];
   const events = project(metadata, agents).events;
   const group = { kind: 'holder-change', index: 0 };
   assert.deepEqual(events.map((event) => [event.kind, event.participant, event.group]), [
@@ -163,6 +163,8 @@ test('groups a switch with the action reserved at its commit, even with an inter
   ]);
   assert.equal(events[0].state, 'uncertain');
   assert.equal(events[3].from, 'Steer A');
+  assert.equal(events[3].fromAgentId, undefined);
+  assert.equal(events[3].participantAgentId, 'local');
 
   for (const patch of [{ epoch: 4 }, { queuedAt: at(1) }, { kind: 'delivery' }]) {
     metadata['wsf.agents'].local.action = { ...action, ...patch };
@@ -190,6 +192,15 @@ test('groups only the exact replacement and its authority-bound Fresh brief', ()
     ['delivery', undefined], ['delivery', group], ['holder-change', group], ['creation', undefined], ['creation', group],
   ]);
   assert.equal(events[2].from, undefined);
+  assert.equal(events[2].fromAgentId, undefined);
+  assert.equal(events[2].participantAgentId, 'replacement');
+
+  const retiredSteer = steer('retired', 'B');
+  const activeReplacement = project(metadata, [retiredSteer, ...agents.slice(1)]).events[2];
+  assert.equal(activeReplacement.fromAgentId, 'retired');
+  const archivedReplacement = project(metadata, [{ ...retiredSteer, archivedAt: at(4) }, ...agents.slice(1)]).events[2];
+  assert.equal(archivedReplacement.from, 'Steer B');
+  assert.equal(archivedReplacement.fromAgentId, undefined);
 });
 
 test('groups recovery by its saved reference and rewind by the acknowledged brief ID', () => {
@@ -234,8 +245,9 @@ test('projects takeover cause and grouped rewind attempts without confirming del
   const group = { kind: 'takeover-request', index: 1 };
   assert.deepEqual(events, [
     { kind: 'takeover-request', state: 'recorded', reason: 'takeover-recorded', observedAt: at(5), from: 'Steer A', cause: 'quota-exhausted' },
-    { kind: 'renewal', state: 'uncertain', reason: 'renewal-unconfirmed', observedAt: at(3), participant: 'Steer B', group },
-    { kind: 'takeover-request', state: 'blocked', reason: 'delivery-blocked', observedAt: null, participant: 'Steer B', from: 'Steer A',
+    { kind: 'renewal', state: 'uncertain', reason: 'renewal-unconfirmed', observedAt: at(3), participant: 'Steer B',
+      participantAgentId: 'target', group },
+    { kind: 'takeover-request', state: 'blocked', reason: 'delivery-blocked', observedAt: null, participant: 'Steer B', participantAgentId: 'target', from: 'Steer A',
       cause: 'quota-exhausted', renewal: 'rewind', group },
   ]);
   assert.equal(JSON.stringify(events).includes(secret), false);
@@ -258,8 +270,8 @@ test('leaves a verified clear ungrouped when its receipt cannot identify the del
   };
   const events = project({ 'wsf.agents': { target: { action } } }, [steer('target', 'private label')]).events;
   assert.deepEqual(events, [
-    { kind: 'delivery', state: 'delivered', reason: 'dispatch-acknowledged', observedAt: at(4), participant: 'Steer', renewal: 'clear' },
-    { kind: 'renewal', state: 'confirmed', reason: 'context-cleared', observedAt: at(2), participant: 'Steer' },
+    { kind: 'delivery', state: 'delivered', reason: 'dispatch-acknowledged', observedAt: at(4), participant: 'Steer', participantAgentId: 'target', renewal: 'clear' },
+    { kind: 'renewal', state: 'confirmed', reason: 'context-cleared', observedAt: at(2), participant: 'Steer', participantAgentId: 'target' },
   ]);
 });
 
@@ -288,15 +300,20 @@ test('assignment labels require exact workspace membership and use the recorded 
   const metadata = { 'wsf.assignment': assignment };
   const agents = [steer('requester', 'A'), steer('target', 'B')];
   assert.equal(project(metadata, agents).events[0].from, undefined);
+  assert.equal(project(metadata, agents).events[0].fromAgentId, undefined);
   assignment.requesterWorkspaceId = workspaceId;
   assert.equal(project(metadata, agents).events[0].from, 'Steer A');
+  assert.equal(project(metadata, agents).events[0].fromAgentId, 'requester');
   assignment.reportedAt = at(2);
   assignment.reportTarget = { workspaceId, agentId: 'target' };
   const [report] = project(metadata, agents).events;
   assert.equal(report.participant, 'Steer B');
+  assert.equal(report.participantAgentId, 'target');
   assert.equal(report.from, undefined);
+  assert.equal(report.fromAgentId, undefined);
   assignment.reportTarget.workspaceId = otherWorkspaceId;
   assert.equal(project(metadata, agents).events[0].participant, undefined);
+  assert.equal(project(metadata, agents).events[0].participantAgentId, undefined);
 });
 
 test('caps the view at the most recent recorded events', () => {
@@ -350,7 +367,7 @@ test('the activity RPC reads the exact workspace and native creation timestamps 
     workspaceId,
     kind: 'recent-recorded-activity',
     events: [
-      { kind: 'creation', state: 'recorded', reason: 'steer-created', observedAt: at(2), participant: 'Steer' },
+      { kind: 'creation', state: 'recorded', reason: 'steer-created', observedAt: at(2), participant: 'Steer', participantAgentId: 'steer' },
       { kind: 'creation', state: 'recorded', reason: 'worker-created', observedAt: at(1), participant: 'Worker' },
     ],
   });

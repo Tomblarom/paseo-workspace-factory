@@ -1,12 +1,26 @@
 import type { RpcOutput } from "@getpaseo/plugin";
-import { useRpc, type PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
+import { useAgents, useRpc, type PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/ui";
 import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { factoryWorkspaceActivity } from "../shared/workspace-activity.js";
 import type { FactoryResultStyles } from "./factory-panel.js";
 
 type ActivityEvent = RpcOutput<typeof factoryWorkspaceActivity>["events"][number];
+const filters = ["All", "Control", "Recovery", "Delivery", "Agents"] as const;
+type Filter = (typeof filters)[number];
+
+const eventFilters: Record<ActivityEvent["kind"], Exclude<Filter, "All">> = {
+  "holder-change": "Control",
+  "takeover-request": "Control",
+  recovery: "Recovery",
+  renewal: "Recovery",
+  delivery: "Delivery",
+  assignment: "Delivery",
+  creation: "Agents",
+  "worker-wake": "Agents",
+};
 
 const titles: Record<ActivityEvent["kind"], string> = {
   "holder-change": "Control changed",
@@ -72,18 +86,9 @@ const causes: Record<NonNullable<ActivityEvent["cause"]>, string> = {
   privacy: "The active Steer was ineligible under the brief privacy rules.",
 };
 
-const observedTime = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
-
-function participants({ kind, from, participant }: ActivityEvent) {
-  if (kind === "takeover-request") {
-    return [from && `Holder ${from}`, participant && `Target ${participant}`].filter(Boolean).join(" · ");
-  }
-  if (kind === "assignment") {
-    return from ? `Requested by ${from}` : participant ? `Report to ${participant}` : "";
-  }
-  if (!from || from === participant) return participant;
-  return participant ? `${from} → ${participant}` : `From ${from}`;
-}
+const observedDay = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
+const observedTime = new Intl.DateTimeFormat(undefined, { timeStyle: "short" });
+const dayOf = (observedAt: string | null) => observedAt ? observedDay.format(new Date(observedAt)) : null;
 
 function timelineRows(events: readonly ActivityEvent[]) {
   const groups = new Map<number, ActivityEvent[]>();
@@ -96,30 +101,108 @@ function timelineRows(events: readonly ActivityEvent[]) {
       }
       const steps = [event];
       groups.set(event.group.index, steps);
-      return [{ index, kind: event.group.kind, steps }];
+      return [{ index, kind: event.group.kind, steps, grouped: true }];
     }
-    return [{ index, kind: event.kind, steps: [event] }];
+    return [{ index, kind: event.kind, steps: [event], grouped: false }];
   });
 }
 
 const timeline = StyleSheet.create({
   header: { flexDirection: "row", flexWrap: "wrap", gap: 8, alignItems: "center", justifyContent: "space-between" },
-  refresh: { minHeight: 44, flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 8, borderRadius: 6 },
-  row: { flexDirection: "row", gap: 10 },
-  rail: { width: 22, alignItems: "center" },
-  stem: { flex: 1, width: StyleSheet.hairlineWidth, marginTop: 4 },
-  content: { flex: 1, minWidth: 0, gap: 4 },
+  refresh: { minHeight: 40, flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 8, borderRadius: 6 },
+  filters: { flexDirection: "row", flexWrap: "wrap", gap: 4 },
+  filter: { minHeight: 36, justifyContent: "center", paddingHorizontal: 9, borderWidth: 1, borderRadius: 18 },
+  day: { marginTop: 12, marginBottom: 8, fontWeight: "600" },
+  row: { flexDirection: "row", gap: 8 },
+  rail: { width: 24, alignItems: "center" },
+  marker: { width: 24, height: 24, borderRadius: 12, alignItems: "center", justifyContent: "center" },
+  stem: { flex: 1, width: StyleSheet.hairlineWidth, marginVertical: 3 },
+  content: { flex: 1, minWidth: 0, gap: 3 },
+  line: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 8 },
+  lineText: { flex: 1, minWidth: 0 },
   title: { fontWeight: "600" },
+  time: { textAlign: "right", fontSize: 12, fontVariant: ["tabular-nums"] },
+  details: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", columnGap: 8, rowGap: 2 },
+  description: { flexShrink: 1 },
+  participants: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 4, maxWidth: "100%" },
+  agent: { minHeight: 28, flexDirection: "row", alignItems: "center", gap: 3, borderRadius: 4, paddingHorizontal: 3 },
+  agentLabel: { textDecorationLine: "underline" },
+  operation: { borderLeftWidth: 2, paddingLeft: 8, gap: 6 },
   step: { gap: 2 },
-  relatedStep: { borderLeftWidth: StyleSheet.hairlineWidth, paddingLeft: 8 },
 });
 
-interface Props extends Pick<PluginWorkspacePanelProps, "workspaceId" | "layout" | "host"> {
+interface Props extends Pick<PluginWorkspacePanelProps, "workspaceId" | "layout" | "host" | "navigation"> {
   offline: boolean;
   styles: FactoryResultStyles;
 }
 
-export function FactoryWorkspaceActivity({ workspaceId, layout, host, offline, styles }: Props) {
+interface ParticipantProps {
+  liveAgentIds: ReadonlySet<string>;
+  openAgent?: (agentId: string) => void;
+  offline: boolean;
+  styles: FactoryResultStyles;
+}
+
+function Participant({ agentId, label, liveAgentIds, openAgent, offline, styles }: ParticipantProps & {
+  agentId?: string;
+  label: string;
+}) {
+  if (!agentId || !openAgent || !liveAgentIds.has(agentId)) return <Text style={styles.label}>{label}</Text>;
+  const labelStyle = offline ? styles.label : styles.body;
+
+  return (
+    <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityHint="Opens the agent tab"
+      disabled={offline} accessibilityState={{ disabled: offline }}
+      onPress={() => openAgent(agentId)}
+      style={({ pressed }) => [timeline.agent, pressed && { backgroundColor: styles.card.backgroundColor }]}>
+      <Text style={[styles.label, { color: labelStyle.color }, timeline.agentLabel]}>{label}</Text>
+      <Icon name="ArrowUpRight" size={12} color={String(labelStyle.color)} />
+    </Pressable>
+  );
+}
+
+function Participants({ event, ...props }: ParticipantProps & { event: ActivityEvent }) {
+  const { kind, fromAgentId, participantAgentId } = event;
+  let from = event.from ?? (fromAgentId ? "Agent" : undefined);
+  let participant = event.participant ?? (participantAgentId ? "Agent" : undefined);
+  if (!from && !participant) return null;
+  if (kind === "takeover-request") {
+    if (from) from = `Holder ${from}`;
+    if (participant) participant = `Target ${participant}`;
+  } else if (kind === "assignment") {
+    if (from) from = `Requested by ${from}`;
+    if (participant) participant = `Report to ${participant}`;
+  } else if (from && from === participant) {
+    if (fromAgentId === participantAgentId) from = undefined;
+    else from = `Previous ${from}`;
+  } else if (from && !participant) {
+    from = `From ${from}`;
+  }
+
+  return (
+    <View style={timeline.participants}>
+      {from ? <Participant {...props} agentId={fromAgentId} label={from} /> : null}
+      {from && participant ? <Text style={props.styles.label}>{kind === "takeover-request" ? "·" : "→"}</Text> : null}
+      {participant ? <Participant {...props} agentId={participantAgentId} label={participant} /> : null}
+    </View>
+  );
+}
+
+function EventTime({ timestamp, rowDay, styles }: {
+  timestamp: ActivityEvent["observedAt"];
+  rowDay: string | null;
+  styles: FactoryResultStyles;
+}) {
+  const eventDay = dayOf(timestamp);
+  const time = timestamp ? observedTime.format(new Date(timestamp)) : "Time unknown";
+  const showDate = eventDay !== null && eventDay !== rowDay;
+  return (
+    <Text style={[styles.label, timeline.time]}>{showDate ? `${eventDay}\n${time}` : time}</Text>
+  );
+}
+
+export function FactoryWorkspaceActivity({ workspaceId, layout, host, offline, navigation, styles }: Props) {
+  const [filter, setFilter] = useState<Filter>("All");
   const callActivity = useRpc(factoryWorkspaceActivity);
   const activity = useQuery({
     queryKey: ["workspace-factory", "activity", host.id, workspaceId],
@@ -134,16 +217,26 @@ export function FactoryWorkspaceActivity({ workspaceId, layout, host, offline, s
     retry: false,
   });
   const events = activity.data?.events;
-  const rows = timelineRows(events ?? []);
+  const visible = (events ?? []).filter(({ kind }) => filter === "All" || eventFilters[kind] === filter);
+  // Keep an operation together under its newest visible step's date.
+  const rows = timelineRows(visible).map((row) => ({ ...row, day: dayOf(row.steps[0].observedAt) }));
+  const liveAgents = useAgents({
+    hosts: [host.id],
+    where: (agent) => agent.workspaceId === workspaceId && !agent.background,
+  });
+  const participantProps = {
+    liveAgentIds: new Set(liveAgents.map(({ id }) => id)),
+    openAgent: navigation && ((agentId: string) => navigation.openAgent({ agentId, serverId: host.id })),
+    offline,
+    styles,
+  };
   const refreshDisabled = offline || activity.isFetching;
   const refreshStyle = refreshDisabled ? styles.label : styles.body;
 
   return (
     <>
       <View style={timeline.header}>
-        <Text accessibilityRole="header" style={[styles.body, { fontSize: layout.compact ? 18 : 21, fontWeight: "600" }]}>
-          Recent recorded activity
-        </Text>
+        <Text accessibilityRole="header" style={[styles.body, timeline.title, { fontSize: layout.compact ? 18 : 21 }]}>Recent activity</Text>
         <Pressable accessibilityRole="button" accessibilityLabel="Refresh workspace activity" disabled={refreshDisabled}
           accessibilityState={{ disabled: refreshDisabled, busy: activity.isFetching }}
           onPress={() => { void activity.refetch(); }}
@@ -162,37 +255,71 @@ export function FactoryWorkspaceActivity({ workspaceId, layout, host, offline, s
       ) : null}
       {!offline && !events && activity.isPending ? <Text style={styles.label}>Loading workspace activity…</Text> : null}
       {events?.length === 0 ? <Text style={styles.label}>No activity recorded.</Text> : null}
-      {rows.length ? (
-        <View>
-          {rows.map(({ index, kind, steps }, rowIndex) => {
-            const grouped = steps.length > 1;
-            const last = rowIndex === rows.length - 1;
-            const attention = steps.some(({ state }) => state === "blocked" || state === "uncertain");
-            const iconStyle = attention ? styles.conflict : styles.label;
-            const gap = layout.compact ? 10 : 14;
+      {events?.length ? (
+        <View style={timeline.filters} accessibilityLabel="Activity filters">
+          {filters.map((name) => {
+            const selected = name === filter;
             return (
-              <View key={index} style={timeline.row}>
-                <View style={timeline.rail} importantForAccessibility="no-hide-descendants">
-                  <Icon name={icons[kind]} size={16} color={String(iconStyle.color)} />
-                  {!last ? <View style={[timeline.stem, { backgroundColor: styles.card.borderColor }]} /> : null}
-                </View>
-                <View style={[timeline.content, { paddingBottom: last ? 0 : gap }]}>
-                  <Text style={[styles.body, timeline.title]}>{titles[kind]}</Text>
-                  {steps.map((event, stepIndex) => {
-                    const resultStyle = event.state === "blocked" || event.state === "uncertain" ? styles.conflict : styles.body;
-                    const time = event.observedAt ? observedTime.format(new Date(event.observedAt)) : "Time unknown";
-                    const metadata = [participants(event), time].filter(Boolean).join(" · ");
-                    return (
-                      <View key={stepIndex} style={[timeline.step, grouped && timeline.relatedStep, { borderColor: styles.card.borderColor }]}>
-                        <Text style={styles.label}>{metadata}</Text>
-                        {event.cause ? <Text style={styles.label}>{causes[event.cause]}</Text> : null}
-                        {event.renewal ? (
-                          <Text style={styles.label}>{event.renewal === "clear" ? "Clear selected before dispatch" : "Rewind selected before dispatch"}</Text>
-                        ) : null}
-                        <Text style={resultStyle}>{descriptions[event.reason]}</Text>
-                      </View>
-                    );
-                  })}
+              <Pressable key={name} accessibilityRole="button" accessibilityState={{ selected }}
+                onPress={() => setFilter(name)}
+                style={({ pressed }) => [timeline.filter, {
+                  borderColor: selected || pressed ? styles.button.backgroundColor : styles.card.borderColor,
+                  backgroundColor: selected ? styles.button.backgroundColor : styles.card.backgroundColor,
+                }]}>
+                <Text style={selected ? [styles.buttonText, timeline.title, { fontSize: 13 }] : styles.label}>{name}</Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      ) : null}
+      {events?.length && !rows.length ? <Text style={styles.label}>No matching recorded activity.</Text> : null}
+      {rows.length > 0 ? (
+        <View>
+          {rows.map(({ index, kind, steps, day, grouped }, rowIndex) => {
+            const startsDay = rowIndex === 0 || rows[rowIndex - 1].day !== day;
+            const endsDay = rowIndex === rows.length - 1 || rows[rowIndex + 1].day !== day;
+            const attention = steps.some(({ state }) => state === "blocked" || state === "uncertain");
+            const confirmed = steps.some(({ state }) => state === "confirmed" || state === "delivered");
+            const iconStyle = attention ? styles.conflict : confirmed ? styles.ok : styles.label;
+            return (
+              <View key={index}>
+                {startsDay ? <Text accessibilityRole="header" style={[styles.label, timeline.day]}>{day ?? "Date unknown"}</Text> : null}
+                <View style={timeline.row}>
+                  <View style={timeline.rail} importantForAccessibility="no-hide-descendants">
+                    <View style={[timeline.marker, { backgroundColor: styles.card.backgroundColor }]}>
+                      <Icon name={icons[kind]} size={14} color={String(iconStyle.color)} />
+                    </View>
+                    {!endsDay ? <View style={[timeline.stem, { backgroundColor: styles.card.borderColor }]} /> : null}
+                  </View>
+                  <View style={[timeline.content, { paddingBottom: endsDay ? 0 : layout.compact ? 8 : 10 }]}>
+                    <View style={timeline.line}>
+                      <Text style={[styles.body, timeline.title, timeline.lineText]}>{titles[kind]}</Text>
+                      {!grouped ? <EventTime timestamp={steps[0].observedAt} rowDay={day} styles={styles} /> : null}
+                    </View>
+                    <View style={grouped && [timeline.operation, { borderColor: styles.card.borderColor }]}>
+                      {steps.map((event, stepIndex) => {
+                        const resultStyle = event.state === "blocked" || event.state === "uncertain" ? styles.conflict : styles.label;
+                        return (
+                          <View key={stepIndex} style={timeline.step}>
+                            {grouped ? (
+                              <View style={timeline.line}>
+                                <Text style={[resultStyle, timeline.lineText]}>{descriptions[event.reason]}</Text>
+                                <EventTime timestamp={event.observedAt} rowDay={day} styles={styles} />
+                              </View>
+                            ) : null}
+                            <View style={timeline.details}>
+                              <Participants event={event} {...participantProps} />
+                              {!grouped ? <Text style={[resultStyle, timeline.description]}>{descriptions[event.reason]}</Text> : null}
+                            </View>
+                            {event.cause ? <Text style={styles.label}>{causes[event.cause]}</Text> : null}
+                            {event.renewal ? (
+                              <Text style={styles.label}>{event.renewal === "clear" ? "Clear selected before dispatch" : "Rewind selected before dispatch"}</Text>
+                            ) : null}
+                          </View>
+                        );
+                      })}
+                    </View>
+                  </View>
                 </View>
               </View>
             );

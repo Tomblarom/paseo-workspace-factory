@@ -26,7 +26,9 @@ export const factoryWorkspaceActivity = defineRpc({
       ]),
       observedAt: z.iso.datetime().nullable(),
       participant: participant.optional(),
+      participantAgentId: z.string().min(1).optional(),
       from: participant.optional(),
+      fromAgentId: z.string().min(1).optional(),
       cause: z.enum(["no-answer", "no-holder", "provider-limit", "quota-exhausted", "advisor-holder", "privacy"]).optional(),
       renewal: z.enum(["clear", "rewind"]).optional(),
       group: z.object({

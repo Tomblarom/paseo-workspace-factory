@@ -53,7 +53,7 @@ type ActivityDetails =
   | { kind: "worker-wake"; state: "recorded"; reason: "wake-recorded" };
 
 type ActivityOutput = RpcOutput<typeof factoryWorkspaceActivity>["events"][number];
-type ActivityContext = Pick<ActivityOutput, "participant" | "from" | "cause" | "renewal">;
+type ActivityContext = Pick<ActivityOutput, "participant" | "participantAgentId" | "from" | "fromAgentId" | "cause" | "renewal">;
 type Group = { kind: NonNullable<ActivityOutput["group"]>["kind"] };
 export type WorkspaceActivityEvent = ActivityDetails & ActivityContext & Pick<ActivityOutput, "observedAt" | "group">;
 type DraftEvent = WorkspaceActivityEvent & { related?: Group };
@@ -66,7 +66,13 @@ export interface WorkspaceActivity {
 /** The workspace and agent membership come from the same host. */
 export interface WorkspaceActivityObservation {
   workspace: { id: string; metadata?: Record<string, unknown> | null } | null;
-  agents: readonly { id: string; workspaceId?: string | null; createdAt?: string; labels?: Record<string, string> | null }[];
+  agents: readonly {
+    id: string;
+    workspaceId?: string | null;
+    createdAt?: string;
+    archivedAt?: string | null;
+    labels?: Record<string, string> | null;
+  }[];
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -210,14 +216,20 @@ export function projectWorkspaceActivity(
     if (lookup(workers, agent.id) || agent.labels?.[LABEL.role] === "worker") return "Worker";
     if (agent.labels?.[LABEL.role] === "steer") return slotLabel(agent.labels[LABEL.slot]) ?? "Steer";
   };
+  const liveAgentId = (id: unknown) => {
+    const agent = typeof id === "string" ? members.get(id) : undefined;
+    return agent && !agent.archivedAt ? agent.id : undefined;
+  };
   const events: DraftEvent[] = [];
   const record: RecordEvent = (details, time, context = {}) => {
-    const { participant, from, cause, renewal } = context;
+    const { participant, participantAgentId, from, fromAgentId, cause, renewal } = context;
     const event = {
       ...details,
       observedAt: recordedTime(time),
       ...(participant ? { participant } : {}),
+      ...(participantAgentId ? { participantAgentId } : {}),
       ...(from ? { from } : {}),
+      ...(fromAgentId ? { fromAgentId } : {}),
       ...(cause ? { cause } : {}),
       ...(renewal ? { renewal } : {}),
     };
@@ -231,19 +243,31 @@ export function projectWorkspaceActivity(
     holderChange = record(
       { kind: "holder-change", state: "recorded", reason: previousSlot ? "slot-changed" : "holder-replaced" },
       state.switchedAt,
-      { from: previousSlot ?? participant(state.previousSteer), participant: slotLabel(state.activeSteer) ?? participant(state.activeAgentId) },
+      {
+        from: previousSlot ?? participant(state.previousSteer),
+        fromAgentId: previousSlot ? undefined : liveAgentId(state.previousSteer),
+        participant: slotLabel(state.activeSteer) ?? participant(state.activeAgentId),
+        participantAgentId: liveAgentId(state.activeAgentId),
+      },
     );
   }
   const assignment = asRecord(metadata?.[ASSIGNMENT_KEY]);
   if (typeof assignment?.by === "string" && assignment.by) {
     const reportedAt = recordedTime(assignment.reportedAt);
     const target = asRecord(assignment.reportTarget);
-    if (reportedAt) record({ kind: "assignment", state: "delivered", reason: "assignment-report-delivered" }, reportedAt, {
-      participant: target?.workspaceId === workspaceId ? participant(target.agentId) : undefined,
-    });
-    else record({ kind: "assignment", state: "recorded", reason: "assignment-recorded" }, assignment.at, {
-      from: assignment.requesterWorkspaceId == null || assignment.requesterWorkspaceId === workspaceId ? participant(assignment.by) : undefined,
-    });
+    if (reportedAt) {
+      const targetId = target?.workspaceId === workspaceId ? target.agentId : undefined;
+      record({ kind: "assignment", state: "delivered", reason: "assignment-report-delivered" }, reportedAt, {
+        participant: participant(targetId),
+        participantAgentId: liveAgentId(targetId),
+      });
+    } else {
+      const requesterId = assignment.requesterWorkspaceId == null || assignment.requesterWorkspaceId === workspaceId ? assignment.by : undefined;
+      record({ kind: "assignment", state: "recorded", reason: "assignment-recorded" }, assignment.at, {
+        from: participant(requesterId),
+        fromAgentId: liveAgentId(requesterId),
+      });
+    }
   }
 
   const checkpoint = asRecord(metadata?.[CHECKPOINT_KEY]);
@@ -254,7 +278,9 @@ export function projectWorkspaceActivity(
   for (const agentId of [...members.keys()].sort()) {
     const agent = members.get(agentId)!;
     const agentLabel = participant(agentId);
-    const forAgent: RecordEvent = (details, time, context) => record(details, time, { participant: agentLabel, ...context });
+    const participantAgentId = liveAgentId(agentId);
+    const forAgent: RecordEvent = (details, time, context) =>
+      record(details, time, { participant: agentLabel, participantAgentId, ...context });
     const entry = asRecord(entries && lookup(entries, agentId));
     if (entry) {
       const renewal = recordRenewal(entry, forAgent);
