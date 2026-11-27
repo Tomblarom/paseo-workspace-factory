@@ -823,7 +823,16 @@ agent. The authority change reserves incomplete transfers so a retry can
 finish them before sending the continuation. Archived workers stay archived.
 The user also asked for the repository in Paseo's native sender line. The
 installed client renders the sender's live title and exposes no plugin
-extension for the label. A separate Paseo change awaits approval.
+extension for the label. The user deferred a separate Paseo change on
+2026-11-27 and directed work back to the existing TODOs.
+
+New steer checkpoints store the live Git HEAD and a short worktree fingerprint.
+The fingerprint uses Git status, staged object IDs and metadata for changed
+files. This keeps the observation bounded and avoids reading file contents.
+Resume, handoff and steer refresh briefs flag changed evidence once. Older
+checkpoints continue to work. A dirty submodule, a large change set or an
+unreadable status can leave the worktree comparison unavailable while still
+allowing a HEAD comparison.
 
 The user also approved the SLP-inspired edits to role rules, templates, checkpoint
 guidance and worker wake text in Steer E's chat on 2026-11-27. The approval
