@@ -24,7 +24,7 @@ const TRANSITIONS = {
   'checkpoint-partial': 'partial',
   'checkpoint-blocked': 'blocked',
   'advisor-request': 'blocked',
-  'turn-no-checkpoint': 'interrupted',
+  'turn-no-checkpoint': 'partial',
   'turn-failed': 'interrupted',
   'turn-canceled': 'interrupted',
   'restart-daemon': 'interrupted',
@@ -183,7 +183,7 @@ export function applyWorkerEvent(register, workerId, event, details = {}) {
   }
   const entry = { ...current, state };
   const status = statusForEvent(event);
-  if (status !== null) entry.status = status;
+  if (status !== null || event === 'turn-no-checkpoint') entry.status = status;
   if (event === 'reassigned') {
     entry.resumes = 0;
     if (details.task !== undefined) entry.task = clipTask(details.task);
@@ -226,10 +226,11 @@ export function shouldMarkStale({ entry, nowMs, lastActiveMs, staleMinutes = SUP
   return nowMs - lastActiveMs > staleMinutes * 60_000;
 }
 
-/** Idle cleanup (C5) skips agents whose register state is running, blocked or interrupted. Accepts a state or an entry. */
+/** Protects workers whose result or checkpoint still needs attention. Accepts a state or a register entry. */
 export function isCleanupProtected(stateOrEntry) {
   const state = typeof stateOrEntry === 'string' ? stateOrEntry : stateOrEntry?.state;
-  return state === 'running' || state === 'blocked' || state === 'interrupted';
+  return state === 'running' || state === 'blocked' || state === 'interrupted' ||
+    (state === 'partial' && stateOrEntry?.status === null);
 }
 
 /**
@@ -383,10 +384,12 @@ export function formatWakeMessage({ events, metadata = null, workerNames = {}, m
     const name = clipTask(workerNames[workerId]).slice(0, 100) || 'Worker';
     const task = clipTask(worker?.task).slice(0, 120);
     const subject = task && task !== name ? `${name} (${task})` : name;
-    const stateText = state === 'done' ? 'result reported' : state;
+    const incomplete = state === 'partial' && worker?.status === null;
+    const stateText = incomplete ? 'incomplete checkpoint' : state === 'done' ? 'result reported' : state;
     let followup = '';
     if (state === 'done') followup = ' Review the result.';
     else if (worker?.resumes >= maxAutoResumes) followup = ' Seek an independent assessment before continuing.';
+    else if (incomplete) followup = ' Ask the worker to record its result, tests, blockers and next step in a checkpoint.';
     else if (state === 'interrupted') followup = ' Check whether the worker can continue.';
     else if (state === 'blocked' || state === 'partial') followup = ' Review the checkpoint.';
     else if (state === 'stale') followup = ' Check worker progress.';

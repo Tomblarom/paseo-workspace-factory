@@ -95,7 +95,7 @@ test('state transition table maps every design event', () => {
     created: 'running', adopted: 'running',
     'checkpoint-done': 'done', 'checkpoint-none': 'done', 'checkpoint-partial': 'partial',
     'checkpoint-blocked': 'blocked', 'advisor-request': 'blocked',
-    'turn-no-checkpoint': 'interrupted', 'turn-failed': 'interrupted', 'turn-canceled': 'interrupted',
+    'turn-no-checkpoint': 'partial', 'turn-failed': 'interrupted', 'turn-canceled': 'interrupted',
     'restart-daemon': 'interrupted', 'restart-planned': 'interrupted',
     reassigned: 'running', archived: null,
   };
@@ -370,7 +370,7 @@ test('watchdog marks only idle running entries stale', () => {
   assert.equal(shouldMarkStale({ entry: entry('running'), nowMs: NOW, lastActiveMs: NOW - 61 * 60_000, staleMinutes: 120 }), false);
 });
 
-test('cleanup protection covers running, blocked and interrupted', () => {
+test('cleanup protection covers running, blocked, interrupted and missing checkpoints', () => {
   assert.equal(isCleanupProtected('running'), true);
   assert.equal(isCleanupProtected('blocked'), true);
   assert.equal(isCleanupProtected('interrupted'), true);
@@ -378,6 +378,8 @@ test('cleanup protection covers running, blocked and interrupted', () => {
   assert.equal(isCleanupProtected('partial'), false);
   assert.equal(isCleanupProtected('stale'), false);
   assert.equal(isCleanupProtected(entry('running')), true);
+  assert.equal(isCleanupProtected({ state: 'partial', status: null }), true);
+  assert.equal(isCleanupProtected({ state: 'partial', status: 'partial' }), false);
   assert.equal(isCleanupProtected(entry('done')), false);
 });
 

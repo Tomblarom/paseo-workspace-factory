@@ -416,7 +416,7 @@ test("turn end maps CHECKPOINT status, advisor requests, and failures", async ()
     ["partial", checkpointOf("c", "partial"), "completed", "checkpoint-partial", "partial", "partial"],
     ["blocked", checkpointOf("d", "blocked"), "completed", "checkpoint-blocked", "blocked", "blocked"],
     ["advisor", `${checkpointOf("e", "done")}\n${ADVISOR_BLOCK}`, "completed", "advisor-request", "blocked", "blocked"],
-    ["missing", "looks done, no block", "completed", "turn-no-checkpoint", "interrupted", null],
+    ["missing", "looks done, no block", "completed", "turn-no-checkpoint", "partial", null],
     ["failed", checkpointOf("g", "done"), "failed", "turn-failed", "interrupted", null],
     ["canceled", checkpointOf("h", "done"), "canceled", "turn-canceled", "interrupted", null],
   ];
@@ -429,6 +429,32 @@ test("turn end maps CHECKPOINT status, advisor requests, and failures", async ()
     assert.equal(written.state, state, task);
     assert.equal(written.status, status, task);
   }
+});
+
+test("a worker result without a CHECKPOINT label routes normally and a missing block requests a checkpoint", async () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  const worker = addWorker(world, ws);
+  ws.metadata[WORKERS_KEY] = { [worker.id]: entry("running", "Write parser tests") };
+
+  const report = ["Result", "```text", "task: Write parser tests", "tests: npm test", "blockers: none", "next: none", "```"].join("\n");
+  const complete = await turnedOut(world, worker, { assistant: report });
+  assert.equal(complete.state, "done");
+  assert.match(sendsTo(world, steers.A.id)[0], /result reported/);
+
+  const nowMs = NOW + MIN;
+  const missing = await turnedOut(world, worker, { turnId: "t2", assistant: "The tests are green." }, { nowMs, nowIso: at(nowMs) });
+  assert.equal(missing.state, "partial");
+  assert.equal(ws.metadata[WORKERS_KEY][worker.id].status, null);
+  const wake = sendsTo(world, steers.A.id)[1];
+  assert.match(wake, /incomplete checkpoint.*record its result, tests, blockers and next step/);
+  assert.doesNotMatch(wake, /interrupted|whether the worker can continue/);
+
+  const failedAt = NOW + 2 * MIN;
+  const failed = await turnedOut(world, worker, { turnId: "t3", outcome: "failed", assistant: report },
+    { nowMs: failedAt, nowIso: at(failedAt) });
+  assert.equal(failed.state, "interrupted");
+  assert.match(sendsTo(world, steers.A.id)[2], /interrupted.*whether the worker can continue/);
 });
 
 test("a worker registered through create.after wakes the active steer without wsf labels", async () => {
@@ -1326,7 +1352,6 @@ test("supervision timer flushes batches and scans on the watchdog cadence", asyn
 const serverEntry = readFileSync(new URL("../index.server.ts", import.meta.url), "utf8");
 const superviseServer = readFileSync(new URL("../server/supervise.ts", import.meta.url), "utf8");
 const coldSweep = readFileSync(new URL("../server/cold-sweep.ts", import.meta.url), "utf8");
-const idleCleanup = readFileSync(new URL("../shared/idle-cleanup.ts", import.meta.url), "utf8");
 
 test("server entry wires supervision hooks, settings, and timers", () => {
   assert.ok(serverEntry.includes("factorySupervisionSettings"), "supervision settings registered");
@@ -1363,12 +1388,9 @@ test("supervise.ts reuses the core and never archives or wakes blindly", () => {
   assert.ok(sharedServer.includes("--to ${args.candidateSlot} --apply"), "takeover text carries the switch");
 });
 
-test("cold sweep feeds the register state into the C5 skip rule", () => {
-  assert.ok(coldSweep.includes("WORKERS_KEY"), "sweep reads wsf.workers");
-  assert.ok(coldSweep.includes("workerState"), "register state passed into cleanupInputOf");
-  assert.ok(idleCleanup.includes("isSupervisionProtectedState"), "C5 skip rule exported");
-  assert.match(idleCleanup, /state === "running" \|\| state === "blocked" \|\| state === "interrupted"/);
-  assert.ok(idleCleanup.includes("the steer has not seen it yet"), "skip reason names the steer");
+test("cold sweep checks register entries before planning and applying cleanup", () => {
+  assert.match(coldSweep, /isCleanupProtected\(reads\.workers\[agent\.id\]\)/);
+  assert.match(coldSweep, /isCleanupProtected\(freshWorkers\[agent\.id\]\)/);
 });
 
 // ---------------------------------------------------------------------------

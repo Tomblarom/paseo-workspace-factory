@@ -23,6 +23,7 @@ import { createExecutors } from './apply.mjs';
 import { resolveScope, scopeToEntry, sameScopeId, domainOfScope } from './scope.mjs';
 import { STEER_TITLE, activeMarker, discoveredRepoPublic, liveSlotHolders, markSteerTitle, stripActiveMarker } from './discovery.mjs';
 import { AGENTS_KEY, currentFreshHint, updateAgentEntry } from './agent-state.mjs';
+import { parseCheckpointBlock } from '../../shared/checkpoint-block.mjs';
 import { CHECKPOINT_NEXT_TEXT, WORKERS_KEY, checkpointNextStep, clipTask, collectPendingWakes, openWorkers as openRegisterWorkers, readWorkers } from './supervision.mjs';
 import { QUOTA_DEFAULTS, formatQuotaLine } from './quota.mjs';
 import { readRewindPoint, rewindAndBrief } from './rewind.mjs';
@@ -813,48 +814,7 @@ function handoffWithBrief(status, args, { discovery, git, language, config = nul
   ]);
 }
 
-const NONE = /^(keine?|none|n\/a|-)\.?$/i;
-
-/**
- * Parses the last `CHECKPOINT` block of an agent answer, fenced or bare:
- *   ```text
- *   CHECKPOINT
- *   task: …   tests: …   blockers: …   next: …   (workers: …)   (status: …)
- *   ```
- * Dashes, the fence, the `workers` line (informational, ignored) and the
- * optional `status` line (`done`|`partial`|`blocked`, case-insensitive) are
- * optional; values "none"/"keine" become empty lists. Returns null without a
- * block or task. Blocks without a status line parse to the previous shape
- * (no `status` key), so old readers keep working.
- */
-export function parseCheckpointBlock(text) {
-  if (typeof text !== 'string') return null;
-  const lines = text.split('\n');
-  let start = -1;
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
-    // Accepts the fenced/bare form plus Markdown headings (`## CHECKPOINT`, `**CHECKPOINT**`).
-    if (/^\s*(?:#{1,6}\s*)?(?:\*\*|__)?`*\s*CHECKPOINT\s*:?\s*`*(?:\*\*|__)?\s*$/i.test(lines[i])) {
-      start = i;
-      break;
-    }
-  }
-  if (start < 0) return null;
-  const fields = {};
-  for (const line of lines.slice(start + 1)) {
-    const match = line.match(/^\s*[-*]?\s*(task|tests|blockers|next|status)\s*:\s*(.*)$/i);
-    if (match) fields[match[1].toLowerCase()] = match[2].trim();
-    else if (line.trim() === '' || /^\s*```/.test(line)) continue;
-    else if (/^\s*[-*]?\s*workers\s*:/i.test(line)) continue;
-    else if (Object.keys(fields).length) break;
-  }
-  if (!fields.task) return null;
-  const list = (value) => (!value || NONE.test(value) ? [] : [value]);
-  const status = typeof fields.status === 'string' && /^(done|partial|blocked)$/i.test(fields.status.trim()) ? fields.status.trim().toLowerCase() : null;
-  return {
-    task: fields.task, tests: list(fields.tests), blockers: list(fields.blockers), next: fields.next && !NONE.test(fields.next) ? fields.next : null,
-    ...(status ? { status } : {}),
-  };
-}
+export { parseCheckpointBlock };
 
 export function lastAssistantText(timelinePayload) {
   const entries = timelinePayload?.entries ?? [];

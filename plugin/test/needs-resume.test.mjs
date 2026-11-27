@@ -906,6 +906,27 @@ test("an eligible idle cleanup is suppressed while the Factory is paused", async
   assert.deepEqual(sendsTo(world, agent.id), []);
 });
 
+test("idle cleanup preserves the latest worker result until its checkpoint exists", async () => {
+  const { world, ws, agent, nowMs } = sweepWorld({ idleMs: 75 * MIN });
+  agent.title = "Worker";
+  agent.labels = { [LABEL.role]: "worker", [LABEL.scope]: REPO, [LABEL.owner]: "A" };
+  const entry = ws.metadata[AGENTS_KEY][agent.id];
+  entry.noteAt = entry.lastTurnEndedAt;
+  const worker = { state: "partial", status: null };
+  ws.metadata[WORKERS_KEY] = { [agent.id]: worker };
+  const deps = {
+    paseo: fakeClient(world), nowMs, lock: noLock, log: () => {},
+    settings: { ...CLEANUP_DEFAULTS, mode: "clear", clearAcknowledged: true, roles: ["worker"] },
+  };
+  assert.deepEqual(await sweep.sweepOnce(deps), []);
+  assert.deepEqual(sendsTo(world, agent.id), []);
+
+  worker.status = "partial";
+  const [result] = await sweep.sweepOnce(deps);
+  assert.equal(result?.sent, true, result?.reason);
+  assert.match(sendsTo(world, agent.id)[0], /^\/clear/);
+});
+
 test("sweepOnce compacts an eligible agent when quota shows headroom", async () => {
   const { world, agent, nowMs } = sweepWorld({ workers: { "worker-1": { state: "running" } } });
   const results = await sweep.sweepOnce({

@@ -3,7 +3,7 @@ import { isAdvisorSteer } from "./core/config.mjs";
 import { METADATA_KEY, readPaseoState } from "./core/paseo.mjs";
 import { QUOTA_DEFAULTS, accountExhausted, freshMaxUsedPct, quotaEntry, quotaExhausted, quotaPct } from "./core/quota.mjs";
 import { listScopes } from "./core/scope.mjs";
-import { WORKERS_KEY } from "./core/supervision.mjs";
+import { isCleanupProtected, WORKERS_KEY } from "./core/supervision.mjs";
 import { buildRewindRecord } from "./core/steer.mjs";
 import { rewindSameTab } from "./core/rewind.mjs";
 import { actionEntry, readSteerAction, readCleanupAction } from "./core/steer-action.mjs";
@@ -20,7 +20,6 @@ import {
   decideCleanupAction,
   isCold,
   isNeedsResumeReason,
-  isSupervisionProtectedState,
   sendCleanupCommand,
   shouldRewindFresh,
   type CleanupSettings,
@@ -151,21 +150,11 @@ function scopeReads(scope: any): {
   };
 }
 
-/** The agent's supervision register state, if any (C5 skips protected ones). */
-function workerStateOf(workers: Record<string, unknown>, agentId: string): string | null {
-  const state = asRecord(workers[agentId])?.state;
-  return typeof state === "string" ? state : null;
-}
-
-/**
- * Scope workers with unfinished state (running/blocked/interrupted). A steer
- * with none is at a package boundary (fresh hint); any open worker means the
- * package is still in flight (compact while warm).
- */
+/** Workers whose outcome is still being handled, for the active steer's cleanup decision. */
 function openWorkerCount(workers: Record<string, unknown>): number {
   let count = 0;
   for (const value of Object.values(workers)) {
-    if (isSupervisionProtectedState(asRecord(value)?.state)) count += 1;
+    if (isCleanupProtected(value)) count += 1;
   }
   return count;
 }
@@ -344,7 +333,7 @@ async function sweepAgent(
 ): Promise<SweepResult | null> {
   const scope = scopeForAgent(agent, lookup);
   const reads = scope ? scopeReads(scope) : null;
-  if (!scope || !reads) return null;
+  if (!scope || !reads || isCleanupProtected(reads.workers[agent.id])) return null;
   const entry = asRecord(reads.entries[agent.id]);
   const first = decideCleanupAction(
     cleanupInputOf({
@@ -357,7 +346,6 @@ async function sweepAgent(
       actionsToday: actionsToday(nowMs),
       effectBlocked: isEffectBlocked(),
       nowMs,
-      workerState: workerStateOf(reads.workers, agent.id),
       quotaAvailable: quotaAvailableForCleanup(agent?.provider, quota, {
         agentId: typeof agent?.id === "string" ? agent.id : null,
         zerosub: quotaCtx.zerosub ?? null,
@@ -406,6 +394,7 @@ async function sweepAgent(
   const freshEntries = asRecord(freshMeta[AGENTS_KEY]) ?? {};
   const freshEntry = asRecord(freshEntries[agent.id]);
   const freshWorkers = asRecord((freshMeta as Record<string, unknown>)[WORKERS_KEY as string]) ?? {};
+  if (isCleanupProtected(freshWorkers[agent.id])) return null;
   const recheckAt = Date.now();
   const recheck = decideCleanupAction(
     cleanupInputOf({
@@ -418,7 +407,6 @@ async function sweepAgent(
       actionsToday: actionsToday(recheckAt),
       effectBlocked: isEffectBlocked(),
       nowMs: recheckAt,
-      workerState: workerStateOf(freshWorkers, agent.id),
       quotaAvailable: quotaAvailableForCleanup(freshAgent?.provider, quota, {
         agentId: typeof agent?.id === "string" ? agent.id : null,
         zerosub: quotaCtx.zerosub ?? null,

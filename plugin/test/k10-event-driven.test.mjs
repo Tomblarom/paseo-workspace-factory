@@ -309,7 +309,7 @@ test("a closed worker stays supervised: turn.after never removes it", async () =
   );
   assert.notEqual(result.action, "removed");
   assert.ok(world.workspaces[0].metadata[WORKERS_KEY][worker.id], "entry retained after close");
-  assert.equal(world.workspaces[0].metadata[WORKERS_KEY][worker.id].state, "interrupted");
+  assert.equal(world.workspaces[0].metadata[WORKERS_KEY][worker.id].state, "partial");
   assert.ok(world.calls.some(([call, id]) => call === "agent.send" && id === steer.id));
 });
 

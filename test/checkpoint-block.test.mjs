@@ -31,6 +31,29 @@ test('parseCheckpointBlock reads the fenced form with dashes', () => {
   }
 });
 
+test('parseCheckpointBlock accepts complete unlabelled fences and an info-string label', () => {
+  const report = 'task: Ship it\r\ntests: npm test\r\nblockers: none\r\nnext: confirm\r\nstatus: partial';
+  for (const [open, close] of [['```text', '```'], ['```', '```'], ['````text', '````'], ['~~~text', '~~~']]) {
+    const answer = ['Result', open, '', report, close, 'Trailing prose'].join('\r\n');
+    assert.deepEqual(parseCheckpointBlock(answer), {
+      task: 'Ship it', tests: ['npm test'], blockers: [], next: 'confirm', status: 'partial',
+    }, open);
+  }
+  assert.equal(parseCheckpointBlock('```CHECKPOINT\ntask: Labelled in the fence\n```').task, 'Labelled in the fence');
+  assert.equal(parseCheckpointBlock(['CHECKPOINT', 'task: Old', '```text', report, '```'].join('\n')).task, 'Ship it');
+});
+
+test('parseCheckpointBlock does not infer an unlabelled checkpoint from prose or a partial fence', () => {
+  const fields = ['task: Ship it', 'tests: npm test', 'blockers: none', 'next: confirm'];
+  for (const lines of [
+    ['Result:', ...fields],
+    ['```text', ...fields],
+    ['```text', ...fields.slice(0, -1), '```', fields.at(-1)],
+    ['```text', 'This is an example:', ...fields, '```'],
+    ['````text', ...fields, '```'],
+  ]) assert.equal(parseCheckpointBlock(lines.join('\n')), null);
+});
+
 test('parseCheckpointBlock tolerates an informational workers line', () => {
   const withWorkers = '```text\nCHECKPOINT\n- task: Ship it\n- tests: none\n- blockers: none\n- workers: agent-1, agent-2\n- next: confirm\n```';
   assert.deepEqual(parseCheckpointBlock(withWorkers), { task: 'Ship it', tests: [], blockers: [], next: 'confirm' });

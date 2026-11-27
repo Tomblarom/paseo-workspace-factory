@@ -33,6 +33,10 @@ test("shortenCheckpoint keeps the surrounding Markdown and extracts a title", ()
   });
 });
 
+test("shortenCheckpoint recognizes the same complete unlabelled block as the server", () => {
+  assert.deepEqual(shortenCheckpoint(FULL.replace("\nCHECKPOINT\n", "\n")), shortenCheckpoint(FULL));
+});
+
 test("shortenCheckpoint accepts the ## CHECKPOINT variant", () => {
   const text = ["# Update", "", "## CHECKPOINT", "task: Fix login", "next: Deploy"].join("\n");
   assert.deepEqual(shortenCheckpoint(text), {
