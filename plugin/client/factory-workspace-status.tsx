@@ -25,7 +25,7 @@ import {
   type WorkspaceStatus,
 } from "./factory-workspace-state.js";
 import { describeSteerMenu, handoffTargets, isExpiredPreviewError, normalizeInitializeNewSteer, type HandoffTarget } from "./steer-menu.js";
-import { SteerMenu } from "./steer-menu-content.js";
+import { FactorySteerOperation } from "./factory-steer-operation.js";
 import type { SteerPillRow } from "./steer-pill.js";
 
 type Theme = PluginWorkspacePanelProps["theme"];
@@ -321,9 +321,9 @@ export function FactoryWorkspaceStatus({
   function steerRow(steer: SteerPillRow, overview = false) {
     const name = steerName(steer);
     const { modelName, providerName } = steerLabels(steer);
-    const controls = describeSteerMenu(steer, steers, { keepChatHistory: false, observedChanged: false, revertAllowed: false });
-    const activation = controls.find((item) => item.kind === "item" && item.id === "activate");
-    const epoch = activation?.kind === "item" ? activation.activationEpoch : undefined;
+    const controls = describeSteerMenu(steer, steers);
+    const activation = controls.find((item) => item.kind === "activate");
+    const epoch = activation?.activationEpoch;
     const retired = steer.state === "retired";
     const controlsHere = steer === controller;
     const focused = !overview && steer.agentId === focusedSteerId;
@@ -408,10 +408,10 @@ export function FactoryWorkspaceStatus({
               onPress={() => setOperation({ kind: "handover", steer })} />
           ) : epoch !== undefined && !steer.active ? (
             <Action theme={theme} icon="Play" title="Activate" name={`Activate ${name}`}
-              disabled={stale || activation?.kind !== "item" || activation.disabled}
-              hint={activation?.kind === "item" && activation.disabled ? activation.title : undefined}
+              disabled={stale || activation?.disabled}
+              hint={activation?.disabled ? activation.title : undefined}
               onPress={() => setOperation({ kind: "activate", steer, epoch,
-                alternatives: activation?.kind === "item" ? activation.activationAlternatives : undefined })} />
+                alternatives: activation?.activationAlternatives })} />
           ) : null}
         </View>
       </View>
@@ -584,7 +584,7 @@ export function FactoryWorkspaceStatus({
                 ))}
               </View>
             ) : (
-              <SteerMenu workspaceId={workspaceId}
+              <FactorySteerOperation workspaceId={workspaceId}
                 agentId={currentOperation.kind === "create" ? controller?.agentId ?? "" : currentOperation.steer.agentId}
                 theme={theme} compact={layout.compact} close={closeOperation} composers={composers}
                 initialAction={currentOperation.kind === "create" ? "create" : currentOperation.kind === "handover" ? "handover" : "staged"}

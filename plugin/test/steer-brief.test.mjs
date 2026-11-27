@@ -549,7 +549,7 @@ for (const resolution of ["placed", "retry"]) {
     const attempt = { claimId: "old-client", placed: false };
     const composer = { prompt: "", setPrompt: () => { throw new Error("Update outcome unknown"); }, insertText: assert.fail };
     await assert.rejects(transferStagedBrief(initialCall, target, () => composer, attempt), /outcome unknown/);
-    await assert.rejects(transferStagedBrief(initialCall, target, () => composer, attempt), /reopen the staged brief menu/i);
+    await assert.rejects(transferStagedBrief(initialCall, target, () => composer, attempt), /open Review brief in Factory/i);
 
     const reopened = fakeClient(world);
     const call = (request) => briefs.deliverSteerBrief(reopened, { ...target, ...request }, deps);

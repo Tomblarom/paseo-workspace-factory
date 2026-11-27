@@ -66,19 +66,15 @@ function row(agentId, over = {}) {
     thinking: null,
     speed: null,
     sessionId: null,
-    baseline: null,
-    confirmed: null,
-    settingsLocked: false,
-    settingsLockReason: null,
     ...over,
   };
 }
 
-/** Stable menu builder stub: one key per agent and warning flag. */
-function stubMenu(row, _rows, observed) {
+/** Stable menu builder stub: one key per agent. */
+function stubMenu(row) {
   return {
     behavior: { kind: "menu", items: [] },
-    menuKey: `${row.agentId}:${observed.changed ? "changed" : "clean"}`,
+    menuKey: row.agentId,
   };
 }
 
@@ -163,7 +159,7 @@ test("steerRowsOf falls back on invalid state, action and quota shapes", () => {
   assert.equal(parsed.tokens, null);
 });
 
-test("steerRowsOf parses settings baseline and lock flags", () => {
+test("steerRowsOf parses runtime settings for the Factory panel", () => {
   const [parsed] = pill.steerRowsOf({
     steers: [{
       agentId: "a1",
@@ -171,23 +167,13 @@ test("steerRowsOf parses settings baseline and lock flags", () => {
       thinking: "high",
       speed: "flex",
       sessionId: "sess-1",
-      baseline: { provider: "codex", model: "gpt-6.2-sol", thinking: "high", speed: "flex", sessionId: "sess-1" },
-      confirmed: { provider: "codex", model: "gpt-6.2-sol" },
-      settingsLocked: true,
-      settingsLockReason: "Maximum efficiency protects this warm context. Use Refresh.",
     }],
   });
   assert.equal(parsed.thinking, "high");
   assert.equal(parsed.speed, "flex");
   assert.equal(parsed.sessionId, "sess-1");
-  assert.deepEqual(parsed.baseline, { provider: "codex", model: "gpt-6.2-sol", thinking: "high", speed: "flex", sessionId: "sess-1" });
-  assert.equal(parsed.confirmed.model, "gpt-6.2-sol");
-  assert.equal(parsed.settingsLocked, true);
-  assert.match(parsed.settingsLockReason, /Maximum efficiency/);
   const [fallback] = pill.steerRowsOf({ steers: [{ agentId: "a1", workspaceId: "w1" }] });
   assert.equal(fallback.thinking, null);
-  assert.equal(fallback.baseline, null);
-  assert.equal(fallback.settingsLocked, false);
 });
 
 test("steerAgentIds collects covered tabs for the attention filter", () => {
@@ -247,14 +233,12 @@ test("face falls back for missing slot and unknown state", () => {
   assert.equal(pill.sameFace(face, pill.faceFor(row("x"))), false);
 });
 
-test("the observed-change warning takes over the label", () => {
-  const face = pill.faceFor(row("c", { slot: "C" }), { settingsChanged: true });
-  assert.equal(face.label, "C · settings changed");
-  assert.equal(face.title, "Steer C · Active · settings changed\n5,000 tokens");
-  assert.equal(face.icon, "TriangleAlert");
-  assert.equal(face.accessibilityLabel, "Steer C · Active · settings changed · 5,000 tokens");
-  assert.equal(pill.pillStateWord("needs-resume"), "needs resume");
-  assert.equal(pill.pillStateWord("waiting"), "waiting");
+test("the needs-resume pill uses its recovery icon and keeps the slot label", () => {
+  const face = pill.faceFor(row("c", { slot: "C", state: "needs-resume" }));
+  assert.equal(face.label, "C");
+  assert.equal(face.title, "Steer C · Active\n5,000 tokens");
+  assert.equal(face.icon, "RotateCcw");
+  assert.equal(face.accessibilityLabel, "Steer C · Active · 5,000 tokens");
 });
 
 test("face icons pin one Lucide name per state-table row", () => {
@@ -339,7 +323,7 @@ test("sync adds one pill per row with the native menu behavior", () => {
     assert.equal(contribution.workspaceId, "wks_main");
     assert.equal(contribution.button.behavior.kind, "menu");
   }
-  assert.equal(pills.get("a1").menuKey, "a1:clean");
+  assert.equal(pills.get("a1").menuKey, "a1");
 });
 
 test("sync patches the face and the menu only when each changes", () => {
@@ -407,30 +391,6 @@ test("sync drops a pill whose update throws and re-adds it on the next event", (
   pill.syncSteerPills(healed, pills, [row("a1", { state: "cold", warmth: "cold" })], stubMenu);
   assert.equal(pills.size, 1);
   assert.equal(pills.get("a1").face.label, "A · cold");
-});
-
-test("sync retains the observed tuple and warns until the baseline matches", () => {
-  const client = fakeClient();
-  const pills = new Map();
-  const baseline = { provider: "codex", model: "gpt-6.2-sol", thinking: null, speed: null, sessionId: "sess-1" };
-  const live = (thinking) => row("a1", {
-    thinking,
-    sessionId: "sess-1",
-    baseline,
-    model: "gpt-6.2-sol",
-    provider: "codex",
-  });
-  pill.syncSteerPills(client, pills, [live("high")], stubMenu);
-  assert.equal(pills.get("a1").face.label, "A · settings changed");
-  assert.equal(pills.get("a1").menuKey, "a1:changed");
-  // A newer change keeps the first observed tuple for the revert guard.
-  pill.syncSteerPills(client, pills, [live("low")], stubMenu);
-  assert.deepEqual(pills.get("a1").observed.observed.thinking, "high");
-  assert.equal(pills.get("a1").face.label, "A · settings changed");
-  // Back to the baseline clears the warning.
-  pill.syncSteerPills(client, pills, [live(null)], stubMenu);
-  assert.equal(pills.get("a1").face.label, "A · warm");
-  assert.equal(pills.get("a1").observed.observed, null);
 });
 
 // ---------------------------------------------------------------------------
@@ -661,14 +621,13 @@ test("entry subscribes to factory.steers and keeps attention worker-only", () =>
   }
 });
 
-test("popovers are keyboard/screen-reader labelled and theme driven", () => {
+test("the Reset popover is keyboard/screen-reader labelled and theme driven", () => {
   for (const token of [
     'accessibilityRole="button"',
-    'accessibilityLabel="Close steer menu"',
-    "useSubscription(factorySteers",
+    'accessibilityRole="checkbox"',
+    "accessibilityState={{ checked: clearChatHistory",
     "theme.colors.",
     "compact",
-    "initialAction",
   ]) {
     assert.ok(menuSource.includes(token), `steer-menu-content.tsx contains ${token}`);
   }

@@ -1,7 +1,4 @@
-// Step-3 menu logic: handover targets with unavailable-row reasons, safe
-// resume/refresh route selection, staged delivery per the "Initialize new
-// steer" setting, expired-preview detection, per-agent results and the
-// Open-Factory bridge. Pure modules only; no sends, no daemon.
+// Steer pill actions and their preview, apply and brief delivery contracts.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -11,7 +8,6 @@ register("./ts-resolve-hooks.mjs", import.meta.url);
 
 const menu = await import("../client/steer-menu.ts");
 const results = await import("../client/steer-results.ts");
-const nav = await import("../client/steer-nav.ts");
 const pill = await import("../client/steer-pill.ts");
 
 test("one native activation press sends exactly one RPC even when the menu is rebuilt", async () => {
@@ -69,23 +65,10 @@ function row(agentId, over = {}) {
 const self = () => row("steer-a", { slot: "A", active: true });
 
 // ---------------------------------------------------------------------------
-// Labels
-// ---------------------------------------------------------------------------
-
-test("menu labels are English", () => {
-  for (const [key, value] of Object.entries(menu.STEER_MENU_LABELS)) {
-    assert.match(value, /^[\x20-\x7E…‹→·]+$/, `label is English: ${key}=${value}`);
-  }
-  assert.equal(menu.resumeActionLabel("needs-resume"), "Resume…");
-  assert.equal(menu.resumeActionLabel("warm"), "Refresh context…");
-  assert.equal(menu.resumeActionLabel("cold"), "Refresh context…");
-});
-
-// ---------------------------------------------------------------------------
 // Handover targets
 // ---------------------------------------------------------------------------
 
-test("handover lists holders in slot order with state, provider and model", () => {
+test("handover lists holders in slot order with provider and model", () => {
   const targets = menu.handoffTargets(
     [
       self(),
@@ -96,7 +79,6 @@ test("handover lists holders in slot order with state, provider and model", () =
   );
   assert.deepEqual(targets.map((t) => t.slot), ["A", "B", "C"]);
   assert.deepEqual(targets.map((t) => t.eligible), [false, true, true]);
-  assert.equal(targets[1].stateLabel, "warm");
   assert.equal(targets[2].provider, "claude");
   assert.equal(targets[2].model, "m");
 });
@@ -159,7 +141,6 @@ test("handover reasons cover busy targets and pending permissions", () => {
   assert.equal(byId["steer-c"].reason, "Busy (Factory operation in progress)");
   assert.equal(byId["steer-d"].reason, "Permission request pending");
   assert.equal(byId["steer-e"].reason, "Busy (turn running)");
-  assert.equal(byId["steer-d"].permissionNeeded, true);
 });
 
 test("handover reasons cover depleted quota with reset details", () => {
@@ -174,9 +155,7 @@ test("handover reasons cover depleted quota with reset details", () => {
   const byId = Object.fromEntries(targets.map((t) => [t.agentId, t]));
   assert.equal(byId["steer-b"].eligible, false);
   assert.equal(byId["steer-b"].reason, "Quota depleted (waiting for reset)");
-  assert.equal(byId["steer-b"].limited, true);
   assert.equal(byId["steer-c"].reason, "Quota depleted (reset unknown)");
-  assert.equal(byId["steer-c"].resetUnknown, true);
 });
 
 test("a destination that needs recovery stays eligible with a recovery flag", () => {
@@ -190,85 +169,23 @@ test("a destination that needs recovery stays eligible with a recovery flag", ()
 });
 
 // ---------------------------------------------------------------------------
-// Resume / refresh route selection
+// Reset eligibility
 // ---------------------------------------------------------------------------
 
-test("resume refuses busy, waiting and replaced tabs", () => {
-  assert.deepEqual(
-    menu.resumeRouteFor(row("a", { state: "running", liveStatus: "running" }), { keepChatHistory: false }),
-    { kind: "blocked", reason: "This steer is running. Wait for the turn to end, then refresh." },
-  );
-  assert.equal(
-    menu.resumeRouteFor(row("a", { liveStatus: "initializing", state: "waiting", detail: "Agent initializing" }), { keepChatHistory: false }).kind,
-    "blocked",
-  );
-  assert.deepEqual(
-    menu.resumeRouteFor(row("a", { state: "waiting", detail: "Factory operation in progress" }), { keepChatHistory: false }),
-    { kind: "blocked", reason: "Busy (Factory operation in progress). Try again after it finishes." },
-  );
-  assert.equal(
-    menu.resumeRouteFor(row("a", { state: "retired" }), { keepChatHistory: false }).kind,
-    "blocked",
-  );
-  assert.match(
-    menu.resumeRouteFor(row("a", { state: "unknown", detail: "Membership ambiguous" }), { keepChatHistory: false }).reason,
-    /Membership ambiguous/,
-  );
-});
-
-test("resume refuses a pending permission before anything else unsafe", () => {
-  assert.deepEqual(
-    menu.resumeRouteFor(row("a", { permissionNeeded: true }), { keepChatHistory: false }),
-    { kind: "blocked", reason: "A permission request is waiting. Answer it first, then refresh." },
-  );
-});
-
-test("resume on depleted quota shows reset details instead of refreshing", () => {
-  assert.deepEqual(
-    menu.resumeRouteFor(row("a", { state: "limited", limited: true }), { keepChatHistory: false }),
-    { kind: "reset-details" },
-  );
-});
-
-test("resume uses the verified in-place clear for Claude", () => {
-  assert.deepEqual(
-    menu.resumeRouteFor(row("a", { provider: "claude", state: "needs-resume" }), { keepChatHistory: false }),
-    { kind: "resume-apply" },
-  );
-  assert.deepEqual(
-    menu.resumeRouteFor(row("a", { provider: "claude-api", state: "large" }), {
-      keepChatHistory: false,
-      clearProviders: ["claude", "other"],
-    }),
-    { kind: "resume-apply" },
-  );
-});
-
-test("manual refresh with Keep chat history uses the Fresh preview", () => {
-  assert.deepEqual(
-    menu.resumeRouteFor(row("a", { provider: "claude" }), { keepChatHistory: true }),
-    { kind: "fresh" },
-  );
-});
-
-test("a Codex refresh uses the Fresh preview for the actual route", () => {
-  for (const keepChatHistory of [false, true]) {
-    assert.deepEqual(
-      menu.resumeRouteFor(row("a", { provider: "codex", state: "needs-resume" }), { keepChatHistory }),
-      { kind: "fresh" },
-    );
+test("reset blocks busy tabs, incomplete membership and exhausted quota", () => {
+  for (const [state, reason] of [
+    [{ state: "running" }, /running/],
+    [{ liveStatus: "initializing" }, /running/],
+    [{ state: "waiting", detail: "Factory operation in progress" }, /Factory operation in progress/],
+    [{ permissionNeeded: true }, /permission/],
+    [{ state: "retired" }, /replaced/],
+    [{ state: "unknown", detail: "Membership ambiguous" }, /Membership ambiguous/],
+    [{ state: "limited" }, /Quota depleted/],
+    [{ scopeId: null }, /membership/],
+  ]) {
+    assert.match(menu.resetSteerBlock(row("a", state)), reason);
   }
-});
-
-test("providers without a verified clear go through fresh planning", () => {
-  assert.deepEqual(
-    menu.resumeRouteFor(row("a", { provider: "mystery" }), { keepChatHistory: false }),
-    { kind: "fresh" },
-  );
-  assert.equal(
-    menu.resumeRouteFor(row("a", { provider: null }), { keepChatHistory: false }).kind,
-    "fresh",
-  );
+  assert.equal(menu.resetSteerBlock(row("a", { state: "needs-resume" })), null);
 });
 
 // ---------------------------------------------------------------------------
@@ -327,16 +244,8 @@ test("expired-preview detection rejects delivery and validation errors", () => {
   assert.equal(menu.isExpiredPreviewError(undefined), false);
 });
 
-test("partial apply with a staged packet offers a retry", () => {
-  assert.equal(menu.needsDeliveryRetry({ applied: true, delivered: false, staged: true }), true);
-  assert.equal(menu.needsDeliveryRetry({ applied: true, delivered: true, staged: true }), false);
-  assert.equal(menu.needsDeliveryRetry({ applied: true, delivered: false, staged: false }), false);
-  assert.equal(menu.needsDeliveryRetry({ applied: true, delivered: false }), false);
-  assert.equal(menu.needsDeliveryRetry({ applied: false, delivered: false, staged: true }), false);
-});
-
 // ---------------------------------------------------------------------------
-// Per-agent results and navigation
+// Per-agent results
 // ---------------------------------------------------------------------------
 
 test("result keys separate hosts and agents", () => {
@@ -377,16 +286,6 @@ test("the host registration defaults and updates", () => {
   assert.equal(results.currentSteerHost(), "host-7");
 });
 
-test("the Open-Factory bridge fans out and unsubscribes", () => {
-  const seen = [];
-  const stop = nav.subscribeOpenFactory((target) => seen.push(target));
-  nav.requestOpenFactory({ workspaceId: "wks_1", agentId: "agt_a" });
-  assert.deepEqual(seen, [{ workspaceId: "wks_1", agentId: "agt_a" }]);
-  stop();
-  nav.requestOpenFactory({ workspaceId: "wks_1" });
-  assert.equal(seen.length, 1);
-});
-
 // ---------------------------------------------------------------------------
 // Feed parsing for the new flags
 // ---------------------------------------------------------------------------
@@ -406,42 +305,39 @@ test("steerRowsOf parses permission and staged-brief flags", () => {
 // Native menu descriptor
 // ---------------------------------------------------------------------------
 
-test("state words are lowercase in labels and titles", () => {
-  assert.equal(menu.stateWord("waiting"), "waiting");
-  assert.equal(menu.stateWord("needs-resume"), "needs resume");
-  assert.equal(menu.stateWord("warm"), "warm");
-  assert.equal(menu.stateWord("unknown"), "unknown");
+test("the active steer menu lists actions and leaf-only handover targets", () => {
+  const active = { ...self(), stagedBrief: true };
+  const items = menu.describeSteerMenu(active, [
+    active, row("steer-c", { slot: "C", state: "needs-resume" }), row("steer-b", { slot: "B", state: "running" }),
+  ]);
+  assert.deepEqual(items.map((entry) => entry.title ?? entry.kind), [
+    "Handover", "Reset Steer", "separator", "Open Factory",
+  ]);
+  const [handover, reset] = items;
+  assert.equal(handover.disabled, false);
+  assert.deepEqual(handover.targets, [
+    { id: "handover-steer-b", title: "Steer B", slot: "B", agentId: "steer-b", disabled: true },
+    { id: "handover-steer-c", title: "Steer C", slot: "C", agentId: "steer-c", disabled: false },
+  ]);
+  assert.deepEqual(reset, { kind: "reset", id: "reset", title: "Reset Steer", disabled: false, icon: "ListRestart" });
 });
 
-test("the menu lists actions with a handover submenu and a settings item", () => {
-  const items = menu.describeSteerMenu(
-    self(),
-    [self(), row("steer-b", { slot: "B", state: "warm" }), row("steer-c", { slot: "C", state: "cooling" })],
-    { keepChatHistory: false, observedChanged: false, revertAllowed: false },
-  );
-  const ids = items.map((entry) => entry.id);
-  assert.deepEqual(ids, ["create", "handover", "refresh", "settings", "sep-open", "open-factory"]);
-  const handover = items.find((entry) => entry.id === "handover");
-  assert.equal(handover.kind, "item");
-  assert.deepEqual(
-    handover.submenu.map((entry) => entry.title),
-    ["Steer A · warm — Already active", "Steer B · warm", "Steer C · cooling"],
-  );
-  assert.deepEqual(handover.submenu.map((entry) => entry.disabled), [true, false, false]);
-  const refresh = items.find((entry) => entry.id === "refresh");
-  assert.equal(refresh.title, "Refresh context…");
-  assert.equal(refresh.disabled, undefined);
-  const settingsItem = items.find((entry) => entry.id === "settings");
-  assert.equal(settingsItem.title, "Change settings…");
+test("standby menus have a visible, disabled Handover with no submenu", () => {
+  const standby = row("steer-b", { slot: "B", activationEpoch: 3, state: "needs-resume" });
+  const items = menu.describeSteerMenu(standby, [self(), standby, row("steer-c", { slot: "C" })]);
+  assert.deepEqual(items.map((entry) => entry.title ?? entry.kind), [
+    "Activate Steer", "Handover", "Reset Steer", "separator", "Open Factory",
+  ]);
+  assert.deepEqual(items[1], {
+    kind: "handover", id: "handover", title: "Handover", icon: "ArrowRightLeft", disabled: true, targets: [],
+  });
 });
 
 test("activation offers the own standby at its observed epoch, and an active receipt offers retry", () => {
   const standby = row("steer-b", { slot: "B", activationEpoch: 3 });
-  const activation = (own, others = []) => menu.describeSteerMenu(own, [own, ...others], {
-    keepChatHistory: false, observedChanged: false, revertAllowed: false,
-  }).find((entry) => entry.action === "activate");
+  const activation = (own, others = []) => menu.describeSteerMenu(own, [own, ...others]).find((entry) => entry.kind === "activate");
   assert.deepEqual(activation(standby, [self()]), {
-    kind: "item", id: "activate", title: "Activate Steer", icon: "ArrowRight", action: "activate", disabled: false, activationEpoch: 3,
+    kind: "activate", id: "activate", title: "Activate Steer", icon: "ArrowRight", disabled: false, activationEpoch: 3, activationAlternatives: [],
   });
   assert.equal(activation(self(), [standby]), undefined);
   assert.equal(activation({ ...standby, advisor: true }), undefined);
@@ -455,131 +351,80 @@ test("activation offers the own standby at its observed epoch, and an active rec
   ]);
 });
 
-test("unavailable handover holders carry the short reason in the title", () => {
-  const items = menu.describeSteerMenu(
-    self(),
-    [
-      self(),
-      row("steer-b", { slot: "B", state: "running", liveStatus: "running" }),
-      row("steer-c", { slot: "C", state: "limited", limited: true, resetUnknown: true }),
-    ],
-    { keepChatHistory: false, observedChanged: false, revertAllowed: false },
-  );
-  const handover = items.find((entry) => entry.id === "handover");
-  assert.deepEqual(
-    handover.submenu.map((entry) => entry.title),
-    [
-      "Steer A · warm — Already active",
-      "Steer B · running — Busy (turn running)",
-      "Steer C · limited — Quota depleted (reset unknown)",
-    ],
-  );
+test("unrelated target state changes do not rebuild the open menu", () => {
+  const active = self();
+  const standby = row("steer-b", { slot: "B" });
+  const key = (state) => menu.menuKeyFor(menu.describeSteerMenu(active, [active, { ...standby, state }]));
+  assert.equal(key("warm"), key("cooling"));
+  assert.equal(key("warm"), key("needs-resume"));
+  assert.notEqual(key("warm"), key("running"));
 });
 
-test("settings changes disable with a short reason under Maximum efficiency", () => {
-  const locked = menu.describeSteerMenu(
-    row("steer-a", { slot: "A", active: true, settingsLocked: true, settingsLockReason: "Maximum efficiency protects this warm context. Use Refresh." }),
-    [row("steer-a", { slot: "A", active: true })],
-    { keepChatHistory: false, observedChanged: false, revertAllowed: false },
-  );
-  const settingsItem = locked.find((entry) => entry.id === "settings");
-  assert.equal(settingsItem.disabled, true);
-  assert.equal(settingsItem.title, "Change settings… (maximum efficiency)");
+test("a Handover target previews and applies in one press with source and target identity checks", async () => {
+  const active = self();
+  const target = { agentId: "steer-b", slot: "B" };
+  const calls = [];
+  const plan = { workspaceId: active.workspaceId, fromId: active.agentId, toId: target.agentId, fingerprint: "switch-fingerprint" };
+  const preview = async (input) => { calls.push(["preview", input]); return plan; };
+  const apply = async (input) => { calls.push(["apply", input]); return { applied: true }; };
+  assert.deepEqual(await menu.handoverSteer(active, target, "composer", preview, apply), { applied: true });
+  const expected = { workspaceId: active.workspaceId, callerId: active.agentId, to: "B" };
+  assert.deepEqual(calls, [
+    ["preview", expected],
+    ["apply", { ...expected, fingerprint: "switch-fingerprint", deliver: "stage" }],
+  ]);
+  for (const change of [{ fromId: "other" }, { toId: "replacement" }, { workspaceId: "other" }]) {
+    await assert.rejects(menu.handoverSteer(active, target, "send",
+      async () => ({ ...plan, ...change }), async () => assert.fail("stale handover applied")), /changed/);
+  }
 });
 
-test("the warning adds revert and fresh-context items first", () => {
-  const items = menu.describeSteerMenu(
-    self(),
-    [self()],
-    { keepChatHistory: false, observedChanged: true, revertAllowed: true },
-  );
-  assert.deepEqual(items.slice(0, 3).map((entry) => entry.id), ["revert-settings", "fresh-context", "sep-warning"]);
-  assert.equal(items[0].disabled, false);
-  const blocked = menu.describeSteerMenu(
-    self(),
-    [self()],
-    { keepChatHistory: false, observedChanged: true, revertAllowed: false, revertReason: "Settings changed again. Review before reverting." },
-  );
-  assert.equal(blocked[0].disabled, true);
-  assert.equal(blocked[0].title, "Revert settings (changed again)");
+test("Reset saves the inverse of Clear chat history before applying its bound preview", async () => {
+  const source = self();
+  for (const clearChatHistory of [true, false]) {
+    const calls = [];
+    const plan = { workspaceId: source.workspaceId, from: source.agentId, slot: source.slot, fingerprint: "reset-fingerprint" };
+    const result = { applied: true, refreshMode: clearChatHistory ? "rewind" : "new-agent" };
+    const reset = await menu.resetSteer(source, clearChatHistory,
+      async (keep) => { calls.push(["save", keep]); return "send"; },
+      async (input) => { calls.push(["preview", input]); return plan; },
+      async (input) => { calls.push(["apply", input]); return result; });
+    const keepChatHistory = !clearChatHistory;
+    const expected = { workspaceId: source.workspaceId, slot: source.slot, keepChatHistory };
+    assert.deepEqual(calls, [
+      ["preview", expected],
+      ["save", keepChatHistory],
+      ["apply", { ...expected, fingerprint: plan.fingerprint, deliver: "send", notifyPrevious: false }],
+    ]);
+    assert.deepEqual(reset, { result, initialize: "send" });
+  }
 });
 
-test("a staged brief adds its own item, refresh disables while busy", () => {
-  const staged = menu.describeSteerMenu(
-    row("steer-a", { slot: "A", active: true, stagedBrief: true }),
-    [row("steer-a", { slot: "A", active: true, stagedBrief: true })],
-    { keepChatHistory: false, observedChanged: false, revertAllowed: false },
-  );
-  assert.ok(staged.some((entry) => entry.id === "staged"));
-  const busy = menu.describeSteerMenu(
-    row("steer-a", { slot: "A", active: true, state: "running", liveStatus: "running" }),
-    [row("steer-a", { slot: "A", active: true })],
-    { keepChatHistory: false, observedChanged: false, revertAllowed: false },
-  );
-  const refresh = busy.find((entry) => entry.id === "refresh");
-  assert.equal(refresh.disabled, true);
-  assert.match(refresh.title, /turn running/);
+test("Reset stops on a stale holder or a failed settings write", async () => {
+  const source = self();
+  const plan = { workspaceId: source.workspaceId, from: source.agentId, slot: source.slot, fingerprint: "reset-fingerprint" };
+  const apply = async () => assert.fail("reset applied");
+  await assert.rejects(menu.resetSteer(source, false, async () => assert.fail("settings written"),
+    async () => ({ ...plan, from: "new-holder" }), apply), /steer changed/);
+  await assert.rejects(menu.resetSteer(source, false, async () => { throw new Error("Settings unavailable"); },
+    async () => plan, apply), /Settings unavailable/);
 });
-
-test("menu keys stay stable for identical descriptors", () => {
-  const opts = { keepChatHistory: false, observedChanged: false, revertAllowed: false };
-  const rows = [self(), row("steer-b", { slot: "B" })];
-  assert.equal(menu.menuKeyFor(menu.describeSteerMenu(self(), rows, opts)), menu.menuKeyFor(menu.describeSteerMenu(self(), rows, opts)));
-  assert.notEqual(
-    menu.menuKeyFor(menu.describeSteerMenu(self(), rows, opts)),
-    menu.menuKeyFor(menu.describeSteerMenu(self(), rows, { ...opts, observedChanged: true, revertAllowed: true })),
-  );
-});
-
-// ---------------------------------------------------------------------------
-// Wiring (static)
-// ---------------------------------------------------------------------------
 
 const menuSource = readFileSync(new URL("../client/steer-menu-content.tsx", import.meta.url), "utf8");
 const entrySource = readFileSync(new URL("../index.client.tsx", import.meta.url), "utf8");
 
-test("the menu calls the /factory preview/apply RPCs and stages efficiently", () => {
-  for (const token of [
-    "factorySteerAddPreview",
-    "factorySteerAdd",
-    "factorySwitchPreview",
-    "factorySwitch",
-    "factoryResume",
-    "factoryResumeApply",
-    "factoryFreshPreview",
-    "factoryFresh",
-    "factorySteerBrief",
-    "factoryHistoryOpen",
-    "factorySteerSettingsPreview",
-    "factorySteerSettings",
-    "factorySteerSettingsRevert",
-    "notifyPrevious: false",
-    "deliver",
-    "isExpiredPreviewError",
-    "useComposers({ agentId:",
-    "transferStagedBrief(callBrief, target, composer, attempt, automatic)",
-    "initialAction",
-    "resumeRouteFor",
-  ]) {
-    assert.ok(menuSource.includes(token), `steer-menu-content.tsx contains ${token}`);
-  }
+test("the single confirmation popover prefills from the saved setting and Cancel closes it", () => {
+  assert.match(menuSource, /choice \?\? \(state.status === "ready" && !state.values.keepChatHistory\)/);
+  assert.match(menuSource, /accessibilityRole="checkbox"[\s\S]*?>Clear chat history</);
+  assert.match(menuSource, /change\("history"\)\(\(current\) => \(\{ \.\.\.current, keepChatHistory \}\)\)/);
+  assert.match(menuSource, /onPress=\{close\}[\s\S]*?>Cancel</);
+  assert.match(menuSource, /onPress=\{\(\) => void confirmReset\(\)\}[\s\S]*?>Reset</);
 });
 
-test("waiting for a composer has no timer-driven delivery", () => {
-  assert.doesNotMatch(menuSource, /setTimeout/);
-  assert.match(menuSource, /pendingComposer && postStage && destComposer && !busy/);
-});
-
-test("the entry builds the native menu and opens the Factory panel on request", () => {
-  for (const token of [
-    "subscribeOpenFactory",
-    "requestOpenFactory",
-    'client.openPanel("factory"',
-    "buildSteerMenuBehavior",
-    "describeSteerMenu",
-    'kind: "menu"',
-    'kind: "popover"',
-  ]) {
-    assert.ok(entrySource.includes(token), `index.client.tsx contains ${token}`);
-  }
+test("Paseo receives one Reset popover and a submenu of direct Handover actions", () => {
+  assert.equal([...entrySource.matchAll(/kind: "popover", Content: actions\./g)].length, 1);
+  assert.match(entrySource, /case "reset":[\s\S]*?kind: "popover", Content: actions.reset/);
+  assert.match(entrySource, /items: entry.targets.map[\s\S]*?kind: "action", onPress: \(\) => actions.handover/);
+  assert.match(entrySource, /async handover[\s\S]*?reportSteerResult\(source, summary,/);
+  assert.match(entrySource, /client.openPanel\("factory", \{ workspaceId, agentId \}\)/);
 });

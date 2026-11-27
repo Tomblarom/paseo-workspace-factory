@@ -1,14 +1,10 @@
-// Steer menu actions (docs/design/steer-menu.md, steps 3-4): pure, testable
-// client logic. The pill uses the native menu behavior with one action per
-// item; previews and confirmations open as popovers (steer-menu-content.tsx,
-// which plain node:test cannot import). Planning and apply stay server-side
-// in the /factory RPCs, the menu only calls them. All UI text is English.
-// State words are lowercase, the way Paseo writes them.
-import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
+// Pure client logic for the steer pill and shared Factory actions.
+import type { PluginRpcContract, RpcInput, RpcOutput } from "@getpaseo/plugin";
 import type { PluginButtonBehavior, PluginComposer } from "@getpaseo/plugin/client";
-import type { factorySteerActivate, factorySteerBrief } from "../shared/factory.js";
-import { mayResumeClear, isClaudeProvider, RESUME_CLEAR_DEFAULTS } from "../shared/idle-cleanup.js";
-import { STEER_STATE_LABELS, type SteerFaceState } from "../shared/steer-state.js";
+import type {
+  factoryFresh, factoryFreshPreview, factorySteerActivate, factorySteerBrief, factorySwitch, factorySwitchPreview,
+} from "../shared/factory.js";
+import type { SteerFaceState } from "../shared/steer-state.js";
 import type { SteerPillRow } from "./steer-pill.js";
 
 export function activationMenuBehavior(
@@ -24,40 +20,13 @@ export function activationMenuBehavior(
 // ---------------------------------------------------------------------------
 
 export const STEER_MENU_LABELS = {
-  create: "Create steer…",
   activate: "Activate Steer",
   retryActivation: "Retry activation delivery",
-  handover: "Hand over to…",
-  changeSettings: "Change settings…",
-  revertSettings: "Revert settings",
-  freshContext: "Continue with fresh context…",
-  stagedBrief: "Initialize staged brief…",
+  handover: "Handover",
+  reset: "Reset Steer",
   openFactory: "Open Factory",
-  back: "Back",
-  cancel: "Cancel",
   close: "Close",
-  confirmCreate: "Confirm creation",
-  confirmHandover: "Confirm handover",
-  confirmRefresh: "Confirm refresh",
-  confirmResume: "Confirm resume",
-  confirmSettings: "Apply settings",
-  confirmRevert: "Revert settings",
-  retryDelivery: "Retry delivery",
-  initializeNow: "Initialize now",
-  dismissBrief: "Dismiss brief",
-  resumeAndHandover: "Resume and hand over…",
-  openSavedChat: "Open saved chat in new tab",
 } as const;
-
-/** Lowercase state word for pill labels, titles and menu items. */
-export function stateWord(state: SteerFaceState): string {
-  return (STEER_STATE_LABELS[state] ?? "Unknown").toLowerCase();
-}
-
-/** "Resume…" for a tab that needs recovery, else "Refresh context…". */
-export function resumeActionLabel(state: SteerFaceState): string {
-  return state === "needs-resume" ? "Resume…" : "Refresh context…";
-}
 
 // ---------------------------------------------------------------------------
 // "Initialize new steer" setting
@@ -98,7 +67,7 @@ export async function transferStagedBrief(
   automatic = false,
 ): Promise<void> {
   const input = { ...target, claimId: attempt.claimId };
-  if (attempt.uncertain) throw new Error("The composer update could not be confirmed. Reopen the staged brief menu and check the draft.");
+  if (attempt.uncertain) throw new Error("The composer update could not be confirmed. Open Review brief in Factory and check the draft.");
   if (!attempt.placed) {
     const unavailable = "The destination composer is unavailable. The brief is still staged.";
     if (!composer()) throw new Error(unavailable);
@@ -128,19 +97,13 @@ export async function transferStagedBrief(
 export interface HandoffTarget {
   slot: string;
   agentId: string;
-  title: string | null;
   provider: string | null;
   model: string | null;
   state: SteerFaceState;
-  stateLabel: string;
   eligible: boolean;
   /** English reason on unavailable rows, null when eligible. */
   reason: string | null;
-  /** The destination needs recovery first ("Resume and hand over…"). */
   needsRecovery: boolean;
-  permissionNeeded: boolean;
-  limited: boolean;
-  resetUnknown: boolean;
 }
 
 function handoverReason(
@@ -170,14 +133,11 @@ function handoverReason(
     const reset = row.resetUnknown || !row.resetAt ? "reset unknown" : "waiting for reset";
     return { eligible: false, reason: `Quota depleted (${reset})`, needsRecovery: false };
   }
-  if (row.state === "needs-resume") {
-    return { eligible: true, reason: null, needsRecovery: true };
-  }
-  return { eligible: true, reason: null, needsRecovery: false };
+  return { eligible: true, reason: null, needsRecovery: row.state === "needs-resume" };
 }
 
 /**
- * Handover submenu rows: every holder of the scope in slot order with state,
+ * Handover candidates: every holder of the scope in slot order with state,
  * provider/model and a reason on unavailable rows. The scope comes from the
  * current tab; without it there is no submenu.
  */
@@ -203,69 +163,33 @@ export function handoffTargets(
     return {
       slot,
       agentId: row.agentId,
-      title: row.title,
       provider: row.provider,
       model: row.model,
       state: row.state,
-      stateLabel: stateWord(row.state),
       eligible: verdict.eligible,
       reason: verdict.reason,
       needsRecovery: verdict.needsRecovery,
-      permissionNeeded: row.permissionNeeded,
-      limited: row.state === "limited" || row.limited,
-      resetUnknown: row.resetUnknown,
     };
   });
 }
 
 // ---------------------------------------------------------------------------
-// Resume / refresh route selection
+// Reset eligibility and stale previews
 // ---------------------------------------------------------------------------
 
-export type ResumeRoute =
-  /** In-place resume in a Claude chat. */
-  | { kind: "resume-apply" }
-  /** Rewind or replacement: /factory fresh planning, then confirm and apply. */
-  | { kind: "fresh" }
-  /** Quota depleted: show reset details instead of refreshing. */
-  | { kind: "reset-details" }
-  /** Refresh is unsafe right now; the reason says why. */
-  | { kind: "blocked"; reason: string };
-
-/** Route manual refresh to in-place resume or the Fresh preview. */
-export function resumeRouteFor(
-  row: SteerPillRow,
-  opts: { keepChatHistory: boolean; clearProviders?: string[] },
-): ResumeRoute {
+export function resetSteerBlock(row: SteerPillRow): string | null {
   const live = (row.liveStatus ?? "").trim().toLowerCase();
   if (row.state === "running" || live === "running" || live === "initializing") {
-    return { kind: "blocked", reason: "This steer is running. Wait for the turn to end, then refresh." };
+    return "This steer is running. Wait for the turn to end.";
   }
-  if (row.permissionNeeded) {
-    return { kind: "blocked", reason: "A permission request is waiting. Answer it first, then refresh." };
-  }
-  if (row.state === "waiting") {
-    return { kind: "blocked", reason: `Busy (${row.detail}). Try again after it finishes.` };
-  }
-  if (row.state === "retired") {
-    return { kind: "blocked", reason: "This tab was replaced. Open the current holder instead." };
-  }
-  if (row.state === "unknown") {
-    return { kind: "blocked", reason: `Steer status is unknown: ${row.detail}.` };
-  }
-  if (row.state === "limited" || row.limited) {
-    return { kind: "reset-details" };
-  }
-  const clearable = isClaudeProvider(row.provider) && mayResumeClear(row.provider, {
-    ...RESUME_CLEAR_DEFAULTS, providers: opts.clearProviders ?? RESUME_CLEAR_DEFAULTS.providers,
-  });
-  if (clearable && !opts.keepChatHistory) return { kind: "resume-apply" };
-  return { kind: "fresh" };
+  if (row.permissionNeeded) return "A permission request is waiting. Answer it first.";
+  if (row.state === "waiting") return `Busy (${row.detail}). Try again after it finishes.`;
+  if (row.state === "retired") return "This tab was replaced. Open the current holder instead.";
+  if (row.state === "unknown") return `Steer status is unknown: ${row.detail}.`;
+  if (row.state === "limited" || row.limited) return "Quota depleted";
+  if (!row.scopeId || !row.slot) return "Steer membership is unavailable";
+  return null;
 }
-
-// ---------------------------------------------------------------------------
-// Expired previews and partial applies
-// ---------------------------------------------------------------------------
 
 /**
  * Error prefixes that mean "the preview no longer matches the live state":
@@ -284,21 +208,6 @@ export function isExpiredPreviewError(error: unknown): boolean {
   return EXPIRED_PREVIEW_PREFIXES.some((prefix) => message.includes(prefix));
 }
 
-export interface DeliveryOutcome {
-  applied: boolean;
-  delivered: boolean;
-  staged?: boolean;
-}
-
-/**
- * True when the apply landed but the brief did not go out and a staged retry
- * is available (partial apply: state stands, delivery can be retried through
- * the staged brief).
- */
-export function needsDeliveryRetry(outcome: DeliveryOutcome): boolean {
-  return outcome.applied === true && outcome.delivered !== true && outcome.staged === true;
-}
-
 // ---------------------------------------------------------------------------
 // Per-agent results
 // ---------------------------------------------------------------------------
@@ -309,196 +218,98 @@ export function steerResultKey(hostId: string, agentId: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Native menu descriptor (step 4 + pill scope change)
+// Native menu descriptor
 // ---------------------------------------------------------------------------
-
-export type SteerMenuAction =
-  | "create"
-  | "activate"
-  | "handover-target"
-  | "refresh"
-  | "settings"
-  | "revert"
-  | "fresh-context"
-  | "staged-brief"
-  | "open-factory"
-  | "noop";
 
 export type SteerMenuEntryDescriptor =
   | { kind: "separator"; id: string }
   | {
-    kind: "item";
-    id: string;
+    kind: "activate";
+    id: "activate";
     title: string;
     icon: string;
-    disabled?: boolean;
-    action: SteerMenuAction;
-    targetSlot?: string;
-    targetAgentId?: string;
-    activationEpoch?: number;
-    activationAlternatives?: { agentId: string; slot: string }[];
-    submenu?: SteerMenuEntryDescriptor[];
-  };
-
-export interface SteerMenuDescriptorOpts {
-  keepChatHistory: boolean;
-  /** True while the observed-change warning is active for this tab. */
-  observedChanged: boolean;
-  /** Revert availability for the retained observed tuple. */
-  revertAllowed: boolean;
-  /** Full revert reason from canRevertObserved (shortened for the title). */
-  revertReason?: string | null;
-}
-
-function shortRevertReason(reason: string | null | undefined): string {
-  if (!reason) return "unavailable";
-  if (/turn is running/i.test(reason)) return "turn running";
-  if (/changed again/i.test(reason)) return "changed again";
-  return "unavailable";
-}
-
-function shortRefreshBlock(reason: string): string {
-  if (/running/i.test(reason)) return "turn running";
-  if (/permission/i.test(reason)) return "permission pending";
-  if (/replaced/i.test(reason)) return "replaced";
-  if (/unknown/i.test(reason)) return "status unknown";
-  if (/Busy/i.test(reason)) return "busy";
-  return "unavailable";
-}
-
-function shortLockReason(reason: string | null): string {
-  if (!reason) return "locked";
-  if (/turn is running/i.test(reason)) return "turn running";
-  if (/Maximum efficiency/i.test(reason)) return "maximum efficiency";
-  return "locked";
-}
-
-function handoverItemTitle(target: HandoffTarget): string {
-  const head = `Steer ${target.slot} · ${target.stateLabel}`;
-  if (target.eligible) return head;
-  return `${head} — ${target.reason ?? "unavailable"}`;
-}
-
-/**
- * Native menu items for one steer tab: nothing but a list of actions.
- * Warning items (Revert, Continue with fresh context) come first while the
- * observed-change warning is active, then Create, Hand over to (submenu
- * with disabled holders carrying the short reason), Refresh/Resume, Change
- * settings (disabled with a short reason under Maximum efficiency), an
- * optional staged-brief item, a separator, and Open Factory.
- */
-export function describeSteerMenu(
-  self: SteerPillRow,
-  rows: SteerPillRow[],
-  opts: SteerMenuDescriptorOpts,
-): SteerMenuEntryDescriptor[] {
-  const items: SteerMenuEntryDescriptor[] = [];
-  if (opts.observedChanged) {
-    items.push({
-      kind: "item",
-      id: "revert-settings",
-      title: opts.revertAllowed
-        ? STEER_MENU_LABELS.revertSettings
-        : `${STEER_MENU_LABELS.revertSettings} (${shortRevertReason(opts.revertReason)})`,
-      icon: "Undo2",
-      disabled: !opts.revertAllowed,
-      action: "revert",
-    });
-    items.push({
-      kind: "item",
-      id: "fresh-context",
-      title: STEER_MENU_LABELS.freshContext,
-      icon: "RefreshCw",
-      action: "fresh-context",
-    });
-    items.push({ kind: "separator", id: "sep-warning" });
+    disabled: boolean;
+    activationEpoch: number;
+    activationAlternatives: { agentId: string; slot: string }[];
   }
-  items.push({ kind: "item", id: "create", title: STEER_MENU_LABELS.create, icon: "Plus", action: "create" });
+  | {
+    kind: "handover";
+    id: "handover";
+    title: string;
+    icon: string;
+    disabled: boolean;
+    targets: { id: string; title: string; disabled: boolean; slot: string; agentId: string }[];
+  }
+  | { kind: "reset" | "open-factory"; id: string; title: string; icon: string; disabled?: boolean };
 
+export function describeSteerMenu(self: SteerPillRow, rows: SteerPillRow[]): SteerMenuEntryDescriptor[] {
+  const items: SteerMenuEntryDescriptor[] = [];
   const targets = handoffTargets(rows, self.agentId);
   if (self.slot && self.scopeId && !self.advisor && self.state !== "retired" && self.activationEpoch != null) {
     const target = targets.find((entry) => entry.agentId === self.agentId);
     const disabled = !self.active && target?.eligible !== true;
     const label = self.active ? STEER_MENU_LABELS.retryActivation : STEER_MENU_LABELS.activate;
-    const alternatives = targets.filter((entry) => entry.eligible && entry.agentId !== self.agentId)
-      .map(({ agentId, slot }) => ({ agentId, slot }));
-    items.push({ kind: "item", id: "activate", title: disabled ? `${label} (${target?.reason ?? "unavailable"})` : label,
-      icon: "ArrowRight", action: "activate", disabled, activationEpoch: self.activationEpoch,
-      ...(alternatives.length ? { activationAlternatives: alternatives } : {}) });
-  }
-
-  if (targets.length === 0) {
     items.push({
-      kind: "item",
-      id: "handover",
-      title: `${STEER_MENU_LABELS.handover} (no other holders)`,
-      icon: "ArrowRightLeft",
-      disabled: true,
-      action: "noop",
-    });
-  } else {
-    items.push({
-      kind: "item",
-      id: "handover",
-      title: STEER_MENU_LABELS.handover,
-      icon: "ArrowRightLeft",
-      action: "noop",
-      submenu: targets.map((target) => ({
-        kind: "item" as const,
-        id: `handover-${target.agentId}`,
-        title: handoverItemTitle(target),
-        icon: "ArrowRight",
-        disabled: !target.eligible,
-        action: "handover-target" as const,
-        targetSlot: target.slot,
-        targetAgentId: target.agentId,
-      })),
+      kind: "activate", id: "activate", icon: "ArrowRight", disabled, activationEpoch: self.activationEpoch,
+      title: disabled ? `${label} (${target?.reason ?? "unavailable"})` : label,
+      activationAlternatives: targets.filter((entry) => entry.eligible && entry.agentId !== self.agentId)
+        .map(({ agentId, slot }) => ({ agentId, slot })),
     });
   }
 
-  const refreshLabel = resumeActionLabel(self.state);
-  const route = resumeRouteFor(self, { keepChatHistory: opts.keepChatHistory });
-  if (route.kind === "blocked") {
-    items.push({
-      kind: "item",
-      id: "refresh",
-      title: `${refreshLabel} (${shortRefreshBlock(route.reason)})`,
-      icon: "RefreshCw",
-      disabled: true,
-      action: "noop",
-    });
-  } else if (route.kind === "reset-details") {
-    items.push({
-      kind: "item",
-      id: "refresh",
-      title: `${refreshLabel} (quota depleted)`,
-      icon: "RefreshCw",
-      disabled: true,
-      action: "noop",
-    });
-  } else {
-    items.push({ kind: "item", id: "refresh", title: refreshLabel, icon: "RefreshCw", action: "refresh" });
-  }
-
-  if (self.settingsLocked) {
-    items.push({
-      kind: "item",
-      id: "settings",
-      title: `${STEER_MENU_LABELS.changeSettings} (${shortLockReason(self.settingsLockReason)})`,
-      icon: "Settings2",
-      disabled: true,
-      action: "noop",
-    });
-  } else {
-    items.push({ kind: "item", id: "settings", title: STEER_MENU_LABELS.changeSettings, icon: "Settings2", action: "settings" });
-  }
-
-  if (self.stagedBrief) {
-    items.push({ kind: "item", id: "staged", title: STEER_MENU_LABELS.stagedBrief, icon: "Send", action: "staged-brief" });
-  }
+  const destinations = self.active ? targets.filter(({ agentId }) => agentId !== self.agentId) : [];
+  items.push({
+    kind: "handover", id: "handover", title: STEER_MENU_LABELS.handover, icon: "ArrowRightLeft",
+    disabled: destinations.length === 0,
+    targets: destinations.map(({ slot, agentId, eligible }) => ({
+      id: `handover-${agentId}`, title: `Steer ${slot}`,
+      disabled: !eligible, slot, agentId,
+    })),
+  });
+  items.push({
+    kind: "reset", id: "reset", title: STEER_MENU_LABELS.reset, icon: "ListRestart",
+    disabled: resetSteerBlock(self) !== null,
+  });
   items.push({ kind: "separator", id: "sep-open" });
-  items.push({ kind: "item", id: "open-factory", title: STEER_MENU_LABELS.openFactory, icon: "Factory", action: "open-factory" });
+  items.push({ kind: "open-factory", id: "open-factory", title: STEER_MENU_LABELS.openFactory, icon: "Factory" });
   return items;
+}
+
+type Call<Contract extends PluginRpcContract> =
+  (input: RpcInput<Contract>) => Promise<RpcOutput<Contract>>;
+
+export async function handoverSteer(
+  source: Pick<SteerPillRow, "workspaceId" | "agentId">,
+  target: { slot: string; agentId: string },
+  initialize: InitializeNewSteer,
+  preview: Call<typeof factorySwitchPreview>,
+  apply: Call<typeof factorySwitch>,
+): Promise<RpcOutput<typeof factorySwitch>> {
+  const input = { workspaceId: source.workspaceId, callerId: source.agentId, to: target.slot };
+  const plan = await preview(input);
+  if (plan.workspaceId !== source.workspaceId || plan.fromId !== source.agentId || plan.toId !== target.agentId) {
+    throw new Error("The controller or destination changed. Choose the handover again.");
+  }
+  return apply({ ...input, fingerprint: plan.fingerprint, deliver: initialize === "send" ? "send" : "stage" });
+}
+
+export async function resetSteer(
+  { workspaceId, agentId, slot }: Pick<SteerPillRow, "workspaceId" | "agentId"> & { slot: string },
+  clearChatHistory: boolean,
+  saveHistory: (keepChatHistory: boolean) => Promise<InitializeNewSteer>,
+  preview: Call<typeof factoryFreshPreview>,
+  apply: Call<typeof factoryFresh>,
+): Promise<{ result: RpcOutput<typeof factoryFresh>; initialize: InitializeNewSteer }> {
+  const keepChatHistory = !clearChatHistory;
+  const input = { workspaceId, slot, keepChatHistory };
+  const plan = await preview(input);
+  if (plan.workspaceId !== workspaceId || plan.from !== agentId || plan.slot !== slot) {
+    throw new Error("The steer changed. Open Reset Steer again for the current holder.");
+  }
+  const initialize = await saveHistory(keepChatHistory);
+  const result = await apply({ ...input, fingerprint: plan.fingerprint,
+    deliver: initialize === "send" ? "send" : "stage", notifyPrevious: false });
+  return { result, initialize };
 }
 
 /** Stable key for a descriptor; the pill patches its behavior only on change. */

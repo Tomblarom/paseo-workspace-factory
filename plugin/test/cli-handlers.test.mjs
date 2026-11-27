@@ -1107,6 +1107,42 @@ test("Fresh RPC binds the requested route and rechecks live options before creat
   assert.equal(world.workspaces[0].metadata[AGENTS_KEY], undefined);
 });
 
+test("Fresh RPC can keep chat history by replacing a steer whose tab supports rewind", async () => {
+  const { world, workspace, active, paseo } = activationWorld();
+  const created = [];
+  const renamed = [];
+  world.createAgent = async (workspaceId, request) => {
+    const [provider, model] = request.config.provider.split("/");
+    const agent = { ...active, id: "steer-replacement", workspaceId, title: request.title,
+      provider, model, labels: request.labels, metadata: request.metadata };
+    world.agents.push(agent);
+    created.push(agent);
+    return { refresh: async () => ({ agent }) };
+  };
+  const deps = {
+    rewindClient: async () => ({
+      fetchAgentTimeline: async () => ({ entries: [{ item: { type: "user_message", messageId: "point" } }] }),
+      rewindAgent: async () => assert.fail("The original chat must not be rewound"),
+    }),
+    lookupFreshReceipt: async () => null,
+    freshPaseoCli: (args) => { renamed.push(args); },
+  };
+  const input = { workspaceId: workspace.id, slot: "A", keepChatHistory: true };
+  const preview = await handlers.previewFresh(input, { paseo }, loader, deps);
+  assert.equal(preview.refreshMode, "new-agent");
+  await assert.rejects(handlers.applyFresh({ ...input, keepChatHistory: false, fingerprint: preview.fingerprint },
+    { paseo }, loader, deps), /Something changed/);
+  const result = await handlers.applyFresh({ ...input, fingerprint: preview.fingerprint, deliver: "stage", notifyPrevious: false },
+    { paseo }, loader, deps);
+  assert.equal(result.applied, true);
+  assert.equal(result.refreshMode, "new-agent");
+  assert.equal(result.to, "steer-replacement");
+  assert.equal(result.stagedTo, "steer-replacement");
+  assert.equal(created.length, 1);
+  assert.equal(renamed.length, 1);
+  assert.deepEqual(world.sent, []);
+});
+
 test("Fresh RPC confirms Worker replacement and carries the requested provider and model", async () => {
   const world = makeWorld();
   const worker = world.agents[2];

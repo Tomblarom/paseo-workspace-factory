@@ -655,7 +655,7 @@ export async function applySteerSettings(
       // Staging is best-effort; the message below still keeps the brief.
     }
     throw new Error(
-      `Bound rewind route failed (${status}${reason}); nothing recorded, no new agent created. The brief is staged for this tab; retry from the steer menu.`,
+      `Bound rewind route failed (${status}${reason}); nothing recorded, no new agent created. The brief is staged for this tab; open Review brief in Factory.`,
     );
   }
   const { writes, actual, actualSessionId, verified } = await writeTuple(

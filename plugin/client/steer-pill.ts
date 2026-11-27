@@ -15,15 +15,6 @@ import {
   type SteerFaceState,
   type SteerPrimaryAction,
 } from "../shared/steer-state.js";
-import {
-  canRevertObserved,
-  detectObservedChange,
-  tupleFromLive,
-  updateObservedTracker,
-  type ObservedTracker,
-  type SettingsTuple,
-} from "../shared/steer-settings.js";
-
 /** Pill id prefixes; each family owns its prefix so pills coexist. */
 export const STEER_PILL_ID_PREFIX = "factory-steer-";
 export const ATTENTION_PILL_ID_PREFIX = "factory-attention-";
@@ -51,14 +42,6 @@ export interface SteerQuotaRowView {
   usedPct: number | null;
   resetsAt: string | null;
   stale: boolean;
-}
-
-export interface SteerSettingsTupleView {
-  provider: string | null;
-  model: string | null;
-  thinking: string | null;
-  speed: string | null;
-  sessionId?: string | null;
 }
 
 export interface SteerPillRow {
@@ -92,10 +75,6 @@ export interface SteerPillRow {
   thinking: string | null;
   speed: string | null;
   sessionId: string | null;
-  baseline: SteerSettingsTupleView | null;
-  confirmed: SteerSettingsTupleView | null;
-  settingsLocked: boolean;
-  settingsLockReason: string | null;
 }
 
 function isSteerState(value: unknown): value is SteerFaceState {
@@ -143,22 +122,6 @@ function quotaRowsOf(value: unknown): SteerQuotaRowView[] {
   return rows;
 }
 
-function tupleOrNull(value: unknown): SteerSettingsTupleView | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const row = value as Record<string, unknown>;
-  const hasAny = ["provider", "model", "thinking", "speed", "sessionId"].some(
-    (key) => typeof row[key] === "string" && (row[key] as string) !== "",
-  );
-  if (!hasAny) return null;
-  return {
-    provider: textOrNull(row.provider),
-    model: textOrNull(row.model),
-    thinking: textOrNull(row.thinking),
-    speed: textOrNull(row.speed),
-    sessionId: textOrNull(row.sessionId),
-  };
-}
-
 /** Reads the factory.steers feed, skipping entries without an agent target. */
 export function steerRowsOf(event: unknown): SteerPillRow[] {
   const record = event as { steers?: unknown } | null;
@@ -201,10 +164,6 @@ export function steerRowsOf(event: unknown): SteerPillRow[] {
       thinking: textOrNull(row.thinking),
       speed: textOrNull(row.speed),
       sessionId: textOrNull(row.sessionId),
-      baseline: tupleOrNull(row.baseline),
-      confirmed: tupleOrNull(row.confirmed),
-      settingsLocked: row.settingsLocked === true,
-      settingsLockReason: textOrNull(row.settingsLockReason),
     });
   }
   return rows;
@@ -252,9 +211,6 @@ export function pillStateWord(state: SteerFaceState): string {
   return (STEER_STATE_LABELS[state] ?? "Unknown").toLowerCase();
 }
 
-/** Collapsed label while the observed-change warning is active. */
-export const SETTINGS_CHANGED_WORD = "settings changed";
-
 /** Role word for the face title and header. */
 export function steerRole(row: Pick<SteerPillRow, "active" | "advisor" | "state">): string {
   if (row.advisor) return "Advisor";
@@ -290,17 +246,16 @@ function secondTitleLine(row: SteerPillRow): string {
   return parts.join(" · ");
 }
 
-export function faceFor(row: SteerPillRow, opts?: { settingsChanged?: boolean }): SteerPillFace {
+export function faceFor(row: SteerPillRow): SteerPillFace {
   const slot = row.slot ?? "?";
-  const changed = opts?.settingsChanged === true;
-  const word = changed ? SETTINGS_CHANGED_WORD : pillStateWord(row.state);
-  const first = `Steer ${slot} · ${steerRole(row)} · ${word}`;
+  const word = row.state === "needs-resume" ? null : pillStateWord(row.state);
+  const first = [`Steer ${slot}`, steerRole(row), word].filter(Boolean).join(" · ");
   const second = secondTitleLine(row);
   const title = second ? `${first}\n${second}` : first;
   return {
-    label: `${slot} · ${changed ? SETTINGS_CHANGED_WORD : pillStateWord(row.state)}`,
+    label: word ? `${slot} · ${word}` : slot,
     title,
-    icon: changed ? "TriangleAlert" : (STEER_PILL_ICONS[row.state] ?? "CircleHelp"),
+    icon: STEER_PILL_ICONS[row.state] ?? "CircleHelp",
     accessibilityLabel: second ? `${first} · ${second}` : first,
   };
 }
@@ -319,53 +274,6 @@ export function disconnectedFace(row: SteerPillRow): SteerPillFace {
 }
 
 // ---------------------------------------------------------------------------
-// Observed-change tracking (step 4)
-// ---------------------------------------------------------------------------
-
-export interface SteerObservedState {
-  tracker: ObservedTracker;
-  /** True while the warning is active (pill shows "settings changed"). */
-  changed: boolean;
-  revertAllowed: boolean;
-  revertReason: string | null;
-  live: SettingsTuple;
-}
-
-/** Live tuple from a feed row (provider/model/thinking/speed). */
-export function liveTupleOfRow(row: SteerPillRow): SettingsTuple {
-  return tupleFromLive({ provider: row.provider, model: row.model, thinking: row.thinking, speed: row.speed });
-}
-
-/**
- * Observed-change state for one row: detect against the turn-end baseline
- * (no warning for a confirmed Factory transition, Unknown without a
- * comparable baseline), retain the first observed tuple, and check revert
- * eligibility (idle and live still equal to the observed change).
- */
-export function observedStateFor(
-  row: SteerPillRow,
-  prev: ObservedTracker | null,
-): SteerObservedState {
-  const live = liveTupleOfRow(row);
-  const verdict = detectObservedChange({
-    live,
-    liveSessionId: row.sessionId,
-    baseline: row.baseline ? { ...row.baseline, sessionId: row.baseline.sessionId ?? null } : null,
-    confirmed: row.confirmed,
-  });
-  const tracker = updateObservedTracker(prev, verdict);
-  const changed = tracker.state === "changed" && tracker.observed !== null;
-  const revert = changed
-    ? canRevertObserved({
-      live,
-      observed: tracker.observed,
-      liveStatus: row.liveStatus,
-      openTurn: row.state === "running",
-    })
-    : { allowed: false as const, reason: "No observed change to revert." };
-  return { tracker, changed, revertAllowed: revert.allowed, revertReason: revert.reason, live };
-}
-
 export function sameFace(a: SteerPillFace, b: SteerPillFace): boolean {
   return a.label === b.label && a.title === b.title && a.icon === b.icon;
 }
@@ -408,8 +316,6 @@ export interface SteerPillEntry {
   row: SteerPillRow;
   /** Stable key of the last menu behavior; behavior patches only on change. */
   menuKey: string;
-  /** Retained observed-change tuple while the warning is active. */
-  observed: ObservedTracker | null;
 }
 
 export type SteerPillMap = Map<string, SteerPillEntry>;
@@ -418,7 +324,6 @@ export type SteerPillMap = Map<string, SteerPillEntry>;
 export type SteerMenuBuilder = (
   row: SteerPillRow,
   rows: SteerPillRow[],
-  observed: SteerObservedState,
 ) => { behavior: PluginButtonBehavior; menuKey: string };
 
 /**
@@ -439,12 +344,10 @@ export function syncSteerPills(
   for (const row of rows) {
     seen.add(row.agentId);
     const known = pills.get(row.agentId);
-    const observed = observedStateFor(row, known?.observed ?? null);
-    const face = faceFor(row, { settingsChanged: observed.changed });
-    const built = buildMenu(row, rows, observed);
+    const face = faceFor(row);
+    const built = buildMenu(row, rows);
     if (known) {
       known.row = row;
-      known.observed = observed.tracker;
       const patch: { title?: string; label?: string; icon?: string; behavior?: PluginButtonBehavior } = {};
       if (!sameFace(known.face, face)) {
         patch.title = face.title;
@@ -479,7 +382,6 @@ export function syncSteerPills(
         face,
         row,
         menuKey: built.menuKey,
-        observed: observed.tracker,
       });
     } catch {
       // No composer for this agent (history-only tab) — retry on next event.

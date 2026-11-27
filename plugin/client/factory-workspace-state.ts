@@ -2,7 +2,7 @@ import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
 import type { factoryPlan, factoryStatus } from "../shared/factory.js";
 import { parseFactoryArgs } from "../shared/factory-args.js";
 import { modelDisplayName } from "../shared/model-label.js";
-import { resumeRouteFor } from "./steer-menu.js";
+import { resetSteerBlock } from "./steer-menu.js";
 import type { SteerPillRow } from "./steer-pill.js";
 
 export type WorkspaceStatus = RpcOutput<typeof factoryStatus>;
@@ -61,9 +61,7 @@ export function steerModelName(model: string | null, catalog: readonly {
 }
 
 export function steerActionEligibility(row: SteerPillRow) {
-  const route = resumeRouteFor(row, { keepChatHistory: false });
-  const reason = route.kind === "blocked" ? route.reason : route.kind === "reset-details" ? "Quota depleted"
-    : !row.scopeId || !row.slot ? "Steer membership is unavailable" : null;
+  const reason = resetSteerBlock(row);
   return {
     reset: reason,
     resume: reason ?? (row.state === "needs-resume" ? null : "No recovery pending"),

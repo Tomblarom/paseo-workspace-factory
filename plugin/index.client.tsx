@@ -1,3 +1,5 @@
+import { settingsRpc, type RpcInput } from "@getpaseo/plugin";
+import type { ComponentType } from "react";
 import type {
   PluginAgentCommandContext,
   PluginButtonBehavior,
@@ -24,13 +26,14 @@ import { FactorySidebarItem } from "./client/factory-sidebar-item.js";
 import { submitFactoryCommand } from "./client/factory-submit.js";
 import { dismissFactoryResultPill, showFactoryResultPill } from "./client/result-pill.js";
 import { FactorySettings } from "./client/settings-factory.js";
-import { requestOpenFactory, subscribeOpenFactory } from "./client/steer-nav.js";
-import { SteerMenu, type SteerMenuAction } from "./client/steer-menu-content.js";
+import { ResetSteerPopover } from "./client/steer-menu-content.js";
 import {
   activationMenuBehavior,
   describeSteerMenu,
+  handoverSteer,
   menuKeyFor,
-  type SteerMenuEntryDescriptor,
+  transferStagedBrief,
+  type InitializeNewSteer,
 } from "./client/steer-menu.js";
 import {
   attentionPillId,
@@ -39,13 +42,15 @@ import {
   steerRowsOf,
   syncSteerPills,
   teardownSteerPills,
-  type SteerObservedState,
   type SteerPillMap,
   type SteerPillRow,
 } from "./client/steer-pill.js";
 import { assertSteerContext } from "./shared/agent-guard.js";
 import { attentionStatus } from "./shared/context-continuation.js";
-import { factoryCold, factorySteerActivate, factorySteers } from "./shared/factory.js";
+import {
+  factoryCold, factorySteerActivate, factorySteerBrief, factorySteers, factorySwitch, factorySwitchPreview,
+} from "./shared/factory.js";
+import { factorySteerMenuSettings } from "./shared/settings.js";
 
 const SETTINGS_SCREEN_ID = "factory-settings";
 
@@ -57,119 +62,114 @@ function openFactory({ openPanel }: PluginWorkspaceCommandContext | PluginAgentC
   openPanel("factory");
 }
 
-/** One steer action as a popover: the menu item opens only its own flow. */
-function steerActionPopover(
-  action: SteerMenuAction,
-  composers: PluginClientContext["composers"],
-  extra?: {
-    targetSlot?: string;
-    targetAgentId?: string;
-    observed?: {
-      provider: string | null;
-      model: string | null;
-      thinking: string | null;
-      speed: string | null;
-      sessionId: string | null;
-    } | null;
-  },
-) {
-  return function SteerActionContent(props: PluginButtonContentProps) {
-    if (props.context !== "agent") return null;
-    return (
-      <SteerMenu
-        key={`${props.agentId}-${action}`}
-        agentId={props.agentId}
-        workspaceId={props.workspaceId}
-        theme={props.theme}
-        compact={props.layout.compact}
-        close={props.close}
-        initialAction={action}
-        initialSlot={extra?.targetSlot}
-        initialAgentId={extra?.targetAgentId}
-        observed={extra?.observed ?? null}
-        composers={composers}
-      />
-    );
-  };
-}
-
-function toMenuEntries(
-  descriptor: SteerMenuEntryDescriptor[],
-  ctx: { row: SteerPillRow; observed: SteerObservedState; composers: PluginClientContext["composers"];
-    activate: Parameters<typeof activationMenuBehavior>[2] },
-): PluginButtonMenuEntry[] {
-  const popover = (action: SteerMenuAction, extra?: Parameters<typeof steerActionPopover>[2]) =>
-    steerActionPopover(action, ctx.composers, extra);
-  return descriptor.map((entry): PluginButtonMenuEntry => {
-    if (entry.kind === "separator") return { kind: "separator", id: entry.id };
-    if (entry.disabled === true) {
-      return { kind: "item", id: entry.id, title: entry.title, icon: entry.icon, disabled: true, behavior: { kind: "action", onPress: () => {} } };
-    }
-    if (entry.submenu) {
-      return { kind: "item", id: entry.id, title: entry.title, icon: entry.icon, behavior: { kind: "menu", items: toMenuEntries(entry.submenu, ctx) } };
-    }
-    switch (entry.action) {
-      case "create":
-        return { kind: "item", id: entry.id, title: entry.title, icon: entry.icon, behavior: { kind: "popover", Content: popover("create") } };
-      case "activate": {
-        const epoch = entry.activationEpoch;
-        return { kind: "item", id: entry.id, title: entry.title, icon: entry.icon,
-          ...(epoch === undefined ? { disabled: true, behavior: { kind: "action", onPress: () => {} } as const } :
-            { behavior: activationMenuBehavior(ctx.row, epoch, ctx.activate) }) };
-      }
-      case "handover-target":
-        return { kind: "item", id: entry.id, title: entry.title, icon: entry.icon, behavior: { kind: "popover", Content: popover("handover", { targetSlot: entry.targetSlot, targetAgentId: entry.targetAgentId }) } };
-      case "refresh":
-      case "fresh-context":
-        return { kind: "item", id: entry.id, title: entry.title, icon: entry.icon, behavior: { kind: "popover", Content: popover(entry.action === "fresh-context" ? "fresh-context" : "refresh") } };
-      case "settings":
-        return { kind: "item", id: entry.id, title: entry.title, icon: entry.icon, behavior: { kind: "popover", Content: popover("settings") } };
-      case "revert": {
-        const seen = ctx.observed.tracker.observed;
-        return { kind: "item", id: entry.id, title: entry.title, icon: entry.icon, behavior: { kind: "popover", Content: popover("revert", { observed: seen ? { ...seen, sessionId: ctx.row.sessionId } : null }) } };
-      }
-      case "staged-brief":
-        return { kind: "item", id: entry.id, title: entry.title, icon: entry.icon, behavior: { kind: "popover", Content: popover("staged") } };
-      case "open-factory":
-        return { kind: "item", id: entry.id, title: entry.title, icon: entry.icon, behavior: { kind: "action", onPress: () => requestOpenFactory({ workspaceId: ctx.row.workspaceId, agentId: ctx.row.agentId }) } };
-      default:
-        return { kind: "item", id: entry.id, title: entry.title, icon: entry.icon, disabled: true, behavior: { kind: "action", onPress: () => {} } };
-    }
-  });
-}
-
-/**
- * Native menu behavior for one steer tab. Keep-chat-history only switches
- * between the resume and fresh routes inside the Refresh popover (both are
- * enabled menu items), so the descriptor builds with a fixed value and the
- * popover reads the live setting.
- */
 function buildSteerMenuBehavior(
   row: SteerPillRow,
   rows: SteerPillRow[],
-  observed: SteerObservedState,
-  composers: PluginClientContext["composers"],
-  activate: Parameters<typeof activationMenuBehavior>[2],
+  actions: {
+    activate: Parameters<typeof activationMenuBehavior>[2];
+    handover: (source: SteerPillRow, target: { slot: string; agentId: string }) => Promise<void>;
+    reset: ComponentType<PluginButtonContentProps>;
+    openFactory: (row: SteerPillRow) => void;
+  },
 ): { behavior: PluginButtonBehavior; menuKey: string } {
-  const descriptor = describeSteerMenu(row, rows, {
-    keepChatHistory: false,
-    observedChanged: observed.changed,
-    revertAllowed: observed.revertAllowed,
-    revertReason: observed.revertReason,
+  const descriptor = describeSteerMenu(row, rows);
+  const items = descriptor.map((entry): PluginButtonMenuEntry => {
+    if (entry.kind === "separator") return entry;
+    const item = { kind: "item" as const, id: entry.id, title: entry.title, icon: entry.icon, disabled: entry.disabled };
+    switch (entry.kind) {
+      case "activate":
+        return { ...item, behavior: activationMenuBehavior(row, entry.activationEpoch, actions.activate) };
+      case "handover":
+        return { ...item, behavior: entry.disabled ? { kind: "action", onPress: () => {} } : {
+          kind: "menu",
+          items: entry.targets.map((target) => ({
+            kind: "item", id: target.id, title: target.title, icon: "ArrowRight", disabled: target.disabled,
+            behavior: { kind: "action", onPress: () => actions.handover(row, target) },
+          })),
+        } };
+      case "reset":
+        return { ...item, behavior: { kind: "popover", Content: actions.reset } };
+      case "open-factory":
+        return { ...item, behavior: { kind: "action", onPress: () => actions.openFactory(row) } };
+    }
   });
-  return { behavior: { kind: "menu", items: toMenuEntries(descriptor, { row, observed, composers, activate }) }, menuKey: menuKeyFor(descriptor) };
+  return { behavior: { kind: "menu", items }, menuKey: menuKeyFor(descriptor) };
 }
 
 export default function contribute(client: PluginClientContext) {
   const panelSteers = createFactorySteerFeed();
   const workspaceResults = createFactoryResultStores();
-  const activate: Parameters<typeof activationMenuBehavior>[2] = async (input) => {
-    const result = await client.rpc(factorySteerActivate, input);
-    const results = workspaceResults(input.workspaceId);
-    results.setResult({ kind: "info", at: new Date().toISOString(), text: result.detail });
-    const summary = result.status === "sent" ? "Steer active" :
-      result.status === "pending" ? "Activation pending" : "Continuation blocked";
-    showFactoryResultPill(client, { workspaceId: input.workspaceId, agentId: input.agentId, summary, results });
+  function reportSteerResult({ workspaceId, agentId }: Pick<SteerPillRow, "workspaceId" | "agentId">, summary: string, detail: string) {
+    const results = workspaceResults(workspaceId);
+    results.setResult({ kind: "info", at: new Date().toISOString(), text: detail });
+    showFactoryResultPill(client, { workspaceId, agentId, summary, results });
+  }
+
+  async function briefResult(workspaceId: string, result: {
+    epoch: number;
+    delivered: boolean;
+    stageId?: string;
+    stagedTo?: string | null;
+    deliveryError?: unknown;
+    stagingError?: unknown;
+  }, initialize: InitializeNewSteer): Promise<string> {
+    if (result.delivered) return "The continuation brief was sent.";
+    const error = result.deliveryError ?? result.stagingError;
+    const { stageId, stagedTo } = result;
+    if (!stageId || !stagedTo) return String(error ?? "");
+    const staged = "Review the staged brief in Factory.";
+    if (error) return `${error} ${staged}`;
+    if (initialize !== "composer") return staged;
+    const composer = () => client.composers({ agentId: stagedTo })[0];
+    if (!composer()) return staged;
+    try {
+      const claimId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36)}`;
+      await transferStagedBrief((input) => client.rpc(factorySteerBrief, input),
+        { workspaceId, agentId: stagedTo, stageId, epoch: result.epoch }, composer, { claimId, placed: false }, true);
+      void composer()?.focus().catch(() => {});
+      return "The continuation brief was placed in the destination composer.";
+    } catch (thrown) {
+      return `${thrown instanceof Error ? thrown.message : String(thrown)} ${staged}`;
+    }
+  }
+
+  const steerActions = {
+    async activate(input: RpcInput<typeof factorySteerActivate>) {
+      const result = await client.rpc(factorySteerActivate, input);
+      const summary = result.status === "sent" ? "Steer active" :
+        result.status === "pending" ? "Activation pending" : "Continuation blocked";
+      reportSteerResult(input, summary, result.detail);
+    },
+    async handover(source: SteerPillRow, target: { slot: string; agentId: string }) {
+      try {
+        const state = await client.rpc(settingsRpc(factorySteerMenuSettings.id).read, {});
+        if (state.status !== "ready") throw new Error(state.error);
+        const { initializeNewSteer } = factorySteerMenuSettings.schema.parse(state.values);
+        const result = await handoverSteer(source, target, initializeNewSteer,
+          (input) => client.rpc(factorySwitchPreview, input), (input) => client.rpc(factorySwitch, input));
+        if (!result.applied) throw new Error(String(result.deliveryError ?? "Factory could not confirm the handover."));
+        const detail = result.deliveryPending ? "The brief is queued pending context renewal."
+          : result.deliveryBlocked ? String(result.deliveryError ?? "Continuation is blocked. Review recovery in Factory.")
+            : await briefResult(source.workspaceId, result, initializeNewSteer);
+        const summary = `Steer ${result.to} active`;
+        reportSteerResult(source, summary, [`Steer ${result.to} is now active (epoch ${result.epoch}).`, detail].filter(Boolean).join(" "));
+      } catch (thrown) {
+        reportSteerResult(source, "Handover blocked", thrown instanceof Error ? thrown.message : String(thrown));
+      }
+    },
+    reset: function ResetPopover(props: PluginButtonContentProps) {
+      if (props.context !== "agent") return null;
+      return <ResetSteerPopover {...props} feed={panelSteers} onReset={async (source, { result, initialize }) => {
+        const summary = result.idempotent ? "Steer already reset" : "Steer reset";
+        const chat = result.idempotent ? "" : result.refreshMode === "rewind"
+          ? "The context was reset in this tab." : "A new agent continues. The original chat stays available.";
+        const brief = result.idempotent ? "" : await briefResult(source.workspaceId, result, initialize);
+        reportSteerResult(source, summary, [`${summary}.`, chat, brief].filter(Boolean).join(" "));
+      }} />;
+    },
+    openFactory({ workspaceId, agentId }: SteerPillRow) {
+      client.openPanel("factory", { workspaceId, agentId });
+    },
   };
   client.addWorkspacePanel({
     id: "factory",
@@ -282,8 +282,8 @@ export default function contribute(client: PluginClientContext) {
       const rows = steerRowsOf(event);
       panelSteers.update(rows);
       steerIds = steerAgentIds(rows);
-      syncSteerPills(client, steerPills, rows, (row, allRows, observed) =>
-        buildSteerMenuBehavior(row, allRows, observed, (selector) => client.composers(selector), activate));
+      syncSteerPills(client, steerPills, rows, (row, allRows) =>
+        buildSteerMenuBehavior(row, allRows, steerActions));
       // A steer row that arrived here replaces its attention pill, if any.
       for (const [id, pill] of attentionPills) {
         if (!steerIds.has(id)) continue;
@@ -331,17 +331,7 @@ export default function contribute(client: PluginClientContext) {
   });
   const stopCheckpointDisplay = initCheckpointDisplay(client);
   void syncCheckpointDisplayFromSettings();
-  // "Open Factory" from a pill popover: the popover cannot open the panel
-  // itself, so the entry opens it (the panel defaults to this workspace).
-  const stopOpenFactory = subscribeOpenFactory((target) => {
-    try {
-      client.openPanel("factory", { workspaceId: target.workspaceId, agentId: target.agentId });
-    } catch {
-      // The panel surface is gone; the pill menu still holds the result.
-    }
-  });
   return () => {
-    stopOpenFactory();
     stopCheckpointDisplay();
     void attentionFeed.release().catch(() => {});
     for (const pill of attentionPills.values()) {

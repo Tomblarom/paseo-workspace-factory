@@ -352,6 +352,8 @@ export const factoryFreshPreview = defineRpc({
     model: z.string().trim().min(1).optional(),
     repo: z.string().min(1).optional(),
     workspaceId: z.string().min(1).optional(),
+    /** Skip in-place rewind and leave the original chat intact. */
+    keepChatHistory: z.boolean().optional(),
   }),
   output: z.looseObject({
     repo: z.string(),
@@ -386,6 +388,8 @@ export const factoryFresh = defineRpc({
     model: z.string().trim().min(1).optional(),
     repo: z.string().min(1).optional(),
     workspaceId: z.string().min(1).optional(),
+    /** Skip in-place rewind and leave the original chat intact. */
+    keepChatHistory: z.boolean().optional(),
     fingerprint: z.string().min(1),
     /** "stage" applies without sending; the packet is staged for later delivery. */
     deliver: z.enum(["send", "stage"]).optional(),

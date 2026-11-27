@@ -430,6 +430,7 @@ async function freshRpcOptions(input: FreshInput, paseo: any, loader: ConfigLoad
   const options: any = {
     client: paseo, discovery, config, slot: input.slot ?? null, workerId: input.workerId ?? null,
     provider: input.provider ?? null, model: input.model ?? null,
+    ...(input.keepChatHistory === true ? { requireRefreshMode: "new-agent" } : {}),
     git: createGit(), rewindClient: deps?.rewindClient ?? defaultCreateRewindClient,
     promptOptions: await loader.loadPromptOptions(paseo), admitTarget: freshPrivacyReader(paseo, loader, deps),
     quotaSnapshot: policy.quotaSnapshot, zerosub: policy.zerosub, repoPublic: policy.repoPublic,
@@ -551,7 +552,7 @@ export async function applyFresh(
         throw error;
       }
       const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`${message} The brief is staged for this tab; retry from the steer menu.`);
+      throw new Error(`${message} The brief is staged for this tab; open Review brief in Factory.`);
     }
     throw error;
   }

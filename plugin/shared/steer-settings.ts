@@ -1,18 +1,9 @@
-// Catalog-backed steer settings (docs/design/steer-menu.md, step 4): pure,
-// testable logic for "Change settings…", the efficiency lock, the settings
-// route (Apply here vs Refresh), and the observed-change warning. No imports,
-// so plain node:test can use it. Server handlers (server/steer-settings.ts)
-// and the pill menu (client/steer-menu.ts, client/steer-pill.ts) share this.
-// All UI text is English.
+// Catalog-backed routing and normalization for steer settings.
 export interface SettingsTuple {
   provider: string | null;
   model: string | null;
   thinking: string | null;
   speed: string | null;
-}
-
-export interface SettingsBaseline extends SettingsTuple {
-  sessionId: string | null;
 }
 
 function cleanString(value: unknown): string | null {
@@ -395,114 +386,6 @@ export function chooseSettingsRoute(input: SettingsRouteInput): SettingsRoute {
     reason: "Small cold context. Safe to apply here.",
     cacheRisk: true,
   };
-}
-
-// ---------------------------------------------------------------------------
-// Observed-change warning
-// ---------------------------------------------------------------------------
-
-export type ObservedState = "clean" | "changed" | "unknown";
-
-export interface ObservedVerdict {
-  state: ObservedState;
-  /** The observed live tuple while changed, else null. */
-  observed: SettingsTuple | null;
-}
-
-function tupleOf(value: unknown): SettingsTuple | null {
-  if (!value || typeof value !== "object") return null;
-  const record = value as Record<string, unknown>;
-  return {
-    provider: normalizeProvider(record.provider),
-    model: normalizeModel(record.model),
-    thinking: normalizeThinking(record.thinking),
-    speed: normalizeSpeed(record.provider, record.model, record.speed),
-  };
-}
-
-/**
- * Compares the live tuple against the stored turn-end baseline. "Unknown"
- * when there is no comparable baseline (first snapshot, reconnect, or a
- * session change): no warning. "Clean" when live matches the baseline, or
- * matches the Factory's last confirmed transition (its baseline write is
- * still on the way). Otherwise "changed": show "Settings changed · cache
- * at risk" once with Revert and Continue actions.
- */
-export function detectObservedChange(args: {
-  live: SettingsTuple | null;
-  liveSessionId: unknown;
-  baseline: SettingsBaseline | null;
-  confirmed?: SettingsTuple | null;
-}): ObservedVerdict {
-  const live = args.live && tupleOf(args.live);
-  const baseline = args.baseline && tupleOf(args.baseline);
-  const baselineSession = typeof args.baseline?.sessionId === "string" && args.baseline.sessionId
-    ? args.baseline.sessionId
-    : null;
-  const liveSession = typeof args.liveSessionId === "string" && args.liveSessionId
-    ? args.liveSessionId
-    : null;
-  if (!live || !baseline || !baselineSession || !liveSession || baselineSession !== liveSession) {
-    return { state: "unknown", observed: null };
-  }
-  if (tuplesEqual(live, baseline)) return { state: "clean", observed: null };
-  const confirmed = args.confirmed ? tupleOf(args.confirmed) : null;
-  if (confirmed && tuplesEqual(live, confirmed)) return { state: "clean", observed: null };
-  return { state: "changed", observed: live };
-}
-
-export interface ObservedTracker {
-  /** The retained observed tuple while the warning is active, else null. */
-  observed: SettingsTuple | null;
-  state: ObservedState;
-}
-
-/**
- * Retains the first observed change while the warning is active. A newer
- * live tuple does not replace it, so Revert stays disabled once the settings
- * changed again. A clean or unknown verdict clears the retained tuple.
- */
-export function updateObservedTracker(
-  prev: ObservedTracker | null,
-  verdict: ObservedVerdict,
-): ObservedTracker {
-  if (verdict.state !== "changed" || !verdict.observed) {
-    return { observed: null, state: verdict.state };
-  }
-  if (prev?.observed && verdict.observed) {
-    return { observed: prev.observed, state: "changed" };
-  }
-  return { observed: verdict.observed, state: "changed" };
-}
-
-export interface RevertCheck {
-  allowed: boolean;
-  /** Short English reason when revert is unavailable. */
-  reason: string | null;
-}
-
-/**
- * Revert is only offered while idle and while the live tuple still equals
- * the observed change. A newer change, a running turn, or a cleared warning
- * disables it. The server revalidates and verifies the restored tuple.
- */
-export function canRevertObserved(args: {
-  live: SettingsTuple | null;
-  observed: SettingsTuple | null;
-  liveStatus?: unknown;
-  openTurn?: unknown;
-}): RevertCheck {
-  if (!args.observed || !args.live) {
-    return { allowed: false, reason: "No observed change to revert." };
-  }
-  const live = typeof args.liveStatus === "string" ? args.liveStatus.trim().toLowerCase() : "";
-  if (args.openTurn === true || live === "running" || live === "initializing") {
-    return { allowed: false, reason: "A turn is running. Revert after it ends." };
-  }
-  if (!tuplesEqual(args.live, args.observed)) {
-    return { allowed: false, reason: "Settings changed again. Review before reverting." };
-  }
-  return { allowed: true, reason: null };
 }
 
 /**

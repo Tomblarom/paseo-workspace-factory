@@ -11,7 +11,7 @@ import { SettingsSaveError, useAutosave } from "./settings-autosave.js";
 
 const SECTION_TITLE = "Steer menu";
 const SECTION_INFO =
-  "Brief delivery for new steers and chat history for automatic actions.";
+  "Brief delivery and chat history for steers.";
 
 export function SteerMenuSettingsSection() {
   const { state, change, errors } = useAutosave(factorySteerMenuSettings);
@@ -42,7 +42,7 @@ export function SteerMenuSettingsSection() {
       <SettingsCard>
         <SettingsSelect
           label="Initialize new steer"
-          hint="Send delivers the brief at once. Composer places it in the Paseo composer (goes out with the next own prompt; falls back to sending when no composer tab is open). Later leaves the composer empty for the steer menu."
+          hint="Send delivers the brief at once. Composer puts it in the destination draft when available. A staged brief can be opened with Review brief in Factory."
           value={values.initializeNewSteer}
           options={[
             { label: "Send the brief at once", value: "send" },
@@ -55,7 +55,7 @@ export function SteerMenuSettingsSection() {
         />
         <SettingsSwitch
           label="Keep chat history"
-          hint="Preserve steer chats during automatic delivery and cleanup, using native compaction when needed and supported."
+          hint="Preserve steer chats during automatic delivery and cleanup. Reset Steer uses this as its default."
           value={values.keepChatHistory}
           onValueChange={(keepChatHistory) =>
             void save((current) => ({ ...current, keepChatHistory }))
