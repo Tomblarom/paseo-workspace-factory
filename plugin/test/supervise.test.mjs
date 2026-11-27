@@ -1724,6 +1724,47 @@ test("continuedIn on a stayed row follows the continuation instead of failing ov
   assert.equal(world.calls.filter((c) => c[0] === "agent.send").length, 0);
 });
 
+test("model-specific quota leaves a healthy standby on the same account eligible", async () => {
+  const { world, ws, steers } = unansweredWorld();
+  steers.A.model = "limited-model";
+  steers.B.model = "healthy-model";
+  steers.C.archivedAt = at(NOW - MIN);
+  const account = { id: "shared", family: "codex", sampledAt: at(NOW), windows: [
+    { id: "limited", models: [steers.A.model], usedPct: 100, resetsAt: RESET_AT },
+    { id: "healthy", models: [steers.B.model], usedPct: 20, resetsAt: RESET_AT },
+  ] };
+  const zerosub = { accounts: [account], agentAccount: {
+    [steers.A.id]: account.id, [steers.B.id]: account.id,
+  }, pending: {} };
+  const result = await supervise.runFailoverCheck(fakeClient(world), { id: REPO, workspaceId: ws.id },
+    failoverDeps(world, { zerosub, force: true, quotaTrigger: { accountId: account.id } }));
+  assert.equal(result.action, "failover");
+  assert.equal(ws.metadata[METADATA_KEY].activeAgentId, steers.B.id);
+  assert.equal(sendsTo(world, steers.A.id).length, 0);
+  assert.equal(sendsTo(world, steers.B.id).length, 1);
+});
+
+test("failover waits for a standby's pending account move to settle", async () => {
+  const { world, ws, steers } = unansweredWorld();
+  steers.A.provider = steers.B.provider = "claude";
+  steers.C.archivedAt = at(NOW - MIN);
+  const pending = zsState({
+    accounts: [zsAccount("acc-full", 99), zsAccount("acc-roomy", 20)],
+    routes: [zsRoute(steers.A.id, "acc-full"), zsRoute(steers.B.id, "acc-roomy", "acc-full")],
+  });
+  const ready = { ...pending, pending: {}, agentAccount: { ...pending.agentAccount, [steers.B.id]: "acc-roomy" } };
+  const scope = { id: REPO, workspaceId: ws.id };
+  const paseo = fakeClient(world);
+  const waiting = await supervise.runFailoverCheck(paseo, scope, failoverDeps(world, { zerosub: pending }));
+  assert.equal(waiting.action, "none");
+  assert.equal(ws.metadata[METADATA_KEY].epoch, 3);
+  assert.equal(sendsTo(world, steers.B.id).length, 0);
+  const applied = await supervise.runFailoverCheck(paseo, scope, failoverDeps(world, { zerosub: ready }));
+  assert.equal(applied.action, "failover");
+  assert.equal(ws.metadata[METADATA_KEY].activeAgentId, steers.B.id);
+  assert.equal(sendsTo(world, steers.B.id).length, 1);
+});
+
 test("a quota-triggered takeover waits when the bound account loses its usage reading", async () => {
   const world = makeWorld();
   const { ws, steers } = provisioned(world);

@@ -1435,7 +1435,7 @@ export async function runFailoverCheck(
     return { action: "abort", reason: "moved" };
   }
   const scopes = deps.scopes ?? listScopes(paseoState);
-  const exhaustedPct = config?.quota?.exhaustedPct ?? settings?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct;
+  const exhaustedPct = config?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct;
   const chain = failoverChain({
     steers: rows,
     activeSlot,
@@ -1443,10 +1443,6 @@ export async function runFailoverCheck(
     advisorIds: rows.filter((r) => r.advisor).map((r) => r.id),
     ...domainHubSteers(paseoState, scopes, scope, wsf, config),
     failingPool: deps.failingPool ?? (config ? rows.find((row) => row.id === holder)?.pool ?? null : null),
-    zerosub,
-    failingAccountId: holder && zerosub ? (zerosub.agentAccount?.[holder] ?? null) : null,
-    exhaustedPct,
-    now: nowMs,
   });
   const waitReset = (): FailoverResult | null => {
     const wakeAt = waitResetWakeAt({ zerosub, targetId: holder, switchWakeAt: holderSwitchWakeAt, nowMs, exhaustedPct });
@@ -1526,7 +1522,7 @@ export async function runFailoverCheck(
       candidateAdmission?.allowed && !sharesLimit && !unavailableForSwitch;
     return { ...steerRouteCandidate({ agent: candidate ?? { id: item.steerId }, entry: candidateEntry,
       entries: candidateWorkspace?.metadata?.[AGENTS_KEY], row: projections.find((row) => row.agentId === item.steerId),
-      snapshot: routing, kind: "handover", eligible, preferenceRank: index,
+      snapshot: routing, admission: candidateAdmission ?? undefined, kind: "handover", eligible, preferenceRank: index,
       reason: unavailableForSwitch ? "target unavailable for authority switch" :
         sharesLimit ? "same limited account and model" : candidateAdmission?.reason ?? "target ineligible" }),
       target: item, escalation: item.kind === "steer" ? 0 : item.kind === "domain" ? 1 : 2 };

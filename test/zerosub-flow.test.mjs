@@ -67,7 +67,7 @@ test('pending move: normalized state keeps the current account and the pending t
   assert.equal(bestFamilyAccount(zerosub, 'claude', { now: NOW }).id, 'acc-new');
 });
 
-test('pending move: failover waits until the route shows the new account', () => {
+test('a pending move retains the old binding until the route shows the new account', () => {
   const zerosub = normalizeZerosubState({
     accounts: [account('acc-old', 99), account('acc-new', 20)],
     agents: [
@@ -76,20 +76,8 @@ test('pending move: failover waits until the route shows the new account', () =>
       route('steer-f', 'acc-new'),
     ],
   }, { now: NOW });
-  const steers = [
-    { id: 'steer-d', slot: 'D', provider: 'claude' },
-    { id: 'steer-e', slot: 'E', provider: 'claude' },
-    { id: 'steer-f', slot: 'F', provider: 'claude' },
-  ];
-  // steer-e still runs on the exhausted old account, so it is excluded with it.
-  const waiting = failoverChain({ steers, activeSlot: 'D', zerosub, failingAccountId: 'acc-old', now: NOW });
-  assert.deepEqual(waiting.map((candidate) => candidate.steerId), ['steer-f']);
-  // Structural order carries no quota score; admission checks the actual
-  // runtime and pending move before a candidate can receive work.
-  const healthy = failoverChain({ steers, activeSlot: 'D', zerosub, failingAccountId: 'acc-new', now: NOW });
-  assert.deepEqual(healthy.map((candidate) => candidate.steerId), ['steer-e', 'steer-f']);
-  // Completed move (route shows the new account, nothing pending): steer-e
-  // survives the old account failing, in structural order.
+  assert.equal(zerosub.agentAccount['steer-e'], 'acc-old');
+  assert.equal(zerosub.pending['steer-e'], 'acc-new');
   const moved = normalizeZerosubState({
     accounts: [account('acc-old', 99), account('acc-new', 20)],
     agents: [
@@ -99,8 +87,7 @@ test('pending move: failover waits until the route shows the new account', () =>
     ],
   }, { now: NOW });
   assert.deepEqual(moved.pending, {});
-  const after = failoverChain({ steers, activeSlot: 'D', zerosub: moved, failingAccountId: 'acc-old', now: NOW });
-  assert.deepEqual(after.map((candidate) => candidate.steerId), ['steer-e', 'steer-f']);
+  assert.equal(moved.agentAccount['steer-e'], 'acc-new');
 });
 
 test('continuation tabs count as the same slot: no duplicate failover candidate', () => {

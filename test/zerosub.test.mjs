@@ -212,19 +212,14 @@ test('all-exhausted families report the earliest resetsAt', () => {
   assert.equal(picked.skipped[0].reason, 'accounts exhausted, earliest reset 2026-11-24T14:00:00Z');
 });
 
-test('failoverChain excludes the exhausted account and leaves ranking to route policy', () => {
-  const zerosub = normalizeZerosubState(fakeRaw(), { now: NOW });
+test('failoverChain retains candidate slots for route admission', () => {
   const steers = [
     { id: 'steer-d', slot: 'D', provider: 'claude' },
     { id: 'steer-e', slot: 'E', provider: 'claude' },
     { id: 'steer-f', slot: 'F', provider: 'claude' },
   ];
-  const chain = failoverChain({ steers, activeSlot: 'D', zerosub, failingAccountId: 'acc-full', now: NOW });
-  assert.deepEqual(chain.map((candidate) => candidate.steerId), ['steer-f']);
-  // Without an exhausted failing account every steer stays a candidate,
-  // in structural order; admission and the shared route policy decide next.
-  const roomy = failoverChain({ steers, activeSlot: 'D', zerosub, failingAccountId: 'acc-roomy', now: NOW });
-  assert.deepEqual(roomy.map((candidate) => candidate.steerId), ['steer-e', 'steer-f']);
+  const chain = failoverChain({ steers, activeSlot: 'D' });
+  assert.deepEqual(chain.map((candidate) => candidate.steerId), ['steer-e', 'steer-f']);
 });
 
 test('quota line uses real account percents with ZeroSub state', () => {

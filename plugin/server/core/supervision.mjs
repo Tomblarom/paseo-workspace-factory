@@ -5,7 +5,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import { liveSlotHolders } from './discovery.mjs';
 import { LABEL, METADATA_KEY } from './paseo.mjs';
-import { QUOTA_DEFAULTS, accountExhausted, allAccountsExhausted, earliestFamilyReset, earliestReset, familyExhausted } from './quota.mjs';
+import { QUOTA_DEFAULTS, allAccountsExhausted, earliestFamilyReset, earliestReset, familyExhausted } from './quota.mjs';
 import { withLock, workspaceLockName } from './lock.mjs';
 
 export const WORKERS_KEY = `${METADATA_KEY}.workers`;
@@ -410,15 +410,13 @@ export function isStaleWake(wakeEpoch, currentEpoch) {
  * the scope in slot order (circular after the failed active slot, skipping
  * archived/interrupted/advisor ones), then the domain steer, then the
  * hub steer. Domain/hub entries are { steerId, scopeId } or null when absent;
- * an advisor on domain or hub level is skipped like any advisor id. With
- * `zerosub` (normalized ZeroSub state), candidates on the exhausted failing
- * account are dropped. The shared route policy compares the remaining
- * admitted candidates; quota percentages do not rank unlike routes here.
+ * an advisor on domain or hub level is skipped like any advisor id.
+ * The shared route policy checks quota for each candidate's account and model.
  * Continuation tabs count as the same
  * slot: a slot appears once (its first entry in the final order), so no
  * duplicate candidate is asked twice.
  */
-export function failoverChain({ steers = [], activeSlot = null, interruptedIds = [], advisorIds = [], domainSteer = null, hubSteer = null, failingPool = null, zerosub = null, failingAccountId = null, exhaustedPct = QUOTA_DEFAULTS.exhaustedPct, now = Date.now() } = {}) {
+export function failoverChain({ steers = [], activeSlot = null, interruptedIds = [], advisorIds = [], domainSteer = null, hubSteer = null, failingPool = null } = {}) {
   const interrupted = new Set(interruptedIds ?? []);
   const advisors = new Set(advisorIds ?? []);
   const live = (steers ?? [])
@@ -428,21 +426,8 @@ export function failoverChain({ steers = [], activeSlot = null, interruptedIds =
     ? [...live.filter((s) => String(s.slot) > activeSlot), ...live.filter((s) => String(s.slot) <= activeSlot)]
     : live;
   if (failingPool) {
-    const differentPool = ordered.filter((candidate) => (candidate.pool ?? candidate.provider) !== failingPool);
-    const samePool = ordered.filter((candidate) => (candidate.pool ?? candidate.provider) === failingPool);
-    if (differentPool.length) ordered.splice(0, ordered.length, ...differentPool, ...samePool);
     ordered.sort((a, b) => Number((a.pool ?? a.provider) === failingPool) - Number((b.pool ?? b.provider) === failingPool)
       || String(a.slot).localeCompare(String(b.slot)));
-  }
-  if (zerosub) {
-    const byId = new Map((zerosub.accounts ?? []).map((account) => [account?.id, account]));
-    const accountOf = (candidate) => candidate?.accountId ?? zerosub.agentAccount?.[candidate?.id] ?? zerosub.agentAccount?.[candidate?.steerId] ?? null;
-    const failing = failingAccountId ? byId.get(failingAccountId) : null;
-    let kept = ordered;
-    if (failing && accountExhausted(failing, { exhaustedPct, now })) {
-      kept = ordered.filter((candidate) => accountOf(candidate) !== failingAccountId);
-    }
-    ordered.splice(0, ordered.length, ...kept);
   }
   const chain = [];
   const seenSlots = new Set();
