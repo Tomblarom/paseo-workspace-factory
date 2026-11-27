@@ -71,14 +71,9 @@ export function scopeRows(paseoState, { now = () => Date.now(), daemonStartedAt 
       ? scopes.filter((s) => lower(s.id) !== lower(scope.id)).flatMap((s) => (blockersOf.get(s.id) ?? []).filter((b) => typeof b === 'string' && b.startsWith('hub:')).map((b) => `${s.id}: ${b}`))
       : children.flatMap((id) => (blockersOf.get(id) ?? []).filter((b) => typeof b === 'string' && b.startsWith('domain:')).map((b) => `${id}: ${b}`));
     const activeSlot = active?.labels?.[LABEL.slot] ?? null;
-    const activeProfileName = activeSlot ? config?.steers?.slots?.[activeSlot] : null;
-    const activeProfile = activeProfileName ? config?.profiles?.[activeProfileName] : null;
     const warnings = [];
-    if (config && active && activeSlot) {
-      if (isAdvisorSteer(config, active.labels, active.metadata)) warnings.push(`Active steer ${activeSlot} is an advisor; advisors never coordinate`);
-      if (activeProfile && (`${active.provider}/${active.model}` !== `${activeProfile.provider}/${activeProfile.model}`)) {
-        warnings.push(`Active steer ${activeSlot} runs ${active.provider}/${active.model} but slot profile "${activeProfileName}" names ${activeProfile.provider}/${activeProfile.model}`);
-      }
+    if (config && active && activeSlot && isAdvisorSteer(config, active.labels, active.metadata)) {
+      warnings.push(`Active steer ${activeSlot} is an advisor; advisors never coordinate`);
     }
     return {
       id: scope.id,

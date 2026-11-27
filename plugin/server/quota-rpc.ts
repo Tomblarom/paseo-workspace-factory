@@ -1,6 +1,6 @@
 // factory.quota: read-only quota visibility. Shapes the sampled `paseo usage`
-// snapshot per pool (state from the effective quota thresholds) and maps each
-// steer slot and worker priority entry to its quota pool.
+// snapshot per pool (state from the effective quota thresholds) and maps worker
+// priorities to quota pools. Current steer quota is shown from live status.
 import type { RpcInput } from "@getpaseo/plugin";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import type { factoryQuota } from "../shared/factory.js";
@@ -98,8 +98,8 @@ function classify(
 
 /**
  * Pure shaping of the RPC payload, so tests can pass a fake snapshot and
- * config. Unknown pools (no snapshot entry) are not listed; slots and workers
- * are always mapped from the config, even before the first sample.
+ * config. Unknown pools (no snapshot entry) are not listed. The slot field
+ * serves legacy configurations that lack role priorities.
  */
 export function shapeQuotaView(args: {
   snapshot: Record<string, any> | null;
@@ -144,7 +144,7 @@ export function shapeQuotaView(args: {
       };
     });
   const profiles = args.config?.profiles ?? {};
-  const slots = args.config?.steers?.slots ?? {};
+  const slots = Array.isArray(args.config?.steers?.priority) ? {} : args.config?.steers?.slots ?? {};
   const steers = Object.entries(slots)
     .filter((entry): entry is [string, string] => typeof entry[0] === "string" && typeof entry[1] === "string")
     .sort(([a], [b]) => a.localeCompare(b))

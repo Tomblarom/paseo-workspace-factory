@@ -56,7 +56,7 @@ test("steer quota leaves ambiguous and expired usage unknown and reports a weekl
   assert.equal(formatSteerQuota(agent, moving), "Account 1 · Weekly 11% used, 5-hour 23% used");
 });
 
-test("quota view shapes snapshot pools with warn states and slot mappings", () => {
+test("quota view shapes snapshot pools with warn states and legacy slot mappings", () => {
   const view = shapeQuotaView({
     snapshot: { codex: { sessionPct: 82 }, claude: { sessionPct: 40 } },
     sampledAt: SAMPLED,
@@ -80,6 +80,11 @@ test("quota view shapes snapshot pools with warn states and slot mappings", () =
     { position: 1, profile: "claude-sonnet", pool: "claude" },
     { position: 2, profile: "codex-high", pool: "codex" },
   ]);
+  const config = fakeConfig();
+  config.steers.priority = ["claude-sonnet", "codex-high"];
+  const migrated = shapeQuotaView({ snapshot: null, sampledAt: null, config, nowMs: NOW });
+  assert.deepEqual(migrated.steers, []);
+  assert.deepEqual(migrated.workers, view.workers);
 });
 
 test("quota view exhausts only on threshold, explicit limit, or limited status", () => {
