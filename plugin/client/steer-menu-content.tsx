@@ -4,7 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useRef, useState, useSyncExternalStore } from "react";
 import { Pressable, Text, View } from "react-native";
 import { factoryFresh, factoryFreshPreview } from "../shared/factory.js";
-import { factorySteerMenuSettings } from "../shared/settings.js";
+import { factorySteerMenuSettings, RESET_KEEP_HISTORY_UNAVAILABLE } from "../shared/settings.js";
 import type { FactorySteerFeed } from "./factory-workspace-state.js";
 import { isExpiredPreviewError, normalizeInitializeNewSteer, resetQuotaConfirmationText, resetSteer, resetSteerBlock, steerQuotaConfirmation } from "./steer-menu.js";
 
@@ -22,7 +22,9 @@ export function ResetSteerForm({ agentId, workspaceId, host, theme, close, feed,
   const apply = useRpc(factoryFresh);
   const { rows, disconnected } = useSyncExternalStore(feed.subscribe, feed.getSnapshot, feed.getSnapshot);
   const row = disconnected ? undefined : rows?.find((entry) => entry.agentId === agentId && entry.workspaceId === workspaceId);
-  const blocked = row ? resetSteerBlock(row) : "This steer is no longer available.";
+  const keepHistory = settings.status === "ready" && settings.values.keepChatHistory;
+  const blocked = !row ? "This steer is no longer available." :
+    resetSteerBlock(row) ?? (keepHistory ? RESET_KEEP_HISTORY_UNAVAILABLE : null);
   const quota = row ? steerQuotaConfirmation(row) : null;
   const resetQuota = quota ?? "available";
   const slot = row?.slot;
@@ -38,7 +40,7 @@ export function ResetSteerForm({ agentId, workspaceId, host, theme, close, feed,
       }
       return plan;
     },
-    enabled: !blocked && Boolean(slot),
+    enabled: settings.status === "ready" && !blocked && Boolean(slot),
     retry: false,
     gcTime: 0,
     refetchOnMount: "always",

@@ -55,7 +55,7 @@ export function SteerMenuSettingsSection() {
         />
         <SettingsSwitch
           label="Keep chat history"
-          hint="Preserve steer chats during automatic delivery and cleanup."
+          hint="Preserve steer chats during automatic delivery and cleanup. Reset Steer is unavailable on Paseo versions that require discarding messages."
           value={values.keepChatHistory}
           onValueChange={(keepChatHistory) =>
             void save((current) => ({ ...current, keepChatHistory }))

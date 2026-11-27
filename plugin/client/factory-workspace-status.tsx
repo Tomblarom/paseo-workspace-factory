@@ -8,7 +8,7 @@ import { Pressable, Text, View } from "react-native";
 import { CACHE_CHECK_INTERVAL_MS } from "../shared/cache-profiles.js";
 import { factoryFresh, factoryFreshPreview, factoryResume, factoryResumeApply, factoryStatus, type factoryPlan } from "../shared/factory.js";
 import { resumeFingerprint } from "../shared/preview.js";
-import { factorySteerMenuSettings } from "../shared/settings.js";
+import { factorySteerMenuSettings, RESET_KEEP_HISTORY_UNAVAILABLE } from "../shared/settings.js";
 import { ActivateSteer } from "./activate-steer.js";
 import type { FactoryResultStyles } from "./factory-panel.js";
 import {
@@ -144,7 +144,10 @@ function ResetOrResumeSteer({ kind, steer, liveSteer, workspaceId, host, theme, 
   const menuSettings = useSettings(factorySteerMenuSettings);
   const [renewedPreview, setRenewedPreview] = useState(false);
   const applying = useRef(false);
-  const blocked = liveSteer ? steerActionEligibility(liveSteer)[kind] : "This steer is no longer available.";
+  const historyBlocked = kind === "reset" && menuSettings.status === "ready" && menuSettings.values.keepChatHistory;
+  const blocked = !liveSteer ? "This steer is no longer available." :
+    steerActionEligibility(liveSteer)[kind] ?? (historyBlocked ? RESET_KEEP_HISTORY_UNAVAILABLE : null);
+  const ready = kind !== "reset" || menuSettings.status === "ready";
   const quota = liveSteer ? steerQuotaConfirmation(liveSteer) : null;
   const resetQuota = quota ?? "available";
   const preview = useQuery({
@@ -177,7 +180,7 @@ function ResetOrResumeSteer({ kind, steer, liveSteer, workspaceId, host, theme, 
         checkpointAt: typeof stamp === "string" ? stamp : null });
       return { kind, details, fingerprint } as const;
     },
-    enabled: !blocked,
+    enabled: ready && !blocked,
     retry: false,
     gcTime: 0,
     refetchOnMount: "always",
@@ -185,7 +188,7 @@ function ResetOrResumeSteer({ kind, steer, liveSteer, workspaceId, host, theme, 
   });
   const confirmation = useMutation({
     mutationFn: async () => {
-      if (blocked || !preview.data || preview.isFetching) throw new Error(blocked ?? "Review the current preview first.");
+      if (blocked || !ready || !preview.data || preview.isFetching) throw new Error(blocked ?? "Review the current preview first.");
       if (preview.data.kind === "resume") {
         const result = await callResumeApply({ workspaceId, agentId, fingerprint: preview.data.fingerprint, takeover: false });
         return { tone: result.status === "blocked" ? "statusDanger" : result.status === "pending" ? "statusWarning" : "statusSuccess",
@@ -223,10 +226,12 @@ function ResetOrResumeSteer({ kind, steer, liveSteer, workspaceId, host, theme, 
       ) : (
         <>
           {blocked ? <Text style={styles.conflict}>{blocked}</Text> : null}
+          {kind === "reset" && (menuSettings.status === "error" || menuSettings.status === "invalid")
+            ? <Text accessibilityRole="alert" style={styles.error}>{menuSettings.error}</Text> : null}
           {error ? <Text accessibilityRole="alert" style={styles.error}>{error.message}</Text> : null}
           {preview.isFetching ? <Text style={styles.label}>Preparing preview…</Text> : null}
           {renewedPreview && !preview.isFetching && !preview.error ? <Text style={styles.conflict}>The preview expired. Review the new preview.</Text> : null}
-          {details?.kind === "reset" ? (
+          {details?.kind === "reset" && !blocked ? (
             <>
               {quota ? <Text style={styles.conflict}>{resetQuotaConfirmationText(quota, liveSteer)}</Text> : null}
               <Text style={styles.body}>This rewinds the conversation and removes later messages from this tab.</Text>
@@ -241,9 +246,9 @@ function ResetOrResumeSteer({ kind, steer, liveSteer, workspaceId, host, theme, 
               <Text style={styles.label}>{details.details.brief.slice(0, 400)}</Text>
             </>
           ) : null}
-          {details && !error ? <Action theme={theme} icon={kind === "reset" ? "ListRestart" : "RotateCcw"}
+          {details && !error && !blocked ? <Action theme={theme} icon={kind === "reset" ? "ListRestart" : "RotateCcw"}
             title={confirmation.isPending ? "Applying…" : kind === "reset" ? "Confirm reset" : "Confirm resume"}
-            emphasized disabled={Boolean(blocked) || preview.isFetching || confirmation.isPending} onPress={() => {
+            emphasized disabled={!ready || preview.isFetching || confirmation.isPending} onPress={() => {
               if (applying.current) return;
               applying.current = true;
               confirmation.mutate();
