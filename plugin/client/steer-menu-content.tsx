@@ -6,7 +6,7 @@ import { Pressable, Text, View } from "react-native";
 import { factoryFresh, factoryFreshPreview } from "../shared/factory.js";
 import { factorySteerMenuSettings, RESET_KEEP_HISTORY_UNAVAILABLE } from "../shared/settings.js";
 import type { FactorySteerFeed } from "./factory-workspace-state.js";
-import { isExpiredPreviewError, normalizeInitializeNewSteer, resetQuotaConfirmationText, resetSteer, resetSteerBlock, steerQuotaConfirmation } from "./steer-menu.js";
+import { isExpiredPreviewError, normalizeAfterReset, resetQuotaConfirmationText, resetSteer, resetSteerBlock, steerQuotaConfirmation } from "./steer-menu.js";
 
 interface ResetSteerFormProps extends Pick<PluginHostProps, "host" | "theme"> {
   agentId: string;
@@ -63,8 +63,8 @@ export function ResetSteerForm({ agentId, workspaceId, host, theme, close, feed,
     setError(null);
     try {
       const source = { agentId, workspaceId, slot };
-      const initialize = normalizeInitializeNewSteer(settings.status === "ready" ? settings.values.initializeNewSteer : undefined);
-      const outcome = await resetSteer(source, plan, initialize, apply, resetQuota);
+      const afterReset = normalizeAfterReset(settings.status === "ready" ? settings.values.afterReset : undefined);
+      const outcome = await resetSteer(source, plan, afterReset, apply, resetQuota);
       if (!outcome.result.applied && !outcome.result.idempotent) {
         throw new Error(String(outcome.result.deliveryError ?? "Factory could not confirm the reset."));
       }

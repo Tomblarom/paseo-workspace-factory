@@ -36,14 +36,15 @@ test("migration v1 to v2: workerDefault becomes workerPriority, sensitive from p
   // The migrated document satisfies the v2 schema and validation.
   const parsed = factoryConfigSettings.schema.parse(migrated);
   assert.deepEqual(validateFactorySettings(parsed), []);
-  assert.equal(factoryConfigSettings.version, 3);
+  assert.equal(factoryConfigSettings.version, 4);
 });
 
-test("migration retains a v2 snapshot, leaves v3 and non-objects alone; defaults parse", () => {
+test("migration retains a v2 snapshot, leaves v4 and non-objects alone; defaults parse", () => {
   const v2 = { profiles: {}, workerPriority: ["x"] };
-  const v3 = migrateFactoryConfig(v2, 2);
-  assert.deepEqual(v3.legacySnapshot, { version: 2, values: v2 });
-  assert.equal(migrateFactoryConfig(v3, 3), v3);
+  const v4 = migrateFactoryConfig(v2, 2);
+  assert.deepEqual(v4.legacySnapshot, { version: 2, values: v2 });
+  assert.equal(v4.noSuitableSteer, "wait");
+  assert.equal(migrateFactoryConfig(v4, 4), v4);
   assert.equal(migrateFactoryConfig(null, 1), null);
   const defaults = factoryConfigSettings.schema.parse({});
   assert.deepEqual(defaults.workerPriority, ["factory-default"]);

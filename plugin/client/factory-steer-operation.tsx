@@ -1,6 +1,6 @@
 import type { RpcOutput } from "@getpaseo/plugin";
 import type { PluginClientContext, PluginHostProps } from "@getpaseo/plugin/client";
-import { useComposers, useRpc, useSettings, useSubscription } from "@getpaseo/plugin/client";
+import { useComposers, useRpc, useSubscription } from "@getpaseo/plugin/client";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
 import {
@@ -11,10 +11,8 @@ import {
   factorySwitch,
   factorySwitchPreview,
 } from "../shared/factory.js";
-import { factorySteerMenuSettings } from "../shared/settings.js";
 import {
   isExpiredPreviewError,
-  normalizeInitializeNewSteer,
   resetSteerBlock,
   transferStagedBrief,
   type BriefTarget,
@@ -73,7 +71,6 @@ export function FactorySteerOperation({
   const callSwitchPreview = useRpc(factorySwitchPreview);
   const callSwitch = useRpc(factorySwitch);
   const callBrief = useRpc(factorySteerBrief);
-  const menuSettings = useSettings(factorySteerMenuSettings);
 
   const [rows, setRows] = useState<SteerPillRow[] | null>(null);
   const onEvent = useCallback((event: unknown) => {
@@ -90,9 +87,6 @@ export function FactorySteerOperation({
   const [postStage, setPostStage] = useState<{ target: BriefTarget; slot: string | null; retry: boolean } | null>(null);
   const startedRef = useRef(false);
 
-  const initializeNewSteer = normalizeInitializeNewSteer(
-    menuSettings.status === "ready" ? menuSettings.values.initializeNewSteer : undefined,
-  );
   const composerAgentId = postStage?.target.agentId ?? agentId;
   const [destComposer] = useComposers({ agentId: composerAgentId });
   const mounted = useRef(false);
@@ -220,8 +214,8 @@ export function FactorySteerOperation({
       return;
     }
     if (args.stageId && args.epoch !== undefined) {
-      setPostStage({ target: { workspaceId, agentId: args.toAgentId, stageId: args.stageId, epoch: args.epoch }, slot: args.slot, retry: initializeNewSteer === "send" });
-      setPendingComposer(initializeNewSteer === "composer");
+      setPostStage({ target: { workspaceId, agentId: args.toAgentId, stageId: args.stageId, epoch: args.epoch }, slot: args.slot, retry: true });
+      setPendingComposer(false);
       setNotice(args.head);
       return;
     }
@@ -270,9 +264,9 @@ export function FactorySteerOperation({
     });
   };
 
-  const onConfirmSwitch = (current: SwitchFlow, sendNow = false): void => {
+  const onConfirmSwitch = (current: SwitchFlow): void => {
     void run(async () => {
-      const deliver = sendNow || initializeNewSteer === "send" ? "send" : "stage";
+      const deliver = "send";
       let applied: RpcOutput<typeof factorySwitch>;
       try {
         applied = await callSwitch({
@@ -428,10 +422,10 @@ export function FactorySteerOperation({
         <View style={{ gap: 4 }}>
           <Text style={[styles.section, { fontWeight: "600" }]}>Steer {preview.from} → Steer {flow.to}</Text>
           <Text style={styles.body}>{preview.checkpoint ? "Continue from the saved task checkpoint." : "Continue with the available workspace state."}</Text>
-          <Text style={styles.label}>{initializeNewSteer === "send" ? "Send the continuation brief after the handover." : "Stage the continuation brief for the destination."}</Text>
+          <Text style={styles.label}>Send the continuation brief after the handover.</Text>
           {canRecover
             ? actionButton("resume-handover", "Resume and hand over", `Resume Steer ${flow.to} and hand over`, () =>
-              onConfirmSwitch(flow, true),
+              onConfirmSwitch(flow),
             )
             : null}
           {actionButton("confirm-switch", "Confirm handover", "Confirm handover", () =>

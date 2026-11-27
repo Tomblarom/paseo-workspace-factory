@@ -4,49 +4,53 @@ import { QUOTA_DEFAULTS } from "./defaults.mjs";
 import { prioritiesFromSlots } from "./settings-validate.js";
 
 /**
- * Preserve the original document before converting v1 via v2 to v3.
+ * Preserve the original document before converting v1/v2 via v3 to v4.
+ * Existing installations keep new automatic effects inactive during migration.
  */
 export function migrateFactoryConfig(values: unknown, fromVersion: number): unknown {
-  if (fromVersion >= 3 || !values || typeof values !== "object" || Array.isArray(values)) return values;
+  if (fromVersion >= 4 || !values || typeof values !== "object" || Array.isArray(values)) return values;
   const old = values as Record<string, any>;
   let next: Record<string, any> = { ...old };
-  if (fromVersion < 2) {
-    if (old.profiles && typeof old.profiles === "object" && !Array.isArray(old.profiles)) {
-      const profiles: Record<string, any> = {};
-      for (const [name, raw] of Object.entries(old.profiles)) {
-        if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-          profiles[name] = raw;
-          continue;
+  if (fromVersion < 3) {
+    if (fromVersion < 2) {
+      if (old.profiles && typeof old.profiles === "object" && !Array.isArray(old.profiles)) {
+        const profiles: Record<string, any> = {};
+        for (const [name, raw] of Object.entries(old.profiles)) {
+          if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+            profiles[name] = raw;
+            continue;
+          }
+          const profile = raw as Record<string, any>;
+          profiles[name] = {
+            ...profile,
+            advisor: profile.advisor === undefined ? false : profile.advisor,
+            sensitive: profile.sensitive === undefined ? profile.provider === "muse" : profile.sensitive,
+          };
         }
-        const profile = raw as Record<string, any>;
-        profiles[name] = {
-          ...profile,
-          advisor: profile.advisor === undefined ? false : profile.advisor,
-          sensitive: profile.sensitive === undefined ? profile.provider === "muse" : profile.sensitive,
-        };
+        next.profiles = profiles;
       }
-      next.profiles = profiles;
+      if (next.workerPriority === undefined && old.workerDefault !== undefined) {
+        next.workerPriority = typeof old.workerDefault === "string" ? [old.workerDefault] : old.workerDefault;
+      }
+      delete next.workerDefault;
     }
-    if (next.workerPriority === undefined && old.workerDefault !== undefined) {
-      next.workerPriority = typeof old.workerDefault === "string" ? [old.workerDefault] : old.workerDefault;
+    const slots = next.slots === undefined ? { A: "factory-default" } : next.slots;
+    const rawProfiles = next.profiles === undefined ? { "factory-default": defaultProfile } : next.profiles;
+    const profiles = rawProfiles && typeof rawProfiles === "object" && !Array.isArray(rawProfiles)
+      ? Object.fromEntries(Object.entries(rawProfiles).map(([name, value]) => {
+        const parsed = profileSchema.safeParse(value);
+        return [name, parsed.success ? parsed.data : value];
+      }))
+      : rawProfiles;
+    const priorities = prioritiesFromSlots(slots && typeof slots === "object" && !Array.isArray(slots) ? slots : {}, profiles);
+    if (next.steerPriority === undefined) next.steerPriority = priorities.steerPriority;
+    if (next.advisorPriority === undefined) next.advisorPriority = priorities.advisorPriority;
+    if (next.routingStrategy === undefined) next.routingStrategy = "efficiency";
+    if (next.legacySnapshot == null) {
+      next.legacySnapshot = { version: fromVersion, values: JSON.parse(JSON.stringify(values)) };
     }
-    delete next.workerDefault;
   }
-  const slots = next.slots === undefined ? { A: "factory-default" } : next.slots;
-  const rawProfiles = next.profiles === undefined ? { "factory-default": defaultProfile } : next.profiles;
-  const profiles = rawProfiles && typeof rawProfiles === "object" && !Array.isArray(rawProfiles)
-    ? Object.fromEntries(Object.entries(rawProfiles).map(([name, value]) => {
-      const parsed = profileSchema.safeParse(value);
-      return [name, parsed.success ? parsed.data : value];
-    }))
-    : rawProfiles;
-  const priorities = prioritiesFromSlots(slots && typeof slots === "object" && !Array.isArray(slots) ? slots : {}, profiles);
-  if (next.steerPriority === undefined) next.steerPriority = priorities.steerPriority;
-  if (next.advisorPriority === undefined) next.advisorPriority = priorities.advisorPriority;
-  if (next.routingStrategy === undefined) next.routingStrategy = "efficiency";
-  if (next.legacySnapshot == null) {
-    next.legacySnapshot = { version: fromVersion, values: JSON.parse(JSON.stringify(values)) };
-  }
+  if (next.noSuitableSteer === undefined) next.noSuitableSteer = "wait";
   return next;
 }
 
@@ -101,7 +105,7 @@ const legacySnapshotSchema = z.object({
 export const factoryConfigSettings = defineSettings({
   id: "factory-config",
   scope: "host",
-  version: 3,
+  version: 4,
   migrate: (values, fromVersion) => migrateFactoryConfig(values, fromVersion),
   schema: z.object({
     profiles: z.record(z.string(), profileSchema).default({ "factory-default": defaultProfile }),
@@ -112,6 +116,7 @@ export const factoryConfigSettings = defineSettings({
     steerPriority: z.array(z.string().min(1)).optional(),
     advisorPriority: z.array(z.string().min(1)).optional(),
     routingStrategy: z.enum(["efficiency", "balanced", "preference"]).default("efficiency"),
+    noSuitableSteer: z.enum(["create", "offer", "wait"]).default("create"),
     legacySnapshot: legacySnapshotSchema.nullable().default(null),
     quota: z.object({
       exhaustedPct: z.number().min(0).max(100).default(QUOTA_DEFAULTS.exhaustedPct),
@@ -198,17 +203,41 @@ export const RESET_KEEP_HISTORY_UNAVAILABLE =
   "Keep chat history is on. This version of Paseo cannot start a new provider session in this tab while preserving the chat.";
 
 const steerMenuSchema = z.object({
-  initializeNewSteer: z.enum(["send", "composer", "later"]).default("composer"),
+  afterReset: z.enum(["continue", "composer", "wait"]).default("continue"),
   keepChatHistory: z.boolean().default(true),
 });
 
-// Brief delivery for a new steer and steer chat history preservation.
+/**
+ * Migrate factory-steer-menu v1/v2 -> v3 without enabling new automatic sends:
+ * legacy initializeNewSteer maps send -> continue, composer -> composer,
+ * later -> wait, and missing -> composer. v1 hosts keep keepChatHistory off
+ * unless explicitly stored.
+ */
+export function migrateFactorySteerMenu(values: unknown, fromVersion: number): unknown {
+  if (fromVersion >= 3 || !values || typeof values !== "object" || Array.isArray(values)) return values;
+  const old = values as Record<string, unknown>;
+  const afterReset = old.afterReset === "continue" || old.afterReset === "composer" || old.afterReset === "wait"
+    ? old.afterReset
+    : old.initializeNewSteer === "send"
+      ? "continue"
+      : old.initializeNewSteer === "later"
+        ? "wait"
+        : "composer";
+  const keepChatHistory = typeof old.keepChatHistory === "boolean"
+    ? old.keepChatHistory
+    : fromVersion < 2
+      ? false
+      : true;
+  return steerMenuSchema.parse({ afterReset, keepChatHistory });
+}
+
+// Post-reset continuation behavior and steer chat history preservation.
 export const factorySteerMenuSettings = defineSettings({
   id: "factory-steer-menu",
   scope: "host",
-  version: 2,
+  version: 3,
   schema: steerMenuSchema,
-  migrate: (values) => steerMenuSchema.extend({ keepChatHistory: z.boolean().default(false) }).parse(values),
+  migrate: (values, fromVersion) => migrateFactorySteerMenu(values, fromVersion),
 });
 
 // Worker supervision (S-B): wake cadence, watchdog, and failover.

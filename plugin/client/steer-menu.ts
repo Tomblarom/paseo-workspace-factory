@@ -32,17 +32,17 @@ export const STEER_MENU_LABELS = {
 } as const;
 
 // ---------------------------------------------------------------------------
-// "Initialize new steer" setting
+// "After reset" setting
 // ---------------------------------------------------------------------------
 
-export type InitializeNewSteer = "send" | "composer" | "later";
+export type AfterReset = "continue" | "composer" | "wait";
 
-export const INITIALIZE_NEW_STEER_DEFAULT: InitializeNewSteer = "composer";
+export const AFTER_RESET_DEFAULT: AfterReset = "continue";
 
-export function normalizeInitializeNewSteer(value: unknown): InitializeNewSteer {
-  return value === "send" || value === "composer" || value === "later"
+export function normalizeAfterReset(value: unknown): AfterReset {
+  return value === "continue" || value === "composer" || value === "wait"
     ? value
-    : INITIALIZE_NEW_STEER_DEFAULT;
+    : AFTER_RESET_DEFAULT;
 }
 
 /**
@@ -326,7 +326,6 @@ export async function copyCurrentBrief(
 export async function handoverSteer(
   source: Pick<SteerPillRow, "workspaceId" | "agentId">,
   target: { slot: string; agentId: string },
-  initialize: InitializeNewSteer,
   preview: Call<typeof factorySwitchPreview>,
   apply: Call<typeof factorySwitch>,
 ): Promise<RpcOutput<typeof factorySwitch>> {
@@ -335,16 +334,16 @@ export async function handoverSteer(
   if (plan.workspaceId !== source.workspaceId || plan.fromId !== source.agentId || plan.toId !== target.agentId) {
     throw new Error("The controller or destination changed. Choose the handover again.");
   }
-  return apply({ ...input, fingerprint: plan.fingerprint, deliver: initialize === "send" ? "send" : "stage" });
+  return apply({ ...input, fingerprint: plan.fingerprint, deliver: "send" });
 }
 
 export async function resetSteer(
   { workspaceId, agentId, slot }: Pick<SteerPillRow, "workspaceId" | "agentId"> & { slot: string },
   plan: RpcOutput<typeof factoryFreshPreview>,
-  initialize: InitializeNewSteer,
+  afterReset: AfterReset,
   apply: Call<typeof factoryFresh>,
   resetQuota: NonNullable<RpcInput<typeof factoryFresh>["resetQuota"]>,
-): Promise<{ result: RpcOutput<typeof factoryFresh>; initialize: InitializeNewSteer }> {
+): Promise<{ result: RpcOutput<typeof factoryFresh>; afterReset: AfterReset }> {
   if (plan.workspaceId !== workspaceId || plan.from !== agentId || plan.slot !== slot) {
     throw new Error("The steer changed. Open Reset Steer again for the current holder.");
   }
@@ -352,8 +351,8 @@ export async function resetSteer(
     throw new Error("An in-place rewind is unavailable. Use /factory fresh to preview and confirm a replacement.");
   }
   const result = await apply({ workspaceId, slot, resetQuota, fingerprint: plan.fingerprint,
-    deliver: initialize === "send" && resetQuota === "available" ? "send" : "stage" });
-  return { result, initialize };
+    deliver: afterReset === "continue" && resetQuota === "available" ? "send" : "stage" });
+  return { result, afterReset };
 }
 
 /** Stable key for a descriptor; the pill patches its behavior only on change. */

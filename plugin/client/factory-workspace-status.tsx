@@ -25,7 +25,7 @@ import {
   type FactorySteerFeed,
   type WorkspaceStatus,
 } from "./factory-workspace-state.js";
-import { copyCurrentBrief, describeSteerMenu, handoffTargets, isExpiredPreviewError, normalizeInitializeNewSteer, quotaConfirmationText, resetQuotaConfirmationText, STEER_MENU_LABELS, steerQuotaConfirmation, type HandoffTarget } from "./steer-menu.js";
+import { copyCurrentBrief, describeSteerMenu, handoffTargets, isExpiredPreviewError, normalizeAfterReset, quotaConfirmationText, resetQuotaConfirmationText, STEER_MENU_LABELS, steerQuotaConfirmation, type HandoffTarget } from "./steer-menu.js";
 import { FactorySteerOperation } from "./factory-steer-operation.js";
 import type { SteerPillRow } from "./steer-pill.js";
 
@@ -195,9 +195,9 @@ function ResetOrResumeSteer({ kind, steer, liveSteer, workspaceId, host, theme, 
           detail: result.detail, stagedTo: null } as const;
       }
       const { details } = preview.data;
-      const initialize = normalizeInitializeNewSteer(menuSettings.status === "ready" ? menuSettings.values.initializeNewSteer : undefined);
+      const afterReset = normalizeAfterReset(menuSettings.status === "ready" ? menuSettings.values.afterReset : undefined);
       const result = await callFresh({ workspaceId, slot: details.slot, fingerprint: details.fingerprint,
-        resetQuota, deliver: !quota && initialize === "send" ? "send" : "stage" });
+        resetQuota, deliver: !quota && afterReset === "continue" ? "send" : "stage" });
       const error = label(result.deliveryError) ?? label(result.stagingError);
       if (!result.applied && result.idempotent !== true) throw new Error(error ?? "Factory could not confirm the reset.");
       const completed = result.idempotent ? "This reset was already applied." : "Steer reset.";

@@ -45,6 +45,7 @@ export interface FactorySettingsValues {
   steerPriority: string[];
   advisorPriority: string[];
   routingStrategy: "efficiency" | "balanced" | "preference";
+  noSuitableSteer: "create" | "offer" | "wait";
   legacySnapshot: LegacyFactoryConfig | null;
   quota: { exhaustedPct: number; warnPct: number };
   /** Null/empty means unset; both host fields are required to run. */
@@ -136,6 +137,8 @@ export function settingsFromConfig(config: any, current: FactorySettingsValues):
     advisorPriority: [...advisorPriority],
     routingStrategy: config.routing?.strategy !== undefined
       ? config.routing.strategy : current.routingStrategy === undefined ? "efficiency" : current.routingStrategy,
+    noSuitableSteer: config.routing?.noSuitableSteer !== undefined
+      ? config.routing.noSuitableSteer : current.noSuitableSteer === undefined ? "create" : current.noSuitableSteer,
     legacySnapshot: current.legacySnapshot == null ? null : JSON.parse(JSON.stringify(current.legacySnapshot)),
     quota: current.quota ?? { exhaustedPct: QUOTA_DEFAULTS.exhaustedPct, warnPct: QUOTA_DEFAULTS.warnPct },
     githubOwner: current.githubOwner ?? null,
@@ -285,7 +288,10 @@ export function configFromSettings(settings: FactorySettingsValues): any {
       defaultProfile: settings.workerPriority?.[0],
     },
     quota: { ...(settings.quota ?? {}) },
-    routing: { strategy: settings.routingStrategy === undefined ? "efficiency" : settings.routingStrategy },
+    routing: {
+      strategy: settings.routingStrategy === undefined ? "efficiency" : settings.routingStrategy,
+      noSuitableSteer: settings.noSuitableSteer === undefined ? "create" : settings.noSuitableSteer,
+    },
   };
 }
 
@@ -405,6 +411,9 @@ export function validateFactorySettings(values: FactorySettingsValues): string[]
   }
   if (values.routingStrategy !== undefined && !["efficiency", "balanced", "preference"].includes(values.routingStrategy)) {
     errors.push("routingStrategy must be efficiency, balanced, or preference");
+  }
+  if (values.noSuitableSteer !== undefined && !["create", "offer", "wait"].includes(values.noSuitableSteer)) {
+    errors.push("noSuitableSteer must be create, offer, or wait");
   }
   if (values.steerPriority === undefined) {
     const isAdvisorSlot = (slot: string) => profiles[slots[slot]]?.advisor === true;

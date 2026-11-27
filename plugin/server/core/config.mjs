@@ -211,6 +211,18 @@ export function validateConfig(config) {
       errors.push(`steers.initialActive must not be advisor slot "${config.steers.initialActive}" (profile "${initialProfile}")`);
     }
   }
+  if (config.routing !== undefined) {
+    if (typeof config.routing !== 'object' || config.routing === null || Array.isArray(config.routing)) {
+      errors.push('routing must be an object');
+    } else {
+      if (config.routing.strategy !== undefined && !['efficiency', 'balanced', 'preference'].includes(config.routing.strategy)) {
+        errors.push('routing.strategy must be efficiency, balanced, or preference');
+      }
+      if (config.routing.noSuitableSteer !== undefined && !['create', 'offer', 'wait'].includes(config.routing.noSuitableSteer)) {
+        errors.push('routing.noSuitableSteer must be create, offer, or wait');
+      }
+    }
+  }
   if (config.handoffLanguage !== undefined && !['en', 'de'].includes(config.handoffLanguage)) errors.push('handoffLanguage must be "en" or "de"');
   const runtime = config.runtime ?? {};
   if (typeof runtime !== 'object') errors.push('runtime must be an object');

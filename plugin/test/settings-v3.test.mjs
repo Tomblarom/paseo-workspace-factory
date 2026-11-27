@@ -44,6 +44,7 @@ test("v2 migration preserves the original and derives ordered role-specific effe
   assert.equal(migrated.initialActive, source.initialActive);
   assert.deepEqual(migrated.workerPriority, source.workerPriority);
   assert.equal(migrated.routingStrategy, "efficiency");
+  assert.equal(migrated.noSuitableSteer, "wait");
   assert.deepEqual(migrated.legacySnapshot, { version: 2, values: before });
   source.profiles.original.model = "changed";
   assert.deepEqual(migrated.legacySnapshot.values, before);
@@ -113,8 +114,14 @@ test("explicit lists and strategy survive migration; current and future versions
   assert.deepEqual(migrated.steerPriority, source.steerPriority);
   assert.deepEqual(migrated.advisorPriority, []);
   assert.equal(migrated.routingStrategy, "preference");
-  assert.strictEqual(migrateFactoryConfig(migrated, 3), migrated);
+  assert.equal(migrated.noSuitableSteer, "wait");
+  const fromV3 = migrateFactoryConfig({ ...migrated, noSuitableSteer: undefined }, 3);
+  assert.equal(fromV3.noSuitableSteer, "wait");
+  assert.deepEqual(fromV3.legacySnapshot, migrated.legacySnapshot);
+  const explicitV3 = migrateFactoryConfig({ ...migrated, noSuitableSteer: "offer" }, 3);
+  assert.equal(explicitV3.noSuitableSteer, "offer");
   assert.strictEqual(migrateFactoryConfig(migrated, 4), migrated);
+  assert.strictEqual(migrateFactoryConfig(migrated, 5), migrated);
   assert.equal(migrateFactoryConfig(null, 1), null);
 });
 
@@ -138,10 +145,11 @@ test("deduplication compares the effective v2 profile defaults and every route d
 
 test("defaults and legacy inputs derive missing lists without replacing explicit empty lists", () => {
   const defaults = factoryConfigSettings.schema.parse({});
-  assert.equal(factoryConfigSettings.version, 3);
+  assert.equal(factoryConfigSettings.version, 4);
   assert.deepEqual(defaults.steerPriority, ["factory-default"]);
   assert.deepEqual(defaults.advisorPriority, []);
   assert.equal(defaults.routingStrategy, "efficiency");
+  assert.equal(defaults.noSuitableSteer, "create");
   assert.deepEqual(validateFactorySettings(defaults), []);
   const input = legacy();
   const parsed = factoryConfigSettings.schema.parse(input);
@@ -158,7 +166,9 @@ test("settings layering retains all profiles, priorities, routing and immutable 
   const snapshot = structuredClone(current.legacySnapshot);
   const config = configFromSettings(current);
   assert.equal(config.routing.strategy, "efficiency");
+  assert.equal(config.routing.noSuitableSteer, "wait");
   config.routing.strategy = "balanced";
+  config.routing.noSuitableSteer = "offer";
   config.steers.priority = ["different", "same"];
   config.advisors.priority = ["advisor"];
   delete config.profiles.unused;
@@ -166,6 +176,7 @@ test("settings layering retains all profiles, priorities, routing and immutable 
   assert.deepEqual(next.steerPriority, ["different", "same"]);
   assert.deepEqual(next.advisorPriority, ["advisor"]);
   assert.equal(next.routingStrategy, "balanced");
+  assert.equal(next.noSuitableSteer, "offer");
   assert.deepEqual(next.profiles.unused, current.profiles.unused);
   assert.deepEqual(next.legacySnapshot, snapshot);
   next.legacySnapshot.values.profiles.original.model = "modified";
@@ -199,6 +210,9 @@ test("malformed classification is rejected rather than promoted into an eligible
   assert.match(validateFactorySettings(values).join("\n"), /unknown profile/);
   values.routingStrategy = "unknown";
   assert.match(validateFactorySettings(values).join("\n"), /routingStrategy/);
+  values.noSuitableSteer = "auto";
+  assert.match(validateFactorySettings(values).join("\n"), /noSuitableSteer/);
+  assert.match(validateConfig({ ...configFromSettings(factoryConfigSettings.schema.parse({})), routing: { noSuitableSteer: "auto" } }).join("\n"), /routing\.noSuitableSteer/);
   values.steerPriority = null;
   assert.throws(() => configFromSettings(values), TypeError);
   const malformedWorker = migrateFactoryConfig({ ...legacy(), workerPriority: undefined, workerDefault: 4 }, 1);

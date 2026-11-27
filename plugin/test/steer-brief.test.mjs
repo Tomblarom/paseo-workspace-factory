@@ -138,21 +138,39 @@ test("delivery contracts do not let a caller attest payload provenance", () => {
   assert.deepEqual(factorySteerBrief.input.parse({ ...staged, ...claimed }), staged);
 });
 
-test("new steer menu settings keep history and migrated hosts retain their current preference", () => {
+test("new steer menu settings default to continue and keep history while migrated hosts keep new automatic effects inactive", () => {
   assert.equal(factorySteerMenuSettings.id, "factory-steer-menu");
   assert.equal(factorySteerMenuSettings.scope, "host");
-  assert.equal(factorySteerMenuSettings.version, 2);
+  assert.equal(factorySteerMenuSettings.version, 3);
   assert.deepEqual(factorySteerMenuSettings.schema.parse({}), {
-    initializeNewSteer: "composer",
+    afterReset: "continue",
     keepChatHistory: true,
   });
-  for (const keepChatHistory of [undefined, false, true]) {
-    const legacy = keepChatHistory === undefined ? {} : { keepChatHistory };
-    const migrated = factorySteerMenuSettings.migrate({ ...legacy, initializeNewSteer: "send" }, 1);
-    assert.deepEqual(factorySteerMenuSettings.schema.parse(migrated), {
-      initializeNewSteer: "send", keepChatHistory: keepChatHistory ?? false,
-    });
+  for (const [legacyInit, expectedAfterReset] of [
+    ["send", "continue"],
+    ["composer", "composer"],
+    ["later", "wait"],
+    [undefined, "composer"],
+  ]) {
+    for (const keepChatHistory of [undefined, false, true]) {
+      const legacy = {
+        ...(legacyInit === undefined ? {} : { initializeNewSteer: legacyInit }),
+        ...(keepChatHistory === undefined ? {} : { keepChatHistory }),
+      };
+      const migratedV1 = factorySteerMenuSettings.migrate(legacy, 1);
+      assert.deepEqual(factorySteerMenuSettings.schema.parse(migratedV1), {
+        afterReset: expectedAfterReset,
+        keepChatHistory: keepChatHistory ?? false,
+      });
+      const migratedV2 = factorySteerMenuSettings.migrate(legacy, 2);
+      assert.deepEqual(factorySteerMenuSettings.schema.parse(migratedV2), {
+        afterReset: expectedAfterReset,
+        keepChatHistory: keepChatHistory ?? true,
+      });
+    }
   }
+  const current = { afterReset: "wait", keepChatHistory: true };
+  assert.strictEqual(factorySteerMenuSettings.migrate(current, 3), current);
 });
 
 // ---------------------------------------------------------------------------

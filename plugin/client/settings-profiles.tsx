@@ -64,6 +64,18 @@ export function ModelSettingsSections(props: ModelSettingsProps) {
             error={fieldErrors.strategy}
             onValueChange={(routingStrategy) => void update("Routing", "strategy", (current) => ({ ...current, routingStrategy }))}
           />
+          <SettingsSelect
+            label="No suitable steer"
+            hint="What Factory should do for due work when no existing steer is eligible."
+            value={draft.noSuitableSteer}
+            options={[
+              { label: "Create", value: "create" },
+              { label: "Offer creation", value: "offer" },
+              { label: "Wait", value: "wait" },
+            ]}
+            error={fieldErrors.noSuitableSteer}
+            onValueChange={(noSuitableSteer) => void update("Routing", "noSuitableSteer", (current) => ({ ...current, noSuitableSteer }))}
+          />
           <SettingsSaveError error={saveErrors.Routing} />
         </SettingsCard>
       </SettingsSection>

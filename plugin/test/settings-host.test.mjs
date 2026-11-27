@@ -41,8 +41,8 @@ function cleanup(dir) {
   rmSync(dir, { recursive: true, force: true });
 }
 
-test("schema: {} parses with null host fields at version 3", () => {
-  assert.equal(factoryConfigSettings.version, 3);
+test("schema: {} parses with null host fields at version 4", () => {
+  assert.equal(factoryConfigSettings.version, 4);
   const defaults = factoryConfigSettings.schema.parse({});
   assert.equal(defaults.githubOwner, null);
   assert.equal(defaults.checkoutRoot, null);

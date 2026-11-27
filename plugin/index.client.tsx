@@ -39,7 +39,7 @@ import {
   quotaConfirmationText,
   type resetSteer,
   transferStagedBrief,
-  type InitializeNewSteer,
+  type AfterReset,
 } from "./client/steer-menu.js";
 import {
   attentionPillId,
@@ -56,7 +56,6 @@ import { attentionStatus } from "./shared/context-continuation.js";
 import {
   factoryCold, factoryResume, factorySteerActivate, factorySteerBrief, factorySteers, factorySwitch, factorySwitchPreview,
 } from "./shared/factory.js";
-import { factorySteerMenuSettings } from "./shared/settings.js";
 
 const SETTINGS_SCREEN_ID = "factory-settings";
 
@@ -152,14 +151,14 @@ export default function contribute(client: PluginClientContext) {
     stagedTo?: string | null;
     deliveryError?: unknown;
     stagingError?: unknown;
-  }, initialize: InitializeNewSteer): Promise<string> {
+  }, afterReset: AfterReset): Promise<string> {
     if (result.delivered) return "The continuation brief was sent.";
     const error = result.deliveryError ?? result.stagingError;
     const { stageId, stagedTo } = result;
     if (!stageId || !stagedTo) return String(error ?? "");
     const staged = "Review the staged brief in Factory.";
     if (error) return `${error} ${staged}`;
-    if (initialize !== "composer") return staged;
+    if (afterReset !== "composer") return staged;
     const composer = () => client.composers({ agentId: stagedTo })[0];
     if (!composer()) return staged;
     try {
@@ -175,11 +174,11 @@ export default function contribute(client: PluginClientContext) {
 
   async function reportReset(
     source: Pick<SteerPillRow, "workspaceId" | "agentId">,
-    { result, initialize }: Awaited<ReturnType<typeof resetSteer>>,
+    { result, afterReset }: Awaited<ReturnType<typeof resetSteer>>,
   ) {
     const summary = result.idempotent ? "Steer already reset" : "Steer reset";
     const chat = result.idempotent ? "" : "The context was reset in this tab.";
-    const brief = result.idempotent ? "" : await briefResult(source.workspaceId, result, initialize);
+    const brief = result.idempotent ? "" : await briefResult(source.workspaceId, result, afterReset);
     reportSteerResult(source, summary, [`${summary}.`, chat, brief].filter(Boolean).join(" "));
   }
 
@@ -192,16 +191,13 @@ export default function contribute(client: PluginClientContext) {
     },
     async handover(source: SteerPillRow, target: { slot: string; agentId: string }) {
       try {
-        const state = await client.rpc(settingsRpc(factorySteerMenuSettings.id).read, {});
-        if (state.status !== "ready") throw new Error(state.error);
-        const { initializeNewSteer } = factorySteerMenuSettings.schema.parse(state.values);
-        const result = await handoverSteer(source, target, initializeNewSteer,
+        const result = await handoverSteer(source, target,
           (input) => client.rpc(factorySwitchPreview, input), (input) => client.rpc(factorySwitch, input));
         if (!result.applied) throw new Error(String(result.deliveryError ?? "Factory could not confirm the handover."));
         const detail = result.workerHandoverPending ? "Worker transfer is pending."
           : result.deliveryPending ? "The brief is queued pending context renewal."
           : result.deliveryBlocked ? String(result.deliveryError ?? "Continuation is blocked. Review recovery in Factory.")
-            : await briefResult(source.workspaceId, result, initializeNewSteer);
+            : await briefResult(source.workspaceId, result, "wait");
         const summary = `Steer ${result.to} active`;
         reportSteerResult(source, summary, [`Steer ${result.to} is now active (epoch ${result.epoch}).`, detail].filter(Boolean).join(" "));
       } catch (thrown) {

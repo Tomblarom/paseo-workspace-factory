@@ -11,7 +11,7 @@ import { SettingsSaveError, useAutosave } from "./settings-autosave.js";
 
 const SECTION_TITLE = "Steer menu";
 const SECTION_INFO =
-  "Brief delivery and chat history for steers.";
+  "Post-reset continuation and chat history for steers.";
 
 export function SteerMenuSettingsSection() {
   const { state, change, errors } = useAutosave(factorySteerMenuSettings);
@@ -41,16 +41,16 @@ export function SteerMenuSettingsSection() {
     <SettingsSection title={SECTION_TITLE} info={SECTION_INFO}>
       <SettingsCard>
         <SettingsSelect
-          label="Initialize new steer"
-          hint="Send delivers the brief at once. Composer puts it in the destination draft when available. A staged brief can be opened with Review brief in Factory."
-          value={values.initializeNewSteer}
+          label="After reset"
+          hint="Choose what happens to assigned open work after Reset Steer. Handover continues automatically on confirmation."
+          value={values.afterReset}
           options={[
-            { label: "Send the brief at once", value: "send" },
-            { label: "Place the brief in the composer (default)", value: "composer" },
-            { label: "Leave the composer empty", value: "later" },
+            { label: "Continue assigned open work", value: "continue" },
+            { label: "Place brief in composer", value: "composer" },
+            { label: "Wait", value: "wait" },
           ]}
-          onValueChange={(initializeNewSteer) =>
-            void save((current) => ({ ...current, initializeNewSteer }))
+          onValueChange={(afterReset) =>
+            void save((current) => ({ ...current, afterReset }))
           }
         />
         <SettingsSwitch

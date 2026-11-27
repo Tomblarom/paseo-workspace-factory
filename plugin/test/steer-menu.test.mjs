@@ -199,17 +199,17 @@ test("reset blocks busy tabs and incomplete membership", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Staged delivery per the "Initialize new steer" setting
+// Staged delivery per the "After reset" setting
 // ---------------------------------------------------------------------------
 
-test("the setting normalizes to send, composer or later (default composer)", () => {
-  assert.equal(menu.normalizeInitializeNewSteer("send"), "send");
-  assert.equal(menu.normalizeInitializeNewSteer("composer"), "composer");
-  assert.equal(menu.normalizeInitializeNewSteer("later"), "later");
-  assert.equal(menu.normalizeInitializeNewSteer(undefined), "composer");
-  assert.equal(menu.normalizeInitializeNewSteer("at-once"), "composer");
-  assert.equal(menu.normalizeInitializeNewSteer(null), "composer");
-  assert.equal(menu.INITIALIZE_NEW_STEER_DEFAULT, "composer");
+test("afterReset normalizes to continue, composer or wait (default continue)", () => {
+  assert.equal(menu.normalizeAfterReset("continue"), "continue");
+  assert.equal(menu.normalizeAfterReset("composer"), "composer");
+  assert.equal(menu.normalizeAfterReset("wait"), "wait");
+  assert.equal(menu.normalizeAfterReset(undefined), "continue");
+  assert.equal(menu.normalizeAfterReset("send"), "continue");
+  assert.equal(menu.normalizeAfterReset(null), "continue");
+  assert.equal(menu.AFTER_RESET_DEFAULT, "continue");
 });
 
 test("composer staging replaces an empty prompt and appends to a draft", () => {
@@ -392,37 +392,43 @@ test("unrelated target state changes do not rebuild the open menu", () => {
   assert.notEqual(key("warm"), key("running"));
 });
 
-test("a Handover target previews and applies in one press with source and target identity checks", async () => {
+test("a Handover target previews and applies in one press with direct continuation and identity checks", async () => {
   const active = self();
   const target = { agentId: "steer-b", slot: "B" };
   const calls = [];
   const plan = { workspaceId: active.workspaceId, fromId: active.agentId, toId: target.agentId, fingerprint: "switch-fingerprint" };
   const preview = async (input) => { calls.push(["preview", input]); return plan; };
   const apply = async (input) => { calls.push(["apply", input]); return { applied: true }; };
-  assert.deepEqual(await menu.handoverSteer(active, target, "composer", preview, apply), { applied: true });
+  assert.deepEqual(await menu.handoverSteer(active, target, preview, apply), { applied: true });
   const expected = { workspaceId: active.workspaceId, callerId: active.agentId, to: "B" };
   assert.deepEqual(calls, [
     ["preview", expected],
-    ["apply", { ...expected, fingerprint: "switch-fingerprint", deliver: "stage" }],
+    ["apply", { ...expected, fingerprint: "switch-fingerprint", deliver: "send" }],
   ]);
   for (const change of [{ fromId: "other" }, { toId: "replacement" }, { workspaceId: "other" }]) {
-    await assert.rejects(menu.handoverSteer(active, target, "send",
+    await assert.rejects(menu.handoverSteer(active, target,
       async () => ({ ...plan, ...change }), async () => assert.fail("stale handover applied")), /changed/);
   }
 });
 
-test("Reset applies the bound rewind to the same holder and stages at unknown quota", async () => {
+test("Reset applies the bound rewind using afterReset and stages at unknown or depleted quota", async () => {
   const source = self();
   const plan = { workspaceId: source.workspaceId, from: source.agentId, slot: source.slot,
     fingerprint: "reset-fingerprint", refreshMode: "rewind" };
-  for (const [resetQuota, deliver] of [["available", "send"], ["unknown", "stage"], ["depleted", "stage"]]) {
+  for (const [afterReset, resetQuota, deliver] of [
+    ["continue", "available", "send"],
+    ["continue", "unknown", "stage"],
+    ["continue", "depleted", "stage"],
+    ["composer", "available", "stage"],
+    ["wait", "available", "stage"],
+  ]) {
     const result = { applied: true, refreshMode: "rewind" };
-    const reset = await menu.resetSteer(source, plan, "send", async (input) => {
+    const reset = await menu.resetSteer(source, plan, afterReset, async (input) => {
       assert.deepEqual(input, { workspaceId: source.workspaceId, slot: source.slot, resetQuota, deliver,
         fingerprint: plan.fingerprint });
       return result;
     }, resetQuota);
-    assert.deepEqual(reset, { result, initialize: "send" });
+    assert.deepEqual(reset, { result, afterReset });
   }
 });
 
@@ -431,8 +437,8 @@ test("Reset stops on a stale holder or a replacement preview", async () => {
   const plan = { workspaceId: source.workspaceId, from: source.agentId, slot: source.slot,
     fingerprint: "reset-fingerprint", refreshMode: "rewind" };
   const apply = async () => assert.fail("reset applied");
-  await assert.rejects(menu.resetSteer(source, { ...plan, from: "new-holder" }, "send", apply, "available"), /steer changed/);
-  await assert.rejects(menu.resetSteer(source, { ...plan, refreshMode: "new-agent" }, "send", apply, "available"), /preview and confirm a replacement/);
+  await assert.rejects(menu.resetSteer(source, { ...plan, from: "new-holder" }, "continue", apply, "available"), /steer changed/);
+  await assert.rejects(menu.resetSteer(source, { ...plan, refreshMode: "new-agent" }, "continue", apply, "available"), /preview and confirm a replacement/);
 });
 
 const menuSource = readFileSync(new URL("../client/steer-menu-content.tsx", import.meta.url), "utf8");
