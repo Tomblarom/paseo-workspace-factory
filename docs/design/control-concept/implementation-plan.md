@@ -813,6 +813,16 @@ uses the target's live route. The account has the same numbered alias as in
 Resources. During a pending move the label uses the account the session still
 runs on.
 
+The user extended that request on 2026-11-27 to the native Factory menu. Its
+entries show `Handover -> Steer B · warm · <model> <thinking> <ZeroSub profile>`.
+The same request authorizes moving live workers to the new steer on Handover.
+The native parent and Factory owner are updated together on the existing
+agent. The authority change reserves incomplete transfers so a retry can
+finish them before sending the continuation. Archived workers stay archived.
+The user also asked for the repository in Paseo's native sender line. The
+installed client renders the sender's live title and exposes no plugin
+extension for the label. A separate Paseo change awaits approval.
+
 The user also approved the SLP-inspired edits to role rules, templates, checkpoint
 guidance and worker wake text in Steer E's chat on 2026-11-27. The approval
 covers these text and delivery changes. Warm notifications use worker titles,
