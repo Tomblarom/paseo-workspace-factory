@@ -87,6 +87,23 @@ test("a bound account without usable telemetry never inherits or clears a limit 
   assert.equal(quotaAdmission(agent, {}, snapshot).reason, "quota exhausted");
 });
 
+test("a same-route success supersedes older inferred limits while current limit evidence still holds", async () => {
+  const limit = { accountId: "api", provider: "claude", model: "m", at: new Date(NOW - 120000).toISOString(), resetAt: null };
+  const snapshot = await readRoutingSnapshot({
+    zerosub: { accounts: [{ id: "api", family: "claude", status: "ready", auth: "api", windows: [] }], agentAccount: { a: "api" }, pending: {} },
+    now: () => new Date(NOW).toISOString(),
+  }, []);
+  const quotaSuccess = { accountId: "api", provider: "claude", model: "m", at: new Date(NOW - 60000).toISOString() };
+  const shared = (quotaLimit) => ({ sibling: { quotaLimit } });
+  assert.equal(quotaAdmission(agent, { quotaSuccess }, snapshot, shared(limit)).confirmation, "unknown");
+  assert.equal(quotaAdmission(agent, { quotaSuccess: { ...quotaSuccess, accountId: "other" } }, snapshot, shared(limit)).allowed, false);
+  assert.equal(quotaAdmission(agent, { quotaSuccess }, snapshot, shared({ ...limit, at: new Date(NOW).toISOString() })).allowed, false);
+  assert.equal(quotaAdmission(agent, { quotaSuccess }, snapshot, shared({ ...limit, resetAt: new Date(NOW + 60000).toISOString() })).allowed, false);
+  assert.equal(quotaAdmission(agent, { quotaSuccess, quotaLimit: limit }, snapshot).allowed, false);
+  snapshot.zerosub.accounts = [account("api", 99)];
+  assert.equal(quotaAdmission(agent, { quotaSuccess }, snapshot, shared(limit)).reason, "quota exhausted");
+});
+
 test("execution takes a fresh observation, so a newly pending move prevents sending", async () => {
   let zerosub = { accounts: [account("source", 10)], agentAccount: { a: "source" }, pending: {} };
   const deps = { getZerosub: async () => zerosub, now: () => new Date(NOW).toISOString() };

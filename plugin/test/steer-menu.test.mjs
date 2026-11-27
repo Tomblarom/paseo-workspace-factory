@@ -306,17 +306,17 @@ test("steerRowsOf parses permission and staged-brief flags", () => {
 
 test("the active steer menu lists actions and leaf-only handover targets", () => {
   const active = { ...self(), stagedBrief: true };
-  const items = menu.describeSteerMenu(active, [
-    active, row("steer-c", { slot: "C", state: "needs-resume" }), row("steer-b", { slot: "B", state: "running" }),
-  ]);
+  const warmup = row("steer-b", { slot: "B", state: "running", warmth: "cooling" });
+  const recovery = row("steer-c", { slot: "C", state: "needs-resume", warmth: "cold", large: true });
+  const items = menu.describeSteerMenu(active, [active, recovery, warmup]);
   assert.deepEqual(items.map((entry) => entry.title ?? entry.kind), [
     "Handover", "Reset Steer", "separator", "Open Factory",
   ]);
   const [handover, reset] = items;
   assert.equal(handover.disabled, false);
   assert.deepEqual(handover.targets, [
-    { id: "handover-steer-b", title: "Steer B · Busy (turn running)", slot: "B", agentId: "steer-b", disabled: true },
-    { id: "handover-steer-c", title: "Steer C · Standby", slot: "C", agentId: "steer-c", disabled: false },
+    { id: "handover-steer-b", title: "Steer B · cooling", icon: pill.faceFor(warmup).icon, slot: "B", agentId: "steer-b", disabled: true },
+    { id: "handover-steer-c", title: "Steer C · large", icon: pill.faceFor(recovery).icon, slot: "C", agentId: "steer-c", disabled: false },
   ]);
   assert.deepEqual(reset, { kind: "reset", id: "reset", title: "Reset Steer", disabled: false, icon: "ListRestart" });
 });
@@ -361,6 +361,11 @@ test("depleted and unknown quota both leave Reset and Activate reachable with th
     assert.equal(entries.find(({ kind }) => kind === "reset").disabled, false);
     assert.match(menu.quotaConfirmationText(quotaConfirmation, own), new RegExp(`Quota is ${quotaConfirmation}`));
   }
+});
+
+test("Reset Steer states unknown quota in one exact sentence and keeps depleted wording", () => {
+  assert.equal(menu.resetQuotaConfirmationText("unknown"), "Quota is unknown.");
+  assert.match(menu.resetQuotaConfirmationText("depleted"), /^Quota is depleted\. The reset time is unknown\./);
 });
 
 test("unrelated target state changes do not rebuild the open menu", () => {

@@ -627,7 +627,7 @@ test("the Reset popover is keyboard/screen-reader labelled and theme driven", ()
     'accessibilityRole="checkbox"',
     "accessibilityState={{ checked: clearChatHistory",
     "theme.colors.",
-    "quotaConfirmationText",
+    "resetQuotaConfirmationText",
   ]) {
     assert.ok(menuSource.includes(token), `steer-menu-content.tsx contains ${token}`);
   }

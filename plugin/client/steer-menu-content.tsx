@@ -7,7 +7,7 @@ import { factoryFresh, factoryFreshPreview } from "../shared/factory.js";
 import { factorySteerMenuSettings } from "../shared/settings.js";
 import type { FactorySteerFeed } from "./factory-workspace-state.js";
 import { useAutosave } from "./settings-autosave.js";
-import { quotaConfirmationText, resetSteer, resetSteerBlock, steerQuotaConfirmation } from "./steer-menu.js";
+import { resetQuotaConfirmationText, resetSteer, resetSteerBlock, steerQuotaConfirmation } from "./steer-menu.js";
 
 type ResetSteerPopoverProps = Extract<PluginButtonContentProps, { context: "agent" }> & {
   feed: FactorySteerFeed;
@@ -63,7 +63,7 @@ export function ResetSteerPopover({ agentId, workspaceId, theme, close, feed, on
   return (
     <View style={{ gap: 4, width: 260, maxWidth: "100%" }}>
       {quota ? <Text style={{ color: theme.colors.statusWarning }}>
-        {quotaConfirmationText(quota, row)} The continuation brief will be prepared for manual delivery.
+        {resetQuotaConfirmationText(quota, row)}
       </Text> : null}
       <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: clearChatHistory, disabled: !canReset }}
         disabled={!canReset} onPress={() => setChoice(!clearChatHistory)}

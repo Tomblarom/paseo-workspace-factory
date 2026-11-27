@@ -91,7 +91,7 @@ function buildSteerMenuBehavior(
         return { ...item, behavior: entry.disabled ? { kind: "action", onPress: () => {} } : {
           kind: "menu",
           items: entry.targets.map((target) => ({
-            kind: "item", id: target.id, title: target.title, icon: "ArrowRight", disabled: target.disabled,
+            kind: "item", id: target.id, title: target.title, icon: target.icon, disabled: target.disabled,
             behavior: { kind: "action", onPress: () => actions.handover(row, target) },
           })),
         } };

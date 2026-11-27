@@ -24,7 +24,7 @@ import {
   type FactorySteerFeed,
   type WorkspaceStatus,
 } from "./factory-workspace-state.js";
-import { describeSteerMenu, handoffTargets, isExpiredPreviewError, normalizeInitializeNewSteer, quotaConfirmationText, steerQuotaConfirmation, type HandoffTarget } from "./steer-menu.js";
+import { describeSteerMenu, handoffTargets, isExpiredPreviewError, normalizeInitializeNewSteer, quotaConfirmationText, resetQuotaConfirmationText, steerQuotaConfirmation, type HandoffTarget } from "./steer-menu.js";
 import { FactorySteerOperation } from "./factory-steer-operation.js";
 import type { SteerPillRow } from "./steer-pill.js";
 
@@ -229,7 +229,7 @@ function ResetOrResumeSteer({ kind, steer, liveSteer, workspaceId, host, theme, 
           {renewedPreview && !preview.isFetching && !preview.error ? <Text style={styles.conflict}>The preview expired. Review the new preview.</Text> : null}
           {details?.kind === "reset" ? (
             <>
-              {quota ? <Text style={styles.conflict}>{quotaConfirmationText(quota, liveSteer)} The continuation brief will be prepared for manual delivery.</Text> : null}
+              {quota ? <Text style={styles.conflict}>{resetQuotaConfirmationText(quota, liveSteer)}</Text> : null}
               <Text style={styles.body}>{replacement ? "A new agent takes this slot. The previous tab keeps its chat."
                 : "This rewinds the conversation and removes later messages from this tab."}</Text>
               <Text style={styles.label}>{details.details.packetChars.toLocaleString()} characters in the continuation brief
@@ -573,8 +573,9 @@ export function FactoryWorkspaceStatus({
               <View style={{ gap: 8, padding: 8 }}>
                 <Text style={styles.label}>Choose the steer that will take over the current work.</Text>
                 {targets.map((target) => (
-                  <Action key={target.agentId} theme={theme} icon="ArrowRight"
-                    title={`Steer ${target.slot} · ${steerLabels(target).modelName}${target.needsRecovery ? " · recovery needed" : target.reason ? ` · ${target.reason}` : ""}`}
+                  <Action key={target.agentId} theme={theme} icon={target.context.icon}
+                    title={`Steer ${target.slot} · ${steerLabels(target).modelName} · ${target.context.state}`}
+                    hint={target.reason ?? (target.needsRecovery ? "Recovery needed" : undefined)}
                     disabled={controller?.agentId !== currentOperation.steer.agentId || !target.eligible}
                     onPress={() => setOperation({ ...currentOperation, target })} />
                 ))}

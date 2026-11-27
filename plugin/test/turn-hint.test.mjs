@@ -1017,9 +1017,13 @@ test("a superseded same-slot steer cannot save a scope checkpoint", async () => 
 test("a completed steer turn never sends a quota-only prompt", async () => {
   for (const pct of [74, 75, 89, 90, 99]) {
     const world = makeWorld();
-    const { steers } = provisioned(world);
+    const { ws, steers } = provisioned(world);
     await completedSteerTurn(world, steers, { getConfig: async () => config, zerosub: zerosubFor(steers, pct) });
     assert.equal(sendsTo(world, steers.A.id).length, 0, `${pct}%`);
+    const entry = ws.metadata[AGENTS_KEY][steers.A.id];
+    assert.deepEqual(entry.quotaSuccess, {
+      accountId: "acc-a", provider: steers.A.provider, model: steers.A.model, at: entry.lastTurnEndedAt,
+    });
     assert.ok(world.calls.some((c) => c[0] === "workspace.setMetadata"), "turn still recorded");
   }
 });

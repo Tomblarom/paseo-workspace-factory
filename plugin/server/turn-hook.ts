@@ -467,6 +467,13 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
     : (typeof agent.thinkingOptionId === "string" ? agent.thinkingOptionId : null);
   const liveSpeed = speedOfLiveOptions(liveProvider, liveModel, agent.options ?? null);
   const liveSessionId = typeof agent?.persistence?.sessionId === "string" ? agent.persistence.sessionId : null;
+  const completedAt = decision.entryUpdate?.lastTurnEndedAt;
+  const successRoute = !isCleanupTurn && !cleanupCommandKind(turnUserText) && kind === "completed" &&
+    identity.role === "steer" && liveProvider && liveModel ? await resolveZerosub(deps) : null;
+  const successAccount = successRoute?.agentAccount?.[agentId];
+  const quotaSuccess = successAccount && !successRoute?.pending?.[agentId] && typeof completedAt === "string"
+    ? { at: completedAt, accountId: successAccount, provider: liveProvider?.toLowerCase(), model: liveModel }
+    : null;
   const settingsBaseline = (buildSettingsBaseline as unknown as (args: any) => any)({
     provider: liveProvider,
     model: liveModel,
@@ -514,6 +521,7 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
       ...prev,
       ...(decision.entryUpdate ?? {}),
       ...(needsResumePatch ?? {}),
+      ...(quotaSuccess && !(Date.parse(prev.quotaSuccess?.at ?? "") > Date.parse(quotaSuccess.at)) ? { quotaSuccess } : {}),
       ...(turnUsage ? { usage: mergeTurnUsage(prev.usage, turnUsage) } : {}),
       ...(settingsBaseline ? { settingsBaseline } : {}),
       ...(newerTurnOpen ? { openTurnId: prev.openTurnId, turnStartedAt: prev.turnStartedAt } : {}),

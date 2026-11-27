@@ -1549,9 +1549,12 @@ test("a worker result wakes the active API steer when a sibling subscription is 
 test("all accounts exhausted holds the wake until the earliest reset", async () => {
   const world = makeWorld();
   const { ws, steers } = provisioned(world);
+  steers.A.provider = "claude";
+  steers.B.archivedAt = at(NOW - MIN);
+  steers.C.archivedAt = at(NOW - MIN);
   const worker = addWorker(world, ws);
   world.workspaces[0].metadata[WORKERS_KEY] = { [worker.id]: entry("running", "t") };
-  const exhausted = zsState({ accounts: [zsAccount("acc-a", 99), zsAccount("acc-b", 95)], routes: [] });
+  const exhausted = zsState({ accounts: [zsAccount("acc-a", 99), zsAccount("acc-b", 95)], routes: [zsRoute(steers.A.id, "acc-a")] });
   const queued = await turnedOut(world, worker, { assistant: checkpointOf("t", "done") }, { zerosub: exhausted });
   assert.equal(queued.action, "queued");
   assert.equal(queued.reason, "wait-reset");
@@ -1617,6 +1620,58 @@ test("wake omits quota when the live holder has a bound account without metrics"
   const texts = sendsTo(world, steers.A.id);
   assert.equal(texts.length, 1);
   assert.doesNotMatch(texts[0], /^Quota:/m);
+});
+
+test("depleted accounts with no binding to the active steer cannot stall its wake", async () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  const worker = addWorker(world, ws);
+  ws.metadata[WORKERS_KEY] = { [worker.id]: entry("running", "Unbound route") };
+  const zerosub = zsState({ accounts: [zsAccount("other", 99)], routes: [] });
+  const result = await turnedOut(world, worker, { assistant: checkpointOf("Unbound route", "done") }, { zerosub });
+  assert.equal(result.action, "sent");
+  assert.equal(sendsTo(world, steers.A.id).length, 1);
+});
+
+test("a lone active steer gets its queued wake once a newer same-route success beats an old shared limit", async () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  const active = steers.A;
+  steers.B.archivedAt = at(NOW - MIN);
+  steers.C.archivedAt = at(NOW - MIN);
+  active.provider = "claude-api";
+  active.model = "proxy-model";
+  active.metadata = { "zerosub.account": "api" };
+  active.persistence = { sessionId: "current-session" };
+  const previous = at(NOW - 2 * MIN);
+  addWorkspace(world, { metadata: { [AGENTS_KEY]: { other: {
+    quotaLimit: { provider: active.provider, model: active.model, accountId: "api", at: previous, resetAt: null },
+  } } } });
+  const worker = addWorker(world, ws);
+  ws.metadata[WORKERS_KEY] = { [worker.id]: entry("running", "Parser checks") };
+  const zerosub = { accounts: [{ id: "api", family: "claude-api", auth: "api", status: "ready", windows: [] }],
+    agentAccount: { [active.id]: "api" }, pending: {} };
+  const delivery = { keepChatHistory: async () => true };
+  const deps = depsOf({ zerosub, delivery });
+  const scope = { id: REPO, workspaceId: ws.id };
+  const turn = await turnedOut(world, worker, { assistant: checkpointOf("Parser checks", "done") }, { zerosub, delivery });
+  assert.equal(turn.reason, "wait-quota");
+  assert.deepEqual(sendsTo(world, active.id), []);
+  assert.ok(ws.metadata[WORKERS_KEY][worker.id].pendingWake);
+
+  const successAt = at(NOW - MIN);
+  ws.metadata[AGENTS_KEY] = { [active.id]: {
+    lastTurnId: "ok", lastTurnEndedAt: successAt, outcome: "completed",
+    settingsBaseline: { provider: active.provider, model: active.model, sessionId: active.persistence.sessionId, turnId: "ok", at: successAt },
+  } };
+  active.status = "running";
+  assert.equal((await supervise.flushScope(fakeClient(world), scope, deps)).reason, "target-busy");
+  assert.ok(ws.metadata[WORKERS_KEY][worker.id].pendingWake);
+  active.status = "idle";
+  assert.equal((await supervise.flushScope(fakeClient(world), scope, deps)).flushed, true);
+  assert.equal(ws.metadata[WORKERS_KEY][worker.id].pendingWake, null);
+  assert.match(sendsTo(world, active.id)[0], /Parser checks.*result reported/);
+  assert.equal(sendsTo(world, active.id).length, 1);
 });
 
 test("failover waits on the holder's pending move, then proceeds past the timeout", async () => {
@@ -1695,9 +1750,12 @@ test("failover skips steers on the exhausted failing account", async () => {
 test("boot finished queues post-boot wakes while all accounts are exhausted", async () => {
   const world = makeWorld();
   const { ws, steers } = provisioned(world);
+  steers.A.provider = "claude";
+  steers.B.archivedAt = at(NOW - MIN);
+  steers.C.archivedAt = at(NOW - MIN);
   const worker = addWorker(world, ws);
   world.workspaces[0].metadata[WORKERS_KEY] = { [worker.id]: entry("running", "t") };
-  const exhausted = zsState({ accounts: [zsAccount("acc-a", 99), zsAccount("acc-b", 95)], routes: [] });
+  const exhausted = zsState({ accounts: [zsAccount("acc-a", 99), zsAccount("acc-b", 95)], routes: [zsRoute(steers.A.id, "acc-a")] });
   const result = await supervise.runBootFinished(
     fakeClient(world),
     [{ agentId: worker.id, scopeId: REPO }],

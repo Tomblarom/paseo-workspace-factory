@@ -251,16 +251,21 @@ function secondTitleLine(row: SteerPillRow): string {
   return parts.join(" · ");
 }
 
+export function steerContextFace(row: Pick<SteerPillRow, "large" | "warmth">) {
+  const state = row.large ? "large" : row.warmth === "warm" || row.warmth === "cooling" || row.warmth === "cold" ? row.warmth : "unknown";
+  return { state, icon: STEER_PILL_ICONS[state] };
+}
+
 export function faceFor(row: SteerPillRow): SteerPillFace {
   const slot = row.slot ?? "?";
-  const context = row.large ? "large" : row.warmth === "warm" || row.warmth === "cooling" || row.warmth === "cold" ? row.warmth : "unknown";
+  const context = steerContextFace(row);
   const first = [`Steer ${slot}`, steerRole(row), pillStateWord(row.state)].join(" · ");
   const second = secondTitleLine(row);
   const title = second ? `${first}\n${second}` : first;
   return {
-    label: `${slot} · ${context}`,
+    label: `${slot} · ${context.state}`,
     title,
-    icon: STEER_PILL_ICONS[context],
+    icon: context.icon,
     accessibilityLabel: second ? `${first} · ${second}` : first,
   };
 }

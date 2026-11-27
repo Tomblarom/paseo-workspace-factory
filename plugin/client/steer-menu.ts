@@ -5,7 +5,7 @@ import type {
   factoryFresh, factoryFreshPreview, factorySteerActivate, factorySteerBrief, factorySwitch, factorySwitchPreview, QuotaConfirmation,
 } from "../shared/factory.js";
 import type { SteerFaceState } from "../shared/steer-state.js";
-import type { SteerPillRow } from "./steer-pill.js";
+import { steerContextFace, type SteerPillRow } from "./steer-pill.js";
 
 export function activationMenuBehavior(
   { agentId, workspaceId }: Pick<SteerPillRow, "agentId" | "workspaceId">,
@@ -100,6 +100,7 @@ export interface HandoffTarget {
   provider: string | null;
   model: string | null;
   state: SteerFaceState;
+  context: ReturnType<typeof steerContextFace>;
   eligible: boolean;
   /** English reason on unavailable rows, null when eligible. */
   reason: string | null;
@@ -171,6 +172,7 @@ export function handoffTargets(
       provider: row.provider,
       model: row.model,
       state: row.state,
+      context: steerContextFace(row),
       eligible: verdict.eligible,
       reason: verdict.reason,
       needsRecovery: verdict.needsRecovery,
@@ -191,6 +193,11 @@ export function quotaConfirmationText(quota: QuotaConfirmation, row?: Pick<Steer
   if (quota === "unknown") return "Quota is unknown. The provider may reject a new turn.";
   if (!row?.resetAt || row.resetUnknown) return "Quota is depleted. The reset time is unknown.";
   return `Quota is depleted. Reported reset: ${new Date(row.resetAt).toLocaleString()}.`;
+}
+
+export function resetQuotaConfirmationText(quota: QuotaConfirmation, row?: Pick<SteerPillRow, "resetAt" | "resetUnknown">): string {
+  if (quota === "unknown") return "Quota is unknown.";
+  return `${quotaConfirmationText(quota, row)} The continuation brief will be prepared for manual delivery.`;
 }
 
 export function resetSteerBlock(row: SteerPillRow): string | null {
@@ -254,7 +261,7 @@ export type SteerMenuEntryDescriptor =
     title: string;
     icon: string;
     disabled: boolean;
-    targets: { id: string; title: string; disabled: boolean; slot: string; agentId: string }[];
+    targets: { id: string; title: string; icon: string; disabled: boolean; slot: string; agentId: string }[];
   }
   | { kind: "reset" | "open-factory"; id: string; title: string; icon: string; disabled?: boolean };
 
@@ -279,8 +286,8 @@ export function describeSteerMenu(self: SteerPillRow, rows: SteerPillRow[]): Ste
   items.push({
     kind: "handover", id: "handover", title: STEER_MENU_LABELS.handover, icon: "ArrowRightLeft",
     disabled: destinations.length === 0,
-    targets: destinations.map(({ slot, agentId, eligible, reason }) => ({
-      id: `handover-${agentId}`, title: `Steer ${slot} · ${reason ?? "Standby"}`,
+    targets: destinations.map(({ slot, agentId, eligible, context }) => ({
+      id: `handover-${agentId}`, title: `Steer ${slot} · ${context.state}`, icon: context.icon,
       disabled: !eligible, slot, agentId,
     })),
   });

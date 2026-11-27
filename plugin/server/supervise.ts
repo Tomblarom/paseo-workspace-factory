@@ -625,7 +625,6 @@ async function deliverScopeWake(paseo: any, args: ScopeWakeInput, deps: Supervis
   }
   const active = typeof freshWsf.activeSteer === "string" ? freshWsf.activeSteer : null;
   const activeRow = rows.find((row: any) => row.id === target) ?? null;
-  const exhaustedPct = config?.quota?.exhaustedPct ?? settings?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct;
   const zerosub = args.zerosub === undefined ? await resolveZerosub({ ...deps.delivery, ...deps }) : args.zerosub;
   const wakeState = { ...paseoState, workspaces: paseoState.workspaces.map((workspace: any) =>
     workspace.id === mainId ? { ...workspace, metadata: freshMeta } : workspace) };
@@ -633,6 +632,7 @@ async function deliverScopeWake(paseo: any, args: ScopeWakeInput, deps: Supervis
     getConfig: async () => config }, wakeState.workspaces, [targetAgent], wakeState.agents);
   const admission = quotaAdmission(targetAgent, agentState[target], wakeRouting, agentState);
   const privacy = steerRouteCandidate({ agent: targetAgent, entry: agentState[target], entries: agentState, snapshot: wakeRouting }).privacy;
+  const quotaBlocked = !activeRow?.advisor && privacy.allowed && !admission.allowed;
   if ((activeRow?.advisor === true || !admission.allowed || !privacy.allowed) && active) {
     const takeover = await runFailoverCheck(paseo, scope, {
       ...deps,
@@ -646,20 +646,14 @@ async function deliverScopeWake(paseo: any, args: ScopeWakeInput, deps: Supervis
     if (takeover.action === "failover") {
       return { sent: true, target: takeover.to?.steerId ?? null, events: events.length };
     }
+    const waitingForQuota = quotaBlocked && !admission.pendingMove && takeover.action === "none";
     return {
       sent: false,
-      reason: takeover.reason ?? "no-failover-candidate",
+      reason: waitingForQuota ? "wait-quota" : takeover.reason ?? "no-failover-candidate",
+      ...(waitingForQuota && admission.reason ? { detail: `Active steer waits for quota (${admission.reason}).` } : {}),
       target,
       ...(takeover.wakeAt ? { wakeAt: takeover.wakeAt } : {}),
     };
-  }
-  // All accounts (or the target's family) exhausted: hold the news until the
-  // earliest reset instead of waking a steer that cannot run a turn. The
-  // events stay queued; the next flush after the reset delivers them.
-  const waitWakeAt = waitResetWakeAt({ zerosub, targetId: target, nowMs: stampsOf(deps).nowMs, exhaustedPct });
-  if (waitWakeAt) {
-    log(`[factory] supervise: wake for ${scope.id} waits for quota reset at ${waitWakeAt}`);
-    return { sent: false, reason: "wait-reset", target, wakeAt: waitWakeAt };
   }
   let text = formatWakeMessage({
     events, metadata: freshMeta, maxAutoResumes: settings?.maxAutoResumes ?? 2,
@@ -1210,13 +1204,14 @@ export async function runBootFinished(
         continue;
       }
       const sent = await sendScopeWake(paseo, { scope, events, state: paseoState }, deps);
-      if (!sent.sent && (sent.reason === "wait-reset" || sent.reason === "paused" || await deps.delivery?.isFactoryPaused?.())) {
+      if (!sent.sent && (["wait-reset", "wait-quota", "target-busy", "paused"].includes(sent.reason ?? "") ||
+          await deps.delivery?.isFactoryPaused?.())) {
         for (const event of events) {
           const current = register[event.workerId];
-          if (current) await queueWake(paseo, scope.workspaceId, event.workerId, current, event.state, deps);
+          if (current && current.pendingWake?.state !== event.state) {
+            await queueWake(paseo, scope.workspaceId, event.workerId, current, event.state, deps);
+          }
         }
-        wakes.push({ scopeId: scope.id, sent: false, reason: sent.reason === "wait-reset" ? "wait-reset" : "paused" });
-        continue;
       }
       wakes.push({ scopeId: scope.id, sent: sent.sent, reason: sent.sent ? undefined : (sent.reason ?? "send-failed") });
     } catch (error) {

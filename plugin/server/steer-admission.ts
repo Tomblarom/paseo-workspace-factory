@@ -3,7 +3,7 @@ import { AGENTS_KEY } from "./core/agent-state.mjs";
 import { unsettledAccountMove } from "./core/steer-action.mjs";
 import { LABEL, METADATA_KEY, readPaseoAgents, readPaseoWorkspaces } from "./core/paseo.mjs";
 import { advisorBriefAdmission, isAdvisorSteer, providerIsSensitive, steerPrivacyAdmission } from "./core/config.mjs";
-import { continuationOrigin, continuedFromId, resolveFactoryLabels } from "./core/zerosub.mjs";
+import { ACCOUNT_METADATA_KEY, continuationOrigin, continuedFromId, resolveFactoryLabels } from "./core/zerosub.mjs";
 import { discoveredRepoPublic, steerTitleSlot } from "./core/discovery.mjs";
 import { createGh, getRepo, parseRepoInput } from "./core/github.mjs";
 import type { QuotaConfirmation } from "../shared/factory.js";
@@ -93,6 +93,23 @@ export async function readAdmissionSnapshot(deps: AdmissionDeps, workspaces?: an
     quota: getQuotaSnapshot(), quotaSampledAt: getQuotaSampledAt() });
 }
 
+/** A successful turn is positive evidence for the account and model that actually ran it. */
+function quotaSuccessAt(agent: any, entry: any, accountId: string, provider: string, model: string | null): number {
+  const success = entry?.quotaSuccess;
+  if (success?.accountId === accountId && success.provider === provider && success.model === model) {
+    return Date.parse(success.at ?? "");
+  }
+  // Older entries did not carry an account on the turn record. Use their
+  // successful turn only for the matching creation pin and provider session.
+  const baseline = entry?.settingsBaseline;
+  if (success === undefined && entry?.outcome === "completed" && agent.metadata?.[ACCOUNT_METADATA_KEY] === accountId &&
+      baseline?.provider === provider && baseline.model === model && baseline.turnId === entry.lastTurnId &&
+      baseline.sessionId && baseline.sessionId === agent.persistence?.sessionId) {
+    return Date.parse(entry.lastTurnEndedAt ?? "");
+  }
+  return Number.NaN;
+}
+
 /** Quota is fail-soft when unknown, except for an unresolved provider limit. */
 export function quotaAdmission(agent: any, entry: any, observed: AdmissionSnapshot, entries: Record<string, any> = {}) {
   const { config, zerosub, nowMs: now, workspaces } = observed;
@@ -129,33 +146,27 @@ export function quotaAdmission(agent: any, entry: any, observed: AdmissionSnapsh
   const exhausted = accountId
     ? (explicitlyLimited || limitedUntil > now || (accountPct !== null && accountPct >= threshold))
     : quotaExhausted(snapshot, pool, threshold, now);
-  const ownLimit = entry?.quotaLimit ?? (entry?.needsResume?.reason === "limit" ? entry.needsResume : null);
-  const limits = [
-    ...(ownLimit ? [ownLimit] : []),
-    ...(accountId ? Object.values(entries).map((other: any) => other?.quotaLimit)
-      .filter((limit) => limit && limit !== ownLimit && limit.accountId === accountId) : []),
-    ...(accountId ? workspaces.flatMap((workspace: any) => Object.values(workspace?.metadata?.[AGENTS_KEY] ?? {}))
-      .map((other: any) => other?.quotaLimit)
-      .filter((limit: any) => limit?.accountId === accountId && limit?.provider && limit?.model) : []),
-  ];
-  const hardLimit = limits.some((limit) => {
-    let applies = true;
-    if (limit.provider && String(limit.provider).toLowerCase() !== provider) applies = false;
-    if (limit.model && limit.model !== model) applies = false;
-    if (limit.accountId && accountId && limit.accountId !== accountId) applies = false;
-    const failedAt = Date.parse(limit.at ?? "");
-    const resetAt = Date.parse(limit.resetAt ?? "");
-    if (Number.isFinite(resetAt) && resetAt > failedAt && resetAt <= now) applies = false;
-    const sampledAt = accountId ? accountSampledAt : poolSampledAt;
-    const healthy = limit.accountId
-      ? accountId === limit.accountId && accountPct !== null && !exhausted
-      : accountId ? !exhausted && accountPct !== null : !!quotaEntry(snapshot, pool) && !exhausted;
-    if (healthy && sampledAt && Number.isFinite(failedAt) && sampledAt > failedAt) applies = false;
-    return applies;
-  });
   const poolEntry = quotaEntry(snapshot, pool);
   const known = accountId ? accountPct !== null : quotaPct(poolEntry) !== null ||
     Number.isFinite(poolEntry?.weeklyPct) || poolEntry?.unlimited === true;
+  const ownLimit = entry?.quotaLimit ?? (entry?.needsResume?.reason === "limit" ? entry.needsResume : null);
+  const successAt = accountId ? quotaSuccessAt(agent, entry, accountId, provider, model) : Number.NaN;
+  const limitApplies = (limit: any, shared = false) => {
+    if (!limit || (limit.provider && String(limit.provider).toLowerCase() !== provider) ||
+        (limit.model && limit.model !== model) || (limit.accountId && accountId && limit.accountId !== accountId)) return false;
+    const failedAt = Date.parse(limit.at ?? "");
+    const resetAt = Date.parse(limit.resetAt ?? "");
+    if (Number.isFinite(resetAt) && resetAt > failedAt && resetAt <= now) return false;
+    if (shared && !Number.isFinite(resetAt) && successAt <= now && successAt > failedAt) return false;
+    const sampledAt = accountId ? accountSampledAt : poolSampledAt;
+    const healthy = known && !exhausted && (!limit.accountId || accountId === limit.accountId);
+    return !(healthy && sampledAt !== null && sampledAt > failedAt);
+  };
+  const hasSharedLimit = (candidateEntries: Record<string, any>) => Object.entries(candidateEntries)
+    .some(([id, other]) => id !== agent.id && other?.quotaLimit?.accountId === accountId &&
+      other.quotaLimit.provider && other.quotaLimit.model && limitApplies(other.quotaLimit, true));
+  const hardLimit = limitApplies(ownLimit) || (!!accountId &&
+    (hasSharedLimit(entries) || workspaces.some((workspace: any) => hasSharedLimit(workspace?.metadata?.[AGENTS_KEY] ?? {}))));
   const confirmation: QuotaConfirmation | null = exhausted || hardLimit ? "depleted" : known ? null : "unknown";
   return {
     confirmation,
