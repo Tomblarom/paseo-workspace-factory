@@ -12,6 +12,8 @@ import { createHash } from 'node:crypto';
 import { LABEL, parentOf } from './paseo.mjs';
 import { ACCOUNT_METADATA_KEY } from './zerosub.mjs';
 
+export const MANAGED_STEER_PROVENANCE_KEY = 'wsf.createdBy';
+
 /** Stable daemon idempotency key: `wsf:<scope>:<parts...>` (scope lowercased). */
 export function idempotencyKey(scope, ...parts) {
   return ['wsf', String(scope).toLowerCase(), ...parts].join(':');
@@ -54,18 +56,22 @@ export function steerCreateKey(keyScope, keyParts, digestInput) {
  * the digest covers (callers whose workspace id is unknown until apply pass
  * the stable inputs instead). `metadata` pins the agent (e.g. the
  * ZeroSub account); `accountId` adds the pin to the expected placement.
+ * `managed` marks automatic Factory creation in both the request and its digest.
  * Returns `{ request, idempotencyKey, expected }`.
  */
-export function buildSteerCreate({ keyScope, repo, scopeId, slot, workspaceId, profile, title = `Steer ${slot}`, keyParts, digestInput = null, metadata = null, accountId = null }) {
+export function buildSteerCreate({ keyScope, repo, scopeId, slot, workspaceId, profile, title = `Steer ${slot}`, keyParts, digestInput = null, metadata = null, accountId = null, managed = false }) {
   const labels = steerCreateLabels(repo, scopeId, slot);
   const config = profileAgentConfig(profile);
-  const request = { workspaceId, title, labels, config, ...(metadata ? { metadata: { ...metadata } } : {}) };
-  const { [ACCOUNT_METADATA_KEY]: _account, ...otherMetadata } = metadata ?? {};
+  const provenance = managed ? { [MANAGED_STEER_PROVENANCE_KEY]: 'factory' } : null;
+  const request = { workspaceId, title, labels, config, ...(metadata || provenance ? { metadata: { ...metadata, ...provenance } } : {}) };
+  const { [ACCOUNT_METADATA_KEY]: _account, ...otherMetadata } = request.metadata ?? {};
   const digestRequest = { workspaceId, title, labels, config, ...(Object.keys(otherMetadata).length ? { metadata: otherMetadata } : {}) };
-  const key = steerCreateKey(keyScope, keyParts, digestInput ?? digestRequest);
+  const digest = digestInput == null ? digestRequest : (managed ? { input: digestInput, metadata: provenance } : digestInput);
+  const key = steerCreateKey(keyScope, keyParts, digest);
   const expected = {
     workspaceId, labels, slot, scopeId, provider: profile.provider, model: profile.model, parent: null,
     ...(accountId ? { accountId } : {}),
+    ...(provenance ? { metadata: provenance } : {}),
   };
   return { request, idempotencyKey: key, expected };
 }
@@ -77,8 +83,8 @@ export class SteerPlacementError extends Error {}
  * Verifies a created or observed agent against the expected placement. Every
  * field present on `expected` is checked: workspace, parent (null means
  * parent-free; omit the key to skip the check), exact labels, provider/model
- * (only when both are expected) and the ZeroSub account pin (only when
- * expected). Archived agents and missing snapshots always refuse: they read
+ * (only when both are expected), selected metadata and the ZeroSub account pin
+ * (only when expected). Archived agents and missing snapshots always refuse: they read
  * as an old idempotency receipt, never as a live placement.
  */
 export function verifySteerPlacement(agent, expected = {}) {
@@ -97,6 +103,9 @@ export function verifySteerPlacement(agent, expected = {}) {
   }
   for (const [key, value] of Object.entries(expected.labels ?? {})) {
     if (agent.labels?.[key] !== value) throw new SteerPlacementError(`Agent ${id} label ${key} is ${agent.labels?.[key]}, expected ${value}`);
+  }
+  for (const [key, value] of Object.entries(expected.metadata ?? {})) {
+    if (agent.metadata?.[key] !== value) throw new SteerPlacementError(`Agent ${id} metadata ${key} is ${agent.metadata?.[key]}, expected ${value}`);
   }
   if (expected.provider != null && expected.model != null && (agent.provider !== expected.provider || agent.model !== expected.model)) {
     throw new SteerPlacementError(`Agent ${id} runs ${agent.provider}/${agent.model}, expected ${expected.provider}/${expected.model}`);
