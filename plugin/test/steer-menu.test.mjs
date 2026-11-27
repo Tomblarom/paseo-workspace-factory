@@ -64,6 +64,27 @@ function row(agentId, over = {}) {
 
 const self = () => row("steer-a", { slot: "A", active: true });
 
+test("copy uses the selected steer and confirms only after the clipboard write succeeds", async () => {
+  const target = row("steer-b", { slot: "B" });
+  const brief = "Current brief\n\n  Preserve spacing.\n";
+  const notifications = [];
+  const toast = { show: (...args) => notifications.push(args) };
+  const resume = async (input) => {
+    assert.deepEqual(input, { workspaceId: target.workspaceId, agentId: target.agentId });
+    return { brief };
+  };
+  await menu.copyCurrentBrief(target, resume, async (text) => {
+    assert.equal(text, brief);
+    assert.deepEqual(notifications, []);
+  }, toast);
+  assert.deepEqual(notifications, [["Brief copied", { variant: "success" }]]);
+
+  await assert.rejects(menu.copyCurrentBrief(target, resume, async () => {
+    throw new Error("Clipboard denied");
+  }, toast), /Clipboard denied/);
+  assert.equal(notifications.length, 1);
+});
+
 // ---------------------------------------------------------------------------
 // Handover targets
 // ---------------------------------------------------------------------------

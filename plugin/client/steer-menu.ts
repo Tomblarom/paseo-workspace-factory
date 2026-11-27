@@ -1,8 +1,9 @@
 // Pure client logic for the steer pill and shared Factory actions.
 import type { PluginRpcContract, RpcInput, RpcOutput } from "@getpaseo/plugin";
 import type { PluginButtonBehavior, PluginComposer } from "@getpaseo/plugin/client";
+import type { ToastApi } from "@getpaseo/plugin/client/ui";
 import type {
-  factoryFresh, factoryFreshPreview, factorySteerActivate, factorySteerBrief, factorySwitch, factorySwitchPreview, QuotaConfirmation,
+  factoryFresh, factoryFreshPreview, factoryResume, factorySteerActivate, factorySteerBrief, factorySwitch, factorySwitchPreview, QuotaConfirmation,
 } from "../shared/factory.js";
 import type { SteerFaceState } from "../shared/steer-state.js";
 import { steerRouteNames } from "../shared/model-label.js";
@@ -310,6 +311,17 @@ export function describeSteerMenu(self: SteerPillRow, rows: SteerPillRow[]): Ste
 
 type Call<Contract extends PluginRpcContract> =
   (input: RpcInput<Contract>) => Promise<RpcOutput<Contract>>;
+
+export async function copyCurrentBrief(
+  { workspaceId, agentId }: Pick<SteerPillRow, "workspaceId" | "agentId">,
+  resume: Call<typeof factoryResume>,
+  copyText: (text: string) => Promise<void>,
+  toast?: Pick<ToastApi, "show">,
+): Promise<void> {
+  const { brief } = await resume({ workspaceId, agentId });
+  await copyText(brief);
+  toast?.show("Brief copied", { variant: "success" });
+}
 
 export async function handoverSteer(
   source: Pick<SteerPillRow, "workspaceId" | "agentId">,

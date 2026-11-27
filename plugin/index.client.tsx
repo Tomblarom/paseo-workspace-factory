@@ -1,15 +1,16 @@
 import { settingsRpc, type RpcInput } from "@getpaseo/plugin";
-import { useSyncExternalStore } from "react";
+import { useEffect, useSyncExternalStore } from "react";
 import type {
   PluginAgentCommandContext,
   PluginButtonBehavior,
+  PluginButtonIconProps,
   PluginButtonMenuEntry,
   PluginButtonRegistration,
   PluginClientContext,
   PluginWorkspaceCommandContext,
   PluginWorkspacePanelProps,
 } from "@getpaseo/plugin/client";
-import { copyText, Modal } from "@getpaseo/plugin/client/ui";
+import { copyText, Icon, Modal, useToast, type ToastApi } from "@getpaseo/plugin/client/ui";
 import {
   FactoryColdPanel,
   FactoryColdPillContent,
@@ -31,6 +32,7 @@ import { ActivateSteer } from "./client/activate-steer.js";
 import { ResetSteerForm } from "./client/steer-menu-content.js";
 import {
   activationMenuBehavior,
+  copyCurrentBrief,
   describeSteerMenu,
   handoverSteer,
   menuKeyFor,
@@ -73,7 +75,7 @@ function buildSteerMenuBehavior(
     activate: Parameters<typeof activationMenuBehavior>[2];
     handover: (source: SteerPillRow, target: { slot: string; agentId: string }) => Promise<void>;
     reset: (row: SteerPillRow) => void;
-    copyBrief: (row: SteerPillRow) => Promise<void>;
+    copyBrief: (row: SteerPillRow, toast?: ToastApi) => Promise<void>;
     openFactory: (row: SteerPillRow) => void;
   },
 ): { behavior: PluginButtonBehavior; menuKey: string } {
@@ -98,8 +100,18 @@ function buildSteerMenuBehavior(
       }
       case "reset":
         return { ...item, behavior: { kind: "action", onPress: () => actions.reset(row) } };
-      case "copy-brief":
-        return { ...item, behavior: { kind: "action", onPress: () => actions.copyBrief(row) } };
+      case "copy-brief": {
+        let menuToast: ToastApi | undefined;
+        function CopyBriefIcon({ size, color }: PluginButtonIconProps) {
+          const toast = useToast();
+          // Paseo may close the menu before running a native action. The host
+          // toast API outlives this icon, so keep it for the pending press.
+          useEffect(() => { menuToast = toast; }, [toast]);
+          return <Icon name={item.icon} size={size} color={color} />;
+        }
+        return { ...item, icon: CopyBriefIcon,
+          behavior: { kind: "action", onPress: () => actions.copyBrief(row, menuToast) } };
+      }
       case "open-factory":
         return { ...item, behavior: { kind: "action", onPress: () => actions.openFactory(row) } };
     }
@@ -200,9 +212,8 @@ export default function contribute(client: PluginClientContext) {
       client.openPanel("factory", { workspaceId, agentId });
       setResetRequest({ workspaceId, agentId });
     },
-    async copyBrief({ workspaceId, agentId }: SteerPillRow) {
-      const { brief } = await client.rpc(factoryResume, { workspaceId, agentId });
-      await copyText(brief);
+    copyBrief(row: SteerPillRow, toast?: ToastApi) {
+      return copyCurrentBrief(row, (input) => client.rpc(factoryResume, input), copyText, toast);
     },
     openFactory({ workspaceId, agentId }: SteerPillRow) {
       client.openPanel("factory", { workspaceId, agentId });

@@ -1,7 +1,7 @@
 import type { RpcInput } from "@getpaseo/plugin";
 import type { PluginClientContext, PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
 import { usePaseo, useRpc, useSettings } from "@getpaseo/plugin/client";
-import { Icon, Modal } from "@getpaseo/plugin/client/ui";
+import { copyText, Icon, Modal, useToast } from "@getpaseo/plugin/client/ui";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
@@ -25,7 +25,7 @@ import {
   type FactorySteerFeed,
   type WorkspaceStatus,
 } from "./factory-workspace-state.js";
-import { describeSteerMenu, handoffTargets, isExpiredPreviewError, normalizeInitializeNewSteer, quotaConfirmationText, resetQuotaConfirmationText, steerQuotaConfirmation, type HandoffTarget } from "./steer-menu.js";
+import { copyCurrentBrief, describeSteerMenu, handoffTargets, isExpiredPreviewError, normalizeInitializeNewSteer, quotaConfirmationText, resetQuotaConfirmationText, STEER_MENU_LABELS, steerQuotaConfirmation, type HandoffTarget } from "./steer-menu.js";
 import { FactorySteerOperation } from "./factory-steer-operation.js";
 import type { SteerPillRow } from "./steer-pill.js";
 
@@ -269,6 +269,12 @@ export function FactoryWorkspaceStatus({
   const focusedRow = useRef<View>(null);
   const checkpointDetails = useRef<View>(null);
   const paseo = usePaseo();
+  const toast = useToast();
+  const callResume = useRpc(factoryResume);
+  const copyBrief = useMutation({
+    mutationFn: (steer: SteerPillRow) => copyCurrentBrief(steer, callResume, copyText, toast),
+    onError: (error) => toast.error(error.message),
+  });
   const activationSteer = operation?.kind === "activate" ? operation.steer : undefined;
   const activationQuota = activationSteer ? steerQuotaConfirmation(activationSteer) : null;
   const catalog = useQuery({
@@ -396,6 +402,8 @@ export function FactoryWorkspaceStatus({
         <View style={[inline, divider, { gap: 2 }]}>
           {openAgent ? <Action theme={theme} icon="ArrowUpRight" title="Open" name={`Open ${name}`} emphasized={overview}
             onPress={() => openAgent(steer)} /> : null}
+          <Action theme={theme} icon="Copy" title={STEER_MENU_LABELS.copyBrief} name={`Copy current brief for ${name}`}
+            disabled={stale || copyBrief.isPending} onPress={() => copyBrief.mutate(steer)} />
           <Action theme={theme} icon="ListRestart" title="Reset Steer" name={`Reset ${name}`} disabled={stale || !!eligibility.reset}
               hint={eligibility.reset ?? undefined} onPress={() => setOperation({ kind: "reset", steer })} />
           {steer.state === "needs-resume" ? (
