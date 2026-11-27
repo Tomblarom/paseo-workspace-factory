@@ -798,6 +798,24 @@ fresh scratch workspace through a trusted click in the web client: one
 the old controller, epoch 1 to 2, and the same guarded checkpoint write refused
 for the old steer and accepted for the new one.
 
+The user approved the restart reconciliation, checkpoint next-step classes and
+standby pill check in Steer E's chat on 2026-11-27. After the reload, Chromium
+showed Activate enabled and Handover disabled on the scratch standby. Menu
+labels had no ellipses. Reset opened the confirmation with the Clear chat history
+checkbox and Cancel closed it without a reset. Restart regressions reloaded the
+Factory modules from saved metadata and confirmed that acknowledged sends,
+rewinds and worker wakes settle without repeating their native effects. A native
+rewind without a saved acknowledgement still requires inspection.
+
+The user also approved the SLP-inspired edits to role rules, templates, checkpoint
+guidance and worker wake text in Steer E's chat on 2026-11-27. The approval
+covers these text and delivery changes. Warm notifications use worker titles,
+assignment names and reported outcomes. Resume and handover keep their longer
+briefs. Wake tests check that the routine event can be understood without a
+`resume` or `workers` command. In one completion fixture the formatted event
+shrank from 174 to 109 characters, before any archive or quota suffixes from the
+old path. The effect on real model turns remains unmeasured.
+
 Track read-only dispatch receipt recovery with the existing
 [Paseo issue #9947](https://github.com/getpaseo/paseo/issues/9947) and
 [PR #9548](https://github.com/getpaseo/paseo/pull/9548). Recheck the released
