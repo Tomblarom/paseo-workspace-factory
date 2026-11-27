@@ -116,6 +116,7 @@ import {
   factoryCleanupSettings,
   factoryConfigSettings,
   factoryDisplaySettings,
+  factoryMetricsSettings,
   factoryResumeSettings,
   factorySteerMenuSettings,
   factorySupervisionSettings,
@@ -128,6 +129,7 @@ export default function contribute(server: PluginServerContext) {
   const resumeSettings = server.registerSettings(factoryResumeSettings);
   const steerMenuSettings = server.registerSettings(factorySteerMenuSettings);
   const displaySettings = server.registerSettings(factoryDisplaySettings);
+  const metricsSettings = server.registerSettings(factoryMetricsSettings);
   const loader = createConfigLoader(hostSettings, registerPromptSettings(server, displaySettings));
   const readSettings = () => readCleanupSettings(cleanupSettings);
   const readSupervision = () => readSupervisionSettings(supervisionSettings);
@@ -297,6 +299,10 @@ export default function contribute(server: PluginServerContext) {
       delivery: automaticDelivery,
       getConfig: () => loader.loadEffectiveConfig(),
       getSupervisionSettings: readSupervision,
+      getMetricsEnabled: async () => {
+        const settings = await metricsSettings.read();
+        return settings.status === "ready" && settings.values.enabled === true;
+      },
       getZerosub,
     });
     notifyFeeds();

@@ -28,10 +28,11 @@ import {
 import { firstUserText, workerIdentityFromMetadata } from "../shared/supervise.js";
 import { decideAssignmentReport } from "../shared/assignment-report.js";
 import { ASSIGNMENT_KEY } from "./core/assign.mjs";
-import { extractTurnUsage, mergeTurnUsage } from "./quota.js";
+import { extractTurnUsage, getQuotaSnapshot, mergeTurnUsage } from "./quota.js";
 import { requestQuotaFailover } from "./supervise.js";
 import { resolveZerosub, type ZerosubSource } from "./zerosub-runtime.js";
-import { earliestResetOf } from "./core/quota.mjs";
+import { earliestResetOf, liveAgentPool, quotaEntry } from "./core/quota.mjs";
+import { observeEfficiencyTurn } from "./efficiency-ledger.js";
 import {
   cleanupCommandKind,
   decideTurnUpdate,
@@ -68,6 +69,7 @@ export interface TurnHookDeps extends ZerosubSource {
   now?: () => string;
   getConfig?: () => Promise<any>;
   getSupervisionSettings?: () => Promise<any>;
+  getMetricsEnabled?: () => Promise<boolean>;
   /** Lock for metadata writes; tests only (defaults to the real one, always with LockBusy retry). */
   lock?: (name: string, fn: (held: { verify: () => void }) => Promise<any>) => Promise<any>;
   setContinuationLabels?: (agentId: string, labels: Record<string, string>) => Promise<void>;
@@ -302,6 +304,18 @@ export async function reportContinuationAssignment(paseo: any, agent: any, scope
     kind: "completed", block, lastAnswer, epoch: scope.workspace?.metadata?.[METADATA_KEY]?.epoch, config, deps });
 }
 
+function observedRoute(previous: unknown, isCleanupTurn: boolean, exactTurn: any[]) {
+  if (isCleanupTurn) return "cleanup";
+  const action = readSteerAction(previous);
+  const message = exactTurn.find(({ item }) => item?.type === "user_message")?.item;
+  const receipt = message?.clientMessageId ?? message?.messageId;
+  if (!action || !receipt || (receipt !== action.wakeId && receipt !== action.briefMessageId)) return "normal";
+  if (action.kind === "fresh-delivery" || action.kind === "rewind") return "fresh";
+  if (action.kind === "switch" || action.kind === "activate" || action.batch?.takeover) return "handoff";
+  if (action.kind === "resume" || action.renewal === "clear" || action.renewal === "rewind" || action.needsResumeAt) return "resume";
+  return action.batch?.events?.length ? "wake" : "normal";
+}
+
 async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps): Promise<void> {
   const agentId = payload?.agent?.id;
   if (!agentId) return;
@@ -429,6 +443,7 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
   // handled after the write, once the brief is sent): a failed steer turn
   // flags, a completed turn clears. Cleanup turns of our own never flag.
   let needsResumePatch: Record<string, unknown> | null = null;
+  let limitRoute: Awaited<ReturnType<typeof resolveZerosub>> = null;
   if (!isCleanupTurn && kind === "completed" && (previous?.needsResume || previous?.quotaLimit)) {
     needsResumePatch = { needsResume: null, quotaLimit: null };
   } else if (!isCleanupTurn && kind === "failed") {
@@ -441,9 +456,9 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
     if (flagged) {
       needsResumePatch = { needsResume: flagged };
       if (flagged.reason === "limit") {
-        const zerosub = await resolveZerosub(deps);
-        const accountId = zerosub?.pending?.[agentId] ?? zerosub?.agentAccount?.[agentId] ?? null;
-        const account = zerosub?.accounts.find((item) => item.id === accountId);
+        limitRoute = await resolveZerosub(deps);
+        const accountId = limitRoute?.pending?.[agentId] ?? limitRoute?.agentAccount?.[agentId] ?? null;
+        const account = limitRoute?.accounts.find((item) => item.id === accountId);
         const fiveHour = /you(?:'|’)ve hit your 5[- ]hour limit/i.test(failureText(payload.outcome) ?? "");
         const windows = fiveHour ? (account?.windows ?? []).filter((window: any) => /five.?hour|5.?h/i.test(`${window.id} ${window.label ?? ""}`)) : [];
         needsResumePatch.quotaLimit = {
@@ -620,9 +635,27 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
         ...deps.delivery, lock: lockOf(deps), buildBrief: deps.getResumeBrief ?? deps.delivery?.buildBrief,
       });
     }
-    return;
   }
   // After a verified sweep clear the agent reloads its task via the resume
   // brief (instruction rule) or the optional Claude SessionStart hook; no
   // extra model turn is sent.
+  if (typeof completedAt === "string" && (!payload.turnId || previous?.lastTurnId !== payload.turnId)) {
+    try {
+      await observeEfficiencyTurn(deps.getMetricsEnabled, () => {
+        const open = openTurnOf(previous);
+        const quotaState = successRoute ?? limitRoute ?? deps.zerosub;
+        return {
+          provider: liveProvider, usage: agent.lastUsage, agentId, sessionId: liveSessionId,
+          accountId: quotaState?.agentAccount?.[agentId], scopeId: identity.scopeId, turnId: payload.turnId,
+          route: observedRoute(previous, isCleanupTurn, exactTurn), outcome: kind, endedAt: completedAt,
+          startedAt: open && open === payload.turnId ? previous?.turnStartedAt : null,
+          previousTurnEndedAt: previous?.lastTurnEndedAt,
+          preTurnContextTokens: !open || open === payload.turnId ? previous?.contextTokens : null,
+          quota: quotaEntry(getQuotaSnapshot(), liveAgentPool(agent, config)),
+        };
+      });
+    } catch {
+      // Metrics must never interrupt turn handling or log observation data.
+    }
+  }
 }

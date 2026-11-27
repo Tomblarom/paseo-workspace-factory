@@ -150,6 +150,13 @@ export const factoryDisplaySettings = defineSettings({
   }),
 });
 
+export const factoryMetricsSettings = defineSettings({
+  id: "factory-metrics",
+  scope: "host",
+  version: 1,
+  schema: z.object({ enabled: z.boolean().default(false) }),
+});
+
 /**
  * factory-cleanup v1 -> v2: the cost profile replaces the global
  * compactAtMinutes (per-group thresholds now come from
