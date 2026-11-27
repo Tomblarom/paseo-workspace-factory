@@ -33,6 +33,7 @@ import { freshCreationRoute, freshLiveRoute } from './fresh-route.mjs';
 import { routeMatchesIntent } from './routing.mjs';
 import { ACCOUNT_METADATA_KEY } from './zerosub.mjs';
 import { finishWorkerHandover, planWorkerHandover } from './workers.mjs';
+import { createGit, readCheckpointGit } from './local.mjs';
 
 export const CHECKPOINT_KEY = `${METADATA_KEY}.checkpoint`;
 // Worker efficiency rule, same wording as the Worker instructions block in docs/steer-instructions.md.
@@ -216,12 +217,13 @@ export function steerStatus(discovery, { warnContextTokens, daemonStartedAt = nu
 }
 
 /** Branch, HEAD and dirty state straight from git; null when unreadable. */
-export function readGitSnapshot(git, path) {
+export function readGitSnapshot(git, path, checkpointGit = null) {
   try {
     const branch = git(path, ['rev-parse', '--abbrev-ref', 'HEAD']).trim();
     const sha = git(path, ['rev-parse', 'HEAD']).trim();
     const lines = git(path, ['status', '--porcelain']).split('\n').filter(Boolean);
-    return { branch, sha, changes: lines.length, paths: changedPaths(lines) };
+    return { branch, sha, changes: lines.length, paths: changedPaths(lines),
+      ...(checkpointGit ? { checkpointObservation: readCheckpointGit(git, path, sha) } : {}) };
   } catch {
     return null;
   }
@@ -232,7 +234,7 @@ function changedPaths(lines) {
 }
 
 /** Richer git read for the resume brief: ahead/behind plus up to 10 changed paths; null when unreadable. */
-export function readGitBrief(git, path) {
+export function readGitBrief(git, path, checkpointGit = null) {
   try {
     const branch = git(path, ['rev-parse', '--abbrev-ref', 'HEAD']).trim();
     const sha = git(path, ['rev-parse', 'HEAD']).trim();
@@ -248,7 +250,8 @@ export function readGitBrief(git, path) {
       ahead = null;
       behind = null;
     }
-    return { branch, sha, ahead, behind, changed: lines.length, paths: changedPaths(lines) };
+    return { branch, sha, ahead, behind, changed: lines.length, paths: changedPaths(lines),
+      ...(checkpointGit ? { checkpointObservation: readCheckpointGit(git, path, sha) } : {}) };
   } catch {
     return null;
   }
@@ -271,6 +274,8 @@ const TEXT = {
     active: (to, from) => `Aktiv ist jetzt Steer ${to.slot} (${to.id}). Steer ${from.slot} (${from.id}) koordiniert nicht mehr.`,
     git: (g) => `Git: ${g.branch} @ ${g.sha.slice(0, 12)} · ${g.changes ? `${g.changes} geänderte/untracked Pfade` : 'sauber'}`,
     noGit: 'Git: Zustand nicht lesbar – vor Arbeitsbeginn selbst prüfen.',
+    checkpointGitChanged: '! Git hat sich seit dem Checkpoint geändert. Die Testergebnisse erneut prüfen.',
+    checkpointGitUnknown: '! Git-Arbeitsbaum nicht vergleichbar. Den Checkpoint gegen die aktuellen Dateien prüfen.',
     noCheckpoint: 'Aufgaben-Checkpoint: KEINER DOKUMENTIERT. Aktuellen Auftrag nicht aus dem Verlauf ableiten, sondern beim Nutzer bestätigen.',
     checkpoint: (cp, stale) => `Aufgaben-Checkpoint (Epoch ${cp.epoch ?? '?'}, ${cp.updatedAt ?? 'ohne Zeit'}${stale ? ', NICHT aus der aktuellen Epoch – auf Aktualität prüfen' : ''}):`,
     task: 'Auftrag', tests: 'Tests', blockers: 'Offene Blocker', next: 'Nächster Schritt', none: 'keine dokumentiert',
@@ -295,6 +300,8 @@ const TEXT = {
     active: (to, from) => `Steer ${to.slot} (${to.id}) is now active. Steer ${from.slot} (${from.id}) no longer coordinates.`,
     git: (g) => `Git: ${g.branch} @ ${g.sha.slice(0, 12)} · ${g.changes ? `${g.changes} changed/untracked paths` : 'clean'}`,
     noGit: 'Git: state unreadable – check it yourself before starting.',
+    checkpointGitChanged: '! Git changed since the checkpoint was recorded. Recheck its test evidence.',
+    checkpointGitUnknown: '! Git worktree comparison unavailable. Verify the checkpoint against the current files.',
     noCheckpoint: 'Task checkpoint: NONE RECORDED. Do not infer the current task from history; confirm it with the user.',
     checkpoint: (cp, stale) => `Task checkpoint (epoch ${cp.epoch ?? '?'}, ${cp.updatedAt ?? 'no time'}${stale ? ', NOT from the current epoch – check whether it is still valid' : ''}):`,
     task: 'Task', tests: 'Tests', blockers: 'Open blockers', next: 'Next step', none: 'none recorded',
@@ -403,6 +410,17 @@ function appendPacketPaths(lines, git) {
   for (const path of git.paths.slice(0, 10)) lines.push(`- ${clip(path, 120)}`);
 }
 
+function appendCheckpointGitNotice(lines, checkpoint, git, text) {
+  if (!checkpoint?.git?.head) return;
+  const saved = checkpoint.git;
+  const current = git?.checkpointObservation;
+  if ((git?.sha && saved.head !== git.sha) || (saved.worktree && current?.worktree && saved.worktree !== current.worktree)) {
+    lines.push(text.checkpointGitChanged);
+  } else if (!saved.worktree || !current?.worktree) {
+    lines.push(text.checkpointGitUnknown);
+  }
+}
+
 /**
  * Deterministic handoff text from Paseo/git state. No model call is made to build
  * it; the receiving steer still reads it as normal input on its next turn.
@@ -411,6 +429,7 @@ export function buildHandoff(status, { from, to, epoch, git, lastMessage, maxLas
   const t = TEXT[language] ?? TEXT.en;
   const lines = [clip(t.head(status.repo, epoch), 350), t.active(to, from), clip(`Workspace ${status.workspace.id} · ${status.workspace.directory}`, 450), clip(git ? t.git(git) : t.noGit, 220)];
   const truncated = packetCheckpoint(lines, status.checkpoint, epoch, t);
+  appendCheckpointGitNotice(lines, status.checkpoint, git, t);
   appendPacketPaths(lines, git);
   const supervised = new Map((status.openWorkers ?? []).map((e) => [e.id, e]));
   const supervisedSuffix = (id) => {
@@ -465,6 +484,7 @@ export function buildRefreshPacket(status, { kind, slot = null, owner = null, ti
   if (kind === 'worker') lines.push(WORKER_EFFICIENCY_LINE);
   const worker = kind === 'worker' ? workerCheckpoint(status, from.id, { note, lastMessage, interrupted }) : null;
   const truncated = worker ? appendWorkerCheckpoint(lines, worker, t, epoch) : packetCheckpoint(lines, status.checkpoint, epoch, t);
+  if (!worker) appendCheckpointGitNotice(lines, status.checkpoint, git, t);
   appendPacketPaths(lines, git);
   if (!worker && status.openWorkers?.length) {
     lines.push(t.workers);
@@ -689,6 +709,7 @@ export function buildResumeBrief(status, { agentId = null, agentState = null, wo
     lines.push(`- Tests: ${cp.tests?.length ? clip(cp.tests.join('; '), 300) : 'none recorded'}`);
     lines.push(`- Open blockers: ${cp.blockers?.length ? clip(cp.blockers.join('; '), 300) : 'none recorded'}`);
     lines.push(`- Next step: ${TEXT.en.nextText[checkpointNextStep(cp)] ?? clip(cp.next, Math.max(300, Math.min(2000, budget - 1500)))}`);
+    appendCheckpointGitNotice(lines, cp, git, TEXT.en);
     if (cp.source === 'failover' && cp.failover) lines.push(`Failover from ${cp.failover.previousSteer ?? '?'}: ${cp.failover.reason ?? 'no reason recorded'}`);
     if (cp.epoch !== null && cp.epoch !== undefined && status.state?.epoch !== null && status.state?.epoch !== undefined && cp.epoch !== status.state.epoch) {
       lines.push(`! Checkpoint is stale: from epoch ${cp.epoch}, scope is at epoch ${status.state.epoch} — verify before continuing.`);
@@ -792,7 +813,7 @@ function handoffWithBrief(status, args, { discovery, git, language, config = nul
   const brief = buildResumeBrief(receivingStatus, {
     agentId: args.to.id,
     agentState: discovery?.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null,
-    git: git ? readGitBrief(git, status.workspace.directory) : null,
+    git: git ? readGitBrief(git, status.workspace.directory, status.checkpoint?.git ?? null) : null,
     scope: discovery?.scope ?? null,
     config,
     workerModel,
@@ -906,7 +927,7 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
     }
   }
   const fromInfo = from ?? { slot: expected.activeSteer, id: 'unknown' };
-  const gitSnapshot = git && !activation ? readGitSnapshot(git, status.workspace.directory) : null;
+  const gitSnapshot = git && !activation ? readGitSnapshot(git, status.workspace.directory, status.checkpoint?.git ?? null) : null;
   const packet = activation ? '' : handoffWithBrief(status, { from: fromInfo, to, epoch: expected.epoch, git: gitSnapshot, lastMessage, language }, { discovery, git, language, config, workerModel, quotaSnapshot, quotaWarnPct, zerosub, promptOptions });
   const result = {
     repo: status.repo, workspaceId: status.workspace.id, from: fromInfo.slot, to: toSlot,
@@ -1197,7 +1218,7 @@ async function tryActiveRewind({ client, discovery, status, expected, slot, from
   const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;
   const entry = agentState?.[from.id] ?? null;
   const previousBriefId = actionFact(entry, 'refreshed')?.briefMessageId;
-  const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory) : null;
+  const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory, status.checkpoint?.git ?? null) : null;
   const checkpoint = Boolean(status.checkpoint?.task);
   const identity = (point, recheck = false) => rewindIdentity({ client, status, expected, from, slot: slot,
     checkpointAt: checkpointStamp(status.checkpoint), intent, point, recheck });
@@ -1667,7 +1688,7 @@ export async function freshSteer({ client, discovery, config, apply = false, sen
   }
   if (requireRefreshMode === 'rewind') throw rewindRequired(slot);
   const { from, result } = await replacement({ kind: 'steer', active: true, slot, single, sources: holders });
-  const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory) : null;
+  const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory, status.checkpoint?.git ?? null) : null;
   result.checkpoint = Boolean(status.checkpoint?.task);
   if (rewindFallback) {
     result.rewindFallback = rewindFallback;
@@ -1698,7 +1719,7 @@ async function tryTabRewind({ client, discovery, status, expected, from, kind, p
   const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;
   const entry = agentState?.[from.id] ?? null;
   const previousBriefId = actionFact(entry, 'refreshed')?.briefMessageId;
-  const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory) : null;
+  const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory, kind === 'worker' ? null : status.checkpoint?.git ?? null) : null;
   const taskCheckpoint = kind === 'worker' ? workerCheckpoint(status, from.id, entry ?? {}) : null;
   const checkpoint = Boolean(taskCheckpoint ? taskCheckpoint.task || taskCheckpoint.block : status.checkpoint?.task);
   const identity = (point, recheck = false) => rewindIdentity({ client, status, expected, from, slot: resultBase.slot,
@@ -1785,7 +1806,7 @@ async function freshNonActiveSteer({ client, discovery, status, expected, slot, 
   }
   if (requireRefreshMode === 'rewind') throw rewindRequired(slot);
   const { from, result } = await replacement({ kind: 'steer', slot, single, sources: holders });
-  const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory) : null;
+  const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory, status.checkpoint?.git ?? null) : null;
   const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;
   result.checkpoint = Boolean(status.checkpoint?.task);
   if (rewindFallback) {
@@ -1904,7 +1925,7 @@ export function workerResumeAnswer(client, status, agentId) {
 }
 
 /** Records a short task checkpoint for the current epoch (same lock as switches). A fresh checkpoint clears the interrupted flag — except source `auto`, which never clears it. Source `failover` logs a takeover with the previous steer and reason. */
-export async function writeCheckpoint({ client, discovery, task, tests = [], blockers = [], next = null, source = 'manual', agentId = null, turnId = null, callerId = null, config = null, previousSteer = null, failoverReason = null, lock = withLock, now = () => new Date() }) {
+export async function writeCheckpoint({ client, discovery, task, tests = [], blockers = [], next = null, source = 'manual', agentId = null, turnId = null, callerId = null, config = null, previousSteer = null, failoverReason = null, lock = withLock, now = () => new Date(), git = createGit() }) {
   const status = steerStatus(discovery, { config });
   if (!status.workspace || !status.state) throw new SwitchRefused('No factory main workspace with steer state');
   if (typeof task !== 'string' || !task.trim()) throw new SwitchRefused('A checkpoint needs a task');
@@ -1919,6 +1940,8 @@ export async function writeCheckpoint({ client, discovery, task, tests = [], blo
     }
     const stamp = now().toISOString();
     const checkpoint = { task: task.trim(), tests, blockers, next: next?.trim() || null, epoch: fresh?.epoch ?? null, updatedAt: stamp, source, agentId, turnId, capturedAt: stamp, interrupted: source === 'auto' ? (metadata[CHECKPOINT_KEY]?.interrupted ?? null) : null, ...(source === 'failover' ? { failover: { previousSteer, reason: failoverReason } } : {}) };
+    const observation = readCheckpointGit(git, status.workspace.directory);
+    if (observation) checkpoint.git = observation;
     held.verify();
     await workspace.setMetadata({ [CHECKPOINT_KEY]: checkpoint });
     return checkpoint;

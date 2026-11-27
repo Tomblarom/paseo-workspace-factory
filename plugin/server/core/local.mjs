@@ -1,5 +1,6 @@
 // Read-only discovery of local git checkouts and their remotes.
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readdirSync, realpathSync, existsSync, lstatSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { remoteToFullName } from './github.mjs';
@@ -15,6 +16,43 @@ export function createGit(exec = execFileSync) {
       env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
     });
   };
+}
+
+/** Observe HEAD and dirty files without reading their contents. */
+export function readCheckpointGit(git, cwd, head = null) {
+  if (!cwd) return null;
+  let sha = head;
+  try {
+    sha ??= git(cwd, ['rev-parse', 'HEAD']).trim();
+  } catch {
+    return null;
+  }
+  if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(sha)) return null;
+  try {
+    const status = git(cwd, ['--no-optional-locks', 'status', '--porcelain=v1', '-z', '--untracked-files=all']);
+    const changes = status.split('\0').filter(Boolean);
+    const hash = createHash('sha256').update(status);
+    if (changes.length) {
+      if (changes.length > 1000 || status.includes('\ufffd')) return { head: sha, worktree: null };
+      const root = git(cwd, ['rev-parse', '--show-toplevel']).replace(/\r?\n$/, '');
+      let staged = false;
+      for (let index = 0; index < changes.length; index++) {
+        const row = changes[index];
+        const flags = row.slice(0, 2);
+        staged ||= ![' ', '?'].includes(flags[0]);
+        const path = row.slice(3);
+        const info = lstatSync(join(root, path), { bigint: true, throwIfNoEntry: false });
+        // A changed submodule or nested repository needs its own observation.
+        if (info?.isDirectory()) return { head: sha, worktree: null };
+        hash.update(info ? `${info.mode}/${info.size}/${info.mtimeNs}/${info.ctimeNs}\0` : 'missing\0');
+        if (/[RC]/.test(flags)) index++;
+      }
+      if (staged) hash.update(git(cwd, ['diff', '--cached', '--raw', '--no-abbrev', '-z', 'HEAD', '--']));
+    }
+    return { head: sha, worktree: hash.digest('hex').slice(0, 16) };
+  } catch {
+    return { head: sha, worktree: null };
+  }
 }
 
 export function readRemotes(git, path) {

@@ -9,7 +9,7 @@ import { continuedFromId, resolveFactoryLabels } from "./core/zerosub.mjs";
 import { readCleanupAction, readSteerAction } from "./core/steer-action.mjs";
 import { ACTION_FACTS, actionFact, mergeActionFacts } from "./core/action-facts.mjs";
 import { pushPreviousSession } from "../shared/idle-cleanup.js";
-import { createGit } from "./core/local.mjs";
+import { createGit, readCheckpointGit } from "./core/local.mjs";
 import { retryOnLockBusy, withLock, withWorkspaceLock, workspaceLockName } from "./core/lock.mjs";
 import {
   agentUsage,
@@ -564,7 +564,8 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
     const patch: Record<string, unknown> = { [AGENTS_KEY]: { ...freshAgents, [agentId]: normalized } };
     const freshCheckpoint = asRecord(freshMeta[CHECKPOINT_KEY]);
     if (checkpointWrite) {
-      patch[CHECKPOINT_KEY] = checkpointWrite;
+      const observation = readCheckpointGit(createGit(), scope.directory ?? null);
+      patch[CHECKPOINT_KEY] = observation ? { ...checkpointWrite, git: observation } : checkpointWrite;
     } else if (patchInterrupted) {
       if (freshCheckpoint && typeof freshCheckpoint.task === "string" && freshCheckpoint.task.trim() !== "") {
         patch[CHECKPOINT_KEY] = { ...freshCheckpoint, interrupted: patchInterrupted };

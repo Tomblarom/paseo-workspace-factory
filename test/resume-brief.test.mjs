@@ -3,14 +3,18 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
-  buildHandoff, buildRefreshPacket, buildResumeBrief, BRIEF_BUDGET, parseCheckpointBlock, readGitBrief, switchSteer, freshSteer,
+  buildHandoff, buildRefreshPacket, buildResumeBrief, BRIEF_BUDGET, parseCheckpointBlock, readGitBrief, readGitSnapshot, switchSteer, freshSteer,
   writeCheckpoint, steerStatus, WORKER_EFFICIENCY_LINE,
 } from '../plugin/server/core/steer.mjs';
 import { updateAgentEntry, flagCheckpointInterrupted, AGENTS_KEY, clipText } from '../plugin/server/core/agent-state.mjs';
 import { LABEL, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
 import { CHECKPOINT_KEY } from '../plugin/server/core/steer.mjs';
 import { outgoingAssignmentRecords } from '../plugin/server/core/discovery.mjs';
+import { createGit, readCheckpointGit } from '../plugin/server/core/local.mjs';
 
 const REPO = 'example-owner/example-repo';
 const NOW = new Date('2026-11-23T12:00:00.000Z').getTime();
@@ -185,6 +189,60 @@ test('brief shows only the caller’s current fresh recommendation', () => {
   assert.match(buildResumeBrief(status, { agentId: steers.A.id, agentState }), /Context recommendation: Fresh recommended at the package boundary/);
   assert.doesNotMatch(buildResumeBrief(status, { agentId: steers.B.id, agentState }), /Context recommendation:/);
   assert.doesNotMatch(buildResumeBrief(status, { agentState }), /Context recommendation:/);
+});
+
+test('checkpoint Git evidence detects edits at the same paths and changes to the index and HEAD', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'factory-checkpoint-git-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const git = createGit();
+  const run = (...args) => git(directory, args);
+  const commit = (message) => run('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+    '-c', 'commit.gpgsign=false', 'commit', '-qm', message);
+  const tracked = join(directory, 'tracked file');
+  const untracked = join(directory, 'new file\nwith newline');
+  run('init', '-q');
+  writeFileSync(tracked, 'original\n');
+  run('add', 'tracked file');
+  commit('original checkout');
+  const baseline = readCheckpointGit(git, directory);
+
+  writeFileSync(tracked, 'modified\n');
+  writeFileSync(untracked, 'draft a\n');
+  const world = makeWorld();
+  provisioned(world);
+  world.workspaces[0].workspaceDirectory = directory;
+  const discovery = discoveryOf(world);
+  const saved = await writeCheckpoint({ client: fakeClient(world), discovery, task: 'Verify the changes',
+    tests: ['passed'], lock: noLock, git });
+  assert.equal(saved.git.head, baseline.head);
+  assert.notEqual(saved.git.worktree, baseline.worktree);
+  const status = steerStatus(discoveryOf(world));
+  const brief = () => buildResumeBrief(status, { git: readGitBrief(git, directory, saved.git) });
+  assert.doesNotMatch(brief(), /Git changed since/);
+
+  writeFileSync(untracked, 'draft b\n');
+  assert.equal((brief().match(/Git changed since the checkpoint/g) ?? []).length, 1);
+  const handoff = buildHandoff(status, {
+    from: { slot: 'A', id: 'a' }, to: { slot: 'B', id: 'b' }, epoch: status.state.epoch,
+    git: readGitSnapshot(git, directory, saved.git), language: 'de',
+  });
+  assert.match(handoff, /Git hat sich seit dem Checkpoint geändert/);
+  writeFileSync(tracked, 'unstaged\n');
+  assert.notEqual(readCheckpointGit(git, directory).worktree, saved.git.worktree);
+
+  run('add', 'tracked file');
+  const staged = readCheckpointGit(git, directory);
+  const nextBlob = execFileSync('git', ['-C', directory, 'hash-object', '-w', '--stdin'],
+    { encoding: 'utf8', input: 'different blob\n' }).trim();
+  run('update-index', '--cacheinfo', `100644,${nextBlob},tracked file`);
+  assert.notEqual(readCheckpointGit(git, directory).worktree, staged.worktree);
+  commit('new revision');
+  assert.notEqual(readCheckpointGit(git, directory).head, baseline.head);
+  const unreadableStatus = (cwd, args) => {
+    if (args[0] === '--no-optional-locks') throw new Error('status unavailable');
+    return git(cwd, args);
+  };
+  assert.deepEqual(readCheckpointGit(unreadableStatus, directory), { head: run('rev-parse', 'HEAD').trim(), worktree: null });
 });
 
 test('brief shows git state and worker note first lines', () => {
