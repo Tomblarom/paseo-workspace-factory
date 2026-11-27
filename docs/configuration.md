@@ -184,6 +184,11 @@ A profile with `"advisor": true` marks its model as a second-opinion candidate f
 
 ## Quota pools
 
+The `status` command shows each live steer's quota. The `resume` brief shows
+the requested steer or, for a scope-only read, its active steer. Both show
+the share used in each current window and the same account aliases as
+**Resources**. A provider pool is shown for unbound steers.
+
 In the Paseo composer, run `/factory quota` (or press **Quota** in the Factory panel) to see provider quota pools with their warn/exhausted state plus which steer or worker uses each pool. The view is read-only. Thresholds live in Settings → Plugins → Factory → Quota: `warnPct` (default 93) and `exhaustedPct` (default 95). The plugin samples quota in the background (result pill; the sidebar warns when a non-advisor steer's pool reaches the warn level).
 
 Profiles belong to a quota pool named by `profiles.<name>.pool`, or by their provider when `pool` is omitted. A pool at `quota.exhaustedPct` is skipped by profile resolution. Briefs show a preferred different pool at `quota.warnPct`; configure at least two non-advisor steer pools to make that failover useful.
