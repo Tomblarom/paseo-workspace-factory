@@ -1,9 +1,9 @@
 # Native provider-session reset and retained timeline
 
-Research only, 2026-11-26. Source: public Paseo **v0.17.4**, tag commit
-`2b3559b107243306986176b80beb0e779f9fe53e`; links below point to that tag.
-No live agents, providers or reset operations were exercised. **Fact** means
-source behavior, not a runtime guarantee; **proposal** is not implemented.
+The original research on 2026-11-26 used public Paseo **v0.17.4**, tag commit
+`2b3559b107243306986176b80beb0e779f9fe53e`. The incident below adds a live
+observation and a source check against v0.18.0. Provider acceptance for the
+proposed renewal operation is still pending.
 
 ## Result
 
@@ -17,6 +17,28 @@ The extension needs more than replacing `resumeSession` with `createSession`:
 restart before a new resumable provider handle exists can otherwise delete
 the retained history. Selection fencing, durable reset state, timeline segment
 boundaries and recovery are part of the minimum safe contract.
+
+## Factory regression and acceptance
+
+On 2026-11-27, Factory commit `53b6893` removed the per-reset history choice
+and made the manual Reset Steer RPC require conversation rewind. The host
+setting remained enabled. The reset kept the Paseo agent and epoch, but the
+new Codex thread recorded a bounded fork of the original. Paseo replaced the
+tab's timeline with the fork's history. The original thread remained readable
+through Codex's `thread/read`. The server guard in `ff5423d` prevents this
+rewind while the user has history retention enabled.
+
+Paseo v0.18.0 and upstream main at `bec63111f1a3` still expose refresh with only
+agent and request IDs. Reload resumes a saved handle. Rewind still rebuilds
+the timeline from the provider. [Refresh request](https://github.com/getpaseo/paseo/blob/bec63111f1a348705c7e5cc0a8076d01eaa8e522/packages/protocol/src/messages.ts#L2080-L2084) · [Reload](https://github.com/getpaseo/paseo/blob/bec63111f1a348705c7e5cc0a8076d01eaa8e522/packages/server/src/server/agent/agent-manager.ts#L2154-L2176) · [Rewind](https://github.com/getpaseo/paseo/blob/bec63111f1a348705c7e5cc0a8076d01eaa8e522/packages/server/src/server/agent/agent-manager.ts#L4407-L4421)
+
+Add the incident sequence to P2 acceptance. Open a synthetic chat with several
+turns after a saved continuation brief. Enable history retention and invoke
+Reset Steer from both the composer menu and the Factory workspace panel on
+separate fixtures. Check that every earlier visible message remains in order,
+the agent ID and epoch match, and the new session's first request carries
+only its launch instructions and the permitted continuation. Repeat with a
+daemon restart between reset and the first request.
 
 ## Evidence: identity, timeline, sessions
 
