@@ -1,14 +1,15 @@
 import { settingsRpc, type RpcInput } from "@getpaseo/plugin";
-import type { ComponentType } from "react";
+import { useSyncExternalStore } from "react";
 import type {
   PluginAgentCommandContext,
   PluginButtonBehavior,
-  PluginButtonContentProps,
   PluginButtonMenuEntry,
   PluginButtonRegistration,
   PluginClientContext,
   PluginWorkspaceCommandContext,
+  PluginWorkspacePanelProps,
 } from "@getpaseo/plugin/client";
+import { Modal } from "@getpaseo/plugin/client/ui";
 import {
   FactoryColdPanel,
   FactoryColdPillContent,
@@ -27,13 +28,14 @@ import { submitFactoryCommand } from "./client/factory-submit.js";
 import { dismissFactoryResultPill, showFactoryResultPill } from "./client/result-pill.js";
 import { FactorySettings } from "./client/settings-factory.js";
 import { ActivateSteer } from "./client/activate-steer.js";
-import { ResetSteerPopover } from "./client/steer-menu-content.js";
+import { ResetSteerForm } from "./client/steer-menu-content.js";
 import {
   activationMenuBehavior,
   describeSteerMenu,
   handoverSteer,
   menuKeyFor,
   quotaConfirmationText,
+  type resetSteer,
   transferStagedBrief,
   type InitializeNewSteer,
 } from "./client/steer-menu.js";
@@ -70,7 +72,7 @@ function buildSteerMenuBehavior(
   actions: {
     activate: Parameters<typeof activationMenuBehavior>[2];
     handover: (source: SteerPillRow, target: { slot: string; agentId: string }) => Promise<void>;
-    reset: ComponentType<PluginButtonContentProps>;
+    reset: (row: SteerPillRow) => void;
     openFactory: (row: SteerPillRow) => void;
   },
 ): { behavior: PluginButtonBehavior; menuKey: string } {
@@ -87,16 +89,14 @@ function buildSteerMenuBehavior(
             quota={{ condition, text: quotaConfirmationText(condition, row) }} />
         ) } };
       }
-      case "handover":
-        return { ...item, behavior: entry.disabled ? { kind: "action", onPress: () => {} } : {
-          kind: "menu",
-          items: entry.targets.map((target) => ({
-            kind: "item", id: target.id, title: target.title, icon: target.icon, disabled: target.disabled,
-            behavior: { kind: "action", onPress: () => actions.handover(row, target) },
-          })),
-        } };
+      case "handover": {
+        const { target } = entry;
+        return { ...item, behavior: { kind: "action", onPress: () => {
+          if (target && !entry.disabled) return actions.handover(row, target);
+        } } };
+      }
       case "reset":
-        return { ...item, behavior: { kind: "popover", Content: actions.reset } };
+        return { ...item, behavior: { kind: "action", onPress: () => actions.reset(row) } };
       case "open-factory":
         return { ...item, behavior: { kind: "action", onPress: () => actions.openFactory(row) } };
     }
@@ -107,6 +107,23 @@ function buildSteerMenuBehavior(
 export default function contribute(client: PluginClientContext) {
   const panelSteers = createFactorySteerFeed();
   const workspaceResults = createFactoryResultStores();
+  let resetRequest: Pick<SteerPillRow, "agentId" | "workspaceId"> | null = null;
+  const resetListeners = new Set<() => void>();
+
+  function setResetRequest(request: typeof resetRequest) {
+    resetRequest = request;
+    for (const listener of resetListeners) listener();
+  }
+
+  function getResetRequest() {
+    return resetRequest;
+  }
+
+  function subscribeToReset(listener: () => void) {
+    resetListeners.add(listener);
+    return () => { resetListeners.delete(listener); };
+  }
+
   function reportSteerResult({ workspaceId, agentId }: Pick<SteerPillRow, "workspaceId" | "agentId">, summary: string, detail: string) {
     const results = workspaceResults(workspaceId);
     results.setResult({ kind: "info", at: new Date().toISOString(), text: detail });
@@ -141,6 +158,16 @@ export default function contribute(client: PluginClientContext) {
     }
   }
 
+  async function reportReset(
+    source: Pick<SteerPillRow, "workspaceId" | "agentId">,
+    { result, initialize }: Awaited<ReturnType<typeof resetSteer>>,
+  ) {
+    const summary = result.idempotent ? "Steer already reset" : "Steer reset";
+    const chat = result.idempotent ? "" : "The context was reset in this tab.";
+    const brief = result.idempotent ? "" : await briefResult(source.workspaceId, result, initialize);
+    reportSteerResult(source, summary, [`${summary}.`, chat, brief].filter(Boolean).join(" "));
+  }
+
   const steerActions = {
     async activate(input: RpcInput<typeof factorySteerActivate>) {
       const result = await client.rpc(factorySteerActivate, input);
@@ -165,26 +192,42 @@ export default function contribute(client: PluginClientContext) {
         reportSteerResult(source, "Handover blocked", thrown instanceof Error ? thrown.message : String(thrown));
       }
     },
-    reset: function ResetPopover(props: PluginButtonContentProps) {
-      if (props.context !== "agent") return null;
-      return <ResetSteerPopover {...props} feed={panelSteers} onReset={async (source, { result, initialize }) => {
-        const summary = result.idempotent ? "Steer already reset" : "Steer reset";
-        const chat = result.idempotent ? "" : "The context was reset in this tab.";
-        const brief = result.idempotent ? "" : await briefResult(source.workspaceId, result, initialize);
-        reportSteerResult(source, summary, [`${summary}.`, chat, brief].filter(Boolean).join(" "));
-      }} />;
+    reset({ workspaceId, agentId }: SteerPillRow) {
+      client.openPanel("factory", { workspaceId, agentId });
+      setResetRequest({ workspaceId, agentId });
     },
     openFactory({ workspaceId, agentId }: SteerPillRow) {
       client.openPanel("factory", { workspaceId, agentId });
     },
   };
+
+  function FactoryWorkspacePanel(props: PluginWorkspacePanelProps) {
+    const request = useSyncExternalStore(subscribeToReset, getResetRequest, getResetRequest);
+    const close = () => {
+      if (getResetRequest() === request) setResetRequest(null);
+    };
+    return (
+      <>
+        <FactoryPanel key={props.workspaceId} {...props} steerFeed={panelSteers}
+          results={workspaceResults(props.workspaceId)} composers={client.composers} />
+        {request?.workspaceId === props.workspaceId ? (
+          <Modal open title="Reset Steer" onOpenChange={(open) => { if (!open) close(); }}>
+            <Modal.Content>
+              <ResetSteerForm key={request.agentId} {...request} host={props.host} theme={props.theme}
+                close={close} feed={panelSteers} onReset={reportReset} />
+            </Modal.Content>
+          </Modal>
+        ) : null}
+      </>
+    );
+  }
+
   client.addWorkspacePanel({
     id: "factory",
     title: "Factory",
     icon: "Factory",
     locations: ["workspace"],
-    Component: (props) => <FactoryPanel key={props.workspaceId} {...props} steerFeed={panelSteers}
-      results={workspaceResults(props.workspaceId)} composers={client.composers} />,
+    Component: FactoryWorkspacePanel,
   });
   client.addAgentPanel({
     id: "factory-cold",
@@ -279,7 +322,7 @@ export default function contribute(client: PluginClientContext) {
     },
   );
   // One persistent pill per steer tab, kept in sync with the host-wide feed.
-  // The pill shows the native action menu; previews open as popovers.
+  // Handover and Reset are direct actions in the native menu.
   // Paseo re-subscribes after a reconnect; the close handler keeps the last
   // verified pills as Unknown until the next event refreshes them.
   const steerFeed = client.subscribe(
@@ -349,6 +392,7 @@ export default function contribute(client: PluginClientContext) {
       }
     }
     attentionPills.clear();
+    setResetRequest(null);
     panelSteers.disconnect();
     void steerFeed.release().catch(() => {});
     teardownSteerPills(steerPills);

@@ -143,7 +143,7 @@ function handoverReason(
 /**
  * Handover candidates: every holder of the scope in slot order with state,
  * provider/model and a reason on unavailable rows. The scope comes from the
- * current tab; without it there is no submenu.
+ * current tab; without it there are no handover targets.
  */
 export function handoffTargets(
   rows: SteerPillRow[],
@@ -255,11 +255,11 @@ export type SteerMenuEntryDescriptor =
   }
   | {
     kind: "handover";
-    id: "handover";
+    id: string;
     title: string;
     icon: string;
     disabled: boolean;
-    targets: { id: string; title: string; icon: string; disabled: boolean; slot: string; agentId: string }[];
+    target: { slot: string; agentId: string } | null;
   }
   | { kind: "reset" | "open-factory"; id: string; title: string; icon: string; disabled?: boolean };
 
@@ -281,14 +281,18 @@ export function describeSteerMenu(self: SteerPillRow, rows: SteerPillRow[]): Ste
   }
 
   const destinations = self.active ? targets.filter(({ agentId }) => agentId !== self.agentId) : [];
-  items.push({
-    kind: "handover", id: "handover", title: STEER_MENU_LABELS.handover, icon: "ArrowRightLeft",
-    disabled: destinations.length === 0,
-    targets: destinations.map(({ slot, agentId, eligible, context }) => ({
-      id: `handover-${agentId}`, title: `Steer ${slot} · ${context.state}`, icon: context.icon,
-      disabled: !eligible, slot, agentId,
-    })),
-  });
+  if (destinations.length === 0) {
+    items.push({
+      kind: "handover", id: "handover", title: STEER_MENU_LABELS.handover, icon: "ArrowRightLeft",
+      disabled: true, target: null,
+    });
+  }
+  for (const { slot, agentId, eligible, context } of destinations) {
+    items.push({
+      kind: "handover", id: `handover-${agentId}`, title: `Hand over to Steer ${slot} · ${context.state}`,
+      icon: context.icon, disabled: !eligible, target: { slot, agentId },
+    });
+  }
   items.push({
     kind: "reset", id: "reset", title: STEER_MENU_LABELS.reset, icon: "ListRestart",
     disabled: resetSteerBlock(self) !== null,

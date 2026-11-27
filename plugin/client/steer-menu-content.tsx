@@ -1,4 +1,4 @@
-import type { PluginButtonContentProps } from "@getpaseo/plugin/client";
+import type { PluginHostProps } from "@getpaseo/plugin/client";
 import { useRpc, useSettings } from "@getpaseo/plugin/client";
 import { useQuery } from "@tanstack/react-query";
 import { useRef, useState, useSyncExternalStore } from "react";
@@ -8,12 +8,15 @@ import { factorySteerMenuSettings } from "../shared/settings.js";
 import type { FactorySteerFeed } from "./factory-workspace-state.js";
 import { isExpiredPreviewError, normalizeInitializeNewSteer, resetQuotaConfirmationText, resetSteer, resetSteerBlock, steerQuotaConfirmation } from "./steer-menu.js";
 
-type ResetSteerPopoverProps = Extract<PluginButtonContentProps, { context: "agent" }> & {
+interface ResetSteerFormProps extends Pick<PluginHostProps, "host" | "theme"> {
+  agentId: string;
+  workspaceId: string;
+  close(): void;
   feed: FactorySteerFeed;
   onReset: (source: { workspaceId: string; agentId: string }, outcome: Awaited<ReturnType<typeof resetSteer>>) => Promise<void>;
-};
+}
 
-export function ResetSteerPopover({ agentId, workspaceId, host, theme, close, feed, onReset }: ResetSteerPopoverProps) {
+export function ResetSteerForm({ agentId, workspaceId, host, theme, close, feed, onReset }: ResetSteerFormProps) {
   const settings = useSettings(factorySteerMenuSettings);
   const callPreview = useRpc(factoryFreshPreview);
   const apply = useRpc(factoryFresh);
@@ -24,7 +27,7 @@ export function ResetSteerPopover({ agentId, workspaceId, host, theme, close, fe
   const resetQuota = quota ?? "available";
   const slot = row?.slot;
   const preview = useQuery({
-    queryKey: ["workspace-factory", "reset-popover", host.id, workspaceId, agentId, slot, resetQuota],
+    queryKey: ["workspace-factory", "reset-steer", host.id, workspaceId, agentId, slot, resetQuota],
     queryFn: async () => {
       const plan = await callPreview({ workspaceId, slot: slot ?? undefined, resetQuota });
       if (plan.from !== agentId || plan.workspaceId !== workspaceId || plan.slot !== slot) {
@@ -74,7 +77,7 @@ export function ResetSteerPopover({ agentId, workspaceId, host, theme, close, fe
   }
 
   return (
-    <View style={{ gap: 4, width: 260, maxWidth: "100%" }}>
+    <View style={{ gap: 4 }}>
       {quota ? <Text style={{ color: theme.colors.statusWarning }}>
         {resetQuotaConfirmationText(quota, row)}
       </Text> : null}

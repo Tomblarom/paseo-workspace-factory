@@ -294,31 +294,34 @@ test("steerRowsOf parses permission and staged-brief flags", () => {
 // Native menu descriptor
 // ---------------------------------------------------------------------------
 
-test("the active steer menu lists actions and leaf-only handover targets", () => {
+test("the active steer menu lists direct handover targets in slot order with context states and icons", () => {
   const active = { ...self(), stagedBrief: true };
   const warmup = row("steer-b", { slot: "B", state: "running", warmth: "cooling" });
   const recovery = row("steer-c", { slot: "C", state: "needs-resume", warmth: "cold", large: true });
   const items = menu.describeSteerMenu(active, [active, recovery, warmup]);
   assert.deepEqual(items.map((entry) => entry.title ?? entry.kind), [
-    "Handover", "Reset Steer", "separator", "Open Factory",
+    "Hand over to Steer B · cooling", "Hand over to Steer C · large", "Reset Steer", "separator", "Open Factory",
   ]);
-  const [handover, reset] = items;
-  assert.equal(handover.disabled, false);
-  assert.deepEqual(handover.targets, [
-    { id: "handover-steer-b", title: "Steer B · cooling", icon: pill.faceFor(warmup).icon, slot: "B", agentId: "steer-b", disabled: true },
-    { id: "handover-steer-c", title: "Steer C · large", icon: pill.faceFor(recovery).icon, slot: "C", agentId: "steer-c", disabled: false },
-  ]);
+  const [busy, eligible, reset] = items;
+  assert.deepEqual(busy, {
+    kind: "handover", id: "handover-steer-b", title: "Hand over to Steer B · cooling",
+    icon: pill.faceFor(warmup).icon, disabled: true, target: { slot: "B", agentId: "steer-b" },
+  });
+  assert.deepEqual(eligible, {
+    kind: "handover", id: "handover-steer-c", title: "Hand over to Steer C · large",
+    icon: pill.faceFor(recovery).icon, disabled: false, target: { slot: "C", agentId: "steer-c" },
+  });
   assert.deepEqual(reset, { kind: "reset", id: "reset", title: "Reset Steer", disabled: false, icon: "ListRestart" });
 });
 
-test("standby menus have a visible, disabled Handover with no submenu", () => {
+test("standby menus have a visible, disabled Handover action", () => {
   const standby = row("steer-b", { slot: "B", activationEpoch: 3, state: "needs-resume" });
   const items = menu.describeSteerMenu(standby, [self(), standby, row("steer-c", { slot: "C" })]);
   assert.deepEqual(items.map((entry) => entry.title ?? entry.kind), [
     "Activate Steer", "Handover", "Reset Steer", "separator", "Open Factory",
   ]);
   assert.deepEqual(items[1], {
-    kind: "handover", id: "handover", title: "Handover", icon: "ArrowRightLeft", disabled: true, targets: [],
+    kind: "handover", id: "handover", title: "Handover", icon: "ArrowRightLeft", disabled: true, target: null,
   });
 });
 
@@ -412,17 +415,18 @@ test("Reset stops on a stale holder or a replacement preview", async () => {
 const menuSource = readFileSync(new URL("../client/steer-menu-content.tsx", import.meta.url), "utf8");
 const entrySource = readFileSync(new URL("../index.client.tsx", import.meta.url), "utf8");
 
-test("the Reset popover checks rewind availability before enabling its confirmation", () => {
+test("the Reset dialog checks rewind availability and wires focusable Cancel and Reset buttons", () => {
   assert.match(menuSource, /queryFn:[\s\S]*?callPreview\(\{ workspaceId, slot: slot \?\? undefined, resetQuota \}\)/);
   assert.match(menuSource, /canReset = plan\?\.refreshMode === "rewind"/);
-  assert.match(menuSource, /onPress=\{close\}[\s\S]*?>Cancel</);
-  assert.match(menuSource, /onPress=\{\(\) => void confirmReset\(\)\}[\s\S]*?>Reset</);
+  assert.match(menuSource, /<Pressable accessibilityRole="button" disabled=\{busy\} onPress=\{close\}[\s\S]*?>Cancel</);
+  assert.match(menuSource, /<Pressable accessibilityRole="button"[^]*?disabled=\{!canReset\}\s+onPress=\{\(\) => void confirmReset\(\)\}[^]*?>Reset</);
 });
 
-test("Paseo receives one Reset popover and a submenu of direct Handover actions", () => {
-  assert.equal([...entrySource.matchAll(/kind: "popover", Content: actions\./g)].length, 1);
-  assert.match(entrySource, /case "reset":[\s\S]*?kind: "popover", Content: actions.reset/);
-  assert.match(entrySource, /items: entry.targets.map[\s\S]*?kind: "action", onPress: \(\) => actions.handover/);
-  assert.match(entrySource, /async handover[\s\S]*?reportSteerResult\(source, summary,/);
-  assert.match(entrySource, /client.openPanel\("factory", \{ workspaceId, agentId \}\)/);
+test("Paseo receives direct Handover and Reset actions, with dismissal wired on the workspace dialog", () => {
+  const actions = entrySource.slice(entrySource.indexOf('case "handover":'), entrySource.indexOf('case "open-factory":'));
+  assert.match(actions, /case "handover":[^]*?kind: "action"[^]*?actions.handover\(row, target\)/);
+  assert.match(actions, /case "reset":[^]*?kind: "action", onPress: \(\) => actions.reset\(row\)/);
+  assert.doesNotMatch(actions, /kind: "(?:menu|popover)"/);
+  assert.match(entrySource, /client.openPanel\("factory", \{ workspaceId, agentId \}\);\s*setResetRequest\(\{ workspaceId, agentId \}\);/);
+  assert.match(entrySource, /request\?\.workspaceId === props.workspaceId[^]*?<Modal open title="Reset Steer" onOpenChange=\{\(open\) => \{ if \(!open\) close\(\); \}\}[^]*?<ResetSteerForm[^]*?close=\{close\}/);
 });

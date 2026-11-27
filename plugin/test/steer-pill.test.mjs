@@ -6,8 +6,10 @@
 //
 // Manual checks (need a running Paseo host with the factory installed):
 // - Keyboard: Tab reaches the steer pill, Enter/Space opens the menu, arrows
-//   move through items and the handover submenu, Enter opens a preview
-//   popover, Tab moves through Close, Escape closes, focus returns.
+//   move through the direct Handover items. Enter on Reset Steer opens the
+//   Factory dialog. Tab to Cancel and press Space to dismiss it without a
+//   rewind. Switch back to the steer tab and reopen to test Escape, then
+//   reopen again, Tab to Reset and press Enter to apply the previewed rewind.
 // - Screen reader: the pill announces slot, role and state
 //   ("Steer A · Active · warm …"); menu items name their action.
 // - Compact layout: narrow window keeps face and menu readable; long
@@ -614,7 +616,7 @@ test("entry subscribes to factory.steers and keeps attention worker-only", () =>
   }
 });
 
-test("the Reset popover is keyboard/screen-reader labelled and theme driven", () => {
+test("the Reset dialog is keyboard/screen-reader labelled and theme driven", () => {
   for (const token of [
     'accessibilityRole="button"',
     'accessibilityRole="alert"',
