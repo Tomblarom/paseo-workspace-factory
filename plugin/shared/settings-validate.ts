@@ -361,20 +361,25 @@ export function validateFactorySettings(values: FactorySettingsValues): string[]
       }
     }
   }
+  const hasRolePriorities = values.steerPriority !== undefined;
   const slots = values.slots ?? {};
-  if (!Object.keys(slots).length) errors.push("slots must define at least one slot");
+  if (!hasRolePriorities && !Object.keys(slots).length) errors.push("slots must define at least one slot");
   for (const [slot, profile] of Object.entries(slots)) {
     if (!/^[A-Z]$/.test(slot)) errors.push(`slot ${JSON.stringify(slot)} must be a single capital letter`);
     if (!profiles[profile]) errors.push(`slot ${slot} references unknown profile ${JSON.stringify(profile)}`);
   }
   const prepare = values.prepare ?? [];
-  if (!Array.isArray(prepare) || !prepare.length) errors.push("prepare must list at least one slot");
-  for (const slot of prepare) {
-    if (!slots[slot]) errors.push(`prepare references unknown slot ${JSON.stringify(slot)}`);
-  }
-  if (new Set(prepare).size !== prepare.length) errors.push("prepare contains duplicates");
-  if (!prepare.includes(values.initialActive)) {
-    errors.push("initialActive must be one of prepare");
+  if (!Array.isArray(prepare)) {
+    errors.push("prepare must list at least one slot");
+  } else {
+    if (!hasRolePriorities && !prepare.length) errors.push("prepare must list at least one slot");
+    for (const slot of prepare) {
+      if (!slots[slot]) errors.push(`prepare references unknown slot ${JSON.stringify(slot)}`);
+    }
+    if (new Set(prepare).size !== prepare.length) errors.push("prepare contains duplicates");
+    if ((!hasRolePriorities || (prepare.length > 0 && Boolean(values.initialActive))) && !prepare.includes(values.initialActive)) {
+      errors.push("initialActive must be one of prepare");
+    }
   }
   const priority = values.workerPriority ?? [];
   if (!Array.isArray(priority) || !priority.length) {

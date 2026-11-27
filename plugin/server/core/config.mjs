@@ -189,19 +189,46 @@ export function validateConfig(config) {
     });
   }
 
+  const hasRolePriorities = Array.isArray(config.steers?.priority);
   const slots = config.steers?.slots ?? {};
-  if (!Object.keys(slots).length) errors.push('steers.slots must define at least one slot');
+  if (!hasRolePriorities && !Object.keys(slots).length) errors.push('steers.slots must define at least one slot');
   for (const [slot, profile] of Object.entries(slots)) {
     if (!SLOT_PATTERN.test(slot)) errors.push(`steer slot "${slot}" must be a single capital letter`);
     if (!profiles[profile]) errors.push(`steer slot ${slot} references unknown profile "${profile}"`);
   }
   const prepare = config.steers?.prepare ?? [];
-  if (!Array.isArray(prepare) || !prepare.length) errors.push('steers.prepare must list at least one slot');
-  for (const slot of prepare) if (!slots[slot]) errors.push(`steers.prepare references unknown slot "${slot}"`);
-  if (new Set(prepare).size !== prepare.length) errors.push('steers.prepare contains duplicates');
-  if (!prepare.includes(config.steers?.initialActive)) errors.push('steers.initialActive must be one of steers.prepare');
+  if (!Array.isArray(prepare)) {
+    errors.push('steers.prepare must list at least one slot');
+  } else {
+    if (!hasRolePriorities && !prepare.length) errors.push('steers.prepare must list at least one slot');
+    for (const slot of prepare) if (!slots[slot]) errors.push(`steers.prepare references unknown slot "${slot}"`);
+    if (new Set(prepare).size !== prepare.length) errors.push('steers.prepare contains duplicates');
+    if ((!hasRolePriorities || (prepare.length > 0 && Boolean(config.steers?.initialActive))) && !prepare.includes(config.steers?.initialActive)) {
+      errors.push('steers.initialActive must be one of steers.prepare');
+    }
+  }
   if (config.steers?.activeMarker !== undefined && typeof config.steers.activeMarker !== 'string') errors.push('steers.activeMarker must be a string (empty disables the active-steer tab marker)');
-  if (!Array.isArray(config.steers?.priority)) {
+  for (const [section, expectedAdvisor] of [['steers', false], ['advisors', true]]) {
+    const list = config[section]?.priority;
+    if (list === undefined) continue;
+    if (!Array.isArray(list)) {
+      errors.push(`${section}.priority must be an array of profile names`);
+      continue;
+    }
+    const seen = new Set();
+    for (const name of list) {
+      if (typeof name !== 'string' || !name || !profiles[name]) {
+        errors.push(`${section}.priority references unknown profile ${JSON.stringify(name)}`);
+      } else if (typeof profiles[name].advisor === 'boolean' && profiles[name].advisor !== expectedAdvisor) {
+        errors.push(`${section}.priority profile ${JSON.stringify(name)} has an incompatible advisor classification`);
+      } else if (seen.has(name)) {
+        errors.push(`${section}.priority lists "${name}" twice`);
+      } else {
+        seen.add(name);
+      }
+    }
+  }
+  if (!hasRolePriorities) {
     const slotEntries = Object.entries(slots);
     if (slotEntries.length && slotEntries.every(([, profile]) => profiles[profile]?.advisor === true)) {
       errors.push('steers.slots needs at least one non-advisor slot (advisors never coordinate)');

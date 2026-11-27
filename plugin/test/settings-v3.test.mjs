@@ -218,3 +218,44 @@ test("malformed classification is rejected rather than promoted into an eligible
   const malformedWorker = migrateFactoryConfig({ ...legacy(), workerPriority: undefined, workerDefault: 4 }, 1);
   assert.equal(factoryConfigSettings.schema.safeParse(malformedWorker).success, false);
 });
+
+test("role-priority configs do not require legacy slots, prepare or initialActive", () => {
+  const modern = factoryConfigSettings.schema.parse({
+    profiles: {
+      coord: profile({ provider: "codex", model: "gpt-6.2-sol" }),
+      adv: profile({ provider: "claude", model: "opus", advisor: true }),
+    },
+    slots: {},
+    prepare: [],
+    initialActive: "",
+    workerPriority: ["coord"],
+    steerPriority: ["coord"],
+    advisorPriority: ["adv"],
+    routingStrategy: "efficiency",
+    noSuitableSteer: "create",
+    githubOwner: "owner",
+    checkoutRoot: "/checkout",
+  });
+  assert.deepEqual(validateFactorySettings(modern), []);
+  const config = configFromSettings(modern);
+  assert.deepEqual(validateConfig(config), []);
+
+  // Legacy configs without steerPriority still require slots, prepare and initialActive.
+  const missingLegacy = { ...modern, steerPriority: undefined };
+  const legacyErrors = validateFactorySettings(missingLegacy).join("\n");
+  assert.match(legacyErrors, /slots must define at least one slot/);
+  assert.match(legacyErrors, /prepare must list at least one slot/);
+  assert.match(legacyErrors, /initialActive must be one of prepare/);
+
+  const legacyConfig = configFromSettings(modern);
+  delete legacyConfig.steers.priority;
+  const legacyConfigErrors = validateConfig(legacyConfig).join("\n");
+  assert.match(legacyConfigErrors, /steers\.slots must define at least one slot/);
+  assert.match(legacyConfigErrors, /steers\.prepare must list at least one slot/);
+  assert.match(legacyConfigErrors, /steers\.initialActive must be one of steers\.prepare/);
+
+  // Invalid legacy entries that are still present remain rejected even with steerPriority.
+  const badSlot = { ...modern, slots: { Z: "missing" } };
+  assert.match(validateFactorySettings(badSlot).join("\n"), /slot Z references unknown profile/);
+  assert.match(validateConfig(configFromSettings(badSlot)).join("\n"), /steer slot Z references unknown profile/);
+});
