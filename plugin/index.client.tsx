@@ -9,7 +9,7 @@ import type {
   PluginWorkspaceCommandContext,
   PluginWorkspacePanelProps,
 } from "@getpaseo/plugin/client";
-import { Modal } from "@getpaseo/plugin/client/ui";
+import { copyText, Modal } from "@getpaseo/plugin/client/ui";
 import {
   FactoryColdPanel,
   FactoryColdPillContent,
@@ -52,7 +52,7 @@ import {
 import { assertSteerContext } from "./shared/agent-guard.js";
 import { attentionStatus } from "./shared/context-continuation.js";
 import {
-  factoryCold, factorySteerActivate, factorySteerBrief, factorySteers, factorySwitch, factorySwitchPreview,
+  factoryCold, factoryResume, factorySteerActivate, factorySteerBrief, factorySteers, factorySwitch, factorySwitchPreview,
 } from "./shared/factory.js";
 import { factorySteerMenuSettings } from "./shared/settings.js";
 
@@ -73,6 +73,7 @@ function buildSteerMenuBehavior(
     activate: Parameters<typeof activationMenuBehavior>[2];
     handover: (source: SteerPillRow, target: { slot: string; agentId: string }) => Promise<void>;
     reset: (row: SteerPillRow) => void;
+    copyBrief: (row: SteerPillRow) => Promise<void>;
     openFactory: (row: SteerPillRow) => void;
   },
 ): { behavior: PluginButtonBehavior; menuKey: string } {
@@ -97,6 +98,8 @@ function buildSteerMenuBehavior(
       }
       case "reset":
         return { ...item, behavior: { kind: "action", onPress: () => actions.reset(row) } };
+      case "copy-brief":
+        return { ...item, behavior: { kind: "action", onPress: () => actions.copyBrief(row) } };
       case "open-factory":
         return { ...item, behavior: { kind: "action", onPress: () => actions.openFactory(row) } };
     }
@@ -196,6 +199,10 @@ export default function contribute(client: PluginClientContext) {
     reset({ workspaceId, agentId }: SteerPillRow) {
       client.openPanel("factory", { workspaceId, agentId });
       setResetRequest({ workspaceId, agentId });
+    },
+    async copyBrief({ workspaceId, agentId }: SteerPillRow) {
+      const { brief } = await client.rpc(factoryResume, { workspaceId, agentId });
+      await copyText(brief);
     },
     openFactory({ workspaceId, agentId }: SteerPillRow) {
       client.openPanel("factory", { workspaceId, agentId });
@@ -323,7 +330,7 @@ export default function contribute(client: PluginClientContext) {
     },
   );
   // One persistent pill per steer tab, kept in sync with the host-wide feed.
-  // Handover and Reset are direct actions in the native menu.
+  // Handover, Reset and Copy are direct actions in the native menu.
   // Paseo re-subscribes after a reconnect; the close handler keeps the last
   // verified pills as Unknown until the next event refreshes them.
   const steerFeed = client.subscribe(

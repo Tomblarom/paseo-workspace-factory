@@ -25,6 +25,7 @@ export const STEER_MENU_LABELS = {
   retryActivation: "Retry activation delivery",
   handover: "Handover",
   reset: "Reset Steer",
+  copyBrief: "Copy current brief",
   openFactory: "Open Factory",
   close: "Close",
 } as const;
@@ -265,7 +266,7 @@ export type SteerMenuEntryDescriptor =
     disabled: boolean;
     target: { slot: string; agentId: string } | null;
   }
-  | { kind: "reset" | "open-factory"; id: string; title: string; icon: string; disabled?: boolean };
+  | { kind: "reset" | "copy-brief" | "open-factory"; id: string; title: string; icon: string; disabled?: boolean };
 
 export function describeSteerMenu(self: SteerPillRow, rows: SteerPillRow[]): SteerMenuEntryDescriptor[] {
   const items: SteerMenuEntryDescriptor[] = [];
@@ -293,8 +294,8 @@ export function describeSteerMenu(self: SteerPillRow, rows: SteerPillRow[]): Ste
   }
   for (const { slot, agentId, eligible, context, route } of destinations) {
     items.push({
-      kind: "handover", id: `handover-${agentId}`, title: `Handover -> Steer ${slot} · ${context.state} · ${route}`,
-      icon: context.icon, disabled: !eligible, target: { slot, agentId },
+      kind: "handover", id: `handover-${agentId}`, title: `Handover to Steer ${slot} · ${context.state} · ${route}`,
+      icon: "ArrowRight", disabled: !eligible, target: { slot, agentId },
     });
   }
   items.push({
@@ -302,6 +303,7 @@ export function describeSteerMenu(self: SteerPillRow, rows: SteerPillRow[]): Ste
     disabled: resetSteerBlock(self) !== null,
   });
   items.push({ kind: "separator", id: "sep-open" });
+  items.push({ kind: "copy-brief", id: "copy-brief", title: STEER_MENU_LABELS.copyBrief, icon: "Copy" });
   items.push({ kind: "open-factory", id: "open-factory", title: STEER_MENU_LABELS.openFactory, icon: "Factory" });
   return items;
 }

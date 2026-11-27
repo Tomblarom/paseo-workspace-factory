@@ -301,17 +301,17 @@ test("the active steer menu lists direct handover targets in slot order with con
     handoverRoute: "GPT-6.2 Sol High Work Codex" });
   const items = menu.describeSteerMenu(active, [active, recovery, warmup]);
   assert.deepEqual(items.map((entry) => entry.title ?? entry.kind), [
-    "Handover -> Steer B · cooling · GPT-6.2 Sol Default thinking ZeroSub account unknown",
-    "Handover -> Steer C · large · GPT-6.2 Sol High Work Codex", "Reset Steer", "separator", "Open Factory",
+    "Handover to Steer B · cooling · GPT-6.2 Sol Default thinking ZeroSub account unknown",
+    "Handover to Steer C · large · GPT-6.2 Sol High Work Codex", "Reset Steer", "separator", "Copy current brief", "Open Factory",
   ]);
   const [busy, eligible, reset] = items;
   assert.deepEqual(busy, {
-    kind: "handover", id: "handover-steer-b", title: "Handover -> Steer B · cooling · GPT-6.2 Sol Default thinking ZeroSub account unknown",
-    icon: pill.faceFor(warmup).icon, disabled: true, target: { slot: "B", agentId: "steer-b" },
+    kind: "handover", id: "handover-steer-b", title: "Handover to Steer B · cooling · GPT-6.2 Sol Default thinking ZeroSub account unknown",
+    icon: "ArrowRight", disabled: true, target: { slot: "B", agentId: "steer-b" },
   });
   assert.deepEqual(eligible, {
-    kind: "handover", id: "handover-steer-c", title: "Handover -> Steer C · large · GPT-6.2 Sol High Work Codex",
-    icon: pill.faceFor(recovery).icon, disabled: false, target: { slot: "C", agentId: "steer-c" },
+    kind: "handover", id: "handover-steer-c", title: "Handover to Steer C · large · GPT-6.2 Sol High Work Codex",
+    icon: "ArrowRight", disabled: false, target: { slot: "C", agentId: "steer-c" },
   });
   assert.deepEqual(reset, { kind: "reset", id: "reset", title: "Reset Steer", disabled: false, icon: "ListRestart" });
 });
@@ -320,7 +320,7 @@ test("standby menus have a visible, disabled Handover action", () => {
   const standby = row("steer-b", { slot: "B", activationEpoch: 3, state: "needs-resume" });
   const items = menu.describeSteerMenu(standby, [self(), standby, row("steer-c", { slot: "C" })]);
   assert.deepEqual(items.map((entry) => entry.title ?? entry.kind), [
-    "Activate Steer", "Handover", "Reset Steer", "separator", "Open Factory",
+    "Activate Steer", "Handover", "Reset Steer", "separator", "Copy current brief", "Open Factory",
   ]);
   assert.deepEqual(items[1], {
     kind: "handover", id: "handover", title: "Handover", icon: "ArrowRightLeft", disabled: true, target: null,
