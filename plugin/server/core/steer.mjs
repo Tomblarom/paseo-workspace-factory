@@ -906,7 +906,9 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
   const liveHolders = (slot) => liveSlotHolders(status.steers, slot);
   const from = liveHolders(expected.activeSteer)[0] ?? null;
   const to = liveHolders(toSlot)[0] ?? null;
+  const failover = activation?.failover;
   if (activation && expected.epoch !== activation.epoch) throw new SwitchRefused('Scope authority changed. Reopen Activate Steer in this tab.');
+  if (failover && (from?.id ?? null) !== failover.holderId) throw new SwitchRefused('The holder changed since failover planning');
   if (!to) throw new SwitchRefused(`Steer ${toSlot} does not exist for ${status.repo}`);
   if (activation && to.id !== activation.agentId) throw new SwitchRefused('This tab no longer holds the selected steer slot.');
   if (toSlot === expected.activeSteer) throw new SwitchRefused(`Steer ${toSlot} is already active`);
@@ -952,10 +954,24 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
       aliases: discoveryScopeAliases(discovery), config,
     });
     if (fresh.workerHandover) throw new SwitchRefused('A previous worker handover is still being reconciled');
+    if (failover && fresh.activeAgentId !== discovery.mainWorkspace.metadata[METADATA_KEY].activeAgentId) {
+      throw new SwitchRefused('The recorded holder changed since failover planning');
+    }
     if (holder && (BUSY.has(holder.status) || holder.activeTurn)) throw new SwitchRefused(`Active Steer ${from.slot} is running; stop it or wait for its turn to end first`);
     const entries = metadata[AGENTS_KEY] ?? {};
     const outgoingEntry = holder ? entries[holder.id] : null;
     const outgoing = readSteerAction(outgoingEntry);
+    if (failover && readStagedSteerBrief(outgoingEntry)?.composerClaim) {
+      throw new SwitchRefused('The active steer has a composer transfer awaiting reconciliation');
+    }
+    // Unattempted wake batches and assignment reports can rebind after the
+    // epoch changes. Other pending operations still own their original route.
+    if (failover && outgoing && !['done', 'staged'].includes(outgoing.phase) &&
+        (!['reserved', 'ready'].includes(outgoing.phase) ||
+          !(outgoing.batch && !outgoing.batch.takeover || outgoing.assignment || outgoing.assignments?.length) ||
+          outgoing.accountMove || readEffectReceipt(metadata, outgoing))) {
+      throw new SwitchRefused('The active steer has an operation awaiting reconciliation');
+    }
     if ((activation || outgoing?.kind === 'activate') && outgoing?.phase !== 'done' &&
         (outgoing?.attemptedAt || outgoing?.rewindAttempt || ['renewing', 'uncertain', 'sent'].includes(outgoing?.phase) ||
           readCleanupAction(outgoingEntry) || unsettledAccountMove(outgoing))) {
@@ -964,9 +980,9 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
     const liveTarget = scopeHolder({ agents, workspaceId: status.workspace.id, scopeId: expected.scope?.id ?? status.repo, slot: toSlot, aliases: discoveryScopeAliases(discovery) });
     if (isAdvisorSteer(config, liveTarget.labels, liveTarget.metadata)) throw new SwitchRefused(`Steer ${toSlot} is an advisor and cannot coordinate`);
     if (liveTarget.id !== to.id || (!selfTakeover && (BUSY.has(liveTarget.status) || liveTarget.activeTurn))) throw new SwitchRefused(`Steer ${toSlot} changed or is running; rerun the switch`);
+    if (activation) await activation.check({ target: liveTarget, holder, entries, metadata });
     const admission = admitTarget ? await admitTarget(liveTarget) : steerPrivacyAdmission(config, liveTarget, discoveredRepoPublic(discovery));
     if (!admission.allowed) throw new SwitchRefused(`Steer ${toSlot} cannot receive a handoff: ${admission.reason}.`);
-    if (activation) await activation.check({ target: liveTarget, holder, entries });
     if (callerId && !selfTakeover) {
       if (callerId !== from?.id) throw new SwitchRefused('Only the active steer or the takeover target may request this switch');
     }
@@ -978,13 +994,15 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
       // claim even after an epoch change or when recovery reopened the stage.
       const stages = [prior?.phase === 'staged' ? prior : null, targetEntry?.stagedBrief];
       if ((prior && !['done', 'staged'].includes(prior.phase)) ||
+          (failover && (readCleanupAction(targetEntry) || stages.some(Boolean))) ||
           stages.some((brief) => brief && (brief.phase !== 'staged' || brief.attemptedAt || brief.rewindAttempt ||
             brief.batch || brief.cleanup || brief.accountMove || brief.composerClaim || brief.manualComposerOnly))) {
         throw new SwitchRefused('Target has a pending steer delivery; finish it before switching');
       }
       switchAction = newSteerAction({ kind: activation ? 'activate' : stage ? 'stage' : 'switch', epoch: next.epoch, at: next.switchedAt,
-        text: activation ? undefined : packet, note: `Handoff from Steer ${fromInfo.slot} to Steer ${toSlot} in round ${next.epoch}.`, phase: stage ? 'staged' : 'reserved' });
-      if (activation) switchAction.routing = { intent: { mode: 'explicit', agentId: to.id,
+        text: activation ? undefined : packet, note: `Handoff from Steer ${fromInfo.slot} to Steer ${toSlot} in round ${next.epoch}.` +
+          (failover?.note ? `\n${failover.note}` : ''), phase: stage ? 'staged' : 'reserved' });
+      if (activation) switchAction.routing = { intent: failover ? { mode: 'automatic' } : { mode: 'explicit', agentId: to.id,
         provider: liveTarget.provider, model: liveTarget.model ?? undefined } };
       switchAction.needsResumeAt = targetEntry?.needsResume?.at ?? null;
       if (!stage) switchAction.authority = { scopeId: expected.scope?.id ?? status.repo, agentId: to.id };
@@ -998,8 +1016,16 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
     const workers = planWorkerHandover({ agents, scopeId, workspaceId: status.workspace.id,
       fromId: holder?.id ?? fresh.activeAgentId, fromSlot: fresh.activeSteer, aliases: discoveryScopeAliases(discovery) });
     if (workers.length) next.workerHandover = { toId: to.id, epoch: next.epoch, scopeId, workers };
+    const checkpoint = metadata[CHECKPOINT_KEY];
+    const failoverCheckpoint = failover && typeof checkpoint?.task === 'string' && checkpoint.task.trim() ? {
+      ...checkpoint, source: 'failover', failover: { kind: 'local-switch', previousSteer: fresh.activeSteer, reason: failover.reason },
+      epoch: next.epoch, updatedAt: next.switchedAt,
+    } : null;
     held.verify(); // commit authority and delivery intent together
-    await workspace.setMetadata({ [METADATA_KEY]: next, ...(switchAction ? { [AGENTS_KEY]: { ...entries, [to.id]: actionEntry(targetEntry, switchAction) } } : {}) });
+    await workspace.setMetadata({ [METADATA_KEY]: next,
+      ...(switchAction ? { [AGENTS_KEY]: { ...entries, [to.id]: actionEntry(targetEntry, switchAction) } } : {}),
+      ...(failoverCheckpoint ? { [CHECKPOINT_KEY]: failoverCheckpoint } : {}),
+    });
     const writtenMeta = (await workspace.refresh())?.metadata;
     const written = writtenMeta?.[METADATA_KEY];
     if (written?.epoch !== next.epoch || written?.activeSteer !== toSlot) throw new Error('Steer switch not verifiable after write');
@@ -1031,7 +1057,7 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
       if (deliverSteer) {
         const outcome = await deliverSteer({
           workspaceId: status.workspace.id, agentId: to.id, epoch: result.epoch, text: packet, actionId: switchAction.wakeId,
-          renewalNote: `Handoff from Steer ${fromInfo.slot} to Steer ${toSlot} in round ${result.epoch}.`,
+          renewalNote: switchAction.note,
         });
         result.delivered = outcome.status === 'sent';
         deliveryId = outcome.deliveryId ?? null;

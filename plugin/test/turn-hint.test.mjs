@@ -7,7 +7,7 @@ register("./ts-resolve-hooks.mjs", import.meta.url);
 
 const { handleTurnAfter, handleTurnBefore, adoptContinuation, reportContinuationAssignment } = await import("../server/turn-hook.ts");
 const { runBootCheck } = await import("../server/boot-check.ts");
-const { flushAllScopes, resetSupervisionForTests, supervisionQuiet } = await import("../server/supervise.ts");
+const { flushAllScopes, markBootCheckDone, resetSupervisionForTests, retryPendingWakeBrief, supervisionQuiet } = await import("../server/supervise.ts");
 const { deliverSteer, dispatchAssignmentReport, finishSteerDelivery } = await import("../server/steer-delivery.ts");
 const { DRAIN_METADATA_KEY } = await import("../shared/supervise.ts");
 import { LABEL, METADATA_KEY, PARENT_LABEL } from "../server/core/paseo.mjs";
@@ -19,7 +19,7 @@ import { normalizeZerosubState } from "../server/core/zerosub.mjs";
 import { newSteerAction } from "../server/core/steer-action.mjs";
 import { attemptSteerAccountMove } from "../server/core/steer-account-move.mjs";
 import { WORKERS_KEY } from "../server/core/supervision.mjs";
-import { switchSteer } from "../server/core/steer.mjs";
+import { CHECKPOINT_KEY, switchSteer } from "../server/core/steer.mjs";
 
 const REPO = "example-owner/example-repo";
 
@@ -595,7 +595,7 @@ test("an unattempted report follows the new holder after an epoch change", async
   assert.equal(sendsTo(world, successor.id).length, 1);
 });
 
-test("a lone report waits through a hard limit and requests takeover without renewing the recipient", async () => {
+test("a lone report triggers local failover at a hard limit and follows the new holder", async () => {
   const world = makeWorld();
   const { ws } = provisioned(world);
   const requesterWs = addWorkspace(world, { metadata: { [METADATA_KEY]: { main: true, activeSteer: "A", epoch: 1, scope: { id: "requester/repo", kind: "github", locator: "requester/repo" } } } });
@@ -614,34 +614,90 @@ test("a lone report waits through a hard limit and requests takeover without ren
   await flushAllScopes(fakeClient(world), deps);
   assert.equal(sendsTo(world, requester.id).length, 0);
   assert.equal(requesterWs.metadata[AGENTS_KEY][requester.id].action, undefined);
-  assert.match(sendsTo(world, successor.id)[0], /takeover/i);
+  assert.match(sendsTo(world, successor.id)[0], /\[Factory resume\]\nbrief/);
   assert.equal(ws.metadata[ASSIGNMENT_KEY].reportedAt, null);
-  resetSupervisionForTests();
-  await flushAllScopes(fakeClient(world), { ...deps, bootCheckDone: false });
-  await flushAllScopes(fakeClient(world), deps);
-  assert.equal(sendsTo(world, successor.id).length, 1, "boot recovery preserves the takeover answer window");
-  assert.equal(ws.metadata[ASSIGNMENT_KEY].reportedAt, null);
-  successor.status = "running";
-  const discovery = {
-    forkName: "requester/repo",
-    scope: { id: "requester/repo", kind: "github", locator: "requester/repo" },
-    mainWorkspace: structuredClone(requesterWs),
-    steers: { labelled: structuredClone([requester, successor]), legacy: [] },
-    workers: [], providers: [],
-  };
-  const switched = await switchSteer({ client: fakeClient(world), discovery, toSlot: "B",
-    callerId: successor.id, apply: true, lock: noLock });
-  assert.equal(switched.selfTakeover, true);
-  assert.equal(switched.applied, true);
-  await assert.rejects(switchSteer({ client: fakeClient(world), discovery, toSlot: "B",
-    callerId: successor.id, apply: true, lock: noLock }), /scope state changed since discovery/i);
   assert.equal(requesterWs.metadata[METADATA_KEY].epoch, 2);
   assert.equal(requesterWs.metadata[METADATA_KEY].activeAgentId, successor.id);
-  successor.status = "idle";
   await flushAllScopes(fakeClient(world), deps);
   assert.ok(ws.metadata[ASSIGNMENT_KEY].reportedAt);
   assert.equal(sendsTo(world, requester.id).length, 0);
   assert.equal(sendsTo(world, successor.id).length, 2);
+  assert.match(sendsTo(world, successor.id)[1], /completed assignment/);
+});
+
+test("Muse quota failure transfers authority, keeps worker and report evidence, and reconciles one continuation", async () => {
+  for (const responseLost of [false, true]) {
+    const world = makeWorld();
+    const { ws, steers } = provisioned(world);
+    Object.assign(steers.A, { provider: "muse", status: "error" });
+    steers.B.provider = "codex";
+    ws.metadata[METADATA_KEY].activeAgentId = steers.A.id;
+    ws.metadata[CHECKPOINT_KEY] = { task: "Continue assigned work", tests: [], blockers: [], next: "Check the result", epoch: 3 };
+    const worker = addAgent(world, { workspaceId: ws.id, labels: {
+      [LABEL.role]: "worker", [LABEL.scope]: REPO, [LABEL.owner]: "A", [PARENT_LABEL]: steers.A.id,
+    } });
+    const queuedAt = new Date().toISOString();
+    const pendingWake = { state: "done", queuedAt };
+    ws.metadata[WORKERS_KEY] = { [worker.id]: { task: "Work result", state: "done", pendingWake } };
+    const child = addWorkspace(world, { metadata: { [METADATA_KEY]: { main: true, activeSteer: "A", epoch: 1,
+      scope: { id: "assigned/repo", kind: "github", locator: "assigned/repo" } } } });
+    child.metadata[ASSIGNMENT_KEY] = { by: steers.A.id, requesterWorkspaceId: ws.id, epoch: 1,
+      reportActionId: "pending-report", reportText: "Assigned work report", reportedAt: null,
+      reportTarget: { workspaceId: ws.id, agentId: steers.A.id, epoch: 3, scopeId: REPO, unreserved: true } };
+    const report = structuredClone(child.metadata[ASSIGNMENT_KEY]);
+    const settings = { enabled: true, answerMinutes: 10, batchMinutes: 10, watchdogMinutes: 15, staleMinutes: 60, maxAutoResumes: 2 };
+    const delivery = {
+      zerosub: null,
+      buildBrief: async (_paseo, workspaceId, agentId) => {
+        assert.equal(workspaceId, ws.id);
+        assert.equal(agentId, steers.B.id);
+        assert.equal(ws.metadata[METADATA_KEY].activeAgentId, steers.B.id);
+        assert.equal(worker.labels[PARENT_LABEL], steers.B.id);
+        return ws.metadata[CHECKPOINT_KEY].task;
+      },
+      workerHandoverCli: ([resource, verb, id, flag, value]) => {
+        assert.deepEqual([resource, verb], ["agent", "update"]);
+        const agent = world.agents.find((entry) => entry.id === id);
+        if (flag === "--name") agent.title = value;
+        else {
+          assert.equal(flag, "--label");
+          Object.assign(agent.labels, Object.fromEntries(value.split(",").map((label) => label.split("="))));
+        }
+      },
+    };
+    const paseo = fakeClient(world);
+    const scope = { id: REPO, workspaceId: ws.id };
+    world.lostSendResponse = responseLost;
+    markBootCheckDone();
+    try {
+      await handleTurnAfter({ agent: { id: steers.A.id }, turnId: "quota-failed",
+        outcome: { kind: "failed", error: { message: "You've hit your 5-hour limit" } } },
+        { paseo }, { lock: noLock, zerosub: null, getSupervisionSettings: async () => settings, delivery });
+    } finally {
+      resetSupervisionForTests();
+    }
+    assert.equal(ws.metadata[AGENTS_KEY][steers.A.id].quotaLimit.provider, "muse");
+    assert.equal(ws.metadata[METADATA_KEY].epoch, 4);
+    assert.equal(ws.metadata[METADATA_KEY].activeAgentId, steers.B.id);
+    assert.equal(worker.labels[PARENT_LABEL], steers.B.id);
+    assert.equal(worker.labels[LABEL.owner], "B");
+    assert.deepEqual(ws.metadata[WORKERS_KEY][worker.id].pendingWake, pendingWake);
+    assert.deepEqual(child.metadata[ASSIGNMENT_KEY], report);
+    const action = ws.metadata[AGENTS_KEY][steers.B.id].action;
+    assert.equal(action.phase, responseLost ? "uncertain" : "done");
+    const deps = { lock: noLock, bootCheckDone: true, settings, delivery };
+    assert.equal((await retryPendingWakeBrief(paseo, scope, deps)).delivered, responseLost);
+    assert.equal((await retryPendingWakeBrief(paseo, scope, deps)).delivered, false);
+    assert.equal(ws.metadata[AGENTS_KEY][steers.B.id].action.wakeId, action.wakeId);
+    assert.equal(world.sendAttempts, responseLost ? 2 : 1);
+    assert.equal(sendsTo(world, steers.A.id).length, 0);
+    assert.equal(sendsTo(world, steers.B.id).length, 1);
+    assert.match(sendsTo(world, steers.B.id)[0], /\[Factory resume\]\nContinue assigned work/);
+    assert.equal((await dispatchAssignmentReport(paseo, child.id, { ...delivery, lock: noLock })).status, "sent");
+    assert.ok(child.metadata[ASSIGNMENT_KEY].reportedAt);
+    assert.match(sendsTo(world, steers.B.id)[1], /Assigned work report/);
+    assert.deepEqual(ws.metadata[WORKERS_KEY][worker.id].pendingWake, pendingWake);
+  }
 });
 
 test("pending reports wait for boot and source or recipient drain, then the sweep delivers", async () => {

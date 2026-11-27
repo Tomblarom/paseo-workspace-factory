@@ -10,13 +10,13 @@
 // and are never duplicated here; plugin-only text and scans live in
 // ../shared/supervise.ts. Only erasable TypeScript: node --test imports this
 // file with type stripping (see plugin/test/ts-resolve-hooks.mjs).
-import { deliverSteer, dispatchAssignmentReport, finishSteerDelivery, pendingSteerDelivery, type EventBatch, type SteerDeliveryDeps } from "./steer-delivery.js";
+import { deliverSteer, dispatchAssignmentReport, finishSteerDelivery, isAutomaticActivation, pendingSteerDelivery, type EventBatch, type SteerDeliveryDeps } from "./steer-delivery.js";
 import { ASSIGNMENT_KEY } from "./core/assign.mjs";
 import { scopeHolder } from "./core/scope-guard.mjs";
 import { isAdvisorSteer } from "./core/config.mjs";
-import { resolveSteerHolders } from "./core/discovery.mjs";
-import { readEffectReceipt, readSteerAction } from "./core/steer-action.mjs";
-import { quotaAdmission } from "./steer-admission.js";
+import { liveSlotHolders, resolveSteerHolders } from "./core/discovery.mjs";
+import { readCleanupAction, readEffectReceipt, readStagedSteerBrief, readSteerAction } from "./core/steer-action.mjs";
+import { quotaAdmission, readAdmissionSnapshot, readPrivacyAdmission } from "./steer-admission.js";
 import { readRoutingSnapshot, routingProjection, steerRouteCandidate, planSteerRoutes } from "./steer-routing.js";
 import { hasActiveAgentWork } from "./agent-context.js";
 import { canMarkWorkerStale, filterStaleWorkerEvents } from "./worker-wakes.js";
@@ -85,7 +85,6 @@ import {
   buildWorkerMetadata,
   firstUserText,
   formatScopeTakeover,
-  formatSteerTakeover,
   hasAdvisorRequest,
   isDrainMarkerActive,
   isWorkerMetadata,
@@ -330,6 +329,14 @@ export async function requestQuotaFailover(
 /**
  * Live steer rows for failover, with their runtime and interruption markers.
  */
+function scopeSteers(state: any, scopeId: string) {
+  const labelled = (state.agents ?? []).filter((agent: any) => {
+    const identity = factoryIdentity(agent?.labels);
+    return identity?.role === "steer" && sameScopeId(identity.scopeId, scopeId);
+  });
+  return resolveSteerHolders(labelled, state.agents ?? []);
+}
+
 function steerRows(
   paseoState: any,
   scopeId: string,
@@ -337,11 +344,7 @@ function steerRows(
   config: any = null,
 ): { slot: string | null; id: string; archivedAt: unknown; superseded: boolean; status: unknown; background: unknown; interrupted: unknown; pool?: string | null; advisor?: boolean }[] {
   const rows: { slot: string | null; id: string; archivedAt: unknown; superseded: boolean; status: unknown; background: unknown; interrupted: unknown; pool?: string | null; advisor?: boolean }[] = [];
-  const labelled = (paseoState?.agents ?? []).filter((agent: any) => {
-    const identity = factoryIdentity(agent?.labels ?? null);
-    return identity?.role === "steer" && sameScopeId(identity.scopeId, scopeId);
-  });
-  for (const agent of resolveSteerHolders(labelled, paseoState?.agents ?? [])) {
+  for (const agent of scopeSteers(paseoState, scopeId)) {
     const identity = factoryIdentity(agent?.labels ?? null);
     if (!identity || identity.role !== "steer" || !sameScopeId(identity.scopeId, scopeId)) continue;
     rows.push({
@@ -1026,7 +1029,12 @@ export async function flushScope(
   }
   if (!(deps.bootCheckDone ?? isBootCheckDone())) return { flushed: false, reason: "boot" };
   if (wsfOf(flushedMeta)?.workerHandover) {
-    await retryWorkerHandover(paseo, scope.workspaceId, lockOf(deps), deps.delivery?.workerHandoverCli);
+    try {
+      await retryWorkerHandover(paseo, scope.workspaceId, lockOf(deps), deps.delivery?.workerHandoverCli);
+    } catch (error) {
+      logOf(deps)(`[factory] supervise: worker handover for ${scope.id} is pending (${error instanceof Error ? error.message : String(error)})`);
+      return { flushed: false, reason: "brief-pending", detail: "Worker transfer is pending." };
+    }
   }
   const retry = await retryPendingWakeBrief(paseo, scope, { ...deps, allowBatches: settings?.enabled === true });
   if (retry.delivered) {
@@ -1306,12 +1314,9 @@ export async function recordTakeoverDelivery(
 }
 
 /**
- * One failover step for a scope: when the last wake is older than
- * answerMinutes and the active steer neither completed a turn since (answered)
- * nor still runs one (busy), the next chain candidate (next slot, then domain,
- * then hub) gets a takeover request, logged as checkpoint source failover.
- * Each candidate gets a full answer window; an empty chain cycles. Quiet
- * periods skip; an epoch move aborts.
+ * Compare the existing failover routes. A local successor gets authority and
+ * a durable continuation in one switch. External escalation and persisted
+ * takeover requests still use the answer window.
  */
 export async function runFailoverCheck(
   paseo: any,
@@ -1321,6 +1326,7 @@ export async function runFailoverCheck(
   if (await deps.delivery?.isFactoryPaused?.()) return { action: "wait", reason: "paused" };
   const settings = await resolveSettings(deps);
   if (!settings || !settings.enabled) return { action: "clear", reason: "disabled" };
+  if (settings.paused) return { action: "wait", reason: "paused" };
   const log = logOf(deps);
   const { nowIso, nowMs } = stampsOf(deps);
   const mainId: string = scope.workspaceId;
@@ -1357,6 +1363,10 @@ export async function runFailoverCheck(
   const rows = steerRows(paseoState, scope.id, agentState, config);
   const holder = activeHolder(paseoState, scope, wsf);
   if (deps.failingAgentId && holder !== deps.failingAgentId) return { action: "clear", reason: "holder-changed" };
+  const holderDelivery = pendingSteerDelivery(holder ? agentState[holder] : null);
+  if (holderDelivery?.epoch === wsf.epoch && isAutomaticActivation(holderDelivery)) {
+    return { action: "wait", reason: "brief-pending" };
+  }
   const zerosub = routing.zerosub;
   let holderRow: ZerosubSwitchRow | null = null;
   let holderSwitchWakeAt: string | null = null;
@@ -1468,10 +1478,16 @@ export async function runFailoverCheck(
   const byId = new Map<string, any>((paseoState.agents ?? []).map((a: any) => [a?.id, a]));
   const holderAgent = holder ? byId.get(holder) : null;
   const holderAdmission = holderAgent && holder ? quotaAdmission(holderAgent, agentState[holder], routing, agentState) : null;
+  const quotaTrigger = deps.quotaTrigger;
+  const limitUnconfirmed = (admission: typeof holderAdmission) => quotaTrigger &&
+    (!admission || admission.allowed || admission.pendingMove ||
+      (quotaTrigger.accountId && quotaTrigger.accountId !== admission.accountId));
+  const sameLimitedAccount = (source: any, sourceQuota: typeof holderAdmission, target: any, targetQuota: typeof holderAdmission) =>
+    sourceQuota?.reason === "provider limit" && sourceQuota.accountId && sourceQuota.accountId === targetQuota?.accountId &&
+    source?.provider === target?.provider && source?.model === target?.model;
   // A quota-triggered wake can race an account change, reset or loss of telemetry.
   // The second routing observation must still justify a takeover of this holder.
-  if (deps.quotaTrigger && (!holderAdmission || holderAdmission.allowed || holderAdmission.pendingMove ||
-      (deps.quotaTrigger.accountId && deps.quotaTrigger.accountId !== holderAdmission.accountId))) {
+  if (limitUnconfirmed(holderAdmission)) {
     return { action: "wait", reason: "quota-limit-unconfirmed" };
   }
   const projections = routingProjection(routingState, routing);
@@ -1480,16 +1496,21 @@ export async function runFailoverCheck(
     const candidateWorkspace = routingState.workspaces?.find((workspace: any) => workspace.id === candidate?.workspaceId);
     const candidateEntry = candidateWorkspace?.metadata?.[AGENTS_KEY]?.[candidate?.id];
     const candidateAdmission = candidate ? quotaAdmission(candidate, candidateEntry, routing, candidateWorkspace?.metadata?.[AGENTS_KEY]) : null;
-    const sameLimitedAccount = holderAdmission?.reason === "provider limit" && holderAdmission.accountId &&
-      candidateAdmission?.accountId === holderAdmission.accountId && candidate?.provider === holderAgent?.provider &&
-      candidate?.model === holderAgent?.model;
+    const sharesLimit = sameLimitedAccount(holderAgent, holderAdmission, candidate, candidateAdmission);
+    const action = readSteerAction(candidateEntry);
+    const unavailableForSwitch = item.kind === "steer" && (
+      liveSlotHolders(rows, item.slot).length !== 1 || candidate?.workspaceId !== mainId ||
+      P.parentOf(candidate) || readStagedSteerBrief(candidateEntry) || readCleanupAction(candidateEntry) ||
+      (action && action.phase !== "done")
+    );
     const eligible = !!candidate && !candidate.archivedAt && candidate.background !== true && canWakeAgent(candidate) &&
       !hasActiveAgentWork(candidate, candidateEntry) && !pendingSteerDelivery(candidateEntry) &&
-      candidateAdmission?.allowed && !sameLimitedAccount;
+      candidateAdmission?.allowed && !sharesLimit && !unavailableForSwitch;
     return { ...steerRouteCandidate({ agent: candidate ?? { id: item.steerId }, entry: candidateEntry,
       entries: candidateWorkspace?.metadata?.[AGENTS_KEY], row: projections.find((row) => row.agentId === item.steerId),
       snapshot: routing, kind: "handover", eligible, preferenceRank: index,
-      reason: sameLimitedAccount ? "same limited account and model" : candidateAdmission?.reason ?? "target ineligible" }),
+      reason: unavailableForSwitch ? "target unavailable for authority switch" :
+        sharesLimit ? "same limited account and model" : candidateAdmission?.reason ?? "target ineligible" }),
       target: item, escalation: item.kind === "steer" ? 0 : item.kind === "domain" ? 1 : 2 };
   });
   // Domain and hub are escalation boundaries, not cheaper substitutes for an
@@ -1501,31 +1522,97 @@ export async function runFailoverCheck(
   });
   next = route.selected?.target ?? null;
   if (!next) return waitReset() ?? { action: "none", reason: "candidates-ineligible" };
+  const forkNote = zerosubForkWarning(holderRow);
+  if (next.kind === "steer") {
+    const delivery = deliveryDeps(deps);
+    const admissionDeps = { ...delivery, paseo };
+    const workspace = routingState.workspaces.find((ws: any) => ws.id === mainId);
+    if (!workspace) return { action: "abort", reason: "scope-unavailable" };
+    const discovery = { forkName: scope.id, scope, mainWorkspace: workspace,
+      steers: { labelled: scopeSteers(paseoState, scope.id) }, workers: workerAgents(paseoState, scope.id) };
+    const selected = byId.get(next.steerId);
+    try {
+      const switched = await ST.switchSteer({
+        client: paseo, discovery, toSlot: next.slot, apply: true, config, lock: lockOf(deps),
+        now: () => new Date(nowIso), paseoCli: delivery.workerHandoverCli,
+        admitTarget: (agent: any) => readPrivacyAdmission(agent, admissionDeps, mainId),
+        activation: {
+          agentId: next.steerId, epoch: wsf.epoch, failover: { holderId: holder, reason, note: forkNote },
+          async check({ target, holder: outgoing, entries, metadata }: any) {
+            const workspaces = await P.readPaseoWorkspaces(paseo);
+            for (const ws of workspaces) {
+              const liveMeta = ws.id === mainId ? metadata : ws.metadata;
+              for (const entry of Object.values(liveMeta?.[AGENTS_KEY] ?? {})) {
+                const action = readSteerAction(entry);
+                const batch = action?.batch;
+                if (batch?.workspaceId !== mainId || batch?.epoch !== wsf.epoch || batch?.takeover?.activeSlot !== activeSlot) continue;
+                if (pendingSteerDelivery(entry) || (action.phase === "done" && nowMs - Date.parse(action.observedAt ?? action.queuedAt) < settings.answerMinutes * 60_000)) {
+                  throw new ST.SwitchRefused("A takeover receipt is still awaiting reconciliation or an answer");
+                }
+              }
+            }
+            if (!deps.force && currentWake) {
+              const freshEvents = await filterStaleWorkerEvents(paseo, metadata,
+                workersReport(readWorkers(metadata)).map((entry: any) => ({ ...entry, workerId: entry.id })));
+              if (scopeLastWakeAt(Object.fromEntries(freshEvents.map((entry: any) => [entry.id, entry]))) !== currentWake ||
+                  steerWakeResponse({ entry: entries[outgoing?.id], status: outgoing?.status, lastWakeAt: currentWake }) === "answered") {
+                throw new ST.SwitchRefused("The unanswered wake changed before failover");
+              }
+            }
+            const [observed, liveTarget, liveHolder] = await Promise.all([
+              readAdmissionSnapshot(admissionDeps, workspaces),
+              refreshAgent(paseo, target.id),
+              outgoing && refreshAgent(paseo, outgoing.id),
+            ]);
+            if (!canWakeAgent(liveTarget, scope.id) || liveTarget.workspaceId !== mainId || P.parentOf(liveTarget) ||
+                entries[target.id]?.interrupted ||
+                hasActiveAgentWork(liveTarget, entries[target.id]) ||
+                (outgoing && (!liveHolder || liveHolder.archivedAt || liveHolder.workspaceId !== mainId ||
+                  P.parentOf(liveHolder) || hasActiveAgentWork(liveHolder, entries[outgoing.id])))) {
+              throw new ST.SwitchRefused("A steer became busy or ineligible before failover");
+            }
+            if (liveTarget.provider !== selected.provider || liveTarget.model !== selected.model) {
+              throw new ST.SwitchRefused("The successor's runtime changed before failover");
+            }
+            if (liveHolder && (liveHolder.provider !== holderAgent?.provider || liveHolder.model !== holderAgent?.model)) {
+              throw new ST.SwitchRefused("The holder's runtime changed before failover");
+            }
+            const sourceQuota = liveHolder ? quotaAdmission(liveHolder, entries[liveHolder.id], observed, entries) : null;
+            const targetQuota = quotaAdmission(liveTarget, entries[target.id], observed, entries);
+            if (limitUnconfirmed(sourceQuota)) throw new ST.SwitchRefused("The holder's quota limit is no longer confirmed");
+            if (!targetQuota.allowed || sameLimitedAccount(liveHolder, sourceQuota, liveTarget, targetQuota)) {
+              throw new ST.SwitchRefused("The successor's quota no longer permits failover");
+            }
+            const liveSettings = await (deps.getSettings?.() ?? resolveSettings(deps));
+            if (!liveSettings?.enabled || liveSettings.paused || await supervisionQuiet(paseo, [mainId], deps)) {
+              throw new ST.SwitchRefused("Supervision is disabled or quiet");
+            }
+          },
+        },
+        deliverSteer: (input: Parameters<typeof deliverSteer>[1]) => deliverSteer(paseo, input, delivery),
+      });
+      if (!switched.delivered || switched.deliveryDetail) {
+        log(`[factory] supervise: local failover for ${scope.id} waits (${switched.deliveryDetail ?? switched.deliveryError ?? "continuation pending"})`);
+        return { action: "wait", reason: switched.deliveryBlocked ? "resume-refused" : "brief-pending" };
+      }
+      return { action: "failover", to: next };
+    } catch (error) {
+      log(`[factory] supervise: local failover for ${scope.id} deferred (${error instanceof Error ? error.message : String(error)})`);
+      return { action: "wait", reason: "brief-pending" };
+    }
+  }
   const factoryCmd = deps.factoryCmd ?? FACTORY_CMD;
   const summary: { id: string; state: string }[] = open.map((entry: any) => ({ id: entry.id, state: entry.state }));
-  let text = next.kind === "steer"
-    ? formatSteerTakeover({
-        scopeId: scope.id,
-        epoch: wsf.epoch,
-        activeSlot: activeSlot ?? "?",
-        candidateSlot: next.slot,
-        reason,
-        openWorkers: summary,
-        factoryCmd,
-      })
-    : formatScopeTakeover({
-        scopeId: scope.id,
-        epoch: wsf.epoch,
-        kind: next.kind,
-        reason,
-        openWorkers: summary,
-        factoryCmd,
-      });
-  const forkNote = zerosubForkWarning(holderRow);
+  let text = formatScopeTakeover({
+    scopeId: scope.id,
+    epoch: wsf.epoch,
+    kind: next.kind,
+    reason,
+    openWorkers: summary,
+    factoryCmd,
+  });
   if (forkNote) text = `${text}\n${forkNote}`;
-  const targetScope = next.kind === "steer"
-    ? scope
-    : findScope(scopes, factoryIdentity(byId.get(next.steerId)?.labels)?.scopeId ?? "");
+  const targetScope = findScope(scopes, factoryIdentity(byId.get(next.steerId)?.labels)?.scopeId ?? "");
   if (!targetScope) return { action: "none", reason: "no-target-scope" };
   const batch: EventBatch = {
     workspaceId: mainId, epoch: wsf.epoch ?? null,
@@ -1535,7 +1622,6 @@ export async function runFailoverCheck(
   const outcome = await deliverSteer(paseo, {
     workspaceId: targetScope.workspaceId,
     agentId: next.steerId,
-    ...(next.kind === "steer" ? { epoch: wsf.epoch } : {}),
     state: paseoState,
     text,
     sendOptions: { activeTurnBehavior: "steer" },

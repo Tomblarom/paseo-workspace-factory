@@ -68,7 +68,7 @@ import { factoryWorkspaceActivity } from "./shared/workspace-activity.js";
 import { readZerosubStateSafe } from "./server/zerosub-runtime.js";
 import { isAdvisorSteer } from "./server/core/config.mjs";
 import { ROLE_RULES_ID, rolePromptForOpen, withFactoryCli, workerEnvAdditions } from "./server/core/role-prompts.mjs";
-import { readPaseoAgents } from "./server/core/paseo.mjs";
+import { createPaseoCli, readPaseoAgents } from "./server/core/paseo.mjs";
 import { continuedFromId, resolveFactoryLabels } from "./server/core/zerosub.mjs";
 import { factoryIdentity } from "./shared/auto-checkpoint.js";
 import { shortHolderId } from "./server/core/steer-create.mjs";
@@ -141,6 +141,7 @@ export default function contribute(server: PluginServerContext) {
   const quotaDisplay = { getZerosub, getQuotaSampleMinutes: async () => (await readQuotaSettings())?.quotaSampleMinutes };
   const buildResumeBrief = createResumeBriefBuilder(loader, { getZerosub });
   const delivery: SteerDeliveryDeps = {
+    workerHandoverCli: (args) => createPaseoCli()(args),
     isFactoryPaused,
     getConfig: () => loader.loadEffectiveConfig(),
     assignmentQuiet: (paseo, sourceIds, targetId) => supervisionQuiet(paseo, [...sourceIds, targetId]),

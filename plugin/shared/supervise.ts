@@ -130,30 +130,6 @@ function summarizeOpenWorkers(open: readonly OpenWorkerSummary[]): string {
 }
 
 /**
- * Takeover request to the next live steer of the scope. The candidate takes
- * over with the epoch-checked switch; the loser of a race gets a refusal and
- * stops (core switchSteer).
- */
-export function formatSteerTakeover(args: {
-  scopeId: string;
-  epoch: unknown;
-  activeSlot: string;
-  candidateSlot: string;
-  reason: string;
-  openWorkers: readonly OpenWorkerSummary[];
-  factoryCmd?: string;
-}): string {
-  const cmd = args.factoryCmd ?? "paseo-factory";
-  return (
-    `[factory] Scope ${args.scopeId}, epoch ${String(args.epoch ?? "?")}: ` +
-    `Steer ${args.activeSlot} is not answering (${args.reason}). ` +
-    `Take over with \`${cmd} switch ${args.scopeId} --to ${args.candidateSlot} --apply\`; ` +
-    `if it is refused, stop. ${summarizeOpenWorkers(args.openWorkers)} ` +
-    `Run \`${cmd} resume\` after the takeover. Ignore if your epoch is newer.`
-  );
-}
-
-/**
  * Takeover request to the domain or hub steer (last chain links): they have no
  * slot in this scope, so they intervene instead of switching.
  */

@@ -136,6 +136,10 @@ function scopeState(meta: any) {
   return meta[METADATA_KEY];
 }
 
+export function isAutomaticActivation(action: any): boolean {
+  return action?.kind === "activate" && action.routing?.intent?.mode === "automatic";
+}
+
 /** A queued explicit request keeps its target tuple across renewal/restart. */
 async function steerQuotaAdmission(agent: any, entry: any, deps: SteerDeliveryDeps, entries: Record<string, any> = {}) {
   const privacy = await readPrivacyAdmission(agent, deps);
@@ -155,7 +159,7 @@ async function steerQuotaAdmission(agent: any, entry: any, deps: SteerDeliveryDe
       { ...admission.admission, allowed: false, reason: "explicit steer/model selection changed" };
   }
   const quota = await quotaOnlyAdmission(agent, entry, deps, entries);
-  const admission = action?.kind === "activate" && action.phase !== "done"
+  const admission = action?.kind === "activate" && action.phase !== "done" && !isAutomaticActivation(action)
     ? activationQuotaAdmission(quota, deps.confirmActivationQuota) : quota;
   const intent = readSteerAction(entry)?.routing?.intent;
   return !intent || routeMatchesIntent({ ...agent, agentId: agent.id }, intent) ? admission :
@@ -362,6 +366,7 @@ async function assignmentIsQuiet(paseo: any, action: any, targetId: string, deps
   const refs = assignmentRefs(action);
   const sources = refs.map((ref) => ref.workspaceId);
   if (action?.batch?.takeover && action.batch.workspaceId) sources.push(action.batch.workspaceId);
+  if (isAutomaticActivation(action)) sources.push(targetId);
   return sources.length > 0 && !!await deps.assignmentQuiet?.(paseo, sources, targetId);
 }
 
@@ -956,6 +961,9 @@ ${pending.note}` : brief;
               return { allowed: false, reason: "The delivery target is unavailable; its action remains recorded." };
             }
             const privacy = await readPrivacyAdmission(live, { ...deps, paseo }, input.workspaceId);
+            if (isAutomaticActivation(pending) && await assignmentIsQuiet(paseo, pending, input.workspaceId, deps)) {
+              return { allowed: false, reason: "Continuation waits for boot or drain." };
+            }
             return await automationPaused(deps) ? { allowed: false, reason: FACTORY_PAUSED } : privacy;
           },
           validate: async (_action: any, latestMeta: any) => {
@@ -1070,7 +1078,7 @@ export async function deliverSteer(
     workspaces: state.workspaces.map((ws: any) => ws.id === input.workspaceId ? { ...ws, metadata: meta } : ws) };
   const routing = await readRoutingSnapshot({ ...deps, paseo }, observationState.workspaces, observationState.agents);
   const rawAdmission = quotaAdmission(agent, entry, routing, meta[AGENTS_KEY]);
-  const routeAdmission = pendingMove?.kind === "activate"
+  const routeAdmission = pendingMove?.kind === "activate" && !isAutomaticActivation(pendingMove)
     ? activationQuotaAdmission(rawAdmission, deps.confirmActivationQuota) : rawAdmission;
   const admission = pendingMove?.accountMove?.phase === "settled"
     ? await steerQuotaAdmission(agent, entry, { ...deps, paseo }, meta[AGENTS_KEY]) : routeAdmission;

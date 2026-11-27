@@ -21,7 +21,6 @@ const {
   buildWorkerMetadata,
   firstUserText,
   formatScopeTakeover,
-  formatSteerTakeover,
   hasAdvisorRequest,
   isDrainMarkerActive,
   isWorkerMetadata,
@@ -30,7 +29,7 @@ const {
   steerWakeResponse,
 } = await import("../shared/supervise.ts");
 const { factorySupervisionSettings } = await import("../shared/settings.ts");
-import { LABEL, METADATA_KEY, readPaseoState } from "../server/core/paseo.mjs";
+import { LABEL, METADATA_KEY, PARENT_LABEL, readPaseoState } from "../server/core/paseo.mjs";
 import { WORKERS_KEY } from "../server/core/supervision.mjs";
 import { AGENTS_KEY } from "../server/core/agent-state.mjs";
 import { CHECKPOINT_KEY, SwitchRefused, switchSteer } from "../server/core/steer.mjs";
@@ -226,25 +225,6 @@ test("worker metadata builds, validates, and clips the excerpt", () => {
   assert.equal(isWorkerMetadata({ scopeId: REPO }), false);
   assert.equal(isWorkerMetadata(null), false);
   assert.equal(isWorkerMetadata("x"), false);
-});
-
-test("steer takeover text carries the epoch-checked switch", () => {
-  const text = formatSteerTakeover({
-    scopeId: REPO, epoch: 4, activeSlot: "A", candidateSlot: "B",
-    reason: "no answer within 10m", openWorkers: [{ id: "w-1", state: "blocked" }],
-  });
-  assert.match(text, new RegExp(`\\[factory\\] Scope ${REPO.replace(/[./-]/g, (c) => `\\${c}`)}, epoch 4`));
-  assert.match(text, /Steer A is not answering \(no answer within 10m\)/);
-  assert.match(text, new RegExp(`\`paseo-factory switch ${REPO.replace(/[./-]/g, (c) => `\\${c}`)} --to B --apply\``));
-  assert.match(text, /if it is refused, stop/);
-  assert.match(text, /Open workers: w-1 blocked/);
-  assert.match(text, /`paseo-factory resume`/);
-  assert.match(text, /Ignore if your epoch is newer/);
-  const custom = formatSteerTakeover({
-    scopeId: "s", epoch: 1, activeSlot: "A", candidateSlot: "C", reason: "x", openWorkers: [], factoryCmd: "wf",
-  });
-  assert.match(custom, /`wf switch s --to C --apply`/);
-  assert.match(custom, /Open workers: none recorded/);
 });
 
 test("domain and hub takeover texts intervene instead of switching", () => {
@@ -707,7 +687,7 @@ test("watchdog skips failover while the drain marker is live", async () => {
   assert.equal(quiet.failovers.length, 0);
   assert.equal(sendsTo(world, steers.B.id).length, 0);
   world.workspaces[0].metadata[DRAIN_METADATA_KEY] = drainMarker(at(NOW - 2 * MIN));
-  const loud = await supervise.watchdogScan(fakeClient(world), depsOf());
+  const loud = await supervise.watchdogScan(fakeClient(world), failoverDeps(world));
   assert.equal(loud.failovers.length, 1);
 });
 
@@ -881,6 +861,29 @@ function unansweredWorld() {
   return { world, ws, steers, worker };
 }
 
+function failoverDeps(world, overrides = {}) {
+  return depsOf({
+    ...overrides,
+    delivery: {
+      buildBrief: async (_paseo, workspaceId, agentId) => {
+        const workspace = world.workspaces.find(({ id }) => id === workspaceId);
+        assert.equal(workspace.metadata[METADATA_KEY].activeAgentId, agentId);
+        return workspace.metadata[CHECKPOINT_KEY]?.task ?? "Resume assigned work";
+      },
+      workerHandoverCli: ([resource, verb, id, flag, value]) => {
+        assert.deepEqual([resource, verb], ["agent", "update"]);
+        const agent = world.agents.find((entry) => entry.id === id);
+        if (flag === "--name") agent.title = value;
+        else {
+          assert.equal(flag, "--label");
+          Object.assign(agent.labels, Object.fromEntries(value.split(",").map((label) => label.split("="))));
+        }
+      },
+      ...overrides.delivery,
+    },
+  });
+}
+
 test("forced failover respects boot and drain without requiring a worker", async () => {
   for (const quiet of ["boot", "global", "marker"]) {
     const { world, ws, steers } = unansweredWorld();
@@ -893,28 +896,38 @@ test("forced failover respects boot and drain without requiring a worker", async
   }
 });
 
-test("unanswered wake fails over to the next slot and logs the takeover", async () => {
+test("unanswered wake transfers local authority and sends one continuation", async () => {
   const { world, ws, steers, worker } = unansweredWorld();
   const paseo = fakeClient(world);
   const scope = { id: REPO, workspaceId: ws.id };
-  const result = await supervise.runFailoverCheck(paseo, scope, depsOf());
+  worker.labels[PARENT_LABEL] = steers.A.id;
+  const before = structuredClone(ws.metadata[WORKERS_KEY][worker.id]);
+  const deps = failoverDeps(world);
+  const result = await supervise.runFailoverCheck(paseo, scope, deps);
   assert.equal(result.action, "failover");
   assert.deepEqual(result.to, { kind: "steer", slot: "B", steerId: steers.B.id });
-  assert.notEqual(result.logged, false);
   const texts = sendsTo(world, steers.B.id);
   assert.equal(texts.length, 1);
-  assert.match(texts[0], new RegExp(`switch ${REPO.replace(/[./-]/g, (c) => `\\${c}`)} --to B --apply`));
-  assert.match(texts[0], /no answer within 10m/);
+  assert.match(texts[0], /\[Factory resume\]\nship it/);
+  assert.doesNotMatch(texts[0], /switch .*--apply/);
+  assert.equal(sendsTo(world, steers.A.id).length, 0);
+  assert.equal(ws.metadata[METADATA_KEY].activeAgentId, steers.B.id);
+  assert.equal(ws.metadata[METADATA_KEY].epoch, 4);
+  assert.equal(worker.labels[PARENT_LABEL], steers.B.id);
+  assert.equal(worker.labels[LABEL.owner], "B");
   const checkpoint = world.workspaces[0].metadata[CHECKPOINT_KEY];
   assert.equal(checkpoint.source, "failover");
-  assert.deepEqual(checkpoint.failover, { previousSteer: "A", reason: "no answer within 10m" });
+  assert.deepEqual(checkpoint.failover, { kind: "local-switch", previousSteer: "A", reason: "no answer within 10m" });
   assert.equal(checkpoint.task, "ship it", "task preserved");
-  const bumped = world.workspaces[0].metadata[WORKERS_KEY][worker.id].lastWakeAt;
-  assert.equal(bumped, at(NOW));
-  assert.deepEqual(supervise.failoverStateForTests()[REPO].asked, [steers.B.id]);
+  assert.equal(checkpoint.epoch, 4);
+  assert.deepEqual(ws.metadata[WORKERS_KEY][worker.id], before);
+  assert.equal(ws.metadata[AGENTS_KEY][steers.B.id].action.phase, "done");
+  assert.equal((await supervise.runFailoverCheck(paseo, scope, deps)).reason, "no-wake");
+  assert.equal((await supervise.retryPendingWakeBrief(paseo, scope, deps)).delivered, false);
+  assert.equal(sendsTo(world, steers.B.id).length, 1);
 });
 
-test("a cold takeover starts its answer window only after the renewed brief is sent", async () => {
+test("a cold successor holds authority during renewal and receives its continuation once", async () => {
   const { world, ws, steers, worker } = unansweredWorld();
   steers.C.archivedAt = at(NOW); // B is the only eligible route in this renewal test.
   steers.B.provider = "claude";
@@ -922,16 +935,17 @@ test("a cold takeover starts its answer window only after the renewed brief is s
   ws.metadata[AGENTS_KEY][steers.B.id] = { lastTurnEndedAt: at(NOW - 6 * MIN) };
   const paseo = fakeClient(world);
   const scope = { id: REPO, workspaceId: ws.id };
-  const deps = depsOf({ buildBrief: async () => "Takeover checkpoint" });
+  const deps = failoverDeps(world, { delivery: { buildBrief: async () => "Task checkpoint" } });
   const outcome = await supervise.runFailoverCheck(paseo, scope, deps);
   assert.deepEqual(outcome, { action: "wait", reason: "brief-pending" });
+  assert.equal(ws.metadata[METADATA_KEY].activeAgentId, steers.B.id);
   assert.deepEqual(sendsTo(world, steers.B.id), ["/clear"]);
   assert.equal(ws.metadata[WORKERS_KEY][worker.id].lastWakeAt, at(NOW - 11 * MIN));
   assert.equal(supervise.failoverStateForTests()[REPO], undefined);
-  // The same reserved K7 takeover remains binding even if another standby
-  // becomes available before renewal finishes.
+  // The activation receipt owns the continuation even after restart.
   steers.C.archivedAt = null;
-  assert.deepEqual(await supervise.runFailoverCheck(paseo, scope, deps), { action: "wait", reason: "brief-pending" });
+  supervise.resetSupervisionForTests();
+  assert.deepEqual(await supervise.runFailoverCheck(paseo, scope, { ...deps, force: true }), { action: "wait", reason: "brief-pending" });
   assert.equal(sendsTo(world, steers.C.id).length, 0);
   assert.equal((await supervise.retryPendingWakeBrief(paseo, scope, deps)).delivered, false);
 
@@ -943,21 +957,159 @@ test("a cold takeover starts its answer window only after the renewed brief is s
   entry.action.phase = "ready";
   assert.equal((await supervise.retryPendingWakeBrief(paseo, scope, deps)).delivered, true);
   assert.equal(sendsTo(world, steers.B.id).length, 2);
-  assert.match(sendsTo(world, steers.B.id)[1], /\[Factory resume\]\nTakeover checkpoint/);
+  assert.match(sendsTo(world, steers.B.id)[1], /\[Factory resume\]\nTask checkpoint/);
   assert.equal(ws.metadata[CHECKPOINT_KEY].source, "failover");
-  assert.equal(ws.metadata[WORKERS_KEY][worker.id].lastWakeAt, at(NOW));
-  assert.deepEqual(supervise.failoverStateForTests()[REPO].asked, [steers.B.id]);
+  assert.equal(ws.metadata[WORKERS_KEY][worker.id].lastWakeAt, at(NOW - 11 * MIN));
+  assert.equal((await supervise.retryPendingWakeBrief(paseo, scope, deps)).delivered, false);
 });
 
 test("automatic failover compares preparation instead of just taking the next letter", async () => {
   const { world, ws, steers } = unansweredWorld();
   steers.B.provider = "claude";
   ws.metadata[AGENTS_KEY][steers.B.id] = { lastTurnEndedAt: at(NOW - 6 * MIN) };
-  const result = await supervise.runFailoverCheck(fakeClient(world), { id: REPO, workspaceId: ws.id }, depsOf());
+  const result = await supervise.runFailoverCheck(fakeClient(world), { id: REPO, workspaceId: ws.id }, failoverDeps(world));
   assert.equal(result.action, "failover");
   assert.equal(result.to.steerId, steers.C.id);
   assert.equal(sendsTo(world, steers.B.id).length, 0);
   assert.equal(sendsTo(world, steers.C.id).length, 1);
+});
+
+test("concurrent automatic plans from one epoch commit a single controller and continuation", async () => {
+  const { world, ws, steers } = unansweredWorld();
+  const scope = { id: REPO, workspaceId: ws.id };
+  const paseo = fakeClient(world);
+  let release;
+  const planned = new Promise((resolve) => { release = resolve; });
+  let tail = Promise.resolve(), count = 0;
+  const lock = (name, operation) => {
+    const next = tail.then(() => planned).then(() => noLock(name, operation));
+    tail = next.catch(() => {});
+    if (++count === 2) release();
+    return next;
+  };
+  const deps = failoverDeps(world, { lock });
+  const attempts = await Promise.all([supervise.runFailoverCheck(paseo, scope, deps), supervise.runFailoverCheck(paseo, scope, deps)]);
+  assert.deepEqual(attempts.map(({ action }) => action).sort(), ["failover", "wait"]);
+  assert.equal(ws.metadata[METADATA_KEY].epoch, 4);
+  assert.equal(ws.metadata[METADATA_KEY].activeAgentId, steers.B.id);
+  assert.equal(sendsTo(world, steers.A.id).length + sendsTo(world, steers.C.id).length, 0);
+  assert.equal(sendsTo(world, steers.B.id).length, 1);
+});
+
+test("local failover selects an executable route and preserves pending target operations", async () => {
+  for (const unavailable of ["staged brief", "cleanup", "duplicate slot"]) {
+    const { world, ws, steers } = unansweredWorld();
+    const entries = ws.metadata[AGENTS_KEY];
+    if (unavailable === "staged brief") {
+      entries[steers.B.id] = { stagedBrief: { phase: "staged", wakeId: "draft", packet: "Prepared brief" } };
+    }
+    if (unavailable === "cleanup") {
+      entries[steers.B.id] = { action: { kind: "cleanup", phase: "renewing", cleanup: { kind: "compact" } } };
+    }
+    if (unavailable === "duplicate slot") {
+      addAgent(world, { title: steers.B.title, workspaceId: ws.id, labels: { ...steers.B.labels } });
+    }
+    const before = structuredClone(entries[steers.B.id]);
+    const result = await supervise.runFailoverCheck(fakeClient(world), { id: REPO, workspaceId: ws.id }, failoverDeps(world));
+    assert.equal(result.action, "failover", unavailable);
+    assert.equal(ws.metadata[METADATA_KEY].activeAgentId, steers.C.id, unavailable);
+    assert.deepEqual(ws.metadata[AGENTS_KEY][steers.B.id], before, unavailable);
+    assert.equal(sendsTo(world, steers.B.id).length, 0, unavailable);
+    assert.equal(sendsTo(world, steers.C.id).length, 1, unavailable);
+  }
+});
+
+test("local failover rechecks authority, live work, quiet, admission and receipts under the lock", async () => {
+  for (const change of ["holder", "permission", "pause", "drain", "quota", "source reset", "privacy", "receipt", "answer"]) {
+    const { world, ws, steers, worker } = unansweredWorld();
+    const scope = { id: REPO, workspaceId: ws.id };
+    const before = structuredClone(ws.metadata[WORKERS_KEY][worker.id]);
+    let crossing = false;
+    if (change === "source reset") ws.metadata[AGENTS_KEY][steers.A.id].quotaLimit = { at: at(NOW), provider: "codex", model: "m" };
+    const deps = failoverDeps(world, {
+      ...(change === "source reset" ? { force: true, quotaTrigger: {} } : {}),
+      lock: (name, operation) => {
+        crossing = true;
+        if (change === "holder") ws.metadata[METADATA_KEY].activeAgentId = steers.C.id;
+        if (change === "permission") steers.A.pendingPermissions = [{ id: "prompt" }];
+        if (change === "drain") ws.metadata[DRAIN_METADATA_KEY] = drainMarker(at(NOW + MIN));
+        if (change === "quota") ws.metadata[AGENTS_KEY][steers.B.id] = { quotaLimit: { at: at(NOW), provider: "codex", model: "m" } };
+        if (change === "source reset") delete ws.metadata[AGENTS_KEY][steers.A.id].quotaLimit;
+        if (change === "receipt") ws.metadata[AGENTS_KEY][steers.C.id] = { action: {
+          phase: "uncertain", wakeId: "unresolved", epoch: 3,
+          batch: { workspaceId: ws.id, epoch: 3, events: [], takeover: { scopeId: REPO, activeSlot: "A" } },
+        } };
+        if (change === "answer") ws.metadata[AGENTS_KEY][steers.A.id].lastTurnEndedAt = at(NOW - MIN);
+        return noLock(name, operation);
+      },
+      getConfig: async () => crossing && change === "privacy"
+        ? { profiles: { sensitive: { provider: "codex", sensitive: true } } } : null,
+      delivery: { isFactoryPaused: async () => crossing && change === "pause", getScopePublic: async () => true },
+    });
+    const result = await supervise.runFailoverCheck(fakeClient(world), scope, deps);
+    assert.equal(crossing, true, change);
+    assert.equal(result.action, "wait", change);
+    assert.equal(ws.metadata[METADATA_KEY].epoch, 3, change);
+    assert.equal(ws.metadata[METADATA_KEY].activeSteer, "A", change);
+    assert.deepEqual(ws.metadata[WORKERS_KEY][worker.id], before, change);
+    assert.equal(world.calls.length, 0, change);
+  }
+});
+
+test("unavailable native worker handover leaves a pending continuation on the new holder", async () => {
+  const { world, ws, steers, worker } = unansweredWorld();
+  const scope = { id: REPO, workspaceId: ws.id };
+  const paseo = fakeClient(world);
+  worker.labels[PARENT_LABEL] = steers.A.id;
+  const before = structuredClone(ws.metadata[WORKERS_KEY][worker.id]);
+  const deps = failoverDeps(world);
+  let available = false;
+  const native = deps.delivery.workerHandoverCli;
+  deps.delivery.workerHandoverCli = (args) => {
+    if (!available) throw new Error("native operation unavailable");
+    native(args);
+  };
+  assert.equal((await supervise.runFailoverCheck(paseo, scope, deps)).reason, "brief-pending");
+  assert.equal(ws.metadata[METADATA_KEY].activeAgentId, steers.B.id);
+  assert.equal(ws.metadata[AGENTS_KEY][steers.B.id].action.phase, "reserved");
+  assert.equal((await supervise.flushScope(paseo, scope, deps)).reason, "brief-pending");
+  assert.equal(worker.labels[PARENT_LABEL], steers.A.id);
+  assert.equal(worker.labels[LABEL.owner], "A");
+  assert.deepEqual(ws.metadata[WORKERS_KEY][worker.id], before);
+  assert.equal(world.calls.filter(([kind]) => kind === "agent.send").length, 0);
+  available = true;
+  assert.equal((await supervise.flushScope(paseo, scope, deps)).flushed, true);
+  assert.equal(ws.metadata[METADATA_KEY].workerHandover, undefined);
+  assert.equal(worker.labels[PARENT_LABEL], steers.B.id);
+  assert.equal(worker.labels[LABEL.owner], "B");
+  assert.equal(sendsTo(world, steers.B.id).length, 1);
+});
+
+test("a lost authority write response resumes the stored switch without another transition", async () => {
+  const { world, ws, steers, worker } = unansweredWorld();
+  const scope = { id: REPO, workspaceId: ws.id };
+  const paseo = fakeClient(world);
+  const ref = paseo.workspaces.ref;
+  paseo.workspaces.ref = (id) => {
+    const handle = ref(id);
+    return { ...handle, async setMetadata(patch) {
+      await handle.setMetadata(patch);
+      if (id === ws.id && patch[METADATA_KEY]?.epoch === 4 && patch[AGENTS_KEY]) throw new Error("response lost");
+    } };
+  };
+  const deps = failoverDeps(world);
+  assert.equal((await supervise.runFailoverCheck(paseo, scope, deps)).reason, "brief-pending");
+  assert.equal(ws.metadata[METADATA_KEY].activeAgentId, steers.B.id);
+  const receipt = ws.metadata[AGENTS_KEY][steers.B.id].action;
+  assert.equal(receipt.phase, "reserved");
+  assert.equal(sendsTo(world, steers.B.id).length, 0);
+  supervise.resetSupervisionForTests();
+  assert.equal((await supervise.flushScope(paseo, scope, deps)).flushed, true);
+  assert.equal(ws.metadata[METADATA_KEY].epoch, 4);
+  assert.equal(worker.labels[PARENT_LABEL], steers.B.id);
+  assert.equal(ws.metadata[AGENTS_KEY][steers.B.id].action.wakeId, receipt.wakeId);
+  assert.equal(sendsTo(world, steers.B.id).length, 1);
+  assert.equal((await supervise.flushScope(paseo, scope, deps)).flushed, false);
 });
 
 test("failover excludes a sensitive runtime and leaves the worker wake pending", async () => {
@@ -979,7 +1131,7 @@ test("preference strategy can select a cold earlier candidate while preserving r
   steers.B.provider = "claude";
   ws.metadata[AGENTS_KEY][steers.B.id] = { lastTurnEndedAt: at(NOW - 6 * MIN) };
   const result = await supervise.runFailoverCheck(fakeClient(world), { id: REPO, workspaceId: ws.id },
-    depsOf({ getConfig: async () => ({ routing: { strategy: "preference" } }) }));
+    failoverDeps(world, { getConfig: async () => ({ routing: { strategy: "preference" } }) }));
   assert.deepEqual(result, { action: "wait", reason: "brief-pending" });
   assert.deepEqual(sendsTo(world, steers.B.id), ["/clear"]);
   assert.equal(sendsTo(world, steers.C.id).length, 0);
@@ -1052,10 +1204,11 @@ test("answered and busy steers stop failover; fresh wakes wait", async () => {
   assert.equal(world.calls.filter((c) => c[0] === "agent.send").length, 0);
 });
 
-test("failover walks B, C, domain, hub, then cycles", async () => {
+test("external failover walks domain then hub and preserves the source authority", async () => {
   const world = makeWorld();
   const { ws, steers } = provisioned(world, { checkpoint: { task: "ship it", tests: [], blockers: [], next: null } });
   const worker = addWorker(world, ws);
+  steers.B.archivedAt = steers.C.archivedAt = at(NOW);
   world.workspaces[0].metadata[WORKERS_KEY] = { [worker.id]: entry("interrupted", "lost", { lastWakeAt: at(NOW - 11 * MIN) }) };
   world.workspaces[0].metadata[AGENTS_KEY] = { [steers.A.id]: { lastTurnEndedAt: at(NOW - 60 * MIN), outcome: "completed" } };
   const domainWs = addWorkspace(world, { metadata: scopeMeta({ scopeId: "shop", kind: "dir", workers: {}, agents: {}, checkpoint: null }) });
@@ -1066,16 +1219,39 @@ test("failover walks B, C, domain, hub, then cycles", async () => {
   const paseo = fakeClient(world);
   const scope = { id: REPO, workspaceId: ws.id };
   const step = (minutes) => depsOf({ nowMs: NOW + minutes * MIN, nowIso: at(NOW + minutes * MIN) });
-  assert.deepEqual((await supervise.runFailoverCheck(paseo, scope, step(0))).to, { kind: "steer", slot: "B", steerId: steers.B.id });
-  assert.deepEqual((await supervise.runFailoverCheck(paseo, scope, step(11))).to, { kind: "steer", slot: "C", steerId: steers.C.id });
-  const domain = await supervise.runFailoverCheck(paseo, scope, step(22));
+  const domain = await supervise.runFailoverCheck(paseo, scope, step(0));
   assert.deepEqual(domain.to, { kind: "domain", steerId: domainSteer.id, scopeId: "shop" });
   assert.match(sendsTo(world, domainSteer.id)[0], /As the domain steer/);
-  const hub = await supervise.runFailoverCheck(paseo, scope, step(33));
+  supervise.resetSupervisionForTests();
+  assert.equal((await supervise.runFailoverCheck(paseo, scope, { ...step(1), force: true })).reason, "takeover-answer-window");
+  const hub = await supervise.runFailoverCheck(paseo, scope, step(11));
   assert.deepEqual(hub.to, { kind: "hub", steerId: hubSteer.id, scopeId: "hub" });
   assert.match(sendsTo(world, hubSteer.id)[0], /As the hub steer/);
-  const cycle = await supervise.runFailoverCheck(paseo, scope, step(44));
-  assert.deepEqual(cycle.to, { kind: "steer", slot: "B", steerId: steers.B.id });
+  const cycle = await supervise.runFailoverCheck(paseo, scope, step(22));
+  assert.deepEqual(cycle.to, domain.to);
+  assert.equal(ws.metadata[METADATA_KEY].epoch, 3);
+  assert.equal(ws.metadata[METADATA_KEY].activeSteer, "A");
+});
+
+test("a persisted legacy local takeover receipt still reconciles and honors its answer window", async () => {
+  const { world, ws, steers, worker } = unansweredWorld();
+  const scope = { id: REPO, workspaceId: ws.id };
+  ws.metadata[AGENTS_KEY][steers.B.id] = { action: {
+    kind: "delivery", phase: "ready", renewal: "send", wakeId: "legacy-takeover", epoch: 3, queuedAt: at(NOW - MIN),
+    packet: "Take over with the existing guarded switch.",
+    batch: { workspaceId: ws.id, epoch: 3, events: [{ workerId: worker.id, state: "blocked" }],
+      takeover: { scopeId: REPO, activeSlot: "A", reason: "legacy request" } },
+  } };
+  const paseo = fakeClient(world);
+  const deps = failoverDeps(world);
+  assert.equal((await supervise.runFailoverCheck(paseo, scope, deps)).reason, "brief-pending");
+  assert.equal((await supervise.retryPendingWakeBrief(paseo, scope, deps)).delivered, true);
+  assert.equal(ws.metadata[AGENTS_KEY][steers.B.id].action.phase, "done");
+  assert.equal(ws.metadata[METADATA_KEY].epoch, 3);
+  supervise.resetSupervisionForTests();
+  assert.equal((await supervise.runFailoverCheck(paseo, scope, { ...deps, force: true })).reason, "takeover-answer-window");
+  assert.deepEqual(sendsTo(world, steers.B.id), ["Take over with the existing guarded switch."]);
+  assert.equal(sendsTo(world, steers.C.id).length, 0);
 });
 
 test("failover follows a switch and clears when nothing is open", async () => {
@@ -1084,7 +1260,7 @@ test("failover follows a switch and clears when nothing is open", async () => {
   const scope = { id: REPO, workspaceId: ws.id };
   world.workspaces[0].metadata[METADATA_KEY].epoch = 4;
   world.workspaces[0].metadata[METADATA_KEY].activeSteer = "B";
-  const moved = await supervise.runFailoverCheck(paseo, scope, depsOf());
+  const moved = await supervise.runFailoverCheck(paseo, scope, failoverDeps(world));
   assert.equal(moved.action, "failover");
   assert.equal(moved.to.slot, "C", "chain continues after the active slot");
   world.workspaces[0].metadata[METADATA_KEY].switchedAt = at(NOW - 5 * MIN);
@@ -1099,7 +1275,7 @@ test("watchdog can fail over an unanswered final worker result and ignores an an
     const { world, ws, steers, worker } = unansweredWorld();
     ws.metadata[WORKERS_KEY][worker.id].state = "done";
     if (answered) ws.metadata[AGENTS_KEY][steers.A.id].lastTurnEndedAt = at(NOW - MIN);
-    const result = await supervise.watchdogScan(fakeClient(world), depsOf());
+    const result = await supervise.watchdogScan(fakeClient(world), failoverDeps(world));
     assert.equal(result.failovers.length, answered ? 0 : 1);
     assert.equal(sendsTo(world, steers.B.id).length, answered ? 0 : 1);
   }
@@ -1306,7 +1482,7 @@ test("watchdog fails closed on unknown activity and refuses disabled scopes", as
 
 test("watchdog runs failover per scope unless quiet", async () => {
   const { world, steers } = unansweredWorld();
-  const loud = await supervise.watchdogScan(fakeClient(world), depsOf());
+  const loud = await supervise.watchdogScan(fakeClient(world), failoverDeps(world));
   assert.equal(loud.failovers.length, 1);
   assert.equal(sendsTo(world, steers.B.id).length, 1);
   const quietBoot = await supervise.watchdogScan(fakeClient(world), depsOf({ bootCheckDone: false }));
@@ -1371,7 +1547,7 @@ test("supervise.ts reuses the core and never archives or wakes blindly", () => {
     "turnEndEvent", "planWake", "resolveWakeTarget", "formatWakeMessage", "failoverChain",
     "updateWorkerEntry", "registerWorker", "removeWorker", "collectPendingWakes", "queuePendingWake",
     "shouldMarkStale", "openWorkers", "eventForRestartReason", "readWorkers",
-    "steerWakeResponse", "hasAdvisorRequest", "formatSteerTakeover", "formatScopeTakeover",
+    "steerWakeResponse", "hasAdvisorRequest", "formatScopeTakeover",
     "isDrainMarkerActive",
   ]) {
     assert.ok(superviseServer.includes(name), `supervise.ts uses ${name}`);
@@ -1381,11 +1557,9 @@ test("supervise.ts reuses the core and never archives or wakes blindly", () => {
   assert.ok(deliveryServer.includes("markWakeSent"), "the common delivery reconciler acknowledges worker wakes");
   assert.ok(!superviseServer.includes(".archive("), "the plugin never archives (the steer does)");
   assert.ok(superviseServer.includes("background"), "background agents guarded");
-  assert.ok(superviseServer.includes("formatSteerTakeover"), "takeover request sent on failover");
+  assert.ok(superviseServer.includes("ST.switchSteer"), "local failover reuses the authority switch");
   assert.ok(superviseServer.includes('source: "failover"'), "failover logged as checkpoint source");
-  const sharedServer = readFileSync(new URL("../shared/supervise.ts", import.meta.url), "utf8");
-  assert.ok(sharedServer.includes("Take over with"), "takeover request text defined");
-  assert.ok(sharedServer.includes("--to ${args.candidateSlot} --apply"), "takeover text carries the switch");
+
 });
 
 test("cold sweep checks register entries before planning and applying cleanup", () => {
@@ -1692,7 +1866,7 @@ test("failover waits on the holder's pending move, then proceeds past the timeou
   const later = await supervise.runFailoverCheck(
     fakeClient(world),
     scope,
-    depsOf({ zerosub: pending(), nowMs: NOW + 11 * MIN, nowIso: at(NOW + 11 * MIN) }),
+    failoverDeps(world, { zerosub: pending(), nowMs: NOW + 11 * MIN, nowIso: at(NOW + 11 * MIN) }),
   );
   assert.equal(later.action, "failover");
   assert.equal(later.to.slot, "B");
@@ -1741,7 +1915,7 @@ test("failover skips steers on the exhausted failing account", async () => {
   const result = await supervise.runFailoverCheck(
     fakeClient(world),
     { id: REPO, workspaceId: ws.id },
-    depsOf({ zerosub }),
+    failoverDeps(world, { zerosub }),
   );
   assert.equal(result.action, "failover");
   assert.equal(result.to.slot, "C", "B shares the exhausted account with A");
