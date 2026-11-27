@@ -174,7 +174,7 @@ priorities in the Factory settings apply to future route selection.
 Settings → Plugins → Factory → Steer menu:
 
 - **Initialize new steer** (`initializeNewSteer` in the `factory-steer-menu` settings document): how a new or replaced steer's brief is delivered — send the brief at once, place the brief in the Paseo composer (default), or leave the composer empty and initialize later from the Factory panel. When the composer is unavailable, the brief remains staged.
-- **Keep chat history** (`keepChatHistory`, default off) preserves steer chats during automatic delivery and idle cleanup. For cold or large contexts, automatic delivery first uses native compaction when supported. It also blocks **Reset Steer** until Paseo supports opening a fresh provider session while retaining the timeline in the same tab.
+- **Keep chat history** (`keepChatHistory`) is on by default for new settings. Existing settings retain their current behavior, including the previous off default if a saved document omitted the field. This setting preserves steer chats during automatic delivery and idle cleanup and blocks **Reset Steer** until Paseo can start a fresh provider session while retaining the same tab’s timeline.
 
 ## Advisors
 
