@@ -86,7 +86,7 @@ test('normalizeZerosubState maps accounts, routes and pending moves', () => {
   assert.deepEqual(roomy, {
     id: 'acc-roomy', family: 'claude', label: 'Roomy', status: 'active', limitedUntil: null,
     windows: [
-      { id: 'five_hour', usedPct: 20, resetsAt: FUTURE_5H },
+      { id: 'five_hour', minutes: 300, usedPct: 20, resetsAt: FUTURE_5H },
       { id: 'seven_day', usedPct: 55, resetsAt: FUTURE_WEEK },
     ],
     sampledAt: '2026-11-24T11:59:00Z', maxUsedPct: 55, exhausted: false,

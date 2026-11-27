@@ -50,9 +50,14 @@ export function normalizeZerosubState(raw, { now = Date.now() } = {}) {
     const rawWindows = Array.isArray(entry.usage?.windows) ? entry.usage.windows : [];
     for (const window of rawWindows) {
       if (!window || typeof window !== 'object') continue;
-      const wid = asId(window.id) ?? asId(window.label);
+      const label = asId(window.label);
+      const wid = asId(window.id) ?? label;
       if (!wid) continue;
       const used = Number(window.usedPercent ?? NaN);
+      const minutes = Number.isSafeInteger(window.minutes) && window.minutes > 0 ? window.minutes
+        : /^(5[_\s-]*h(?:our)?|five[_\s-]*hour)$/i.test(label ?? '') ? 300
+        : /^weekly$/i.test(label ?? '') ? 10080
+        : null;
       const models = Array.isArray(window.models)
         ? window.models.filter((name) => typeof name === 'string' && name.trim()).map((name) => name.trim())
         : (typeof window.model === 'string' && window.model.trim() ? [window.model.trim()] : null);
@@ -60,6 +65,7 @@ export function normalizeZerosubState(raw, { now = Date.now() } = {}) {
         id: wid,
         usedPct: Number.isFinite(used) ? used : null,
         resetsAt: asId(window.resetsAt),
+        ...(minutes !== null ? { minutes } : {}),
         ...(models && models.length ? { models } : {}),
       });
     }

@@ -28,6 +28,17 @@ const windowAliases = new Map([
   ["primary", "Primary"], ["secondary", "Secondary"],
 ]);
 
+function accountWindowAlias(window: { id: string; minutes?: number }): string | undefined {
+  const named = windowAliases.get(window.id);
+  if (named && named !== "Primary" && named !== "Secondary") return named;
+  const minutes = window.minutes;
+  if (!minutes) return named;
+  if (minutes === 10080) return "Weekly";
+  if (minutes % 1440 === 0) return `${minutes / 1440}-day`;
+  if (minutes % 60 === 0) return `${minutes / 60}-hour`;
+  return `${minutes}-minute`;
+}
+
 function catalogLabel(value: unknown): string | null {
   const label = typeof value === "string" ? value.trim() : "";
   // Catalog names are display text. Paths, handles and control characters stay out.
@@ -85,7 +96,7 @@ export function formatSteerQuota(agent: { id: string; provider?: string; model?:
   const windows: ReportedWindow[] = accountId
     ? account?.windows?.length
       ? account.windows.filter((window: any) => windowAppliesToModel(window, agent.model))
-        .map((window: any, index: number) => ({ ...window, alias: windowAliases.get(window.id) ?? `Window ${index + 1}` }))
+        .map((window: any, index: number) => ({ ...window, alias: accountWindowAlias(window) ?? `Window ${index + 1}` }))
       : [{ alias: "Reported usage", usedPct: account?.maxUsedPct }]
     : poolWindows(pool);
   const used = windows
@@ -239,7 +250,7 @@ export function shapeWorkspaceResources({
       const windows = (account.windows ?? [])
         .filter((item: any) => applicableModels.some((model) => windowAppliesToModel(item, model)))
         .map((item: any) => {
-          let name = windowAliases.get(item.id) ?? unknownWindows.get(item.id);
+          let name = accountWindowAlias(item) ?? unknownWindows.get(item.id);
           if (!name) {
             name = `Window ${unknownWindows.size + 1}`;
             unknownWindows.set(item.id, name);

@@ -41,7 +41,10 @@ test("steer quota leaves ambiguous and expired usage unknown and reports a weekl
     { id: "old", family: "codex", auth: "subscription", usage: { fetchedAt: SAMPLED, windows: [
       { id: "5h", usedPercent: 99, resetsAt: "2026-06-01T11:59:00.000Z" },
     ] } },
-    { id: "new", family: "codex", usage: { fetchedAt: SAMPLED, windows: [{ id: "5h", usedPercent: 11 }] } },
+    { id: "new", family: "codex", usage: { fetchedAt: SAMPLED, windows: [
+      { id: "primary", label: "Weekly", usedPercent: 11 },
+      { id: "secondary", label: "private@example.invalid", minutes: 300, usedPercent: 23 },
+    ] } },
   ] });
   zerosub.agentAccount.steer = "new";
   zerosub.pending.steer = "old";
@@ -49,6 +52,8 @@ test("steer quota leaves ambiguous and expired usage unknown and reports a weekl
   assert.equal(formatSteerQuota(agent, moving), "Subscription 2 (move pending) · usage unknown");
   assert.equal(formatSteerQuota(agent, { ...moving, quotaSampleMinutes: 2 }),
     "Subscription 2 (move pending) · usage sample stale");
+  zerosub.pending = {};
+  assert.equal(formatSteerQuota(agent, moving), "Account 1 · Weekly 11% used, 5-hour 23% used");
 });
 
 test("quota view shapes snapshot pools with warn states and slot mappings", () => {
