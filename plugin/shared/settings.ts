@@ -195,7 +195,7 @@ export const factoryResumeSettings = defineSettings({
 });
 
 export const RESET_KEEP_HISTORY_UNAVAILABLE =
-  "This version of Paseo cannot reset a steer in place while keeping its chat history.";
+  "Keep chat history is on. This version of Paseo cannot start a new provider session in this tab while preserving the chat.";
 
 const steerMenuSchema = z.object({
   initializeNewSteer: z.enum(["send", "composer", "later"]).default("composer"),

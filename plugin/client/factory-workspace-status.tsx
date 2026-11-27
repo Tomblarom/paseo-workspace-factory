@@ -145,8 +145,8 @@ function ResetOrResumeSteer({ kind, steer, liveSteer, workspaceId, host, theme, 
   const [renewedPreview, setRenewedPreview] = useState(false);
   const applying = useRef(false);
   const historyBlocked = kind === "reset" && menuSettings.status === "ready" && menuSettings.values.keepChatHistory;
-  const blocked = !liveSteer ? "This steer is no longer available." :
-    steerActionEligibility(liveSteer)[kind] ?? (historyBlocked ? RESET_KEEP_HISTORY_UNAVAILABLE : null);
+  const blocked = historyBlocked ? RESET_KEEP_HISTORY_UNAVAILABLE :
+    liveSteer ? steerActionEligibility(liveSteer)[kind] : "This steer is no longer available.";
   const ready = kind !== "reset" || menuSettings.status === "ready";
   const quota = liveSteer ? steerQuotaConfirmation(liveSteer) : null;
   const resetQuota = quota ?? "available";
@@ -215,7 +215,7 @@ function ResetOrResumeSteer({ kind, steer, liveSteer, workspaceId, host, theme, 
   const details = preview.data;
   const result = confirmation.data;
   const stagedTo = result?.stagedTo;
-  const error = preview.error ?? (confirmation.error && !isExpiredPreviewError(confirmation.error) ? confirmation.error : null);
+  const error = !blocked ? preview.error ?? (confirmation.error && !isExpiredPreviewError(confirmation.error) ? confirmation.error : null) : null;
   return (
     <View style={{ gap: 8, padding: 8 }}>
       {result ? (
@@ -225,13 +225,13 @@ function ResetOrResumeSteer({ kind, steer, liveSteer, workspaceId, host, theme, 
         </>
       ) : (
         <>
-          {blocked ? <Text style={styles.conflict}>{blocked}</Text> : null}
+          {blocked ? <Text accessibilityRole="alert" style={styles.conflict}>{blocked}</Text> : null}
           {kind === "reset" && (menuSettings.status === "error" || menuSettings.status === "invalid")
             ? <Text accessibilityRole="alert" style={styles.error}>{menuSettings.error}</Text> : null}
           {error ? <Text accessibilityRole="alert" style={styles.error}>{error.message}</Text> : null}
-          {preview.isFetching ? <Text style={styles.label}>Preparing preview…</Text> : null}
-          {renewedPreview && !preview.isFetching && !preview.error ? <Text style={styles.conflict}>The preview expired. Review the new preview.</Text> : null}
-          {details?.kind === "reset" && !blocked ? (
+          {!blocked && preview.isFetching ? <Text style={styles.label}>Preparing preview…</Text> : null}
+          {!blocked && renewedPreview && !preview.isFetching && !preview.error ? <Text style={styles.conflict}>The preview expired. Review the new preview.</Text> : null}
+          {details?.kind === "reset" && ready && !blocked && !error && !preview.isFetching ? (
             <>
               {quota ? <Text style={styles.conflict}>{resetQuotaConfirmationText(quota, liveSteer)}</Text> : null}
               <Text style={styles.body}>This rewinds the conversation and removes later messages from this tab.</Text>

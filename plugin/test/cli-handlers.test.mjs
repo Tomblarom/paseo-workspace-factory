@@ -1495,7 +1495,7 @@ test("Reset Steer refuses to rewind when the live setting keeps chat history", a
       };
     },
   };
-  const denied = /cannot reset a steer in place while keeping its chat history/;
+  const denied = /Keep chat history is on.*cannot start a new provider session in this tab/;
   await assert.rejects(handlers.previewFresh(input, context, loader, deps), denied);
   await assert.rejects(handlers.previewFresh(input, context, loader, {
     ...deps, readResetHistorySetting: undefined,

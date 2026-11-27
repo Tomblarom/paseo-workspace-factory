@@ -23,8 +23,8 @@ export function ResetSteerForm({ agentId, workspaceId, host, theme, close, feed,
   const { rows, disconnected } = useSyncExternalStore(feed.subscribe, feed.getSnapshot, feed.getSnapshot);
   const row = disconnected ? undefined : rows?.find((entry) => entry.agentId === agentId && entry.workspaceId === workspaceId);
   const keepHistory = settings.status === "ready" && settings.values.keepChatHistory;
-  const blocked = !row ? "This steer is no longer available." :
-    resetSteerBlock(row) ?? (keepHistory ? RESET_KEEP_HISTORY_UNAVAILABLE : null);
+  const blocked = keepHistory ? RESET_KEEP_HISTORY_UNAVAILABLE :
+    row ? resetSteerBlock(row) : "This steer is no longer available.";
   const quota = row ? steerQuotaConfirmation(row) : null;
   const resetQuota = quota ?? "available";
   const slot = row?.slot;
@@ -52,6 +52,7 @@ export function ResetSteerForm({ agentId, workspaceId, host, theme, close, feed,
   const plan = preview.data;
   const canReset = plan?.refreshMode === "rewind" && settings.status === "ready" && !preview.isFetching && !blocked && !busy;
   const settingsError = settings.status === "error" || settings.status === "invalid" ? settings.error : null;
+  const failure = blocked ?? error ?? preview.error?.message ?? settingsError;
   const foreground = { color: theme.colors.foreground };
   const button = { minHeight: 36, paddingHorizontal: 12, borderRadius: 8, justifyContent: "center" } as const;
 
@@ -80,17 +81,17 @@ export function ResetSteerForm({ agentId, workspaceId, host, theme, close, feed,
 
   return (
     <View style={{ gap: 4 }}>
-      {quota ? <Text style={{ color: theme.colors.statusWarning }}>
-        {resetQuotaConfirmationText(quota, row)}
-      </Text> : null}
-      {preview.isFetching ? <Text style={foreground}>Checking rewind availability…</Text> : null}
-      {plan && !blocked ? <Text style={{ color: theme.colors.foregroundMuted }}>
-        This rewinds the conversation and removes later messages from this tab.
-      </Text> : null}
-      {error || blocked || preview.error || settingsError ? (
-        <Text accessibilityRole="alert" style={{ color: theme.colors.statusDanger }}>
-          {error ?? blocked ?? preview.error?.message ?? settingsError}
-        </Text>
+      {failure ? (
+        <Text accessibilityRole="alert" style={{ color: theme.colors.statusDanger }}>{failure}</Text>
+      ) : preview.isFetching ? (
+        <Text style={foreground}>Checking rewind availability…</Text>
+      ) : plan && settings.status === "ready" ? (
+        <>
+          {quota ? <Text style={{ color: theme.colors.statusWarning }}>{resetQuotaConfirmationText(quota, row)}</Text> : null}
+          <Text style={{ color: theme.colors.foregroundMuted }}>
+            This rewinds the conversation and removes later messages from this tab.
+          </Text>
+        </>
       ) : null}
       <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
         <Pressable accessibilityRole="button" disabled={busy} onPress={close} style={button}>

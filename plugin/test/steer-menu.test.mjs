@@ -437,12 +437,20 @@ test("Reset stops on a stale holder or a replacement preview", async () => {
 
 const menuSource = readFileSync(new URL("../client/steer-menu-content.tsx", import.meta.url), "utf8");
 const entrySource = readFileSync(new URL("../index.client.tsx", import.meta.url), "utf8");
+const workspaceStatusSource = readFileSync(new URL("../client/factory-workspace-status.tsx", import.meta.url), "utf8");
 
 test("the Reset dialog checks rewind availability and wires focusable Cancel and Reset buttons", () => {
   assert.match(menuSource, /queryFn:[\s\S]*?callPreview\(\{ workspaceId, slot: slot \?\? undefined, resetQuota \}\)/);
   assert.match(menuSource, /canReset = plan\?\.refreshMode === "rewind"/);
   assert.match(menuSource, /<Pressable accessibilityRole="button" disabled=\{busy\} onPress=\{close\}[\s\S]*?>Cancel</);
   assert.match(menuSource, /<Pressable accessibilityRole="button"[^]*?disabled=\{!canReset\}\s+onPress=\{\(\) => void confirmReset\(\)\}[^]*?>Reset</);
+});
+
+test("both reset dialogs surface history protection before any quota confirmation", () => {
+  assert.match(menuSource, /const blocked = keepHistory \? RESET_KEEP_HISTORY_UNAVAILABLE/);
+  assert.match(menuSource, /\{failure \? \([\s\S]*?\) : plan && settings\.status === "ready" \? \([\s\S]*?resetQuotaConfirmationText/);
+  assert.match(workspaceStatusSource, /const blocked = historyBlocked \? RESET_KEEP_HISTORY_UNAVAILABLE/);
+  assert.match(workspaceStatusSource, /details\?\.kind === "reset" && ready && !blocked && !error && !preview\.isFetching \? \([\s\S]*?resetQuotaConfirmationText/);
 });
 
 test("Paseo receives direct Handover and Reset actions, with dismissal wired on the workspace dialog", () => {
