@@ -815,6 +815,8 @@ runs on.
 
 The user extended that request on 2026-11-27 to the native Factory menu. Its
 entries show `Handover -> Steer B · warm · <model> <thinking> <ZeroSub profile>`.
+Chromium on Paseo 0.17.4 shows the complete label on desktop. At 390 pixels the
+native menu visually ellipsizes the label even though its full text is present.
 The same request authorizes moving live workers to the new steer on Handover.
 The native parent and Factory owner are updated together on the existing
 agent. The authority change reserves incomplete transfers so a retry can
