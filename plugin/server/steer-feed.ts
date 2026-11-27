@@ -14,7 +14,7 @@ import { listScopes } from "./core/scope.mjs";
 import { quotaAdmission } from "./steer-admission.js";
 import type { QuotaConfirmation } from "../shared/factory.js";
 import { getQuotaSampledAt, getQuotaSnapshot } from "./quota.js";
-import { resolveZerosub, type ZerosubState } from "./zerosub-runtime.js";
+import { resolveZerosub, zerosubAccountAliases, type ZerosubState } from "./zerosub-runtime.js";
 import { applySteerTitleLabels } from "./steer-title-labels.js";
 import {
   CLEANUP_DEFAULTS,
@@ -59,6 +59,7 @@ export interface SteerFeedRow {
   title: string | null;
   provider: string | null;
   model: string | null;
+  accountAlias?: string;
   liveStatus: string | null;
   advisor: boolean;
   active: boolean;
@@ -155,6 +156,7 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
   const warnPct = finiteNumber(quota.warnPct) ?? QUOTA_DEFAULTS.warnPct;
   const exhaustedPct = finiteNumber(quota.exhaustedPct) ?? QUOTA_DEFAULTS.exhaustedPct;
   const queuedWakeFor = deps.queuedWakeFor ?? (() => false);
+  const accountAliases = zerosubAccountAliases(deps.zerosub);
 
   // Candidate tabs per scope: live resolved holders.
   const rawByScope = new Map<string, any[]>();
@@ -227,6 +229,7 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
         : null,
       interruptedUnrecovered: entry?.interrupted !== null && entry?.interrupted !== undefined,
       zerosub: deps.zerosub ?? null,
+      accountAliases,
       pool: provider,
       quotaSnapshot: deps.quotaSnapshot ?? null,
       poolSampledAtMs: deps.poolSampledAtMs ?? null,
@@ -263,6 +266,8 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
       config: deps.config, zerosub: deps.zerosub, nowMs, quota: deps.quotaSnapshot,
       quotaSampledAt: deps.poolSampledAtMs ?? null, workspaces: paseoState.workspaces,
     }, reads.entries);
+    const { accountId } = projection.quota;
+    const accountAlias = accountId ? accountAliases.get(accountId) : undefined;
     rows.push({
       scopeId: identity.scopeId,
       workspaceId: reads.mainId,
@@ -271,6 +276,7 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
       title: typeof agent.title === "string" ? agent.title : null,
       provider,
       model,
+      ...(accountAlias ? { accountAlias } : {}),
       liveStatus: status,
       advisor: slot !== null && isAdvisorSteer(deps.config, agent.labels, agent.metadata),
       active,

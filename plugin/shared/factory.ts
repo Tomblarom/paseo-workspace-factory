@@ -993,6 +993,7 @@ const steerStateRow = z.looseObject({
   title: z.unknown().optional(),
   provider: z.unknown().optional(),
   model: z.unknown().optional(),
+  accountAlias: z.string().optional(),
   liveStatus: z.unknown().optional(),
   advisor: z.boolean().optional(),
   active: z.boolean().optional(),

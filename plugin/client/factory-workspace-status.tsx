@@ -13,6 +13,7 @@ import { ActivateSteer } from "./activate-steer.js";
 import type { FactoryResultStyles } from "./factory-panel.js";
 import {
   enrollmentPlan,
+  handoverRouteLabel,
   label,
   pendingWorkspaceWork,
   record,
@@ -78,7 +79,7 @@ function Action({ theme, icon, title, name, hint, disabled, emphasized, onPress 
         backgroundColor: emphasized && !disabled ? theme.colors.accent : pressed || emphasized ? theme.colors.surface2 : "transparent",
       })}>
       <Icon name={icon} size={15} color={color} />
-      <Text style={{ color, fontSize: 13, fontWeight: "500" }}>{title}</Text>
+      <Text style={{ color, fontSize: 13, fontWeight: "500", flexShrink: 1 }}>{title}</Text>
     </Pressable>
   );
 }
@@ -565,13 +566,18 @@ export function FactoryWorkspaceStatus({
             ) : currentOperation.kind === "handover" && !currentOperation.target ? (
               <View style={{ gap: 8, padding: 8 }}>
                 <Text style={styles.label}>Choose the steer that will take over the current work.</Text>
-                {targets.map((target) => (
-                  <Action key={target.agentId} theme={theme} icon={target.context.icon}
-                    title={`Steer ${target.slot} · ${steerLabels(target).modelName} · ${target.context.state}`}
-                    hint={target.reason ?? (target.needsRecovery ? "Recovery needed" : undefined)}
-                    disabled={controller?.agentId !== currentOperation.steer.agentId || !target.eligible}
-                    onPress={() => setOperation({ ...currentOperation, target })} />
-                ))}
+                {targets.map((target) => {
+                  const steer = steers.find(({ agentId }) => agentId === target.agentId);
+                  const models = catalog.data?.entries.find(({ provider }) => provider === target.provider)?.models;
+                  const route = handoverRouteLabel(steer ?? { model: target.model, thinking: null }, models);
+                  return (
+                    <Action key={target.agentId} theme={theme} icon={target.context.icon}
+                      title={`Steer ${target.slot} · ${target.context.state} · ${route}`}
+                      hint={target.reason ?? (target.needsRecovery ? "Recovery needed" : undefined)}
+                      disabled={controller?.agentId !== currentOperation.steer.agentId || !target.eligible}
+                      onPress={() => setOperation({ ...currentOperation, target })} />
+                  );
+                })}
               </View>
             ) : (
               <FactorySteerOperation workspaceId={workspaceId}

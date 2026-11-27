@@ -11,7 +11,7 @@ import {
 } from "./core/quota.mjs";
 import { readSteerAction } from "./core/steer-action.mjs";
 import { resolveFactoryLabels } from "./core/zerosub.mjs";
-import type { ZerosubState } from "./zerosub-runtime.js";
+import { zerosubAccountAliases, type ZerosubState } from "./zerosub-runtime.js";
 
 export type WorkspaceResources = RpcOutput<typeof factoryWorkspaceResources>;
 type ResourceWindow = WorkspaceResources["pools"][number]["windows"][number];
@@ -175,13 +175,13 @@ export function shapeWorkspaceResources({
 
   // Aliases belong to this snapshot. ZeroSub display labels can hold personal
   // data, and pool keys and window IDs can carry account identifiers.
+  const hostAliases = zerosubAccountAliases(zerosub);
   const accountAliases = new Map<string, string>();
   const unknownWindowsByProvider = new Map<string, Map<string, string>>();
   const accounts = [...relevantAccounts.values()]
     .sort((a, b) => a.account.id.localeCompare(b.account.id))
-    .map(({ account, models }, index) => {
-      const kind = account.auth === "subscription" ? "Subscription" : account.auth === "api" ? "API account" : "Account";
-      const alias = `${kind} ${index + 1}`;
+    .map(({ account, models }) => {
+      const alias = hostAliases.get(account.id)!;
       accountAliases.set(account.id, alias);
       const sampledAt = stampMs(account.sampledAt);
       const provider = account.family.toLowerCase();

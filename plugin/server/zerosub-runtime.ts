@@ -32,6 +32,15 @@ export type ZerosubState = {
   pending: Record<string, string>;
 } | null;
 
+/** Number accounts consistently across Factory views without exposing ZeroSub names or IDs. */
+export function zerosubAccountAliases(state: ZerosubState | undefined): ReadonlyMap<string, string> {
+  return new Map((state?.accounts ?? []).slice().sort((a, b) => a.id.localeCompare(b.id))
+    .map(({ id, auth }, index) => {
+      const kind = auth === "subscription" ? "Subscription" : auth === "api" ? "API account" : "Account";
+      return [id, `${kind} ${index + 1}`];
+    }));
+}
+
 /** Normalized `zerosub-switch` row, exactly the shared `parseSwitchData` shape. */
 export interface ZerosubSwitchRow {
   family: string | null;

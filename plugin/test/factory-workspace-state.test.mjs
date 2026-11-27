@@ -9,6 +9,7 @@ const { createFactoryResultStores } = await import('../client/factory-store.ts')
 const {
   createFactorySteerFeed,
   enrollmentPlan,
+  handoverRouteLabel,
   pendingWorkspaceWork,
   steerActionEligibility,
   steerConditions,
@@ -65,6 +66,16 @@ test('a namespaced steer model takes its display name from the provider catalog'
   assert.equal(steerModelName('anthropic/claude-opus-5-5', [...catalog,
     { id: 'anthropic/claude-opus-5-5', label: 'Hosted Opus' }]), 'Hosted Opus');
   assert.equal(steerModelName('arbitrary/model', catalog), 'arbitrary/model');
+});
+
+test('handover names the live model, thinking and ZeroSub account', () => {
+  const catalog = [{ id: 'gpt-6.2-sol', label: 'GPT-6.2 Sol', defaultThinkingOptionId: 'high',
+    thinkingOptions: [{ id: 'high', label: 'High' }] }];
+  assert.equal(handoverRouteLabel({ model: 'openai/gpt-6.2-sol', thinking: 'high', accountAlias: 'Subscription 2' }, catalog),
+    'GPT-6.2 Sol, High, ZeroSub Subscription 2');
+  assert.equal(handoverRouteLabel({ model: 'gpt-6.2-sol', thinking: null }, catalog),
+    'GPT-6.2 Sol, High, ZeroSub account unknown');
+  assert.equal(handoverRouteLabel({ model: null, thinking: null }), 'Model unknown, Default thinking, ZeroSub account unknown');
 });
 
 test('attention preserves the affected steer and metrics only count observed work', () => {

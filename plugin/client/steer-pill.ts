@@ -54,6 +54,7 @@ export interface SteerPillRow {
   title: string | null;
   provider: string | null;
   model: string | null;
+  accountAlias?: string;
   liveStatus: string | null;
   advisor: boolean;
   active: boolean;
@@ -141,6 +142,7 @@ export function steerRowsOf(event: unknown): SteerPillRow[] {
       title: textOrNull(row.title),
       provider: textOrNull(row.provider),
       model: textOrNull(row.model),
+      ...(typeof row.accountAlias === "string" && row.accountAlias ? { accountAlias: row.accountAlias } : {}),
       liveStatus: textOrNull(row.liveStatus),
       advisor: row.advisor === true,
       active: row.active === true,

@@ -587,6 +587,7 @@ export interface SteerProjectionInput {
   /** Unresolved Factory operation on this holder. */
   resumeFallback?: string | null;
   pendingOperation?: boolean;
+  accountAliases?: ReadonlyMap<string, string>;
   /** Queued wake addressed to this holder. */
   queuedWake?: boolean;
   /** Proven history-free current session. */
@@ -806,7 +807,8 @@ export function projectSteer(input: SteerProjectionInput): SteerProjection {
   ) {
     let detail = "Agent initializing";
     if (quota.pendingMove) {
-      const dest = quota.destinationAccountId ? ` to ${quota.destinationAccountId}` : "";
+      const alias = quota.destinationAccountId ? input.accountAliases?.get(quota.destinationAccountId) : undefined;
+      const dest = alias ? ` to ${alias}` : "";
       detail = quota.waiting === "restart"
         ? `Account move${dest} needs a session restart`
         : `Account move${dest} in progress`;

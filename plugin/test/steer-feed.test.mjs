@@ -8,6 +8,7 @@ import { register } from "node:module";
 register("./ts-resolve-hooks.mjs", import.meta.url);
 
 const { collectSteerStates } = await import("../server/steer-feed.ts");
+const { steerRowsOf } = await import("../client/steer-pill.ts");
 const { applySteerTitleLabels } = await import("../server/steer-title-labels.ts");
 const { CLEANUP_DEFAULTS } = await import("../shared/idle-cleanup.ts");
 
@@ -55,6 +56,25 @@ function feed(state, over = {}) {
 }
 
 const TURN = { lastTurnEndedAt: iso(NOW - 5 * MIN) };
+
+test("the handover feed exposes only the live ZeroSub account alias while a move is pending", () => {
+  const state = paseoState([agent("steer-a")]);
+  const zerosub = {
+    accounts: [
+      { id: "destination-id", family: "codex", auth: "subscription", label: "private@example.com" },
+      { id: "current-id", family: "codex", auth: "api" },
+    ],
+    agentAccount: { "steer-a": "destination-id" },
+    pending: { "steer-a": "current-id" },
+  };
+  const rows = feed(state, { zerosub });
+  assert.equal(steerRowsOf({ steers: rows })[0].accountAlias, "API account 1");
+  assert.equal(rows[0].detail, "Account move to Subscription 2 in progress");
+  assert.doesNotMatch(JSON.stringify(rows), /destination-id|current-id|private@/);
+
+  zerosub.pending = {};
+  assert.equal(feed(state, { zerosub })[0].accountAlias, "Subscription 2");
+});
 
 test("title labels use the injected writer and update only the selected snapshot agent", async () => {
   const state = paseoState([

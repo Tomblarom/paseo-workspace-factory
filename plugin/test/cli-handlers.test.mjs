@@ -1058,7 +1058,7 @@ test("workspace Resources binds an exact enrolled workspace even with shared pat
   assert.deepEqual(view.pools.map(({ provider }) => provider).sort(), ["claude", "codex"]);
   assert.equal(view.pools.find(({ provider }) => provider === "codex").providerLabel, "Codex");
   assert.deepEqual(view.accounts.map(({ provider }) => provider), ["codex"]);
-  assert.equal(view.accounts[0].alias, "Subscription 1");
+  assert.equal(view.accounts[0].alias, "Subscription 2");
   assert.equal(view.accounts[0].windows[0].usedPct, 12);
   assert.equal(view.accounts[0].windows[0].alias, "Window 1");
   assert.equal(view.workerSelection.candidates[0].modelLabel, "GPT-6.2 Sol");
