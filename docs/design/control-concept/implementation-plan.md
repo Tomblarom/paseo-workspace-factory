@@ -834,6 +834,14 @@ checkpoints continue to work. A dirty submodule, a large change set or an
 unreadable status can leave the worktree comparison unavailable while still
 allowing a HEAD comparison.
 
+On Paseo 0.17.4, the CLI saved both Git observations in a live checkpoint.
+After the next documentation commit, Resume printed one warning. Chromium at
+1366 and 390 pixels also showed the Pause/Resume control and the expanded
+checkpoint, reached Activate on a standby and opened and cancelled its Reset
+confirmation. The Pause regression checks that autonomous failover and wake
+delivery stay queued until Resume. Live Pause and quota-limit mutations still
+need an isolated scenario.
+
 The user also approved the SLP-inspired edits to role rules, templates, checkpoint
 guidance and worker wake text in Steer E's chat on 2026-11-27. The approval
 covers these text and delivery changes. Warm notifications use worker titles,
