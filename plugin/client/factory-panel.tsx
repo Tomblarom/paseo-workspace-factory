@@ -950,6 +950,7 @@ function StatusView({
         <Text key={String(s.id)} style={styles.body}>
           Steer {text(s.slot)} {text(s.id)} {text(s.provider)}/{text(s.model)} {text(s.status)}
           {s.parent ? ` (parent ${text(s.parent)}; steers should be top-level)` : ""}
+          {s.quota ? ` · quota: ${s.quota}` : ""}
         </Text>
       ))}
       {workers.map((w) => (
