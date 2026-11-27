@@ -108,7 +108,7 @@ For first-time setup, open **Settings → Plugins → Factory** in Paseo. Under 
 | wait until nothing runs (safe restart) | `/factory drain` |
 | tidy up leftovers | `/factory cleanup`, then archive natively (`paseo archive`, `paseo workspace archive`, `paseo project delete`) |
 | manage the worker model priority | `/factory worker list`, `/factory worker set 1 <model>`, `/factory worker pick` |
-| manage steer slots and models | `/factory steer list`, `/factory steer set B <model>` |
+| show or edit steer and advisor model priorities | `/factory steer list`, Factory settings |
 | mark a model as advisor-only or sensitive | `/factory model advisor <profile> on`, `/factory model sensitive <profile> on` |
 
 Without a project name, commands use the workspace you are in. The Factory panel shows previews for setup, checkpoints, and handoffs. Settings live under Settings → Plugins → Factory.

@@ -361,7 +361,7 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
       else if (parent) conflict(key, `Steer ${slot} (${existing.id}) has ${describeParent(existing)}; detach it in Paseo or archive it before the factory can use the slot`);
       else if (main && existing.workspaceId !== main.id) conflict(key, `Steer ${slot} (${existing.id}) lives in workspace ${existing.workspaceId}, not in main workspace ${main.id}`);
       // A live model differing from the slot profile is kept silently (K13:
-      // no expected-model drift handling; point the slot at it with steer set).
+      // no expected-model drift handling).
       continue;
     }
 

@@ -231,29 +231,25 @@ test("worker and steer lists parse list, set and rm", () => {
     spec: "my-profile",
     dryRun: false,
   });
-  assert.deepEqual(parseFactoryArgs("steer set b codex/gpt-6.2-sol"), {
-    command: "steer",
-    action: "set",
-    n: "B",
-    spec: "codex/gpt-6.2-sol",
-    dryRun: false,
-  });
-  assert.deepEqual(parseFactoryArgs("steer rm 2 --dry-run"), { command: "steer", action: "rm", n: "2", dryRun: true });
   assert.deepEqual(parseFactoryArgs("worker rm 3"), { command: "worker", action: "rm", n: "3", dryRun: false });
 });
 
 test("worker and steer reject bad input with usage", () => {
   assert.throws(() => parseFactoryArgs("worker"), /list, pick, set or rm/);
-  assert.throws(() => parseFactoryArgs("steer"), /list, add, set or rm/);
+  assert.throws(() => parseFactoryArgs("steer"), /list or add/);
   assert.throws(() => parseFactoryArgs("worker set 1"), /needs a position and a profile/);
   assert.throws(() => parseFactoryArgs("worker set B x/y"), /expects a position/);
   assert.throws(() => parseFactoryArgs("worker set 0 x/y"), /expects a position/);
-  assert.throws(() => parseFactoryArgs("steer set 1 profile --thinking high"), /only go with provider\/model/);
+  assert.throws(() => parseFactoryArgs("worker set 1 profile --thinking high"), /only go with provider\/model/);
   assert.throws(() => parseFactoryArgs("worker list --dry-run"), /takes no flags/);
   assert.throws(() => parseFactoryArgs("worker rm"), /exactly one position/);
-  assert.throws(() => parseFactoryArgs("steer rm AB"), /slot letter/);
   assert.throws(() => parseFactoryArgs("worker set 1 a/b --to A"), /Unknown flag/);
   assert.throws(() => parseFactoryArgs("status --dry-run"), /takes no flags/);
+});
+
+test("legacy steer edits direct users to live controls and Factory settings", () => {
+  assert.throws(() => parseFactoryArgs("steer set B codex/gpt-6.2-sol"), /Factory settings.*Paseo model controls/);
+  assert.throws(() => parseFactoryArgs("steer rm 2 --dry-run"), /Factory settings.*archive its tab/);
 });
 
 test("checkpoint accepts --from-steer as a slot letter", () => {

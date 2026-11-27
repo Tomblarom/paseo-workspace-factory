@@ -22,7 +22,7 @@ import { acquireLock, LockBusy, withLock, workspaceLockName } from "../server/co
 import { PROFILE_HEALTH_KEY } from "../server/core/quota.mjs";
 import { configureRuntime, runtime } from "../server/core/runtime.mjs";
 import { formatStatus, scopeCandidates } from "../server/core/scopes-view.mjs";
-import { formatSlotProfileSuggestion, resolveWorkerPick, workerListRows } from "../server/core/models.mjs";
+import { resolveWorkerPick, workerListRows } from "../server/core/models.mjs";
 import { formatWorkersPruneText, formatWorkersText, workersReport, WORKERS_KEY } from "../server/core/supervision.mjs";
 import { buildSteerCreate } from "../server/core/steer-create.mjs";
 import { steerAddFingerprint } from "../shared/preview.ts";
@@ -1329,8 +1329,7 @@ test("checkpoint, self-takeover switch, and assign preserve caller guards", asyn
   assert.deepEqual(world.sent, []);
 });
 
-test("core suggestion helpers default to /factory for removed CLI commands", () => {
-  assert.equal(formatSlotProfileSuggestion(CONFIG, "B", "codex", "gpt-6.2-sol"), '/factory steer set B "sol"');
+test("scope suggestions default to /factory for the removed plan CLI", () => {
   const candidates = scopeCandidates({ workspaces: [{ id: "wks_x", workspaceDirectory: "/tmp/x", metadata: {} }] });
   assert.equal(candidates[0].suggestedPlan, "/factory plan --local /tmp/x");
 });

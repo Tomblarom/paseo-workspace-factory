@@ -1,5 +1,5 @@
 // Prioritized model lists (WL-A): worker priority with read migration,
-// resolveProfile fallback, worker insert-and-slide, steer replace-by-slot.
+// resolveProfile fallback, worker insert-and-slide.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
@@ -7,8 +7,8 @@ import {
   providerIsSensitive, slotOrder, validateConfig, workerPriority,
 } from '../plugin/server/core/config.mjs';
 import {
-  formatWorkerModel, paseoRunFlags, planSteerRemove, planSteerSet, planWorkerRemove,
-  planWorkerSet, resolveProfile, resolveSteerTarget, steerFallbackList,
+  formatWorkerModel, paseoRunFlags, planWorkerRemove,
+  planWorkerSet, resolveProfile, steerFallbackList,
 } from '../plugin/server/core/models.mjs';
 import { defaultPickAddress } from '../plugin/server/core/scope.mjs';
 import { LABEL, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
@@ -203,42 +203,6 @@ test('planWorkerRemove closes the gap and keeps one entry', () => {
   const single = structuredClone(CONFIG);
   single.workers = { priority: ['muse'], defaultProfile: 'muse' };
   assert.throws(() => planWorkerRemove(single, 1), /Cannot remove the last worker profile/);
-});
-
-test('resolveSteerTarget maps numbers to slots and refuses gaps', () => {
-  assert.equal(resolveSteerTarget(CONFIG, '2'), 'B');
-  assert.equal(resolveSteerTarget(CONFIG, 'b'), 'B');
-  assert.equal(resolveSteerTarget(CONFIG, 'B'), 'B');
-  assert.throws(() => resolveSteerTarget(CONFIG, '4'), /out of range \(1\.\.3\)/);
-  assert.throws(() => resolveSteerTarget(CONFIG, 'D'), /not defined/);
-  assert.equal(resolveSteerTarget(CONFIG, 'D', { allowNewLetter: true }), 'D', 'next free letter extends');
-  assert.throws(() => resolveSteerTarget(CONFIG, 'E', { allowNewLetter: true }), /would leave a gap.*use the next free letter D/);
-});
-
-test('planSteerSet replaces (2 is B), never shifts; free letters within reach create', () => {
-  const byNumber = planSteerSet(CONFIG, PROVIDERS, { target: '2', spec: 'agy' });
-  const byLetter = planSteerSet(CONFIG, PROVIDERS, { target: 'B', spec: 'agy' });
-  assert.deepEqual(byNumber.config.steers.slots, byLetter.config.steers.slots);
-  assert.deepEqual(byNumber.config.steers.slots, { A: 'sol', B: 'agy', C: 'agy' });
-  assert.match(byNumber.summary, /\[A:sol, B:muse, C:agy\] → \[A:sol, B:agy, C:agy\]/);
-  assert.match(byNumber.hint, /Existing steers are unchanged/);
-  const created = planSteerSet(CONFIG, PROVIDERS, { target: 'D', spec: 'sol' });
-  assert.equal(created.config.steers.slots.D, 'sol');
-  assert.ok(created.notes.some((n) => /not in steers\.prepare/.test(n)));
-  assert.throws(() => planSteerSet(CONFIG, PROVIDERS, { target: 'E', spec: 'sol' }), /would leave a gap/);
-  assert.throws(() => planSteerSet(CONFIG, PROVIDERS, { target: '9', spec: 'sol' }), /out of range/);
-  assert.throws(() => planSteerSet(CONFIG, PROVIDERS, { target: 'B', spec: 'missing' }), /Unknown profile/);
-});
-
-test('planSteerRemove drops the slot by letter or position', () => {
-  const byLetter = planSteerRemove(CONFIG, 'C');
-  assert.deepEqual(Object.keys(byLetter.config.steers.slots), ['A', 'B']);
-  assert.ok(byLetter.config.profiles.agy, 'profile is kept');
-  const byNumber = planSteerRemove(CONFIG, '2');
-  assert.deepEqual(byNumber.config.steers.slots, { A: 'sol', C: 'agy' });
-  const single = structuredClone(CONFIG);
-  single.steers = { slots: { A: 'sol' }, prepare: ['A'], initialActive: 'A' };
-  assert.throws(() => planSteerRemove(single, 'A'), /at least one slot must remain/);
 });
 
 test('defaultPickAddress derives the scope like resume: agent label, workspace, cwd', () => {

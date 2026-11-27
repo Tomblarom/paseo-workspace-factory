@@ -15,7 +15,6 @@ import { buildSteerCreate } from '../plugin/server/core/steer-create.mjs';
 import { applyPlans, createAuthorization, createExecutors } from '../plugin/server/core/apply.mjs';
 import { planSteerAdd } from '../plugin/server/core/steer-add.mjs';
 import { WORKERS_KEY, formatWorkersPruneText, pruneWorkerRegister, staleWorkerEntries } from '../plugin/server/core/supervision.mjs';
-import { formatSlotProfileSuggestion, suggestSlotProfile } from '../plugin/server/core/models.mjs';
 import { scopeRows } from '../plugin/server/core/scopes-view.mjs';
 import { withLock } from '../plugin/server/core/lock.mjs';
 import { LABEL, METADATA_KEY, PARENT_LABEL } from '../plugin/server/core/paseo.mjs';
@@ -592,17 +591,6 @@ test('scopes does not select an ambiguous holder', () => {
 });
 
 // ------------------------------------------------- slot-profile suggestions
-
-test('suggestSlotProfile distinguishes existing, ambiguous and missing matches', () => {
-  assert.deepEqual(suggestSlotProfile(CONFIG, 'codex', 'gpt-6.2-sol'), { kind: 'existing', profile: 'standard' });
-  assert.deepEqual(suggestSlotProfile(CONFIG, 'nope', 'nope'), { kind: 'none' });
-  const twin = structuredClone(CONFIG);
-  twin.profiles.twin = { provider: 'codex', model: 'gpt-6.2-sol', thinking: null, mode: null };
-  assert.deepEqual(suggestSlotProfile(twin, 'codex', 'gpt-6.2-sol'), { kind: 'ambiguous', profiles: ['standard', 'twin'] });
-  assert.equal(formatSlotProfileSuggestion(CONFIG, 'B', 'codex', 'gpt-6.2-sol'), '/factory steer set B "standard"');
-  assert.equal(formatSlotProfileSuggestion(CONFIG, 'B', 'nope', 'nope'), '/factory steer set B nope/nope');
-  assert.match(formatSlotProfileSuggestion(twin, 'B', 'codex', 'gpt-6.2-sol'), /one of "standard", "twin"/);
-});
 
 test('fresh requires an explicit route when the live provider is unavailable', async () => {
   const world = makeWorld();

@@ -179,17 +179,21 @@ test("factory.models.set: worker-set returns a new settings document, no write",
   assert.match(formatModelChange(out, false), /Preview only/);
 });
 
-test("factory.models.set: steer set replaces the slot, advisor and sensitive flip tags", async () => {
+test("factory.models.set: legacy steer edits stop before loading or writing settings", async () => {
   const f = fixture();
-  const steer = await setModels({ action: "steer-set", n: "B", spec: "antigravity/g2" }, f.ctx, f.loader, f.hostSettings);
-  assert.equal(steer.values.profiles[steer.values.slots.B].model, "g2");
-  assert.equal(steer.values.slots.A, "codex");
+  const forbidden = { read: () => assert.fail("legacy edit must not load settings") };
+  await assert.rejects(setModels({ action: "steer-set", n: "B", spec: "antigravity/g2" }, f.ctx, f.loader, forbidden), /Factory settings.*live steers/);
+  await assert.rejects(setModels({ action: "steer-rm", n: "A" }, f.ctx, f.loader, forbidden), /Factory settings.*live steers/);
+});
+
+test("factory.models.set: advisor and sensitive flip tags", async () => {
+  const f = fixture();
   const adv = await setModels({ action: "advisor", spec: "anti", on: true }, f.ctx, f.loader, f.hostSettings);
   assert.equal(adv.values.profiles.anti.advisor, true);
   const sens = await setModels({ action: "sensitive", spec: "muse", on: false }, f.ctx, f.loader, f.hostSettings);
   assert.equal(sens.values.profiles.muse.sensitive, false);
   await assert.rejects(setModels({ action: "worker-rm", n: "1" }, f.ctx, f.loader, f.hostSettings), /last worker/);
-  await assert.rejects(setModels({ action: "steer-rm", n: "A" }, f.ctx, f.loader, null), /not available/);
+  await assert.rejects(setModels({ action: "worker-rm", n: "1" }, f.ctx, f.loader, null), /not available/);
   await assert.rejects(setModels({ action: "worker-set", spec: "codex" }, f.ctx, f.loader, f.hostSettings), /needs a position/);
 });
 

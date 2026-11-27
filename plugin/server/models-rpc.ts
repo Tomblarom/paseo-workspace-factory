@@ -11,8 +11,6 @@ import { isAdvisorProfile, isSensitiveProfile, slotOrder, validateProfilesAgains
 import {
   planAdvisorTag,
   planSensitiveTag,
-  planSteerRemove,
-  planSteerSet,
   planWorkerRemove,
   planWorkerSet,
   resolveProfile,
@@ -118,6 +116,10 @@ export async function setModels(
   hostSettings: HostSettingsReader | null,
   now: () => number = Date.now,
 ) {
+  // Old clients can still call the RPC with these actions.
+  if (input.action === "steer-set" || input.action === "steer-rm") {
+    throw new Error("Edit model priorities in Factory settings. Manage live steers in their Paseo tabs.");
+  }
   if (!hostSettings) throw new Error("Factory settings are not available; open Factory settings and save them again");
   const state = structuredClone(await hostSettings.read());
   if (state.status !== "ready") {
@@ -143,12 +145,6 @@ export async function setModels(
       break;
     case "worker-rm":
       plan = planWorkerRemove(config, need(input.n, "a position"));
-      break;
-    case "steer-set":
-      plan = planSteerSet(config, entries, { target: need(input.n, "a position or slot"), ...opts() });
-      break;
-    case "steer-rm":
-      plan = planSteerRemove(config, need(input.n, "a position or slot"));
       break;
     case "advisor":
       plan = planAdvisorTag(config, entries, { spec: need(input.spec, "a profile"), on: input.on === true });

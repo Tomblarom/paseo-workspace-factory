@@ -1,4 +1,4 @@
-// Model catalog listing and config planning for steer slots and workers.
+// Model catalog listing, worker priorities, and profile edits.
 // Validation reuses validateProfilesAgainstCatalog() from config.mjs, the same
 // check the planner runs (live catalog shape plus known limits). Plans return
 // a new config object; the caller persists it in the plugin settings.
@@ -57,39 +57,6 @@ export function steerFallbackList(config, slot) {
     if (typeof name === 'string' && name && !names.includes(name)) names.push(name);
   }
   return names;
-}
-
-/**
- * Slot-profile suggestion for a live steer running provider/model: the
- * profile to point the slot at so the config matches reality. Matches on
- * provider/model only (thinking/mode/tags are ignored). Returns
- * `{ kind: 'existing', profile }` for exactly one match,
- * `{ kind: 'ambiguous', profiles }` when several profiles share the pair
- * (preview-only: the caller lists the options instead of picking one), and
- * `{ kind: 'none' }` when no profile matches (the caller suggests
- * `steer set <slot> <provider/model>` to create or update one).
- */
-export function suggestSlotProfile(config, provider, model) {
-  const matches = Object.keys(config?.profiles ?? {}).filter((name) => {
-    const entry = config.profiles[name];
-    return entry?.provider === provider && entry?.model === model;
-  });
-  if (matches.length === 1) return { kind: 'existing', profile: matches[0] };
-  if (matches.length > 1) return { kind: 'ambiguous', profiles: matches };
-  return { kind: 'none' };
-}
-
-/**
- * Renders a suggestSlotProfile outcome as the `steer set` command (or the
- * ambiguous option list) that aligns the slot profile with the live steer.
- * Pure text; the caller decides whether to apply it or show it as a
- * preview-only suggestion.
- */
-export function formatSlotProfileSuggestion(config, slot, provider, model, { factoryCmd = '/factory' } = {}) {
-  const suggestion = suggestSlotProfile(config, provider, model);
-  if (suggestion.kind === 'existing') return `${factoryCmd} steer set ${slot} "${suggestion.profile}"`;
-  if (suggestion.kind === 'ambiguous') return `one of ${suggestion.profiles.map((name) => `"${name}"`).join(', ')} via ${factoryCmd} steer set ${slot} <profile>`;
-  return `${factoryCmd} steer set ${slot} ${provider}/${model}`;
 }
 
 /** Profile names whose provider/model match a live steer (fallback duplicate avoidance). */
@@ -318,13 +285,12 @@ export function workerModelLine(config, discovery) {
   return formatWorkerModel(config, profile);
 }
 
-function resolveProfileName(config, slot, provider, model, profileOption) {
+function resolveProfileName(provider, model, profileOption) {
   if (profileOption !== undefined && profileOption !== null) {
     const name = String(profileOption).trim();
     if (!name) throw new Error('--profile must be a non-empty name');
     return name;
   }
-  if (slot && config.steers?.slots?.[slot]) return config.steers.slots[slot];
   return `${provider}-${model}`;
 }
 
@@ -402,14 +368,11 @@ function samePairNotes(config, provider, model, profileName) {
 }
 
 /** Warns when an edited profile is shared beyond the edited entry. */
-function sharedProfileWarnings(config, profileName, { steerSlot = null, workerEntry = false } = {}) {
-  const warnings = [];
-  const slots = Object.entries(config.steers?.slots ?? {}).filter(([slot, name]) => name === profileName && slot !== steerSlot).map(([slot]) => slot);
-  if (slots.length) warnings.push(`Profile "${profileName}" is also used by steer slot${slots.length > 1 ? 's' : ''} ${slots.join(', ')}; those steers keep running until plan/fresh`);
-  if (!workerEntry && workerPriority(config).includes(profileName)) {
-    warnings.push(`Profile "${profileName}" is also in workers.priority; future workers use the new model`);
-  }
-  return warnings;
+function sharedProfileWarnings(config, profileName) {
+  const slots = Object.entries(config.steers?.slots ?? {}).filter(([, name]) => name === profileName).map(([slot]) => slot);
+  return slots.length
+    ? [`Profile "${profileName}" is also referenced by legacy steer slot${slots.length > 1 ? 's' : ''} ${slots.join(', ')}`]
+    : [];
 }
 
 function checkPosition(n, what) {
@@ -435,7 +398,7 @@ export function planWorkerSet(config, providerEntries, { n, spec, thinking, mode
   let candidate = null;
   if (trimmed.includes('/')) {
     const { provider, model } = parseProviderModel(trimmed);
-    profileName = resolveProfileName(config, null, provider, model, profile);
+    profileName = resolveProfileName(provider, model, profile);
     const existing = config.profiles?.[profileName] ?? null;
     candidate = buildCandidate(existing, provider, model, thinking, mode, { providerEntries, notes, profileName });
     if (candidate.advisor === true) throw new Error(`Profile "${profileName}" is tagged as advisor and cannot be used for workers`);
@@ -480,7 +443,7 @@ export function planWorkerSet(config, providerEntries, { n, spec, thinking, mode
   next.workers.defaultProfile = rest[0];
   checkedConfig(next);
   const warnings = startableWarnings(next, providerEntries, profileName);
-  if (candidate && config.profiles?.[profileName]) warnings.push(...sharedProfileWarnings(next, profileName, { workerEntry: true }));
+  if (candidate && config.profiles?.[profileName]) warnings.push(...sharedProfileWarnings(next, profileName));
   return {
     config: next, profileName, position: at, before, after: [...rest],
     summary: `workers.priority: [${before.join(', ')}] → [${rest.join(', ')}]`,
@@ -504,128 +467,6 @@ export function planWorkerRemove(config, n) {
   return {
     config: next, removed, position, before, after,
     summary: `workers.priority: [${before.join(', ')}] → [${after.join(', ')}]`,
-  };
-}
-
-/**
- * Resolve a `steer set|rm` target: a slot letter (existing, or a free one for
- * set) or a 1-based position in slot order (2 is B). Steer slots never shift:
- * positions address the current order, replacements keep every letter. A new
- * letter must not open a gap (existing gappy configs still load, but no new
- * gap can be written).
- */
-export function resolveSteerTarget(config, target, { allowNewLetter = false } = {}) {
-  const order = slotOrder(config);
-  const raw = String(target ?? '').trim().toUpperCase();
-  if (/^[A-Z]$/.test(raw)) {
-    if (!config.steers?.slots?.[raw] && !allowNewLetter) throw new Error(`Slot ${raw} is not defined in steers.slots`);
-    if (!config.steers?.slots?.[raw] && allowNewLetter) {
-      const max = order.length ? order[order.length - 1] : '@';
-      const nextFree = Array.from({ length: 26 }, (_, i) => String.fromCharCode(65 + i)).find((letter) => !config.steers?.slots?.[letter]);
-      if (raw > String.fromCharCode(max.charCodeAt(0) + 1)) {
-        throw new Error(`Slot ${raw} would leave a gap (slots are ${order.join(', ') || 'none'}); use the next free letter ${nextFree}`);
-      }
-    }
-    return raw;
-  }
-  if (/^\d+$/.test(raw)) {
-    const n = Number(raw);
-    if (n >= 1 && n <= order.length) return order[n - 1];
-    throw new Error(`Steer position ${raw} is out of range (1..${order.length}); slots never shift, use an existing position or slot letter`);
-  }
-  throw new Error(`Steer target must be a slot letter A-Z or a position 1..${order.length}, got ${JSON.stringify(target)}`);
-}
-
-function slotList(config) {
-  return slotOrder(config).map((slot) => `${slot}:${config.steers.slots[slot]}`);
-}
-
-/**
- * Plan `steer set <n|slot> <profile|provider/model>`: replace the slot's
- * profile (no shifting; a free letter creates the slot). Unavailable models
- * are stored with a warning.
- */
-export function planSteerSet(config, providerEntries, { target, spec, thinking, mode, profile }) {
-  if (typeof spec !== 'string' || !spec.trim()) throw new Error('steer set needs <profile|provider/model>');
-  const slot = resolveSteerTarget(config, target, { allowNewLetter: true });
-  const trimmed = spec.trim();
-  const notes = [];
-  const isNewSlot = !config.steers?.slots?.[slot];
-  let profileName;
-  let candidate = null;
-  if (trimmed.includes('/')) {
-    const { provider, model } = parseProviderModel(trimmed);
-    profileName = resolveProfileName(config, slot, provider, model, profile);
-    const existing = config.profiles?.[profileName] ?? null;
-    candidate = buildCandidate(existing, provider, model, thinking, mode, { providerEntries, notes, profileName });
-    if (!existing) {
-      const assumed = { provider: candidate.provider, model: candidate.model, thinking: candidate.thinking ?? null, mode: candidate.mode ?? null, advisor: false };
-      const merged = findProfileByKey(config.profiles, modelKey(assumed, { withTags: true }), { withTags: true });
-      if (merged) {
-        notes.push(`Reusing existing profile "${merged}" (identical model, no new profile created)`);
-        profileName = merged;
-        candidate = null;
-      }
-    } else if (modelKey(existing, { withTags: true }) !== modelKey(candidate, { withTags: true })) {
-      const other = findProfileByKey(config.profiles, modelKey(candidate, { withTags: true }), { exclude: profileName, withTags: true });
-      if (other) {
-        notes.push(`Profile "${profileName}" not changed: identical model already exists as "${other}", slot ${slot} points there`);
-        profileName = other;
-        candidate = null;
-      }
-    } else {
-      candidate = null;
-    }
-  } else {
-    profileName = trimmed;
-    if (thinking !== undefined || mode !== undefined || (profile !== undefined && profile !== null)) {
-      throw new Error('steer set <profile> takes no --thinking/--mode/--profile; use steer set <provider/model> to change a profile');
-    }
-    if (!config.profiles?.[profileName]) throw new Error(`Unknown profile "${profileName}"`);
-  }
-  const next = structuredClone(config);
-  if (candidate) {
-    next.profiles[profileName] = candidate;
-    if (config.profiles?.[profileName]) notes.push(`Profile "${profileName}" updated in place`);
-    else if (trimmed.includes('/')) notes.push(...samePairNotes(config, next.profiles[profileName].provider, next.profiles[profileName].model, profileName));
-  }
-  const before = slotList(config);
-  next.steers.slots[slot] = profileName;
-  checkedConfig(next);
-  const after = slotList(next);
-  if (isNewSlot && !next.steers.prepare.includes(slot)) {
-    notes.push(`Slot ${slot} is not in steers.prepare; add it there to plan a steer`);
-  }
-  const warnings = startableWarnings(next, providerEntries, profileName);
-  if (candidate && config.profiles?.[profileName]) warnings.push(...sharedProfileWarnings(next, profileName, { steerSlot: slot }));
-  const detail = `${next.profiles[profileName].provider}/${next.profiles[profileName].model}`
-    + (next.profiles[profileName].thinking ? ` thinking ${next.profiles[profileName].thinking}` : '')
-    + (next.profiles[profileName].mode ? ` mode ${next.profiles[profileName].mode}` : '');
-  return {
-    config: next, slot, profileName, before, after,
-    summary: `steer slots: [${before.join(', ')}] → [${after.join(', ')}] (${slot} → "${profileName}" ${detail})`,
-    notes, warnings,
-    hint: 'Existing steers are unchanged; the next plan will report the difference.',
-  };
-}
-
-/** Plan `steer rm <n|slot>`: drop the slot, keep its profile, repair prepare/initialActive. */
-export function planSteerRemove(config, target) {
-  const slot = resolveSteerTarget(config, target, { allowNewLetter: false });
-  const slots = config.steers?.slots ?? {};
-  if (Object.keys(slots).length === 1) throw new Error(`Cannot remove slot ${slot}: at least one slot must remain`);
-  const next = structuredClone(config);
-  const before = slotList(config);
-  const removedProfile = next.steers.slots[slot];
-  delete next.steers.slots[slot];
-  next.steers.prepare = (next.steers.prepare ?? []).filter((s) => s !== slot);
-  if (!next.steers.prepare.length) next.steers.prepare = [Object.keys(next.steers.slots).sort()[0]];
-  if (next.steers.initialActive === slot) next.steers.initialActive = next.steers.prepare[0];
-  checkedConfig(next);
-  const after = slotList(next);
-  return {
-    config: next, slot, removedProfile, before, after,
-    summary: `steer slots: [${before.join(', ')}] → [${after.join(', ')}] (slot ${slot} removed, profile "${removedProfile}" kept)`,
   };
 }
 

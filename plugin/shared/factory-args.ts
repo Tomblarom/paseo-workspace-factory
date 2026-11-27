@@ -162,15 +162,13 @@ export const FACTORY_COMMANDS: Record<string, CommandHelp> = {
   },
   steer: {
     usage:
-      "/factory steer list | add [slot] [profile|provider/model] [--thinking X] [--mode Y] [--profile name] [--dry-run] | set <n|slot> <profile|provider/model> [--thinking X] [--mode Y] [--profile name] [--dry-run] | rm <n|slot> [--dry-run]",
-    summary: "Show or edit the steer slots; slot order is the priority (1 = A, 2 = B …).",
+      "/factory steer list | add [slot] [profile|provider/model] [--thinking X] [--mode Y] [--profile name] [--dry-run]",
+    summary: "Show model priorities or add a steer to this scope.",
     details: [
-      "add creates a new steer in this workspace's project; without a slot it suggests the next free letter.",
-      "set replaces the model of that slot; letters never shift. A new letter must be the next free one.",
-      "Running steers keep their model.",
-      "set and rm save at once in the plugin settings (--dry-run only shows it); add shows a preview and confirms in the Factory panel.",
+      "list shows steer and advisor model priorities. Edit them in Factory settings.",
+      "add suggests the next free letter when omitted. Confirm the preview in the Factory panel.",
     ],
-    examples: ["/factory steer list", "/factory steer add", "/factory steer add C codex/gpt-6.2-sol --thinking high", "/factory steer set B codex/gpt-6.2-sol --thinking high", "/factory steer rm C"],
+    examples: ["/factory steer list", "/factory steer add", "/factory steer add C codex/gpt-6.2-sol --thinking high"],
   },
   model: {
     usage: "/factory model advisor|sensitive <profile|provider/model> on|off [--dry-run]",
@@ -259,12 +257,12 @@ interface ModelEdit {
   dryRun: boolean;
 }
 
-/** worker/steer list, set, rm and model advisor|sensitive: the lists live in the plugin settings. */
+/** Model priorities and profile tags live in Factory settings. */
 export type ModelsCommand =
   | { command: "worker" | "steer"; action: "list" }
   | { command: "worker"; action: "pick"; repo?: string }
-  | ({ command: "worker" | "steer"; action: "set"; n: string } & ModelEdit)
-  | { command: "worker" | "steer"; action: "rm"; n: string; dryRun: boolean }
+  | ({ command: "worker"; action: "set"; n: string } & ModelEdit)
+  | { command: "worker"; action: "rm"; n: string; dryRun: boolean }
   | { command: "model"; flag: "advisor" | "sensitive"; spec: string; on: boolean; dryRun: boolean };
 
 // Subcommand being parsed, so errors can point at its usage and examples.
@@ -395,10 +393,9 @@ function checkSlot(slot: string, flag: string): string {
   return upper;
 }
 
-function checkTarget(value: string, sub: string): string {
+function checkWorkerPosition(value: string): string {
   if (/^\d+$/.test(value) && Number(value) >= 1) return value;
-  if (sub === "steer" && /^[A-Za-z]$/.test(value)) return value.toUpperCase();
-  return fail(`${sub} expects ${sub === "steer" ? "a slot letter A-Z or a position 1, 2, …" : "a position 1, 2, …"}, got ${JSON.stringify(value)}.`);
+  return fail(`worker expects a position 1, 2, …, got ${JSON.stringify(value)}.`);
 }
 
 /** Split --adopt input: SLOT=<id> pairs (single entry). Slots are uppercase. */
@@ -763,7 +760,6 @@ export function parseFactoryArgs(args: string): FactoryCommand {
   if (sub === "worker" || sub === "steer") {
     const [action, ...args] = flags.positionals;
     const dryRun = flags.bools.has("dry-run");
-    const what = sub === "worker" ? "position" : "position or slot";
     if (action === "list") {
       checkNoFlags(flags, `${sub} list`);
       if (args.length) fail(`${sub} list takes no arguments.`);
@@ -778,13 +774,15 @@ export function parseFactoryArgs(args: string): FactoryCommand {
         : { command: "worker", action: "pick" };
     }
     if (action === "rm") {
-      checkAllowed(flags, `${sub} rm`, ["dry-run"]);
-      if (args.length !== 1) fail(`${sub} rm needs exactly one ${what}.`);
-      return { command: sub, action: "rm", n: checkTarget(args[0], sub), dryRun };
+      if (sub === "steer") return fail("Edit model priorities in Factory settings. To remove a steer from the scope, archive its tab in Paseo after handing over any active work.");
+      checkAllowed(flags, "worker rm", ["dry-run"]);
+      if (args.length !== 1) fail("worker rm needs exactly one position.");
+      return { command: sub, action: "rm", n: checkWorkerPosition(args[0]), dryRun };
     }
     if (action === "set") {
-      checkAllowed(flags, `${sub} set`, ["thinking", "mode", "profile", "dry-run"]);
-      if (args.length !== 2) fail(`${sub} set needs a ${what} and a profile or provider/model.`);
+      if (sub === "steer") return fail("Edit model priorities in Factory settings. To change a live steer's model, use that tab's Paseo model controls.");
+      checkAllowed(flags, "worker set", ["thinking", "mode", "profile", "dry-run"]);
+      if (args.length !== 2) fail("worker set needs a position and a profile or provider/model.");
       const spec = args[1];
       const thinking = flags.singles.get("thinking");
       const mode = flags.singles.get("mode");
@@ -795,7 +793,7 @@ export function parseFactoryArgs(args: string): FactoryCommand {
       return {
         command: sub,
         action: "set",
-        n: checkTarget(args[0], sub),
+        n: checkWorkerPosition(args[0]),
         spec,
         ...(thinking !== undefined ? { thinking } : {}),
         ...(mode !== undefined ? { mode } : {}),
@@ -836,7 +834,7 @@ export function parseFactoryArgs(args: string): FactoryCommand {
         dryRun,
       };
     }
-    return fail(sub === "worker" ? `${sub} needs list, pick, set or rm.` : `${sub} needs list, add, set or rm.`);
+    return fail(sub === "worker" ? "worker needs list, pick, set or rm." : "steer needs list or add.");
   }
   if (sub === "model") {
     checkAllowed(flags, "model", ["dry-run"]);

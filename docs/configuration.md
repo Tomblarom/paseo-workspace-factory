@@ -193,27 +193,35 @@ no usage windows. In that case `/factory quota` shows “Usage unavailable” an
 can receive work until an applicable limit is reported. Unbound routes can use a provider
 pool when its usage report is unambiguous.
 
-## Managing models from the CLI
+## Managing models in Paseo
 
 Use these commands in the Paseo composer. See [Agent CLI](#agent-cli) for the commands agents run via `paseo-factory`.
 
 ```text
 /factory models
-/factory worker list [scope] | /factory worker pick [scope] | /factory worker set <n> <profile|provider/model> [--thinking X] [--mode Y] [--profile name] [--dry-run] | /factory worker rm <n> [--dry-run]
-/factory steer list | /factory steer set <n|slot> <profile|provider/model> [--thinking X] [--mode Y] [--profile name] [--dry-run] | /factory steer rm <n|slot> [--dry-run]
+/factory worker list | /factory worker pick [scope] | /factory worker set <n> <profile|provider/model> [--thinking X] [--mode Y] [--profile name] [--dry-run] | /factory worker rm <n> [--dry-run]
+/factory steer list
 /factory model advisor|sensitive <profile|provider/model> on|off [--dry-run]
 ```
 
 Use `/factory steer add [slot] [profile|provider/model]` to create a steer in the current scope. Omit the slot to use the first free letter among live workspace agents. Omit the profile to select an eligible route by role priority. The preview shows the model, account eligibility evidence and why alternatives were skipped. Confirm to create the agent in this workspace with the selected route. Select **Activate Steer** in an existing standby tab to make it the coordinator.
 
-Model lists are ordered by priority, highest first. `worker set <n> <model>` inserts the model at position n; the entries from n onwards move down by one, and an existing copy of the same model is removed, so every model appears once. `worker rm <n>` removes an entry and closes the gap. Steer slots never shift: `steer set <n|slot>` replaces the slot's profile (`steer set 2 X` is `steer set B X`); a number past the end is refused, a free letter within reach creates the slot without opening a gap. `set` creates or updates a profile (named by `--profile`, otherwise the slot's/entry's current profile, or `<provider>-<model>` for a new entry) after validating against the live catalog including the built-in exceptions. Omitted `--thinking`/`--mode` keep the stored value (new profiles default to `"thinking": null` and no mode); use `--thinking null` for the provider default. A temporarily unavailable model is still stored, but with a warning — a fallback list may hold such entries; an unknown provider/model syntax is an error. When a model is not available in the live catalog, the next entry that is available and allowed for the role and repository (advisor and sensitive rules) is used. `rm` keeps the profile; `steer rm` also repairs `prepare`/`initialActive`. Writes act directly (reversible, no hash), like saving in Settings; plan and apply only concern agents. `--dry-run` shows the change instead of saving it. `/factory worker|steer|model …` saves in the host settings document, which is the effective source.
+Model lists are ordered by priority, highest first. `worker set <n> <model>`
+inserts the model at position n and moves any existing entry for that model.
+`worker rm <n>` removes the entry and keeps its profile. With a provider/model
+pair, `worker set` creates or updates the named `--profile`, defaulting to
+`<provider>-<model>`. Omitted `--thinking` and `--mode` keep stored values
+when valid for the model. Use `--thinking null` for the provider default.
+Temporarily unavailable models are saved with a warning. `--dry-run` previews
+a settings edit.
 
-Profile selection reads the priority for the requested role and checks
-availability, quota and repository visibility. Workers and coordinating
-steers skip advisor profiles. Enrollment and `steer add` use the current
-steer priority when no explicit profile is selected. The `steer set` and
-`steer rm` commands still edit the legacy slot presets. Fresh keeps the live
-route unless a different model is explicitly selected.
+Edit steer and advisor model priorities in Factory settings. Use a live
+steer's Paseo model controls to change its runtime model. To remove a steer
+from a scope, hand over active work and archive the tab in Paseo.
+Enrollment and `steer add` use the current steer priority when no explicit
+profile is selected. Selection checks model availability, quota, and
+repository visibility. Workers and coordinating steers skip advisor profiles.
+Fresh keeps the live route unless a different model is explicitly selected.
 
 `worker pick` prints the chosen profile plus the matching `paseo run` flags (`--provider … --model … [--thinking …] [--mode …]`). Steers start workers with that model (see [steer instructions](steer-instructions.md#worker-instructions)); the resume brief carries it as `Worker model: …`.
 
