@@ -807,6 +807,12 @@ Factory modules from saved metadata and confirmed that acknowledged sends,
 rewinds and worker wakes settle without repeating their native effects. A native
 rewind without a saved acknowledgement still requires inspection.
 
+On 2026-11-27 the user asked for the model, thinking level and ZeroSub account
+on each Handover target under Steers. The picker keeps the context status and
+uses the target's live route. The account has the same numbered alias as in
+Resources. During a pending move the label uses the account the session still
+runs on.
+
 The user also approved the SLP-inspired edits to role rules, templates, checkpoint
 guidance and worker wake text in Steer E's chat on 2026-11-27. The approval
 covers these text and delivery changes. Warm notifications use worker titles,
