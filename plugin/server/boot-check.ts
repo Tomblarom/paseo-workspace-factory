@@ -5,7 +5,7 @@
 // the daemon start becomes an interrupted record with reason "daemon-restart"
 // (C2 shape plus reason) and clears the open fields, so a second plugin start
 // finds nothing to mark. Never throws out of ensureBootChecked.
-import { actionEntry, readSteerAction } from "./core/steer-action.mjs";
+import { actionEntry, readEffectReceipt, readSteerAction } from "./core/steer-action.mjs";
 import { execFileSync } from "node:child_process";
 import { METADATA_KEY, paseoBinary, readPaseoState } from "./core/paseo.mjs";
 import { listScopes } from "./core/scope.mjs";
@@ -284,7 +284,7 @@ export async function runBootCheck({
     const entries = asRecord(scope.workspace?.metadata?.[AGENTS_KEY]) ?? {};
     for (const [agentId, raw] of Object.entries(entries)) {
       const action = readSteerAction(raw);
-      const stale = action && Date.parse(action.queuedAt) < Date.parse(daemonStartedAt) &&
+      const stale = action && !readEffectReceipt(scope.workspace?.metadata ?? {}, action) && Date.parse(action.queuedAt) < Date.parse(daemonStartedAt) &&
         ((action.phase === "renewing" && action.kind !== "fresh-delivery") || action.phase === "rewinding");
       if (stale) {
         groupOf(scope).renewals.push(agentId);
@@ -419,7 +419,7 @@ export async function runBootCheck({
       for (const agentId of group.renewals) {
         const entry = asRecord(nextAgents[agentId]);
         const action = readSteerAction(entry);
-        if (!action || !(Date.parse(action.queuedAt) < Date.parse(daemonStartedAt))) continue;
+        if (!action || readEffectReceipt(freshMeta, action) || !(Date.parse(action.queuedAt) < Date.parse(daemonStartedAt))) continue;
         if (action.phase === "rewinding") {
           nextAgents[agentId] = actionEntry(entry,
             { ...action, phase: "uncertain", lastError: "Paseo restarted before the rewind outcome was confirmed. Inspect the agent before recovery." });

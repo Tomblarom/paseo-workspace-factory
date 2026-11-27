@@ -533,6 +533,7 @@ export async function applyFresh(
   const applyOptions: any = {
     ...dryOptions, apply: true, confirmPreview,
     send: input.deliver !== "stage",
+    stageRewind: input.deliver === "stage",
     notifyPrevious: input.notifyPrevious !== false,
     lookupReceipt, paseoCli,
     execute: (createExecutors as any)({ client: paseo, paseoCli, getZerosub: () => resolveZerosub(deps ?? {}), lookupReceipt }),
@@ -559,15 +560,17 @@ export async function applyFresh(
   const { routeBinding: _internalRoute, recordingError, ...result } = applied;
   if (!applied.applied) return result;
   const destination = typeof applied.to === "string" && applied.to ? applied.to : applied.from;
-  const staged = await stageAppliedPacket(paseo, {
-    workspaceId: dry.workspaceId,
-    agentId: destination,
-    packet: applied.packet,
-    kind: "fresh",
-    epoch: applied.epoch,
-    deliver: input.deliver,
-    deliveryError: applied.deliveryError,
-  }, deps);
+  const staged = applied.stageId ? { staged: true, stagedTo: destination, stagingError: null, stageId: applied.stageId } :
+    recordingError && applied.refreshMode === "rewind" ? { staged: false, stagedTo: null, stagingError: recordingError } :
+    await stageAppliedPacket(paseo, {
+      workspaceId: dry.workspaceId,
+      agentId: destination,
+      packet: applied.packet,
+      kind: "fresh",
+      epoch: applied.epoch,
+      deliver: input.deliver,
+      deliveryError: applied.deliveryError,
+    }, deps);
   // Keep the packet in Factory state if the destination changed during Fresh.
   // Composer insertion rechecks admission when it fetches the stage.
   if (staged.staged || applied.deliveryError || recordingError) {

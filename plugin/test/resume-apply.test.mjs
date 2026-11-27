@@ -391,10 +391,13 @@ test("resume preserves a denied Fresh receipt and replays the exact request when
     // A crash can leave the successful receipt recorded as sent but unsettled.
     ws.metadata[AGENTS_KEY][agent.id].action.phase = "sent";
     agent.provider = "muse";
-    const settled = await resumeApply.applyResume(paseo, input, deps);
+    const restarted = structuredClone(world);
+    const reloaded = await import("../server/resume-apply.ts?fresh-delivery-restart");
+    const reopened = fakeClient(restarted);
+    const settled = await reloaded.applyResume(reopened, input, deps);
     assert.equal(settled.status, "sent");
-    assert.equal(ws.metadata[AGENTS_KEY][agent.id].action.phase, "done");
-    assert.equal(sendsTo(world, agent.id).length, 1);
+    assert.equal(restarted.workspaces[0].metadata[AGENTS_KEY][agent.id].action.phase, "done");
+    assert.equal(sendsTo(restarted, agent.id).length, 1);
   }
 });
 

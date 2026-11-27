@@ -15,7 +15,7 @@ import { ASSIGNMENT_KEY } from "./core/assign.mjs";
 import { scopeHolder } from "./core/scope-guard.mjs";
 import { isAdvisorSteer } from "./core/config.mjs";
 import { resolveSteerHolders } from "./core/discovery.mjs";
-import { readSteerAction } from "./core/steer-action.mjs";
+import { readEffectReceipt, readSteerAction } from "./core/steer-action.mjs";
 import { quotaAdmission } from "./steer-admission.js";
 import { readRoutingSnapshot, routingProjection, steerRouteCandidate, planSteerRoutes } from "./steer-routing.js";
 import { hasActiveAgentWork } from "./agent-context.js";
@@ -987,6 +987,15 @@ export interface RetryWakeBriefResult {
   events?: number;
 }
 
+function retryableDelivery(entry: unknown, meta: Record<string, unknown>, allowBatches: boolean) {
+  const action = readSteerAction(entry);
+  if (!action || action.phase === "done" || action.phase === "staged") return null;
+  const effect = readEffectReceipt(meta, action);
+  if (effect || action.phase === "sent" || action.kind === "fresh-delivery") return action;
+  const pending = pendingSteerDelivery(entry);
+  return pending && (allowBatches || !pending.batch) ? pending : null;
+}
+
 export async function retryPendingWakeBrief(
   paseo: any,
   scope: any,
@@ -999,17 +1008,21 @@ export async function retryPendingWakeBrief(
   const entries = asRecord(meta[AGENTS_KEY]) ?? {};
   const candidates = Object.entries(entries)
     .flatMap(([agentId, entry]) => {
-      const pending = pendingSteerDelivery(entry);
-      return pending && (deps.allowBatches !== false || !pending.batch) ? [{ agentId, pending }] : [];
+      const pending = retryableDelivery(entry, meta, deps.allowBatches !== false);
+      return pending ? [{ agentId, pending }] : [];
     })
-    .sort((a, b) => a.pending.queuedAt.localeCompare(b.pending.queuedAt));
+    .sort((a, b) => (a.pending.queuedAt ?? "").localeCompare(b.pending.queuedAt ?? ""));
   let waiting: RetryWakeBriefResult | null = null;
   for (const { agentId, pending } of candidates) {
+    if (deps.allowBatches === false && pending.batch && readEffectReceipt(meta, pending)?.kind === "rewind") {
+      await ST.settleRewindReceipt({ client: paseo, workspaceId: mainId, agentId, actionId: pending.wakeId, lock: lockOf(deps) });
+      continue;
+    }
     const result = await finishSteerDelivery(paseo, { workspaceId: mainId, agentId }, deliveryDeps(deps));
     if (!result) continue;
     const batch = pending.batch;
     const events = batch?.workspaceId === mainId && !batch.takeover ? batch.events.length : 0;
-    if (result.status === "sent") return { attempted: true, delivered: true, target: agentId, events };
+    if (result.status === "sent" && !result.recordingError) return { attempted: true, delivered: true, target: agentId, events };
     // Keep the unresolved receipt for recovery. An older authority epoch
     // cannot hold the current controller's independent wake queue.
     const receiptEpoch = batch?.epoch ?? pending.epoch;
@@ -1088,10 +1101,7 @@ export async function flushAllScopes(paseo: any, deps: SuperviseDeps & { state?:
         logOf(deps)(`[factory] supervise: assignment recovery for ${scope.id} failed (${error instanceof Error ? error.message : String(error)})`);
       }
     }
-    const hasBrief = Object.values(meta?.[AGENTS_KEY] ?? {}).some((entry) => {
-      const pending = pendingSteerDelivery(entry);
-      return pending && (settings?.enabled || !pending.batch);
-    });
+    const hasBrief = Object.values(meta?.[AGENTS_KEY] ?? {}).some((entry) => retryableDelivery(entry, meta, settings?.enabled === true));
     if (!hasBrief && !(settings?.enabled && collectPendingWakes(readWorkers(meta)).length)) continue;
     try {
       const result = await flushScope(paseo, scope, { ...deps, settings, state: paseoState });
@@ -1128,7 +1138,10 @@ export async function runBootFinished(
 ): Promise<BootFinishedResult> {
   markBootCheckDone();
   const settings = await resolveSettings(deps);
-  if (!settings || !settings.enabled) return { ok: true, action: "disabled", marked: [], wakes: [] };
+  if (!settings?.enabled) {
+    if (deps.delivery) await flushAllScopes(paseo, { ...deps, settings });
+    return { ok: true, action: "disabled", marked: [], wakes: [] };
+  }
   const log = logOf(deps);
   const paseoState = deps.state ?? ((await readPaseoState(paseo)) as any);
   const scopes = listScopes(paseoState);
@@ -1176,7 +1189,9 @@ export async function runBootFinished(
   const wakes: { scopeId: string; sent: boolean; reason?: string }[] = [];
   for (const scope of scopes) {
     try {
-      if (!drainingFlag) {
+      const bootMeta = await refreshWorkspaceMeta(paseo, scope.workspaceId);
+      const quiet = drainingFlag || isDrainMarkerActive(bootMeta[DRAIN_METADATA_KEY], nowMs);
+      if (!quiet) {
         const retry = await retryPendingWakeBrief(paseo, scope, deps);
         if (retry.delivered) {
           wakes.push({ scopeId: scope.id, sent: true });
@@ -1195,13 +1210,12 @@ export async function runBootFinished(
           continue;
         }
       }
-      const bootMeta = await refreshWorkspaceMeta(paseo, scope.workspaceId);
       const register = readWorkers(bootMeta);
       const events = workersReport(register)
         .filter((entry: any) => entry && entry.state === "interrupted")
         .map((entry: any) => ({ workerId: entry.id, state: entry.state as string }));
       if (!events.length) continue;
-      if (drainingFlag || isDrainMarkerActive(bootMeta[DRAIN_METADATA_KEY], nowMs)) {
+      if (quiet) {
         for (const event of events) {
           const current = register[event.workerId];
           if (current) await queueWake(paseo, scope.workspaceId, event.workerId, current, event.state, deps);
@@ -1281,6 +1295,9 @@ export async function logFailoverCheckpoint(
       log("[factory] supervise: failover log skipped (no task checkpoint)");
       return false;
     }
+    const failover = asRecord(checkpoint.failover);
+    if (args.observedAt && checkpoint.source === "failover" && checkpoint.updatedAt === args.observedAt &&
+        failover?.previousSteer === args.previousSteer && failover.reason === args.reason) return true;
     held.verify();
     await workspace.setMetadata({
       [CHECKPOINT_KEY]: {
@@ -1704,6 +1721,7 @@ export async function watchdogScan(paseo: any, deps: SuperviseDeps & { state?: a
 }
 
 export interface SupervisionTimerDeps {
+  ensureBoot?: (paseo: any) => void;
   getSettings: () => Promise<SupervisionSettings | null>;
   getConfig?: () => Promise<any>;
   getZerosub?: SuperviseDeps["getZerosub"];
@@ -1719,6 +1737,7 @@ export interface SupervisionTimerDeps {
  * unanswered wakes use the independent watchdog cadence.
  */
 export function startSupervisionTimer({
+  ensureBoot,
   getSettings,
   intervalMs = 10_000,
   lock,
@@ -1735,6 +1754,7 @@ export function startSupervisionTimer({
     if (stopped || checking || !supervisionPaseo) return;
     checking = true;
     const paseo: any = supervisionPaseo;
+    if (!isBootCheckDone()) ensureBoot?.(paseo);
     void (async () => {
       try {
         const settings = await getSettings();

@@ -1,12 +1,12 @@
 // Manual /factory resume validates the preview and captures a checkpoint before delivery.
 import { AGENTS_KEY } from "./core/agent-state.mjs";
-import { readCleanupAction, readSteerAction } from "./core/steer-action.mjs";
+import { readCleanupAction, readEffectReceipt, readSteerAction } from "./core/steer-action.mjs";
 import { actionFact } from "./core/action-facts.mjs";
 import { withLock, workspaceLockName } from "./core/lock.mjs";
 import { METADATA_KEY, readPaseoState } from "./core/paseo.mjs";
 import { listScopes, sameScopeId } from "./core/scope.mjs";
 import { guardScope, scopeHolder } from "./core/scope-guard.mjs";
-import { lastAssistantText, parseCheckpointBlock, reconcileFreshDelivery, requireFreshPrivacy, SwitchRefused } from "./core/steer.mjs";
+import { lastAssistantText, parseCheckpointBlock, requireFreshPrivacy, SwitchRefused } from "./core/steer.mjs";
 import { WORKERS_KEY } from "./core/supervision.mjs";
 import { CLEANUP_DEFAULTS, cleanupIdentity, formatResumeMessage, type ResumeClearSettings } from "../shared/idle-cleanup.js";
 import { decideSteerDelivery, deliverSteer, finishSteerDelivery, type DeliveryResult, type SteerDeliveryDeps } from "./steer-delivery.js";
@@ -38,23 +38,12 @@ export interface ResumeApplyDeps extends SteerDeliveryDeps {
   }>;
 }
 
-function checkFreshPrivacy(paseo: any, workspaceId: string, scopeId: string, deps: ResumeApplyDeps) {
-  return (agentId: string, epoch: unknown) => requireFreshPrivacy({ client: paseo, workspaceId, scopeId, epoch, agentId,
-    admitTarget: (agent: any) => readPrivacyAdmission(agent, { ...deps, paseo }, workspaceId),
-  });
-}
-
-async function resumeFreshDelivery(paseo: any, workspaceId: string, scopeId: string, agentId: string, entry: unknown, deps: ResumeApplyDeps, lock: NonNullable<ResumeApplyDeps["lock"]>): Promise<ResumeApplyResult | null> {
-  const action = readSteerAction(entry);
-  if (action?.kind !== "fresh-delivery" || action.phase === "done") return null;
-  const result = await reconcileFreshDelivery({ client: paseo, workspaceId, agentId, actionId: action.wakeId,
-    lock, checkPrivacy: checkFreshPrivacy(paseo, workspaceId, scopeId, deps),
-  });
-  return {
-    agentId, cleared: false, renewed: true,
-    status: result.status === "sent" ? "sent" : result.status === "blocked" || result.status === "missing" ? "blocked" : "pending",
-    detail: result.status === "sent" ? result.recordingError ?? "Fresh brief delivered." : result.detail ?? "Fresh brief needs receipt reconciliation.",
-  };
+async function resumeRecordedDelivery(paseo: any, workspaceId: string, agentId: string, meta: any, deps: ResumeApplyDeps): Promise<ResumeApplyResult | null> {
+  const action = readSteerAction(meta[AGENTS_KEY]?.[agentId]);
+  if (!action || action.phase === "done" ||
+      (action.phase !== "sent" && action.kind !== "fresh-delivery" && !readEffectReceipt(meta, action))) return null;
+  const result = await finishSteerDelivery(paseo, { workspaceId, agentId, actionId: action.wakeId }, deps);
+  return result ? { agentId, ...result } : null;
 }
 
 async function applyWorkerResume(paseo: any, mainId: string, agentId: string, scopeId: string, deps: ResumeApplyDeps, lock: NonNullable<ResumeApplyDeps["lock"]>): Promise<ResumeApplyResult> {
@@ -80,8 +69,8 @@ async function applyWorkerResume(paseo: any, mainId: string, agentId: string, sc
     if (readCleanupAction(entry) || hasActiveAgentWork(agent, entry)) {
       return { agentId, status: "blocked", cleared: false, detail: "The worker is busy. Try again after the current operation." };
     }
-    const pendingFresh = await resumeFreshDelivery(paseo, mainId, scopeId, agentId, entry, deps, lock);
-    if (pendingFresh) return pendingFresh;
+    const recorded = await resumeRecordedDelivery(paseo, mainId, agentId, meta, { ...deps, lock });
+    if (recorded) return recorded;
     const context = agentContextInputs(agent, entry, cleanup ?? CLEANUP_DEFAULTS, routes, deps.now ? Date.parse(deps.now()) : Date.now());
     const { warmth, large } = projectAgentContext(context);
     const replacementMessageId = !context.lastTurnEndedAt && typeof entry?.workerResumeMessageId === "string" ? entry.workerResumeMessageId : null;
@@ -129,7 +118,9 @@ async function applyWorkerResume(paseo: any, mainId: string, agentId: string, sc
     }
     const messageId = replacementMessageId ?? (typeof at === "string" ? `wsf-worker-resume-${agentId}-${at}` : null);
     try {
-      await checkFreshPrivacy(paseo, mainId, scopeId, deps)(agentId, scope.epoch);
+      await requireFreshPrivacy({ client: paseo, workspaceId: mainId, scopeId, epoch: scope.epoch, agentId,
+        admitTarget: (agent: any) => readPrivacyAdmission(agent, { ...deps, paseo }, mainId),
+      });
     } catch (error) {
       if (error instanceof SwitchRefused) return { agentId, status: "blocked", cleared: false, detail: error.message };
       throw error;
@@ -282,12 +273,8 @@ export async function applyResume(
     await (guardScope as any)({ client: paseo, held, workspaceId: mainId, scopeId: identity.scopeId, epoch: wsf.epoch, agentId: activeHolder.id, config });
   });
   if (identity.role === "worker") return applyWorkerResume(paseo, mainId, agentId, identity.scopeId, deps, lock);
-  const pendingFresh = await resumeFreshDelivery(paseo, mainId, identity.scopeId, agentId, entry, deps, lock);
-  if (pendingFresh) return pendingFresh;
-  if (readSteerAction(entry)?.phase === "sent") {
-    const settled = await finishSteerDelivery(paseo, { workspaceId: mainId, agentId }, deps);
-    if (settled) return { agentId, ...settled };
-  }
+  const recorded = await resumeRecordedDelivery(paseo, mainId, agentId, meta, { ...deps, lock });
+  if (recorded) return recorded;
   const liveAgent = (await paseo.agents.ref(agentId).refresh())?.agent;
   if (!liveAgent || liveAgent.archivedAt) return { agentId, status: "blocked", cleared: false, detail: "The steer is unavailable." };
   const privacy = await readPrivacyAdmission(liveAgent, { ...deps, paseo }, mainId);

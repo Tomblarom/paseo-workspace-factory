@@ -112,13 +112,13 @@ export function isComparableBaseline(baseline, liveSessionId) {
  * is not in `liveIds` are dropped when `liveIds` is given. Verified by
  * re-reading afterwards. Returns the merged entry.
  */
-export async function updateAgentEntry({ client, workspaceId, agentId, patch, liveIds = null, lock = withLock, guard = null }) {
+export async function updateAgentEntry({ client, workspaceId, agentId, patch, liveIds = null, lock = withLock, guard = null, clearMetadataKey = null }) {
   const workspace = client.workspaces.ref(workspaceId);
   return lock(workspaceLockName(workspaceId), async (held) => {
     const metadata = (await workspace.refresh())?.metadata ?? {};
     if (guard) await guard({ held, metadata });
     const state = { ...(metadata[AGENTS_KEY] ?? {}) };
-    const entryPatch = typeof patch === 'function' ? patch(state[agentId] ?? null) : patch;
+    const entryPatch = typeof patch === 'function' ? patch(state[agentId] ?? null, metadata) : patch;
     if (entryPatch === null) return state[agentId] ?? null;
     if (liveIds !== null && liveIds !== undefined) {
       const live = new Set(liveIds);
@@ -129,7 +129,7 @@ export async function updateAgentEntry({ client, workspaceId, agentId, patch, li
     state[agentId] = clipEntry(mergeActionFacts(state[agentId], entryPatch));
     for (const key of Object.keys(state[agentId])) if (state[agentId][key] === undefined) delete state[agentId][key];
     held.verify(); // the lock file must still be the locked inode right before the write
-    await workspace.setMetadata({ [AGENTS_KEY]: state });
+    await workspace.setMetadata({ [AGENTS_KEY]: state, ...(clearMetadataKey ? { [clearMetadataKey]: null } : {}) });
     const written = (await workspace.refresh())?.metadata?.[AGENTS_KEY]?.[agentId] ?? null;
     if (!isDeepStrictEqual(written, state[agentId])) throw new Error(`Agent entry ${agentId} not verifiable after write in workspace ${workspaceId}`);
     return written;

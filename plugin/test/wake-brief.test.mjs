@@ -895,8 +895,8 @@ test("a later resume marker survives acknowledgement of an earlier warm wake", a
   assert.deepEqual(ws.metadata[AGENTS_KEY][steer.id].needsResume, later);
 });
 
-test("a lost worker acknowledgement resumes after the recorded admission without another prompt", async () => {
-  const { wake, recheck, ws, steer, workerId, world, client } = deliveryFixture({ minutesIdle: 1 });
+test("post-boot worker wake completion settles the recorded admission without another prompt", async () => {
+  const { wake, ws, steer, workerId, world, client, deps } = deliveryFixture({ minutesIdle: 1 });
   ws.metadata[WORKERS_KEY][workerId].pendingWake = { state: "done", queuedAt: at(NOW - MIN) };
   const ref = client.workspaces.ref;
   let failAck = true;
@@ -913,9 +913,92 @@ test("a lost worker acknowledgement resumes after the recorded admission without
   assert.equal((await wake()).sent, false);
   assert.equal(ws.metadata[AGENTS_KEY][steer.id].action.phase, "sent");
   assert.equal(ws.metadata[WORKERS_KEY][workerId].pendingWake.state, "done");
-  assert.equal((await recheck()).delivered, true);
-  assert.equal(ws.metadata[WORKERS_KEY][workerId].pendingWake, null);
-  assert.equal(sendsTo(world, steer.id).length, 1);
+  const restarted = structuredClone(world);
+  const recovered = fakeClient(restarted);
+  const after = restarted.workspaces[0].metadata;
+  const boot = await import("../server/supervise.ts?worker-wake-restart");
+  assert.equal(boot.isBootCheckDone(), false);
+  const recoveryDeps = { ...deps, delivery: { lock: noLock }, settings: { enabled: false } };
+  await boot.runBootFinished(recovered, [], recoveryDeps);
+  assert.equal(after[WORKERS_KEY][workerId].pendingWake, null);
+  assert.equal(after[AGENTS_KEY][steer.id].action.phase, "done");
+  assert.equal(sendsTo(restarted, steer.id).length, 1);
+  assert.deepEqual(await boot.flushAllScopes(recovered, recoveryDeps), []);
+  assert.equal(sendsTo(restarted, steer.id).length, 1);
+});
+
+test("a restarted sweep does not rewrite a worker receipt already recorded before completion contention", async (t) => {
+  const { ws, steer, workerId, world, client, deps } = deliveryFixture({ minutesIdle: 1 });
+  ws.metadata[WORKERS_KEY][workerId].pendingWake = { state: "done", queuedAt: at(NOW - MIN) };
+  let clock = NOW;
+  t.mock.method(Date, "now", () => clock);
+  const lock = (name, fn) => {
+    const action = ws.metadata[AGENTS_KEY][steer.id].action;
+    if (action?.phase === "sent" && !ws.metadata[WORKERS_KEY][workerId].pendingWake) {
+      clock = NOW + 2500;
+      throw new LockBusy("completion lock held");
+    }
+    return noLock(name, fn);
+  };
+  const input = { workspaceId: ws.id, agentId: steer.id, text: "Worker finished",
+    batch: { workspaceId: ws.id, epoch: 3, events: [{ workerId, state: "done" }] } };
+  const pending = await deliverSteer(client, input, { lock, now: () => at(NOW) });
+  assert.match(pending.recordingError, /completion record is still pending/);
+  assert.equal(ws.metadata[AGENTS_KEY][steer.id].action.phase, "sent");
+  assert.equal(ws.metadata[WORKERS_KEY][workerId].lastWakeAt, at(NOW));
+  const restarted = structuredClone(world);
+  const reopened = fakeClient(restarted);
+  const after = restarted.workspaces[0].metadata;
+  const postBoot = await import("../server/supervise.ts?worker-completion-restart");
+  postBoot.markBootCheckDone();
+  const recovery = { ...deps, nowMs: NOW + MIN, settings: { enabled: true } };
+  const registerWrites = () => restarted.calls.filter(([kind, , patch]) => kind === "workspace.setMetadata" && patch[WORKERS_KEY]).length;
+  const before = registerWrites();
+  assert.equal((await postBoot.flushAllScopes(reopened, recovery))[0].flushed, true);
+  assert.equal(after[AGENTS_KEY][steer.id].action.phase, "done");
+  assert.equal(after[WORKERS_KEY][workerId].lastWakeAt, at(NOW));
+  assert.equal(registerWrites(), before);
+  assert.deepEqual(await postBoot.flushAllScopes(reopened, recovery), []);
+  assert.equal(sendsTo(restarted, steer.id).length, 1);
+});
+
+test("a sweep finishes a rewound worker wake after restart and delivers its queued brief once", async (t) => {
+  const { client: initialClient, ws, steer, workerId, world, deps } = deliveryFixture({ provider: "codex", minutesIdle: 31 });
+  let rewinds = 0;
+  let clock = NOW;
+  t.mock.method(Date, "now", () => clock);
+  const lock = (_name, fn) => {
+    if (rewinds) {
+      clock = NOW + 2500;
+      throw new LockBusy("turn metadata owns the workspace lock");
+    }
+    return noLock(_name, fn);
+  };
+  const rewindClient = async () => ({
+    fetchAgentTimeline: async () => ({ entries: [{ item: { type: "user_message", messageId: "first" } }] }),
+    rewindAgent: async () => { rewinds++; },
+  });
+  const queued = await deliverSteer(initialClient, {
+    workspaceId: ws.id, agentId: steer.id, epoch: 3, text: "Worker finished",
+    batch: { workspaceId: ws.id, epoch: 3, events: [{ workerId, state: "done" }] },
+  }, { lock, rewindClient, now: () => at(NOW), buildBrief: deps.buildBrief });
+  assert.match(queued.detail, /Context rewound.*confirmation is still pending/);
+  assert.equal(ws.metadata[AGENTS_KEY][steer.id].action.phase, "renewing");
+  assert.equal(sendsTo(world, steer.id).length, 0);
+  const restarted = structuredClone(world);
+  const client = fakeClient(restarted);
+  const after = restarted.workspaces[0].metadata;
+  const boot = await import("../server/supervise.ts?auto-rewind-restart");
+  const recoveryDeps = { ...deps, settings: { enabled: true }, delivery: { lock: noLock, rewindClient } };
+  boot.markBootCheckDone();
+  assert.equal((await boot.flushAllScopes(client, recoveryDeps))[0].flushed, true);
+  assert.equal(after[AGENTS_KEY][steer.id].action.phase, "done");
+  assert.equal(after[AGENTS_KEY][steer.id].action.facts.refreshed.messageId, "first");
+  assert.equal(after[WORKERS_KEY][workerId].pendingWake, null);
+  assert.equal(sendsTo(restarted, steer.id).length, 1);
+  assert.deepEqual(await boot.flushAllScopes(client, recoveryDeps), []);
+  assert.equal(rewinds, 1);
+  assert.equal(sendsTo(restarted, steer.id).length, 1);
 });
 
 test("a reserved switch retains the cold-context decision after recovery", async () => {

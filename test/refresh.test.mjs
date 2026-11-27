@@ -831,6 +831,40 @@ test('a lost response from the old executor replays its completed creation and r
   assert.equal(world.agents.at(-1).id, retried.agentId);
 });
 
+test('active Fresh settles a completed creation receipt on the next apply after restart', async () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  const client = fakeClient(world);
+  const originalRef = client.workspaces.ref;
+  client.workspaces.ref = (id) => {
+    const workspace = originalRef(id);
+    return { ...workspace, setMetadata: async (patch) => {
+      if (patch[METADATA_KEY]?.activeAgentId) throw new Error('authority write interrupted');
+      return workspace.setMetadata(patch);
+    } };
+  };
+  const options = { config: CONFIG, apply: true, notifyPrevious: false, lock: testLock, language: 'en' };
+  await assert.rejects(freshSteer({ ...options, client, discovery: discoveryOf(world), lookupReceipt: fakeLookup(world) }), /authority write interrupted/);
+  const creation = ws.metadata[AGENTS_KEY][steers.A.id].freshCreation;
+  const key = creation.op.params.idempotencyKey;
+  const created = world.receipts.get(key);
+  assert.equal(world.agents.length, 3);
+  assert.equal(ws.metadata[METADATA_KEY].epoch, 1);
+
+  const restarted = structuredClone(world);
+  const { freshSteer: reloadedFresh } = await import('../plugin/server/core/steer.mjs?fresh-create-restart');
+  const resume = () => reloadedFresh({ ...options, client: fakeClient(restarted), discovery: discoveryOf(restarted),
+    lookupReceipt: fakeLookup(restarted), paseoCli: fakePaseoCli(restarted) });
+  const recovered = await resume();
+  assert.equal(recovered.to, created);
+  assert.equal(recovered.reused, true);
+  assert.equal(recovered.delivered, true);
+  assert.equal(restarted.workspaces[0].metadata[METADATA_KEY].epoch, 2);
+  assert.equal(restarted.agents.length, 3);
+  assert.ok(restarted.calls.filter(([kind]) => kind === 'agent.create').every(([, request]) => request.idempotencyKey === key));
+  assert.equal(restarted.calls.filter(([kind]) => kind === 'agent.send').length, 1);
+});
+
 test('a failed receipt confirmation reuses the same unpinned agent on a later retry', async () => {
   const world = makeWorld();
   const { ws } = provisioned(world);

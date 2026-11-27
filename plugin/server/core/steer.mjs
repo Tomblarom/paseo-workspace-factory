@@ -27,7 +27,7 @@ import { CHECKPOINT_NEXT_TEXT, WORKERS_KEY, checkpointNextStep, clipTask, collec
 import { QUOTA_DEFAULTS, formatQuotaLine } from './quota.mjs';
 import { readRewindPoint, rewindAndBrief } from './rewind.mjs';
 import { findingsPassage } from './findings.mjs';
-import { readSteerAction, readCleanupAction, actionEntry, newSteerAction, reconcileSteerSend, unsettledAccountMove } from './steer-action.mjs';
+import { readSteerAction, readStagedSteerBrief, readCleanupAction, readEffectReceipt, effectReceiptKey, actionEntry, newSteerAction, reconcileSteerSend, unsettledAccountMove } from './steer-action.mjs';
 import { actionFact } from './action-facts.mjs';
 import { freshCreationRoute, freshLiveRoute } from './fresh-route.mjs';
 import { routeMatchesIntent } from './routing.mjs';
@@ -590,6 +590,34 @@ export function buildRewindRecord({ checkpoint = null, messageId = null, briefMe
   };
 }
 
+export async function settleRewindReceipt({ client, workspaceId, agentId, actionId, lock }) {
+  return updateAgentEntry({ client, workspaceId, agentId, lock, clearMetadataKey: effectReceiptKey(actionId), patch: (entry, metadata) => {
+    const action = readSteerAction(entry);
+    if (action?.wakeId !== actionId) return null;
+    const receipt = readEffectReceipt(metadata, action);
+    if (receipt?.kind !== 'rewind') return null;
+    const manual = action.kind === 'rewind' && ['rewinding', 'uncertain'].includes(action.phase);
+    if (!manual && (action.renewal !== 'rewind' || !action.rewindAttempt || !['renewing', 'blocked'].includes(action.phase))) return null;
+    const { previousAction: _previous, rewindAttempt: _attempt, lastError: _error, ...current } = action;
+    const { at, messageId, briefMessageId, sendError, checkpointAt, note, stage } = receipt;
+    const scope = metadata[METADATA_KEY];
+    const epoch = scope?.epoch ?? null;
+    const staged = stage && scope && !scope.retired && epoch === current.epoch;
+    const next = staged ? {
+      ...newSteerAction({ kind: 'stage', id: actionId, epoch, at, text: current.packet, phase: 'staged' }),
+      at, stageKind: 'fresh',
+    } : manual ? {
+      ...current, phase: 'done', messageId, briefMessageId, ...(sendError ? { sendError } : {}),
+    } : { ...current, phase: 'ready' };
+    return {
+      action: next,
+      ...buildRewindRecord({ checkpoint: { capturedAt: checkpointAt }, messageId, briefMessageId, now: () => new Date(at) }),
+      ...(note ? { note, noteAt: checkpointAt ?? null } : {}),
+      ...(staged ? { stagedBrief: null } : {}),
+    };
+  } });
+}
+
 /** Hard budget for the resume brief: ≤6000 chars (~1.5k tokens), enforced. */
 export const BRIEF_BUDGET = 6000;
 const BRIEF_WORKERS_SHOWN = 8;
@@ -1109,9 +1137,10 @@ function rewindFallbackWarning(fromId, outcomeStatus) {
  * outcome, no new agent); anything but `rewound` means the caller falls back
  * to the new-agent path. A landed rewind is recorded even when the brief send
  * failed (the rewind stands; resend the packet manually). With `send: false`
- * the rewind lands without a brief (stage-only: the caller stages the packet).
+ * the rewind lands without sending a brief. Stage-only RPCs save the packet
+ * in the same write that settles the rewind.
  */
-async function runTabRewind({ client, workspaceId, agentId, packet, checkpoint, lock, now, rewindClient, previousBriefId, checkPrivacy, send = true, note = null, authority = null, confirmRewind = null }) {
+async function runTabRewind({ client, workspaceId, agentId, packet, checkpoint, lock, now, rewindClient, previousBriefId, checkPrivacy, send = true, stageRewind = false, note = null, authority = null, confirmRewind = null }) {
   const workspace = client.workspaces.ref(workspaceId);
   const actionId = crypto.randomUUID();
   const action = await lock(workspaceLockName(workspaceId), async (held) => {
@@ -1126,14 +1155,17 @@ async function runTabRewind({ client, workspaceId, agentId, packet, checkpoint, 
     if (readCleanupAction(entry) || (previous && !['done', 'staged'].includes(previous.phase))) {
       throw new SwitchRefused('An existing agent action needs reconciliation before rewind');
     }
-    const reserved = { kind: 'rewind', wakeId: actionId, phase: 'rewinding', queuedAt: now().toISOString(), packet, previousBriefId: previousBriefId ?? null, previousAction: previous };
+    const epoch = metadata[METADATA_KEY]?.epoch ?? null;
+    const staged = readStagedSteerBrief(entry);
+    if (stageRewind && staged?.epoch === epoch && staged.composerClaim) throw new SwitchRefused('A brief transfer to the composer is already pending');
+    const reserved = { kind: 'rewind', wakeId: actionId, phase: 'rewinding', queuedAt: now().toISOString(), epoch, packet, previousBriefId: previousBriefId ?? null, previousAction: previous };
     held.verify();
     await workspace.setMetadata({ [AGENTS_KEY]: { ...agents, [agentId]: actionEntry(entry, reserved) } });
     return reserved;
   });
   let privacyError;
   const outcome = await rewindAndBrief(agentId, packet, {
-    createClient: rewindClient, previousBriefId, skipBrief: !send,
+    createClient: rewindClient, previousBriefId, skipBrief: !send, messageId: actionId,
     beforeRewind: async (point) => {
       try {
         await checkPrivacy(agentId);
@@ -1146,28 +1178,26 @@ async function runTabRewind({ client, workspaceId, agentId, packet, checkpoint, 
     },
     beforeBrief: () => checkPrivacy(agentId),
   });
-  const settle = () => updateAgentEntry({ client, workspaceId, agentId, lock, patch: (entry) => {
+  if (outcome.status === 'rewound') {
+    const receipt = { kind: 'rewind', at: now().toISOString(), messageId: outcome.messageId,
+      briefMessageId: outcome.briefMessageId ?? null, ...(outcome.sendError ? { sendError: outcome.sendError } : {}),
+      checkpointAt: checkpoint?.capturedAt ?? checkpoint?.updatedAt ?? null, note, stage: stageRewind };
+    try {
+      await workspace.setMetadata({ [effectReceiptKey(actionId)]: receipt });
+      const entry = await retryOnLockBusy(() => settleRewindReceipt({ client, workspaceId, agentId, actionId, lock }));
+      if (entry?.action?.wakeId !== actionId) throw new SwitchRefused('Rewind action changed while running; outcome needs attention');
+      return { outcome, ...(entry.action.phase === 'staged' ? { stageId: actionId } : {}) };
+    } catch (error) {
+      return { outcome, recordingError: `Rewind applied. Factory could not confirm its record (${error.message}).` };
+    }
+  }
+  await retryOnLockBusy(() => updateAgentEntry({ client, workspaceId, agentId, lock, patch: (entry) => {
     if (entry?.action?.wakeId !== actionId) throw new SwitchRefused('Rewind action changed while running; outcome needs attention');
     const preDispatch = ['no-point', 'no-op', 'unsupported', 'unavailable', 'deferred'].includes(outcome.status);
     if (preDispatch) return { action: action.previousAction ?? null };
     const { previousAction: _dropped, ...attempt } = action;
-    if (outcome.status !== 'rewound') {
-      return { action: { ...attempt, phase: 'uncertain', lastError: outcome.error ?? 'Rewind outcome could not be confirmed' } };
-    }
-    return {
-      action: { ...attempt, phase: 'done', messageId: outcome.messageId, briefMessageId: outcome.briefMessageId, ...(outcome.sendError ? { sendError: outcome.sendError } : {}) },
-      ...buildRewindRecord({ checkpoint, messageId: outcome.messageId, briefMessageId: outcome.briefMessageId, now }),
-      ...(note ? { note, noteAt: checkpoint?.capturedAt ?? null } : {}),
-    };
-  } });
-  // Retry the journal write only. The native rewind and any send already ran.
-  try {
-    await retryOnLockBusy(settle);
-  } catch (error) {
-    if (outcome.status !== 'rewound') throw error;
-    const detail = error instanceof Error ? error.message : String(error);
-    return { outcome, recordingError: `Rewind applied. Factory could not confirm its record (${detail}).` };
-  }
+    return { action: { ...attempt, phase: 'uncertain', lastError: outcome.error ?? 'Rewind outcome could not be confirmed' } };
+  } }));
   if (privacyError) throw privacyError;
   if (outcome.status === 'failed') {
     const error = new SwitchRefused(`Rewind of ${agentId} has an uncertain outcome (${outcome.error ?? 'unknown error'}); inspect the agent before recovery`);
@@ -1201,7 +1231,7 @@ async function rewindIdentity({ client, status, expected, from, slot, checkpoint
  * a failed rewind throws instead of falling back (the packet travels on the
  * error for the caller to keep); the preview path still reports fallback.
  */
-async function tryActiveRewind({ client, discovery, status, expected, slot, from, config = null, apply, send = true, language, git, lock, now, workerModel, rewindClient, checkPrivacy, requireRefreshMode = null, promptOptions, callerId = null, confirmPreview, intent }) {
+async function tryActiveRewind({ client, discovery, status, expected, slot, from, config = null, apply, send = true, stageRewind = false, language, git, lock, now, workerModel, rewindClient, checkPrivacy, requireRefreshMode = null, promptOptions, callerId = null, confirmPreview, intent }) {
   const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;
   const entry = agentState?.[from.id] ?? null;
   const previousBriefId = actionFact(entry, 'refreshed')?.briefMessageId;
@@ -1250,7 +1280,7 @@ async function tryActiveRewind({ client, discovery, status, expected, slot, from
     note: entry?.note ?? null, noteAt: entry?.noteAt ?? null,
     lastMessage: await hintOf(client, from.id), language, workerModel, rewound: true, promptOptions,
   });
-  const { outcome, recordingError } = await runTabRewind({ client, workspaceId: status.workspace.id, agentId: from.id, packet, checkpoint: status.checkpoint, lock, now, rewindClient, previousBriefId, send, checkPrivacy, confirmRewind,
+  const { outcome, recordingError, stageId } = await runTabRewind({ client, workspaceId: status.workspace.id, agentId: from.id, packet, checkpoint: status.checkpoint, lock, now, rewindClient, previousBriefId, send, stageRewind, checkPrivacy, confirmRewind,
     authority: { scopeId: expected.scope?.id ?? status.repo, epoch: expected.epoch, aliases: discoveryScopeAliases(discovery), callerId, config } });
   if (outcome.status !== 'rewound') {
     if (requireRefreshMode === 'rewind') {
@@ -1268,7 +1298,7 @@ async function tryActiveRewind({ client, discovery, status, expected, slot, from
     previousNotified: false, reused: false, renameError: null,
     warnings: [], fallbackFrom: null, profileSuggestion: null, refreshMode: 'rewind',
     rewindPoint: outcome.messageId ?? null, briefMessageId: outcome.briefMessageId ?? null,
-    ...(recordingError ? { recordingError } : {}),
+    ...(recordingError ? { recordingError } : {}), ...(stageId ? { stageId } : {}),
   };
 }
 
@@ -1572,7 +1602,7 @@ async function replacementFresh({ client, discovery, config, status, expected, k
  * key under the workspace lock. Only active replacement advances the epoch.
  * `send: false` leaves the brief for the caller to stage or deliver.
  */
-export async function freshSteer({ client, discovery, config, apply = false, send = true, notifyPrevious = true, slot: slotArg = null, workerId = null, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, now = () => new Date(), workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, quotaExhaustedPct = config?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct, zerosub = null, paseoCli = null, rewindClient = null, requireRefreshMode = null, promptOptions, callerId = null, admitTarget = null, provider = null, model = null, confirmPreview = null, readPolicy = null, repoPublic = discoveredRepoPublic(discovery) }) {
+export async function freshSteer({ client, discovery, config, apply = false, send = true, stageRewind = false, notifyPrevious = true, slot: slotArg = null, workerId = null, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, now = () => new Date(), workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, quotaExhaustedPct = config?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct, zerosub = null, paseoCli = null, rewindClient = null, requireRefreshMode = null, promptOptions, callerId = null, admitTarget = null, provider = null, model = null, confirmPreview = null, readPolicy = null, repoPublic = discoveredRepoPublic(discovery) }) {
   const status = steerStatus(discovery, { config });
   if (!status.workspace || !status.state) throw new SwitchRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
@@ -1594,7 +1624,7 @@ export async function freshSteer({ client, discovery, config, apply = false, sen
     !!freshSourceRecord(discovery.mainWorkspace?.metadata, sources, kind, expected, slot, slot === expected.activeSteer);
   const tryRewind = (source, sources, kind, slot = null) => typeof rewindClient === 'function' && source &&
     requireRefreshMode !== 'new-agent' && !hasPending(sources, kind, slot);
-  const rewindArgs = { client, discovery, status, expected, config, apply, send, language, git, lock, now,
+  const rewindArgs = { client, discovery, status, expected, config, apply, send, stageRewind, language, git, lock, now,
     workerModel, rewindClient, checkPrivacy, requireRefreshMode, promptOptions, confirmPreview, intent };
   const target = wantSlot ? String(slotArg).trim().toUpperCase() : expected.activeSteer;
   if (!wantWorker && !/^[A-Z]$/.test(target ?? '')) throw new SwitchRefused(`Not a steer slot: ${JSON.stringify(slotArg)}`);
@@ -1667,7 +1697,7 @@ export async function freshSteer({ client, discovery, config, apply = false, sen
  * must continue with the new-agent path. `packetArgs` carries the
  * kind-specific buildRefreshPacket fields (slot or owner/title).
  */
-async function tryTabRewind({ client, discovery, status, expected, from, kind, packetArgs, apply, send = true, language, git, lock, now, workerModel, rewindClient, checkPrivacy, requireRefreshMode = null, resultBase, promptOptions, confirmPreview, intent }) {
+async function tryTabRewind({ client, discovery, status, expected, from, kind, packetArgs, apply, send = true, stageRewind = false, language, git, lock, now, workerModel, rewindClient, checkPrivacy, requireRefreshMode = null, resultBase, promptOptions, confirmPreview, intent }) {
   const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;
   const entry = agentState?.[from.id] ?? null;
   const previousBriefId = actionFact(entry, 'refreshed')?.briefMessageId;
@@ -1717,7 +1747,7 @@ async function tryTabRewind({ client, discovery, status, expected, from, kind, p
   const packet = await packetOf();
   const savedCheckpoint = kind === 'worker' ? { capturedAt: entry?.noteAt } : status.checkpoint;
   const block = kind === 'worker' ? parseCheckpointBlock(packet) : null;
-  const { outcome, recordingError } = await runTabRewind({ client, workspaceId: status.workspace.id, agentId: from.id, packet, checkpoint: savedCheckpoint, lock, now, rewindClient, previousBriefId, send, checkPrivacy, confirmRewind, note: block ? formatCheckpointBlock(block) : null });
+  const { outcome, recordingError, stageId } = await runTabRewind({ client, workspaceId: status.workspace.id, agentId: from.id, packet, checkpoint: savedCheckpoint, lock, now, rewindClient, previousBriefId, send, stageRewind: stageRewind && kind === 'steer', checkPrivacy, confirmRewind, note: block ? formatCheckpointBlock(block) : null });
   if (outcome.status !== 'rewound') {
     if (requireRefreshMode === 'rewind') {
       const error = new SwitchRefused(`Bound rewind route failed (${outcome.status}${outcome.error ? `: ${outcome.error}` : ''}); nothing sent, nothing recorded, no new agent created. The brief is kept.`);
@@ -1734,7 +1764,7 @@ async function tryTabRewind({ client, discovery, status, expected, from, kind, p
     previousNotified: false, reused: false, renameError: null,
     warnings: [], fallbackFrom: null, profileSuggestion: null, refreshMode: 'rewind',
     rewindPoint: outcome.messageId ?? null, briefMessageId: outcome.briefMessageId ?? null,
-    ...(recordingError ? { recordingError } : {}),
+    ...(recordingError ? { recordingError } : {}), ...(stageId ? { stageId } : {}),
   };
 }
 

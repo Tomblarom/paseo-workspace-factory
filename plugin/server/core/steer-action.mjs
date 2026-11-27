@@ -35,6 +35,16 @@ export function readCleanupAction(entry) {
   return entry?.action?.cleanup ?? null;
 }
 
+// Paseo patches top-level metadata keys independently. Acknowledgements can
+// be stored even while the Factory lock for the shared agent map is held.
+export function effectReceiptKey(actionId) {
+  return `${METADATA_KEY}.effect.${actionId}`;
+}
+
+export function readEffectReceipt(metadata, action) {
+  return action?.wakeId ? metadata[effectReceiptKey(action.wakeId)] : null;
+}
+
 /** @param {any} input @returns {any} */
 export function newSteerAction(input) {
   const { kind = 'delivery', epoch = null, at = new Date().toISOString(), text, options, batch, note, renewal = 'send', phase = 'ready', id = randomUUID() } = input;
@@ -54,6 +64,13 @@ export async function reconcileSteerSend({ client, workspaceId, agentId, actionI
     const action = readSteerAction(entries[agentId]);
     if (!action || action.wakeId !== actionId) return { status: 'missing' };
     if (action.phase === 'sent' || action.phase === 'done') return { status: 'sent', action };
+    const receipt = readEffectReceipt(meta, action);
+    if (receipt?.kind === 'send') {
+      const sent = { ...action, phase: 'sent', observedAt: receipt.at };
+      held.verify();
+      await workspace.setMetadata({ [AGENTS_KEY]: { ...entries, [agentId]: actionEntry(entries[agentId], sent) }, [effectReceiptKey(actionId)]: null });
+      return { status: 'sent', action: sent };
+    }
     if (unsettledAccountMove(action)) return { status: 'pending', action, detail: 'Account move needs reconciliation before delivery.' };
     if (action.accountMove?.resolution === 'replan' && !admittedAccountMoveReplan(action)) {
       return { status: 'pending', action, detail: 'Delivery needs a new route after the account move.' };
@@ -88,6 +105,8 @@ export async function reconcileSteerSend({ client, workspaceId, agentId, actionI
     }).catch(() => {});
     return { status: 'uncertain', action: claim.action, detail };
   }
+  const observedAt = now();
+  await workspace.setMetadata({ [effectReceiptKey(actionId)]: { kind: 'send', at: observedAt } });
   try {
     return await retryOnLockBusy(() => lock(workspaceLockName(workspaceId), async (held) => {
       const current = (await workspace.refresh())?.metadata ?? {};
@@ -95,9 +114,9 @@ export async function reconcileSteerSend({ client, workspaceId, agentId, actionI
       const action = readSteerAction(entries[agentId]);
       if (action?.wakeId !== actionId) return { status: 'uncertain', action: claim.action, detail: 'Delivery accepted but its record changed.' };
       if (action.phase === 'done' || action.phase === 'sent') return { status: 'sent', action };
-      const sent = { ...action, phase: 'sent', observedAt: now() };
+      const sent = { ...action, phase: 'sent', observedAt };
       held.verify();
-      await workspace.setMetadata({ [AGENTS_KEY]: { ...entries, [agentId]: actionEntry(entries[agentId], sent) } });
+      await workspace.setMetadata({ [AGENTS_KEY]: { ...entries, [agentId]: actionEntry(entries[agentId], sent) }, [effectReceiptKey(actionId)]: null });
       return { status: 'sent', action: sent };
     }));
   } catch (error) {

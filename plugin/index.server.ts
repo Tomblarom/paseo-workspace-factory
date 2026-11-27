@@ -186,8 +186,14 @@ export default function contribute(server: PluginServerContext) {
   server.handle(factoryPlan, (input, ctx) => getPlan(input, ctx, loader));
   server.handle(factoryWorkspaceActivity, getWorkspaceActivity);
   server.handle(factorySwitchPreview, (input, ctx) => previewSwitch(input, ctx, loader));
-  server.handle(factorySwitch, (input, ctx) => applySwitch(input, ctx, loader, delivery));
-  server.handle(factorySteerDelivery, (input, { paseo }) => deliverSteer(paseo, input, delivery));
+  server.handle(factorySwitch, (input, ctx) => {
+    bootOnce(ctx.paseo);
+    return applySwitch(input, ctx, loader, delivery);
+  });
+  server.handle(factorySteerDelivery, (input, { paseo }) => {
+    bootOnce(paseo);
+    return deliverSteer(paseo, input, delivery);
+  });
   server.handle(factoryCheckpointPreview, (input, ctx) => previewCheckpoint(input, ctx, loader));
   server.handle(factoryCheckpoint, (input, ctx) => writeCheckpointRpc(input, ctx, loader));
   server.handle(factoryApply, (input, ctx) => applyPlan(input, ctx, loader));
@@ -202,7 +208,10 @@ export default function contribute(server: PluginServerContext) {
     return getResume(input, ctx, loader, { getZerosub });
   });
   server.handle(factoryFreshPreview, (input, ctx) => previewFresh(input, ctx, loader, delivery));
-  server.handle(factoryFresh, (input, ctx) => applyFresh(input, ctx, loader, delivery));
+  server.handle(factoryFresh, (input, ctx) => {
+    bootOnce(ctx.paseo);
+    return applyFresh(input, ctx, loader, delivery);
+  });
   server.handle(factoryHistoryOpen, openHistory);
   server.handle(factoryWorkers, (input, ctx) => getWorkers(input, ctx, loader));
   server.handle(factoryModelsCatalog, getModelsCatalog);
@@ -349,7 +358,7 @@ export default function contribute(server: PluginServerContext) {
     return { ...request, appendSystemPrompt: [...(request.appendSystemPrompt ?? []), rendered] };
   });
   const stopCleanupTimer = startCleanupTimer({ readSettings, getZerosub, getQuotaSettings: readQuotaSettings, keepChatHistory: delivery.keepChatHistory });
-  const stopSupervisionTimer = startSupervisionTimer({ getSettings: readSupervision, getConfig: () => loader.loadEffectiveConfig(), delivery, getZerosub, buildBrief: buildResumeBrief });
+  const stopSupervisionTimer = startSupervisionTimer({ ensureBoot: bootOnce, getSettings: readSupervision, getConfig: () => loader.loadEffectiveConfig(), delivery, getZerosub, buildBrief: buildResumeBrief });
   const stopQuotaTimer = startQuotaTimer({ getSettings: readQuotaSettings });
   return () => {
     removeTurnBefore();

@@ -212,8 +212,8 @@ test("activation records the new open turn and settles transient contention afte
   assert.equal(sends, 1);
 });
 
-test("activation reports a confirmed send when its receipt lock stays busy", async (t) => {
-  const { workspace, target, paseo, activate } = activationWorld();
+test("the next activation RPC after restart settles a confirmed send without repeating it", async (t) => {
+  const { world, workspace, target, paseo, activate } = activationWorld();
   const started = Date.now();
   let blocked = false;
   let time = started;
@@ -240,9 +240,21 @@ test("activation reports a confirmed send when its receipt lock stays busy", asy
   const pending = workspace.metadata[AGENTS_KEY][target.id].action;
   assert.equal(pending.phase, "uncertain");
   assert.equal(pending.wakeId, messageIds[0]);
-  blocked = false;
-  assert.equal((await activate(target.id, 3, workspace.id, { lock })).status, "sent");
-  assert.deepEqual(messageIds, [pending.wakeId, pending.wakeId]);
+  const restarted = structuredClone(world);
+  const connection = fakePaseo(restarted);
+  const restartedRef = connection.agents.ref;
+  connection.agents.ref = (id) => ({
+    ...restartedRef(id),
+    async send(_text, { messageId }) { messageIds.push(messageId); },
+  });
+  const reloaded = await import("../server/handlers.ts?activation-restart");
+  const retry = () => reloaded.activateSteer({ workspaceId: workspace.id, agentId: target.id, epoch: 3 }, { paseo: connection }, loader,
+    { lock: withLock, getZerosub: async () => null });
+  assert.equal((await retry()).status, "sent");
+  assert.equal((await retry()).status, "sent");
+  assert.equal(restarted.workspaces[0].metadata[AGENTS_KEY][target.id].action.phase, "done");
+  assert.equal(restarted.workspaces[0].metadata[METADATA_KEY].epoch, 4);
+  assert.deepEqual(messageIds, [pending.wakeId]);
 });
 
 test("own-tab activation retries a lost delivery receipt with the same target, epoch, packet and message ID", async () => {
@@ -596,35 +608,59 @@ test("Fresh retries journal contention after rewind and returns the staged resul
   assert.deepEqual(world.sent, []);
 });
 
-test("Fresh reports an applied rewind if its journal cannot be settled", async () => {
-  const world = makeWorld();
-  const [workspace] = world.workspaces;
-  const [active] = world.agents;
-  const paseo = fakePaseo(world);
-  let rewinds = 0;
-  const deps = {
-    lock: async (_name, run) => {
-      if (rewinds) throw new Error("Factory journal unavailable");
-      return run({ verify() {} });
-    },
-    rewindClient: async () => ({
-      fetchAgentTimeline: async () => ({ entries: [{ item: { type: "user_message", messageId: "point" } }] }),
-      rewindAgent: async () => { rewinds++; },
-    }),
-  };
-  const preview = await handlers.previewFresh({ workspaceId: MAIN }, { paseo }, loader, deps);
-  const result = await handlers.applyFresh({ workspaceId: MAIN, fingerprint: preview.fingerprint, deliver: "stage" },
-    { paseo }, loader, deps);
-  assert.equal(rewinds, 1);
-  assert.equal(result.applied, true);
-  assert.equal(result.refreshMode, "rewind");
-  assert.equal(result.staged, false);
-  assert.match(result.stagingError, /Rewind applied.*Factory journal unavailable/);
-  assert.equal(workspace.metadata[AGENTS_KEY][active.id].action.phase, "rewinding");
-  assert.equal(world.agents.length, 3);
-});
+for (const deliver of ["stage", "send"]) {
+  test(`post-boot settles a Fresh rewind after restart with delivery set to ${deliver}`, async () => {
+    const world = makeWorld();
+    const [workspace] = world.workspaces;
+    const [active] = world.agents;
+    const paseo = fakePaseo(world);
+    let rewinds = 0;
+    const deps = {
+      lock: async (_name, run) => {
+        if (rewinds) throw new Error("Factory journal unavailable");
+        return run({ verify() {} });
+      },
+      rewindClient: async () => ({
+        fetchAgentTimeline: async () => ({ entries: [{ item: { type: "user_message", messageId: "point" } }] }),
+        rewindAgent: async () => { rewinds++; },
+        sendMessage: async (id, text, options) => { world.sent.push([id, text, options]); },
+      }),
+    };
+    const preview = await handlers.previewFresh({ workspaceId: MAIN }, { paseo }, loader, deps);
+    const result = await handlers.applyFresh({ workspaceId: MAIN, fingerprint: preview.fingerprint, deliver },
+      { paseo }, loader, deps);
+    assert.equal(rewinds, 1);
+    assert.equal(result.applied, true);
+    assert.equal(result.refreshMode, "rewind");
+    assert.equal(result.staged, false);
+    assert.equal(result.delivered, deliver === "send");
+    assert.match(result.stagingError, /Rewind applied.*Factory journal unavailable/);
+    assert.equal(workspace.metadata[AGENTS_KEY][active.id].action.phase, "rewinding");
+    const restarted = structuredClone(world);
+    const postBoot = await import(`../server/supervise.ts?fresh-tab-restart-${deliver}`);
+    const boot = await import(`../server/boot-check.ts?fresh-tab-restart-${deliver}`);
+    assert.equal(postBoot.isBootCheckDone(), false);
+    const recovery = { settings: { enabled: false }, delivery: { lock: withLock, rewindClient: deps.rewindClient } };
+    const connection = fakePaseo(restarted);
+    const marks = await boot.ensureBootChecked(connection, {
+      getDaemonStartedAt: async () => new Date(Date.now() + 1000).toISOString(), log: () => {},
+    });
+    assert.ok(Array.isArray(marks));
+    assert.equal(restarted.workspaces[0].metadata[AGENTS_KEY][active.id].action.phase, "rewinding");
+    await postBoot.runBootFinished(connection, marks, recovery);
+    const action = restarted.workspaces[0].metadata[AGENTS_KEY][active.id].action;
+    assert.equal(action.phase, deliver === "stage" ? "staged" : "done");
+    assert.equal(action.facts.refreshed.messageId, "point");
+    assert.match(action.packet, /Steer refresh/);
+    assert.deepEqual(await postBoot.flushAllScopes(connection, recovery), []);
+    assert.equal(rewinds, 1);
+    assert.equal(restarted.agents.length, 3);
+    assert.equal(restarted.sent.length, deliver === "send" ? 1 : 0);
+    if (deliver === "send") assert.equal(action.facts.refreshed.briefMessageId, restarted.sent[0][2].messageId);
+  });
+}
 
-test("Fresh retries staging contention after the rewind journal has settled", async () => {
+test("Fresh settles the rewind and stage together after workspace contention", async () => {
   const world = makeWorld();
   const [workspace] = world.workspaces;
   const [active] = world.agents;
@@ -633,7 +669,7 @@ test("Fresh retries staging contention after the rewind journal has settled", as
   let contended = false;
   const deps = {
     lock: (name, run) => {
-      if (!contended && workspace.metadata[AGENTS_KEY]?.[active.id]?.action?.phase === "done") {
+      if (!contended && rewinds) {
         contended = true;
         throw new LockBusy("assignment recovery owns the lock");
       }
@@ -652,6 +688,7 @@ test("Fresh retries staging contention after the rewind journal has settled", as
   assert.equal(result.staged, true);
   assert.equal(result.stageId, workspace.metadata[AGENTS_KEY][active.id].action.wakeId);
   assert.equal(result.stagingError, null);
+  assert.equal(contended, true);
   assert.equal(rewinds, 1);
   assert.equal(world.agents.length, 3);
 });

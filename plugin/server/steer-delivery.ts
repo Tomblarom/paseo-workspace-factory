@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as wait } from "node:timers/promises";
 import type { PaseoAgentTimelineHandle, PaseoAgentTimelineSubscription } from "@getpaseo/client";
 import { AGENTS_KEY } from "./core/agent-state.mjs";
-import { readSteerAction, readCleanupAction, unsettledAccountMove, admittedAccountMoveReplan, actionEntry, newSteerAction, reconcileSteerSend } from "./core/steer-action.mjs";
+import { readSteerAction, readCleanupAction, readEffectReceipt, effectReceiptKey, unsettledAccountMove, admittedAccountMoveReplan, actionEntry, newSteerAction, reconcileSteerSend } from "./core/steer-action.mjs";
 import { reconcileSteerAccountMove } from "./core/steer-account-move.mjs";
 import { actionFact, mergeActionFacts } from "./core/action-facts.mjs";
 import { LockBusy, retryOnLockBusy, withLock, workspaceLockName } from "./core/lock.mjs";
@@ -12,7 +12,7 @@ import { ASSIGNMENT_KEY } from "./core/assign.mjs";
 import { resolveContinuations, resolveFactoryLabels } from "./core/zerosub.mjs";
 import { defaultCreateRewindClient, rewindAndBrief } from "./core/rewind.mjs";
 import { listScopes, sameScopeId } from "./core/scope.mjs";
-import { buildRewindRecord } from "./core/steer.mjs";
+import { reconcileFreshDelivery, requireFreshPrivacy, settleRewindReceipt } from "./core/steer.mjs";
 import { WORKERS_KEY, formatWakeMessage, markWakeSent, updateWorkerEntry } from "./core/supervision.mjs";
 import { runCleanup } from "./cold-sweep.js";
 import { AgentBusyError, hasActiveAgentWork } from "./agent-context.js";
@@ -116,9 +116,6 @@ const markWorker = updateWorkerEntry as unknown as (args: {
   client: any; workspaceId: string; workerId: string; lock: Lock;
   patch: (worker: any, metadata: any) => Record<string, unknown> | null;
 }) => Promise<any>;
-const rewindRecord = buildRewindRecord as unknown as (
-  args: { messageId?: string; now: () => Date }
-) => Record<string, unknown>;
 const markSent = markWakeSent as unknown as (worker: any, options: { at: string; clearPending: boolean }) => any;
 const formatWorkerWake = formatWakeMessage as unknown as (args: {
   scopeId: string; epoch: number | null; events: WakeEvent[]; metadata: Record<string, unknown>;
@@ -661,9 +658,11 @@ export async function finishSteerDelivery(
   finishing.add(key);
   const lock = deps.lock ?? productionLock;
   try {
-    const meta = (await paseo.workspaces.ref(input.workspaceId).refresh())?.metadata ?? {};
+    const workspace = paseo.workspaces.ref(input.workspaceId);
+    let meta = (await workspace.refresh())?.metadata ?? {};
     let entry = meta[AGENTS_KEY]?.[input.agentId];
     const receipt = readSteerAction(entry);
+    const effect = readEffectReceipt(meta, receipt);
     if (input.actionId && receipt?.wakeId !== input.actionId) return null;
     if (input.actionId && receipt?.kind === "activate") {
       if (input.epoch !== undefined && scopeState(meta)?.epoch !== input.epoch) {
@@ -671,10 +670,39 @@ export async function finishSteerDelivery(
       }
       if (receipt.phase === "done") return { status: "sent", cleared: false, detail: "Activation continuation already delivered." };
     }
+    if (effect?.kind === "rewind") {
+      const settled = await settleRewindReceipt({ client: paseo, ...input, actionId: receipt.wakeId, lock });
+      if (settled?.action?.wakeId !== receipt.wakeId) return null;
+      if (receipt.kind === "rewind") {
+        return { status: effect.briefMessageId ? "sent" : "pending", cleared: false, renewed: true,
+          detail: settled.action.phase === "staged" ? "Context rewound and brief staged." : effect.sendError ?? "Context rewind recorded." };
+      }
+      meta = (await workspace.refresh())?.metadata ?? {};
+      entry = meta[AGENTS_KEY]?.[input.agentId];
+      if (readSteerAction(entry)?.wakeId !== receipt.wakeId) return null;
+    }
+    if (receipt?.kind === "fresh-delivery" && receipt.phase !== "done") {
+      if (receipt.phase !== "sent" && effect?.kind !== "send" &&
+          hasActiveAgentWork((await paseo.agents.ref(input.agentId).refresh())?.agent, entry)) return deferred();
+      const result = await reconcileFreshDelivery({ client: paseo, ...input, actionId: receipt.wakeId, lock,
+        checkPrivacy: (agentId: string, epoch: number) => requireFreshPrivacy({
+          client: paseo, workspaceId: input.workspaceId, scopeId: scopeState(meta)?.scope?.id, agentId, epoch,
+          admitTarget: (agent: any) => readPrivacyAdmission(agent, { ...deps, paseo }, input.workspaceId),
+        }),
+      });
+      return { status: result.status === "sent" ? "sent" : result.status === "blocked" || result.status === "missing" ? "blocked" : "pending",
+        cleared: false, renewed: true, recordingError: result.recordingError,
+        detail: result.status === "sent" ? result.recordingError ?? "Fresh brief delivered." : result.detail ?? "Fresh brief needs receipt reconciliation." };
+    }
     let pending = pendingSteerDelivery(entry);
     if (!pending) return null;
+    if (effect?.kind === "send" && pending.phase !== "sent") {
+      const recovered = await reconcileSend({ client: paseo, ...input, actionId: pending.wakeId, lock });
+      if (recovered.status !== "sent") return deferred("The delivery record changed during reconciliation.");
+      pending = recovered.action as PendingSteerDelivery;
+    }
     const cleared = pending.renewal === "clear";
-    if (pending.accountMove && stoppedAfterQueued(entry, pending)) {
+    if (pending.phase !== "sent" && pending.accountMove && stoppedAfterQueued(entry, pending)) {
       return blocked("Delivery is paused after a canceled turn.", cleared);
     }
     const targetScope = scopeState(meta);
@@ -931,7 +959,7 @@ ${pending.note}` : brief;
       }
       const batch = pending.batch;
       if (batch) {
-        const at = deps.now?.() ?? new Date().toISOString();
+        const at = sent.observedAt ?? deps.now?.() ?? new Date().toISOString();
         for (const event of batch.events) {
           await markWorker({
             client: paseo, workspaceId: batch.workspaceId, workerId: event.workerId, lock,
@@ -940,7 +968,9 @@ ${pending.note}` : brief;
               const queued = worker.pendingWake;
               const superseded = queued && (queued.state !== event.state ||
                 (event.queuedAt !== undefined ? queued.queuedAt !== event.queuedAt : Date.parse(queued.queuedAt) > Date.parse(pending.queuedAt)));
-              const marked = markSent(worker, { at, clearPending: !batch.takeover && !superseded });
+              const latestWake = worker.lastWakeAt && worker.lastWakeAt > at ? worker.lastWakeAt : at;
+              const marked = markSent(worker, { at: latestWake, clearPending: !batch.takeover && !superseded });
+              if (marked.lastWakeAt === worker.lastWakeAt && marked.pendingWake === queued) return null;
               return { lastWakeAt: marked.lastWakeAt, pendingWake: marked.pendingWake };
             },
           });
@@ -967,6 +997,9 @@ ${pending.note}` : brief;
       }
       return { status: "pending", cleared, detail: `Brief delivery is queued (${message}).` };
     }
+  } catch (error) {
+    if (!(error instanceof LockBusy)) throw error;
+    return deferred(`Factory delivery bookkeeping waits for the workspace lock (${error.message}).`);
   } finally {
     finishing.delete(key);
   }
@@ -996,7 +1029,8 @@ export async function deliverSteer(
   if (input.actionId && previous?.wakeId === input.actionId && previous.phase === "done") {
     return { status: "sent", cleared: false, detail: "Message already delivered." };
   }
-  if (previous?.phase === "sent" && (previous.wakeId === input.actionId || input.manual)) {
+  if (previous && (previous.phase === "sent" || readEffectReceipt(meta, previous)) &&
+      (previous.wakeId === input.actionId || input.manual)) {
     return (await finishSteerDelivery(paseo, input, deps)) ?? deferred();
   }
   const pendingMove = pendingSteerDelivery(entry);
@@ -1253,10 +1287,11 @@ export async function deliverSteer(
       return blocked(detail);
     }
     try {
-      await retryOnLockBusy(() => replacePending(paseo, input, lock, pending, {
-        ...rewindRecord({ messageId: outcome.messageId, now: () => new Date(deps.now?.() ?? Date.now()) }),
-        action: { ...pending, phase: "ready" },
-      }));
+      const workspace = paseo.workspaces.ref(input.workspaceId);
+      await workspace.setMetadata({ [effectReceiptKey(pending.wakeId)]: {
+        kind: "rewind", messageId: outcome.messageId, at: deps.now?.() ?? new Date().toISOString(),
+      } });
+      await retryOnLockBusy(() => settleRewindReceipt({ client: paseo, ...input, actionId: pending.wakeId, lock }));
     } catch (error) {
       if (!(error instanceof LockBusy)) throw error;
       return deferred(`Context rewound. Factory confirmation is still pending (${error.message}).`);
