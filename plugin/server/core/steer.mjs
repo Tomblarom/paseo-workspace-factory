@@ -663,7 +663,7 @@ function ageAgo(when, now) {
  * the last turn had no CHECKPOINT) enable the heuristic restart guess; without
  * them only plugin-marked interruptions are shown.
  */
-export function buildResumeBrief(status, { agentId = null, agentState = null, workerLastAnswer = null, git = null, scope = null, now = () => Date.now(), daemonStartedAt = null, lastTurnCheckpoints = null, config = null, workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, zerosub = null, promptOptions, budget = BRIEF_BUDGET, assignments = [] } = {}) {
+export function buildResumeBrief(status, { agentId = null, agentState = null, workerLastAnswer = null, git = null, scope = null, now = () => Date.now(), daemonStartedAt = null, lastTurnCheckpoints = null, config = null, workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, zerosub = null, showSteerQuota = null, promptOptions, budget = BRIEF_BUDGET, assignments = [] } = {}) {
   const id = scope?.id ?? status.repo;
   const kind = scope?.kind ?? 'unknown';
   const epoch = status.state?.epoch ?? '?';
@@ -691,8 +691,13 @@ export function buildResumeBrief(status, { agentId = null, agentState = null, wo
   if (workerModel) lines.push(workerModel);
   const findings = findingsPassage(promptOptions);
   if (findings) lines.push(findings);
-  const quotaLine = active && formatQuotaLine(config, quotaSnapshot, { agent: active, warnPct: quotaWarnPct, zerosub, now: now() });
-  if (quotaLine) lines.push(quotaLine);
+  if (showSteerQuota) {
+    const subject = agentId ? callerSteer : active;
+    if (subject && !subject.superseded) lines.push(`Quota: ${showSteerQuota(subject)}`);
+  } else {
+    const quotaLine = active && formatQuotaLine(config, quotaSnapshot, { agent: active, warnPct: quotaWarnPct, zerosub, now: now() });
+    if (quotaLine) lines.push(quotaLine);
+  }
 
   const cp = status.checkpoint;
   const agents = agentState && typeof agentState === 'object' ? agentState : {};

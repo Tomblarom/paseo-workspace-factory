@@ -314,15 +314,16 @@ function windowPctOf(window) {
   return quotaPct(window) ?? (window?.remainingPct != null && Number.isFinite(Number(window.remainingPct)) ? 100 - Number(window.remainingPct) : null);
 }
 
-/** Session (5h) and weekly window of one usage report; missing stays undefined. */
+/** Session and weekly windows of one usage report; missing stays undefined. */
 function selectUsageWindows(report) {
   const windows = Array.isArray(report?.windows) ? report.windows : [];
-  const session = windows.find((window) => {
-    const text = windowText(window).toLowerCase();
-    return text.includes('5h') || text.includes('5 h') || text.includes('session');
-  }) ?? windows[0];
-  const weekly = windows.find((window) => /week|7\s*d/i.test(windowText(window)));
-  return { session, weekly };
+  const fiveHours = /5[_\s-]*h|five[_\s-]*hour/i;
+  const weekly = windows.find((window) => /week|7[_\s-]*d|seven[_\s-]*day/i.test(windowText(window)));
+  const session = windows.find((window) => window !== weekly && (fiveHours.test(windowText(window)) || /session/i.test(windowText(window)))) ?? windows[0];
+  const sessionWindow = session === weekly && session ? 'weekly' :
+    fiveHours.test(windowText(session)) ? '5-hour' :
+    /session/i.test(windowText(session)) ? 'session' : null;
+  return { session, sessionWindow, weekly };
 }
 
 /** Pool key of one usage record (sourceId, else sourceLabel); '' when unknown. */
@@ -348,13 +349,14 @@ export function parseUsageJson(input) {
       pools.set(pool, null);
       continue;
     }
-    const { session, weekly } = selectUsageWindows(report);
+    const { session, sessionWindow, weekly } = selectUsageWindows(report);
     const pct = windowPctOf(session);
     const weeklyPct = windowPctOf(weekly);
     const cached = record.lastSuccessful?.report != null;
     const sampledAt = cached ? record.lastSuccessful.fetchedAt : record.fetchedAt;
     pools.set(pool, pct === null ? null : {
       sessionPct: pct,
+      ...(sessionWindow ? { sessionWindow } : {}),
       ...(typeof sampledAt === 'string' ? { sampledAt } : cached ? { sampledAt: null } : {}),
       ...(session?.resetsAt ? { resetsAt: session.resetsAt } : {}),
       ...(weeklyPct !== null ? { weeklyPct } : {}),

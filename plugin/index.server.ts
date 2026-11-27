@@ -138,6 +138,7 @@ export default function contribute(server: PluginServerContext) {
   const readQuotaSettings = () => readSupervisionSettings(supervisionSettings);
   const readResume = () => readResumeSettings(resumeSettings);
   const getZerosub = () => readZerosubStateSafe();
+  const quotaDisplay = { getZerosub, getQuotaSampleMinutes: async () => (await readQuotaSettings())?.quotaSampleMinutes };
   const buildResumeBrief = createResumeBriefBuilder(loader, { getZerosub });
   const delivery: SteerDeliveryDeps = {
     isFactoryPaused,
@@ -189,7 +190,7 @@ export default function contribute(server: PluginServerContext) {
   };
   server.handle(factoryStatus, (input, ctx) => {
     bootOnce(ctx.paseo);
-    return getStatus(input, ctx, loader);
+    return getStatus(input, ctx, loader, quotaDisplay);
   });
   server.handle(factoryPlan, (input, ctx) => getPlan(input, ctx, loader));
   server.handle(factoryWorkspaceActivity, getWorkspaceActivity);
@@ -213,7 +214,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(factoryCleanup, getCleanup);
   server.handle(factoryResume, (input, ctx) => {
     bootOnce(ctx.paseo);
-    return getResume(input, ctx, loader, { getZerosub });
+    return getResume(input, ctx, loader, quotaDisplay);
   });
   const freshDeps = {
     ...delivery,

@@ -158,7 +158,7 @@ test('usage JSON parsing is fail-soft and extracts the 5h window', () => {
   const output = JSON.stringify([{ sourceLabel: 'claude', lastSuccessful: { report: { windows: [
     { id: 'five-hour', usedPct: 82, resetsAt: '2026-11-24T15:00:00Z' },
   ] } } }]);
-  assert.deepEqual(parseUsageJson(output), { claude: { sessionPct: 82, sampledAt: null, resetsAt: '2026-11-24T15:00:00Z' } });
+  assert.deepEqual(parseUsageJson(output), { claude: { sessionPct: 82, sessionWindow: '5-hour', sampledAt: null, resetsAt: '2026-11-24T15:00:00Z' } });
   assert.deepEqual(parseUsageJson('{broken'), {});
   assert.deepEqual(parseUsageJson(null), {});
 });
@@ -173,12 +173,12 @@ test('usage reports for distinct accounts leave shared pool evidence unknown in 
   const claude = record('usage-3', 'claude', [{ id: '5h', usedPct: null, remainingPct: 22 }, { id: 'weekly', usedPct: 80 }]);
   for (const pair of [[full, other], [other, full], [full, noQuota], [noQuota, full]]) {
     const snapshot = parseUsageJson({ sources: [...pair, claude] });
-    assert.deepEqual(snapshot, { claude: { sessionPct: 78, weeklyPct: 80 } });
+    assert.deepEqual(snapshot, { claude: { sessionPct: 78, sessionWindow: '5-hour', weeklyPct: 80 } });
     assert.equal(quotaEntry(snapshot, 'codex'), null);
     assert.equal(quotaExhausted(snapshot, 'codex'), false);
     assert.equal(formatQuotaLine(config, snapshot, { currentPool: 'codex' }), null);
   }
-  assert.deepEqual(parseUsageJson([full]), { codex: { sessionPct: 99, weeklyPct: 98 } });
+  assert.deepEqual(parseUsageJson([full]), { codex: { sessionPct: 99, sessionWindow: '5-hour', weeklyPct: 98 } });
 });
 
 

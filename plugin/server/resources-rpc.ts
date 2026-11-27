@@ -15,12 +15,13 @@ import { zerosubAccountAliases, type ZerosubState } from "./zerosub-runtime.js";
 
 export type WorkspaceResources = RpcOutput<typeof factoryWorkspaceResources>;
 type ResourceWindow = WorkspaceResources["pools"][number]["windows"][number];
+type ReportedWindow = { alias: string; usedPct: unknown; resetsAt?: unknown };
 type QuotaKind = WorkspaceResources["accounts"][number]["quotaKind"];
 type ProviderCatalog = Awaited<ReturnType<PluginHandlerContext["paseo"]["providers"]["snapshot"]>>["entries"];
 
 // ZeroSub's normalized windows keep the ID, which can also be provider-supplied.
 const windowAliases = new Map([
-  ["5h", "5-hour"], ["five_hour", "5-hour"],
+  ["5h", "5-hour"], ["5-hour", "5-hour"], ["five-hour", "5-hour"], ["five_hour", "5-hour"],
   ["weekly", "Weekly"], ["seven_day", "Weekly"],
   ["seven_day_opus", "Opus weekly"], ["seven_day_sonnet", "Sonnet weekly"],
   ["weekly_fable", "Fable weekly"],
@@ -36,6 +37,61 @@ function catalogLabel(value: unknown): string | null {
 function stampMs(value: unknown): number | null {
   const ms = typeof value === "string" ? Date.parse(value) : NaN;
   return Number.isFinite(ms) ? ms : null;
+}
+
+function quotaWindow(alias: string, pct: unknown, sampledAt: number | null, reset: unknown,
+  now: number, sampleMinutes = QUOTA_SAMPLE_MINUTES): ResourceWindow {
+  const resetMs = stampMs(reset);
+  const usedPct = typeof pct === "number" && Number.isFinite(pct) && pct >= 0 ? pct : null;
+  const state = usedPct === null ? "unavailable"
+    : resetMs !== null && resetMs <= now ? "stale"
+    : sampledAt === null || sampledAt > now ? "unavailable"
+    : isQuotaSampleStale(sampledAt, now, sampleMinutes) ? "stale" : "available";
+  return { alias, usedPct: state === "available" ? usedPct : null,
+    sampledAt: iso(sampledAt), resetsAt: iso(resetMs), state };
+}
+
+function poolWindows(entry: any): ReportedWindow[] {
+  if (!entry) return [];
+  return [
+    ...(entry.sessionWindow === "weekly" ? [] : [{
+      alias: entry.sessionWindow === "5-hour" ? "5-hour" : entry.sessionWindow === "session" ? "Session" : "Reported usage",
+      usedPct: quotaPct(entry), resetsAt: entry.resetsAt ?? entry.resetAt,
+    }]),
+    { alias: "Weekly", usedPct: entry.weeklyPct ?? entry.weeklyUsedPct, resetsAt: entry.weeklyResetAt },
+  ].filter(({ usedPct, resetsAt }) => Number.isFinite(usedPct) || stampMs(resetsAt) !== null);
+}
+
+export function formatSteerQuota(agent: { id: string; provider?: string; model?: string | null }, {
+  config, zerosub, accountAliases, snapshot, quotaSampledAt, now, quotaSampleMinutes,
+}: {
+  config: any;
+  zerosub: ZerosubState;
+  accountAliases: ReadonlyMap<string, string>;
+  snapshot: Record<string, any> | null;
+  quotaSampledAt: number | null;
+  now: number;
+  quotaSampleMinutes?: number;
+}): string {
+  const pending = zerosub?.pending?.[agent.id];
+  const accountId = pending ?? zerosub?.agentAccount?.[agent.id];
+  const account = familyAccounts(zerosub, profileFamily(agent)).find(({ id }: { id: string }) => id === accountId);
+  const pool = accountId ? null : quotaEntry(snapshot, liveAgentPool(agent, config));
+  const sampledAt = pool && pool.sampledAt === undefined ? quotaSampledAt : stampMs(account?.sampledAt ?? pool?.sampledAt);
+  const name = accountId ? accountAliases.get(accountId) ?? "Linked account" : "Provider pool";
+  const label = pending ? `${name} (move pending)` : name;
+  if (sampledAt === null || sampledAt > now) return `${label} · usage unknown`;
+  if (isQuotaSampleStale(sampledAt, now, quotaSampleMinutes)) return `${label} · usage sample stale`;
+  const windows: ReportedWindow[] = accountId
+    ? account?.windows?.length
+      ? account.windows.filter((window: any) => windowAppliesToModel(window, agent.model))
+        .map((window: any, index: number) => ({ ...window, alias: windowAliases.get(window.id) ?? `Window ${index + 1}` }))
+      : [{ alias: "Reported usage", usedPct: account?.maxUsedPct }]
+    : poolWindows(pool);
+  const used = windows
+    .map(({ alias, usedPct, resetsAt }) => quotaWindow(alias, usedPct, sampledAt, resetsAt, now, quotaSampleMinutes))
+    .flatMap(({ alias, usedPct }) => usedPct === null ? [] : [`${alias} ${Number(usedPct.toFixed(1))}% used`]);
+  return `${label} · ${used.length ? used.join(", ") : "usage unknown"}`;
 }
 
 function iso(ms: number | null): string | null {
@@ -110,16 +166,7 @@ export function shapeWorkspaceResources({
     ?? provider.charAt(0).toUpperCase() + provider.slice(1);
 
   function window(alias: string, pct: unknown, sampledAt: number | null, reset: unknown): ResourceWindow {
-    const resetMs = stampMs(reset);
-    const expired = resetMs !== null && resetMs <= nowMs;
-    const usedPct = typeof pct === "number" && Number.isFinite(pct) && pct >= 0 ? pct : null;
-    const state = usedPct === null ? "unavailable"
-      : expired ? "stale"
-      : sampledAt === null ? "unavailable"
-      : isQuotaSampleStale(sampledAt, nowMs, sampleMinutes) ? "stale"
-      : "available";
-    return { alias, usedPct: state === "available" ? usedPct : null,
-      sampledAt: iso(sampledAt), resetsAt: iso(resetMs), state };
+    return quotaWindow(alias, pct, sampledAt, reset, nowMs, sampleMinutes);
   }
 
   function activeLimit(value: unknown): string | null {
@@ -230,14 +277,7 @@ export function shapeWorkspaceResources({
       const entry = quotaEntry(snapshot, pool);
       const sampledAt = !entry ? null : entry.sampledAt === undefined ? quotaSampledAt : stampMs(entry.sampledAt);
       const limitedUntil = activeLimit(entry?.limitUntil ?? entry?.limitedUntil);
-      const sessionPct = quotaPct(entry);
-      const weeklyPct = entry?.weeklyPct ?? entry?.weeklyUsedPct;
-      const sessionReset = entry?.resetsAt ?? entry?.resetAt;
-      const weeklyReset = entry?.weeklyResetAt;
-      const windows = [
-        ...(sessionPct !== null || stampMs(sessionReset) !== null ? [window("Session", sessionPct, sampledAt, sessionReset)] : []),
-        ...(Number.isFinite(weeklyPct) || stampMs(weeklyReset) !== null ? [window("Weekly", weeklyPct, sampledAt, weeklyReset)] : []),
-      ];
+      const windows = poolWindows(entry).map(({ alias, usedPct, resetsAt }) => window(alias, usedPct, sampledAt, resetsAt));
       return {
         provider, providerLabel: providerLabel(provider), alias, limitedUntil,
         sampledAt: iso(sampledAt), quotaKind: windows.length > 0 ? "reported" : "unknown",

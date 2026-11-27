@@ -253,7 +253,7 @@ export function formatStatus(status, warnContextTokens) {
   for (const w of status.warnings ?? []) lines.push(`  ! ${w}`);
   for (const s of status.steers) {
     const tags = `${s.advisor ? ' [advisor]' : ''}${s.sensitive ? ' [sensitive]' : ''}`;
-    lines.push(`  Steer ${s.slot}${tags}  ${s.id}  ${s.provider}/${s.model}  ${s.status}  ${formatStatusUsage(s.usage)}${s.continuedFrom ? `  continued-from ${s.continuedFrom}` : ''}${s.parent ? `  PARENT ${s.parent}` : ''}`);
+    lines.push(`  Steer ${s.slot}${tags}  ${s.id}  ${s.provider}/${s.model}  ${s.status}  ${formatStatusUsage(s.usage)}${s.continuedFrom ? `  continued-from ${s.continuedFrom}` : ''}${s.parent ? `  PARENT ${s.parent}` : ''}${s.quota ? ` · quota: ${s.quota}` : ''}`);
   }
   for (const c of status.candidates ?? []) lines.push(`  candidate "${c.title}" ${c.id} ${c.provider}/${c.model} ${c.status}  ${formatStatusUsage(c.usage)} → adopt with --adopt ${c.slot ?? '<slot>'}=${c.id}${c.parent ? ` (has parent ${c.parent}; needs --detach)` : ''}`);
   const supervised = new Map((status.openWorkers ?? []).map((e) => [e.id, e]));

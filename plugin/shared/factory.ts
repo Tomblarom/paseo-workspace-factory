@@ -10,6 +10,7 @@ const steerSummary = z.looseObject({
   status: z.unknown().optional(),
   parent: z.unknown().optional(),
   workspaceId: z.unknown().optional(),
+  quota: z.string().optional(),
 });
 
 const workerSummary = z.looseObject({

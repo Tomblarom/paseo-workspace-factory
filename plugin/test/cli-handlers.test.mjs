@@ -1159,17 +1159,43 @@ test("getStatus and getWorkers (list + prune) match core text formatting", async
   assert.equal(world.workspaces[0].metadata[WORKERS_KEY]["w-stale"], undefined);
 });
 
-test("getResume includes Worker model line and restartInterrupted metadata", async () => {
+test("status and resume show the selected steer’s own account and current model windows", async () => {
   const world = makeWorld();
   const paseo = fakePaseo(world);
-  const quotaSource = { zerosub: { accounts: [{ id: "acc-live", family: "codex", maxUsedPct: 94 }], agentAccount: { "steer-a": "acc-live" }, pending: {} } };
-  const res = await handlers.getResume({ repo: SCOPE, agentId: "steer-a" }, { paseo }, loader, quotaSource);
-  assert.match(res.brief, /Worker model: codex\/gpt-6\.2-sol/);
-  assert.equal(res.openWorkers.length, 1);
-  assert.equal(res.openWorkers[0].id, "w-live");
-  const line = /^Quota: codex \(acc-live\) 94% used$/m;
-  assert.match(res.brief, line);
-  assert.match(await handlers.createResumeBriefBuilder(loader, quotaSource)(paseo, MAIN, "steer-a"), line);
+  const now = Date.now();
+  const sampledAt = new Date(now - 7 * 60_000).toISOString();
+  const quotaSource = {
+    getQuotaSampleMinutes: async () => 5,
+    zerosub: {
+      accounts: [
+        { id: "acc-live", family: "codex", auth: "subscription", label: "private@example.invalid", sampledAt,
+          windows: [{ id: "5h", usedPct: 94 }, { id: "weekly", usedPct: 24 }] },
+        { id: "acc-standby", family: "claude", auth: "subscription", sampledAt,
+          windows: [
+            { id: "seven_day_sonnet", usedPct: 13.5 },
+            { id: "seven_day_opus", usedPct: 99 },
+            { id: "5h", usedPct: 100, resetsAt: new Date(now - 1000).toISOString() },
+          ] },
+      ],
+      agentAccount: { "steer-a": "acc-live", "steer-b": "acc-standby" },
+      pending: {},
+    },
+  };
+  const activeQuota = "Subscription 1 · 5-hour 94% used, Weekly 24% used";
+  const standbyQuota = "Subscription 2 · Sonnet weekly 13.5% used";
+  const status = await handlers.getStatus({ repo: SCOPE }, { paseo }, loader, quotaSource);
+  assert.deepEqual(status.steers.map(({ quota }) => quota), [activeQuota, standbyQuota]);
+  assert.ok(status.text.includes(activeQuota) && status.text.includes(standbyQuota));
+  assert.doesNotMatch(status.text, /private@example\.invalid|acc-live|acc-standby/);
+  for (const [agentId, quota] of [[undefined, activeQuota], ["steer-a", activeQuota], ["steer-b", standbyQuota]]) {
+    const res = await handlers.getResume({ repo: SCOPE, agentId }, { paseo }, loader, quotaSource);
+    assert.match(res.brief, /Worker model: codex\/gpt-6\.2-sol/);
+    assert.equal(res.openWorkers.length, 1);
+    assert.equal(res.openWorkers[0].id, "w-live");
+    assert.deepEqual(res.brief.match(/^Quota: .+$/gm), [`Quota: ${quota}`]);
+  }
+  assert.match(await handlers.createResumeBriefBuilder(loader, quotaSource)(paseo, MAIN, "steer-a"),
+    /^Quota: codex \(acc-live\) 94% used$/m);
 });
 
 test("pickWorker, listWorkersModels and startWorkerRpc agree and record --failed", async () => {

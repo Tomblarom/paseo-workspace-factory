@@ -3,10 +3,11 @@ import assert from "node:assert/strict";
 import { register } from "node:module";
 register("./ts-resolve-hooks.mjs", import.meta.url);
 const { shapeQuotaView } = await import("../server/quota-rpc.ts");
-const { shapeWorkspaceResources } = await import("../server/resources-rpc.ts");
+const { formatSteerQuota, shapeWorkspaceResources } = await import("../server/resources-rpc.ts");
 const { factoryWorkspaceResources } = await import("../shared/factory.ts");
 const { parseFactoryArgs, FACTORY_COMMANDS, factoryHelp } = await import("../shared/factory-args.ts");
 const { validateQuotaSettings } = await import("../shared/settings-validate.ts");
+const { zerosubAccountAliases } = await import("../server/zerosub-runtime.ts");
 import { parseUsageJson } from "../server/core/quota.mjs";
 import { AGENTS_KEY } from "../server/core/agent-state.mjs";
 import { resolveWorkerPick } from "../server/core/models.mjs";
@@ -27,6 +28,28 @@ function fakeConfig() {
     workers: { priority: ["claude-sonnet", "codex-high"] },
   };
 }
+
+test("steer quota leaves ambiguous and expired usage unknown and reports a weekly-only pool once", () => {
+  const agent = { id: "steer", provider: "codex", model: "gpt-6.2-sol" };
+  const snapshot = parseUsageJson([{ sourceId: "codex", report: { windows: [{ id: "seven-day", usedPct: 4 }] } }]);
+  const sample = {
+    config: fakeConfig(), snapshot, quotaSampledAt: Date.parse(SAMPLED), now: NOW,
+    zerosub: null, accountAliases: new Map(),
+  };
+  assert.equal(formatSteerQuota(agent, sample), "Provider pool · Weekly 4% used");
+  const zerosub = normalizeZerosubState({ accounts: [
+    { id: "old", family: "codex", auth: "subscription", usage: { fetchedAt: SAMPLED, windows: [
+      { id: "5h", usedPercent: 99, resetsAt: "2026-06-01T11:59:00.000Z" },
+    ] } },
+    { id: "new", family: "codex", usage: { fetchedAt: SAMPLED, windows: [{ id: "5h", usedPercent: 11 }] } },
+  ] });
+  zerosub.agentAccount.steer = "new";
+  zerosub.pending.steer = "old";
+  const moving = { ...sample, zerosub, accountAliases: zerosubAccountAliases(zerosub) };
+  assert.equal(formatSteerQuota(agent, moving), "Subscription 2 (move pending) · usage unknown");
+  assert.equal(formatSteerQuota(agent, { ...moving, quotaSampleMinutes: 2 }),
+    "Subscription 2 (move pending) · usage sample stale");
+});
 
 test("quota view shapes snapshot pools with warn states and slot mappings", () => {
   const view = shapeQuotaView({
@@ -209,7 +232,7 @@ test("workspace Resources exposes current, stale and unavailable provider and ac
   } }]);
   const retained = shapeWorkspaceResources({ ...input, snapshot: cached });
   assert.deepEqual(retained.pools.find(({ provider }) => provider === "codex").windows[0], {
-    alias: "Session", state: "stale", usedPct: null, sampledAt: olderSample, resetsAt: futureReset,
+    alias: "5-hour", state: "stale", usedPct: null, sampledAt: olderSample, resetsAt: futureReset,
   });
   const timeless = parseUsageJson([{ sourceId: "codex", fetchedAt: SAMPLED, lastSuccessful: {
     report: { windows: [{ id: "5h", usedPct: 90, resetsAt: futureReset }] },

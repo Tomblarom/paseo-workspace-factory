@@ -114,9 +114,9 @@ import {
 } from "./core/steer.mjs";
 import type { ConfigLoader, HostSettingsReader, HostSettingsState } from "./config.js";
 import { getQuotaSampledAt, getQuotaSnapshot } from "./quota.js";
-import { shapeWorkspaceResources, type WorkspaceResources } from "./resources-rpc.js";
+import { formatSteerQuota, shapeWorkspaceResources, type WorkspaceResources } from "./resources-rpc.js";
 import { withWorkspaceLock } from "./core/lock.mjs";
-import { readZerosubStateSafe, resolveZerosub, type ZerosubSource } from "./zerosub-runtime.js";
+import { readZerosubStateSafe, resolveZerosub, zerosubAccountAliases, type ZerosubSource } from "./zerosub-runtime.js";
 import { readZerosubState } from "./core/zerosub.mjs";
 import { workerIdentityFromMetadata } from "../shared/supervise.js";
 import { RESET_KEEP_HISTORY_UNAVAILABLE } from "../shared/settings.js";
@@ -198,10 +198,22 @@ async function resolveEntryForAddress(
   };
 }
 
+type QuotaDisplaySource = ZerosubSource & { getQuotaSampleMinutes?: () => Promise<number | undefined> };
+
+async function steerQuotaFormatter(config: any, source: QuotaDisplaySource) {
+  const [zerosub, quotaSampleMinutes] = await Promise.all([resolveZerosub(source), source.getQuotaSampleMinutes?.()]);
+  const sample = {
+    config, zerosub, accountAliases: zerosubAccountAliases(zerosub),
+    snapshot: getQuotaSnapshot(), quotaSampledAt: getQuotaSampledAt(), now: Date.now(), quotaSampleMinutes,
+  };
+  return (agent: Parameters<typeof formatSteerQuota>[0]) => formatSteerQuota(agent, sample);
+}
+
 export async function getStatus(
   input: RpcInput<typeof factoryStatus>,
   { paseo }: PluginHandlerContext,
   loader: ConfigLoader,
+  quotaSource: QuotaDisplaySource = {},
 ): Promise<any> {
   const { config, scope, deprecatedAlias, status } = await discoverOne(
     paseo,
@@ -210,12 +222,14 @@ export async function getStatus(
     input.workspaceId,
     input.agentId ?? null,
   );
-  return {
+  const quota = status.steers.length ? await steerQuotaFormatter(config, quotaSource) : null;
+  const result = {
     ...status,
+    steers: status.steers.map((steer: any) => steer.superseded || !quota ? steer : { ...steer, quota: quota(steer) }),
     scope,
     deprecatedAlias,
-    text: (formatStatus as any)(status, config.usage?.warnContextTokens),
   };
+  return { ...result, text: (formatStatus as any)(result, config.usage?.warnContextTokens) };
 }
 
 export async function getScopes(
@@ -244,7 +258,7 @@ export async function getResume(
   input: RpcInput<typeof factoryResume>,
   { paseo }: PluginHandlerContext,
   loader: ConfigLoader,
-  quotaSource: ZerosubSource = {},
+  quotaSource: QuotaDisplaySource = {},
 ): Promise<any> {
   const agentId = input.agentId?.trim() || null;
   const { config, discovery, scope, deprecatedAlias, status, snapshot } = await discoverOne(paseo, loader, input.repo?.trim() || undefined, input.workspaceId, agentId);
@@ -276,9 +290,7 @@ export async function getResume(
     scope: discovery.scope ?? scope ?? null,
     config,
     workerModel: (workerModelLine as any)(config, discovery),
-    quotaSnapshot: getQuotaSnapshot(),
-    quotaWarnPct: config.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct,
-    zerosub: await resolveZerosub(quotaSource),
+    showSteerQuota: status.steers.length ? await steerQuotaFormatter(config, quotaSource) : null,
   };
   const brief: string = buildResumeBrief(status, briefOptions);
   const restartInterrupted = status.restartInterrupted ?? [];
