@@ -469,12 +469,22 @@ function splitCandidates(candidates, matchKeys, agentsById) {
 }
 
 /**
+ * True when a steer agent belongs to this scope by its authoritative `wsf.scope`
+ * label, or by legacy `wsf.repo` when `wsf.scope` is absent.
+ */
+function matchesSteerScope(agent, matchKeys) {
+  if (agent?.labels?.[LABEL.role] !== 'steer') return false;
+  const scope = agent.labels?.[LABEL.scope];
+  if (typeof scope === 'string' && scope) return matchKeys.has(scope.toLowerCase());
+  const repo = agent.labels?.[LABEL.repo];
+  return typeof repo === 'string' && repo ? matchKeys.has(repo.toLowerCase()) : false;
+}
+
+/**
  * Half-labelled steers: live agents in the main workspace with role=steer but
  * without a scope identity (role/slot present, no scope/repo). Labelled
- * steers (repo present) and foreign-labelled agents (a scope label outside
- * matchKeys) are not half-labelled. Archived agents are ignored; closed ones
- * stay visible when they carry a scope assignment (a daemon restart closes
- * real steers too) and are ignored only without one.
+ * steers (scope or repo present) and foreign-labelled agents are not
+ * half-labelled. Archived and closed scope-less agents are ignored.
  */
 function halfLabelledSteers(paseo, mainWorkspace, matchKeys) {
   if (!mainWorkspace) return [];
@@ -484,8 +494,8 @@ function halfLabelledSteers(paseo, mainWorkspace, matchKeys) {
     const repo = a.labels?.[LABEL.repo];
     if (typeof repo === 'string' && repo) return false;
     const scope = a.labels?.[LABEL.scope];
-    if (typeof scope === 'string' && scope && !matchKeys.has(scope.toLowerCase())) return false;
-    if (a.status === 'closed' && !(typeof scope === 'string' && scope)) return false;
+    if (typeof scope === 'string' && scope) return false;
+    if (a.status === 'closed') return false;
     return true;
   });
 }
@@ -628,7 +638,7 @@ function buildWorktreeDiscovery(matched, { normalized, parentDir, checkouts, pas
   const projects = paseo.projects.filter((p) => projectIds.has(p.projectId));
   const mainCandidates = matched;
 
-  const labelledFound = paseo.agents.filter((a) => a.labels?.[LABEL.role] === 'steer' && matchKeys.has(a.labels?.[LABEL.repo]?.toLowerCase()));
+  const labelledFound = paseo.agents.filter((a) => matchesSteerScope(a, matchKeys));
   const { labelled, legacy, digitCandidates, foreignWorkers, halfLabelled, steerIds, workers, projectWorkspaceIds } = resolveScopeMembers(paseo, { mainWorkspace, matchKeys, labelledFound, scopeName: forkName, projectIds, zerosubSwitches });
   const worktreeAgents = mainWorkspace
     ? paseo.agents.filter((a) => a.workspaceId === mainWorkspace.id && !a.archivedAt && !steerIds.has(a.id) && a.labels?.[LABEL.role] !== 'steer')
@@ -728,7 +738,7 @@ function discoverLocal(normalized, { config, checkouts, paseo, realpath, existsD
       if (!isWorktreeWorkspace(w) && basename(w.workspaceDirectory) === wanted) addCandidate(w.workspaceDirectory);
     }
     for (const a of paseo.agents) {
-      const label = a.labels?.[LABEL.repo]?.toLowerCase();
+      const label = (a.labels?.[LABEL.scope] ?? a.labels?.[LABEL.repo])?.toLowerCase();
       if (a.labels?.[LABEL.role] === 'steer' && (label === `local/${wanted}`.toLowerCase() || label === wanted.toLowerCase())) {
         const ws = paseo.workspaces.find((w) => w.id === a.workspaceId);
         if (ws && !isWorktreeWorkspace(ws)) addCandidate(ws.workspaceDirectory);
@@ -828,7 +838,7 @@ function discoverLocal(normalized, { config, checkouts, paseo, realpath, existsD
   const legacyKey = `local/${folder}`.toLowerCase();
   const matchKeys = new Set([repoKey, legacyKey]);
   if (stored && stored.id.toLowerCase() !== repoKey) matchKeys.add(stored.id.toLowerCase());
-  const labelledFound = paseo.agents.filter((a) => a.labels?.[LABEL.role] === 'steer' && matchKeys.has(a.labels?.[LABEL.repo]?.toLowerCase()));
+  const labelledFound = paseo.agents.filter((a) => matchesSteerScope(a, matchKeys));
   const { labelled, legacy, digitCandidates, foreignWorkers, halfLabelled, steerIds, workers, projectWorkspaceIds } = resolveScopeMembers(paseo, { mainWorkspace, matchKeys, labelledFound, scopeName: forkName, projectIds, zerosubSwitches });
 
   return {
@@ -968,8 +978,8 @@ export function discoverRepository(entry, { config, gh, git, checkouts, paseo, r
   // Steers are identified by labels; an unlabelled top-level "Steer X" in the main
   // workspace is a legacy steer that can be adopted.
   const repoKey = forkName?.toLowerCase();
-  const labelledFound = paseo.agents.filter((a) => a.labels?.[LABEL.role] === 'steer' && a.labels?.[LABEL.repo]?.toLowerCase() === repoKey);
   const matchKeys = new Set(repoKey ? [repoKey] : []);
+  const labelledFound = paseo.agents.filter((a) => matchesSteerScope(a, matchKeys));
   const { labelled, legacy, digitCandidates, foreignWorkers, halfLabelled, steerIds, workers, projectWorkspaceIds } = resolveScopeMembers(paseo, { mainWorkspace, matchKeys, labelledFound, scopeName: forkName, projectIds, zerosubSwitches });
   // The github scope id is the resolved fork; the network-verified identity
   // always wins over a stored field (a mismatch is a planner conflict).

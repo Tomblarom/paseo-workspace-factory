@@ -105,7 +105,7 @@ export function listScopes(paseoState) {
     for (const a of paseoState?.agents ?? []) {
       if (a.archivedAt || a.workspaceId !== w.id) continue;
       if (a.labels?.[LABEL.role] !== 'steer') continue;
-      const repo = a.labels?.[LABEL.repo];
+      const repo = a.labels?.[LABEL.scope] ?? a.labels?.[LABEL.repo];
       if (typeof repo === 'string' && repo) labels.add(repo);
     }
     const folder = folderOf(w.workspaceDirectory) ?? w.id;

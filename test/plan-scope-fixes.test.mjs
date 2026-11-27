@@ -319,8 +319,9 @@ test('4: half-labelled steers are conflicts; closed+labelled stays visible, arch
   const closedFull = addAgent(world, { title: 'Steer A', provider: 'codex', model: 'gpt-6.2-sol', status: 'closed', workspaceId: ws.id, labels: { [LABEL.repo]: 'web', [LABEL.role]: 'steer', [LABEL.slot]: 'A', [LABEL.scope]: 'web' } });
 
   const [d] = await runnerFor(world).discoverAll([{ local: '/p/web' }]);
-  assert.deepEqual(d.steers.halfLabelled.map((a) => a.id).sort(), [half.id, slotless.id, closedScoped.id].sort());
+  assert.deepEqual(d.steers.halfLabelled.map((a) => a.id).sort(), [half.id, slotless.id].sort());
   assert.ok(d.steers.labelled.some((a) => a.id === closedFull.id), 'closed+labelled stays visible');
+  assert.ok(d.steers.labelled.some((a) => a.id === closedScoped.id), 'scope-only steer is discovered as live membership');
   assert.ok(!d.steers.labelled.some((a) => a.id === half.id));
 
   const [p] = await runnerFor(world).runPlans([{ local: '/p/web' }]);
