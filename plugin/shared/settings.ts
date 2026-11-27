@@ -197,15 +197,18 @@ export const factoryResumeSettings = defineSettings({
 export const RESET_KEEP_HISTORY_UNAVAILABLE =
   "This version of Paseo cannot reset a steer in place while keeping its chat history.";
 
+const steerMenuSchema = z.object({
+  initializeNewSteer: z.enum(["send", "composer", "later"]).default("composer"),
+  keepChatHistory: z.boolean().default(true),
+});
+
 // Brief delivery for a new steer and steer chat history preservation.
 export const factorySteerMenuSettings = defineSettings({
   id: "factory-steer-menu",
   scope: "host",
-  version: 1,
-  schema: z.object({
-    initializeNewSteer: z.enum(["send", "composer", "later"]).default("composer"),
-    keepChatHistory: z.boolean().default(false),
-  }),
+  version: 2,
+  schema: steerMenuSchema,
+  migrate: (values) => steerMenuSchema.extend({ keepChatHistory: z.boolean().default(false) }).parse(values),
 });
 
 // Worker supervision (S-B): wake cadence, watchdog, and failover.

@@ -138,13 +138,21 @@ test("delivery contracts do not let a caller attest payload provenance", () => {
   assert.deepEqual(factorySteerBrief.input.parse({ ...staged, ...claimed }), staged);
 });
 
-test("the steer menu settings default to composer staging without history", () => {
+test("new steer menu settings keep history and migrated hosts retain their current preference", () => {
   assert.equal(factorySteerMenuSettings.id, "factory-steer-menu");
   assert.equal(factorySteerMenuSettings.scope, "host");
+  assert.equal(factorySteerMenuSettings.version, 2);
   assert.deepEqual(factorySteerMenuSettings.schema.parse({}), {
     initializeNewSteer: "composer",
-    keepChatHistory: false,
+    keepChatHistory: true,
   });
+  for (const keepChatHistory of [undefined, false, true]) {
+    const legacy = keepChatHistory === undefined ? {} : { keepChatHistory };
+    const migrated = factorySteerMenuSettings.migrate({ ...legacy, initializeNewSteer: "send" }, 1);
+    assert.deepEqual(factorySteerMenuSettings.schema.parse(migrated), {
+      initializeNewSteer: "send", keepChatHistory: keepChatHistory ?? false,
+    });
+  }
 });
 
 // ---------------------------------------------------------------------------
