@@ -267,6 +267,11 @@ test("fresh, workers, models and drain parse", () => {
   assert.deepEqual(parseFactoryArgs("fresh a/b"), { command: "fresh", repo: "a/b" });
   assert.deepEqual(parseFactoryArgs("fresh --slot e"), { command: "fresh", slot: "E" });
   assert.throws(() => parseFactoryArgs("fresh --slot EE"), /one steer letter/);
+  assert.deepEqual(parseFactoryArgs("fresh --worker abc --model claude/anthropic/claude-opus-5-5 --keep-chat-history"), {
+    command: "fresh", workerId: "abc", provider: "claude", model: "anthropic/claude-opus-5-5", keepChatHistory: true,
+  });
+  assert.throws(() => parseFactoryArgs("fresh --model claude"), /needs provider\/model/);
+  assert.throws(() => parseFactoryArgs("fresh --worker abc --slot E"), /either --slot or --worker/);
   assert.deepEqual(parseFactoryArgs("workers"), { command: "workers" });
   assert.deepEqual(parseFactoryArgs("workers a/b"), { command: "workers", repo: "a/b" });
   assert.deepEqual(parseFactoryArgs("models"), { command: "models" });

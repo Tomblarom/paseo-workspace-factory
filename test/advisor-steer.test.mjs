@@ -139,7 +139,7 @@ test('switch --to an advisor slot is refused', async () => {
   assert.match(ok.packet, /Steer handoff/);
 });
 
-test('fresh keeps the advisor status and falls back with a warning', async () => {
+test('fresh keeps the advisor status when an alternative is selected explicitly', async () => {
   const discovery = steerDiscovery(CONFIG, { activeSteer: 'E' });
   const kept = await freshSteer({ client: stubClient, discovery, config: CONFIG, language: 'en' });
   assert.equal(kept.profile, 'opus');
@@ -162,10 +162,11 @@ test('fresh keeps the advisor status and falls back with a warning', async () =>
     steers: { labelled: [mkAgent('A', 'agent-a', 'codex', 'gpt-6.2-sol'), mkAgent('E', 'agent-e', 'nosuch', 'x')] },
     workers: [],
   };
-  const fell = await freshSteer({ client: stubClient, discovery: twoAdvisors, config, language: 'en' });
-  assert.equal(fell.profile, 'opusGood', 'advisor slot falls back to the next advisor profile');
-  assert.equal(fell.fallbackFrom, 'opusBad');
-  assert.ok(fell.warnings.some((w) => /Using fallback "opusGood"/.test(w)));
+  const options = { client: stubClient, discovery: twoAdvisors, config, language: 'en' };
+  await assert.rejects(freshSteer(options), /Live route.*fresh --model/);
+  const selected = await freshSteer({ ...options, provider: 'antigravity', model: 'gemini-3.8-flash-high' });
+  assert.equal(selected.profile, 'opusGood');
+  assert.ok(selected.warnings.some((w) => /Steer E is an advisor/.test(w)));
 });
 
 test('resume brief addresses advisor steers and carries the worker model', () => {

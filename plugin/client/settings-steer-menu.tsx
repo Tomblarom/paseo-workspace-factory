@@ -55,7 +55,7 @@ export function SteerMenuSettingsSection() {
         />
         <SettingsSwitch
           label="Keep chat history"
-          hint="Preserve steer chats during automatic delivery and cleanup. Reset Steer uses this as its default."
+          hint="Preserve steer chats during automatic delivery and cleanup."
           value={values.keepChatHistory}
           onValueChange={(keepChatHistory) =>
             void save((current) => ({ ...current, keepChatHistory }))

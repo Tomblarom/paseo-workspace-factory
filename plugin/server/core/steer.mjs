@@ -32,6 +32,7 @@ import { readSteerAction, readStagedSteerBrief, readCleanupAction, readEffectRec
 import { actionFact } from './action-facts.mjs';
 import { freshCreationRoute, freshLiveRoute } from './fresh-route.mjs';
 import { routeMatchesIntent } from './routing.mjs';
+import { ACCOUNT_METADATA_KEY } from './zerosub.mjs';
 
 export const CHECKPOINT_KEY = `${METADATA_KEY}.checkpoint`;
 // Worker efficiency rule, same wording as the Worker instructions block in docs/steer-instructions.md.
@@ -1071,6 +1072,11 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
   return stage && switchAction ? { ...result, stageId: switchAction.wakeId } : result;
 }
 
+function rewindRequired(slot, workerId = null) {
+  const target = workerId ? `--worker ${workerId}` : `--slot ${slot}`;
+  return new SwitchRefused(`An in-place rewind is unavailable for this session. Use /factory fresh ${target} --keep-chat-history to preview and confirm a replacement.`);
+}
+
 /**
  * Reads the rewind point for a fresh preview without side effects. Returns
  * the previous resume brief or first user_message id, or null when the daemon is
@@ -1180,6 +1186,7 @@ async function rewindIdentity({ client, status, expected, from, slot, checkpoint
   return {
     repo: status.repo, workspaceId: status.workspace.id, slot, from: from.id, epoch: expected.epoch,
     provider: live.provider, model: live.model, checkpointAt, refreshMode: 'rewind',
+    rewindSupported: agent?.capabilities?.supportsRewindConversation !== false,
     routeBinding: { live, intent, sessionId: agent?.persistence?.sessionId ?? null, point },
   };
 }
@@ -1200,17 +1207,20 @@ async function tryActiveRewind({ client, discovery, status, expected, slot, from
   const checkpoint = Boolean(status.checkpoint?.task);
   const identity = (point, recheck = false) => rewindIdentity({ client, status, expected, from, slot: slot,
     checkpointAt: checkpointStamp(status.checkpoint), intent, point, recheck });
-  const eligibleRewind = intent.mode !== 'explicit' || routeMatchesIntent((await identity(null)).routeBinding.live, intent);
-  if (!eligibleRewind) return { fallback: 'route changed' };
-  const confirmRewind = confirmPreview || intent.mode === 'explicit' ? async (point) => {
+  const current = await identity(null);
+  if (!current.rewindSupported) return { fallback: 'unsupported' };
+  if (!routeMatchesIntent(current.routeBinding.live, intent)) return { fallback: 'route changed' };
+  const confirmRewind = async (point) => {
     const current = await identity(point, true);
+    if (!current.rewindSupported) throw new SwitchRefused('This provider no longer supports conversation rewind for this session.');
     if (!routeMatchesIntent(current.routeBinding.live, intent)) throw new SwitchRefused('Requested rewind route changed');
     confirmPreview?.(current);
-  } : null;
+  };
   if (!apply) {
     const point = await previewRewindPoint(from.id, rewindClient, previousBriefId);
     if (!point) return { fallback: 'unavailable' };
     const route = await identity(point);
+    if (!route.rewindSupported) return { fallback: 'unsupported' };
     if (!routeMatchesIntent(route.routeBinding.live, intent)) return { fallback: 'route changed' };
     await checkPrivacy(from.id);
     const packet = buildRefreshPacket(status, {
@@ -1245,7 +1255,7 @@ async function tryActiveRewind({ client, discovery, status, expected, slot, from
     authority: { scopeId: expected.scope?.id ?? status.repo, epoch: expected.epoch, aliases: discoveryScopeAliases(discovery), callerId, config } });
   if (outcome.status !== 'rewound') {
     if (requireRefreshMode === 'rewind') {
-      const error = new SwitchRefused(`Bound rewind route failed (${outcome.status}${outcome.error ? `: ${outcome.error}` : ''}); nothing sent, nothing recorded, no new agent created. The brief is kept.`);
+      const error = new SwitchRefused(`Bound rewind route failed (${outcome.status}${outcome.error ? `: ${outcome.error}` : ''}). ${rewindRequired(slot).message} The brief is kept.`);
       error.packet = packet;
       error.refreshMode = 'rewind';
       throw error;
@@ -1388,11 +1398,13 @@ async function replacementFresh({ client, discovery, config, status, expected, k
     const picked = freshCreationRoute({ ...observed, from: agent, role, slot, steers: status.steers, metadata, now: now().getTime(), intent });
     if (picked.error) throw new SwitchRefused(picked.error);
     const { route, live, profile, source: selection, account, evidence } = picked;
+    const liveAccount = observed.zerosub?.agentAccount?.[agent.id] ?? agent.metadata?.[ACCOUNT_METADATA_KEY] ?? null;
+    const managedAccount = Boolean(liveAccount || account || agent.metadata?.['zerosub.agent']);
     const { op, placement } = replacementRequest({ ...context(source, observed.config, role), route });
     return {
       kind, slot, epoch: expected.epoch, intent, op, placement, profile, selection, evidence,
       checkpointAt: stamp(metadata, source),
-      binding: { live, request: op.params, account, intent },
+      binding: { live, request: op.params, liveAccount, account, managedAccount, intent },
     };
   };
   const resultOf = (source, record) => ({
@@ -1403,11 +1415,8 @@ async function replacementFresh({ client, discovery, config, status, expected, k
     idempotencyKey: record.op.params.idempotencyKey, routeBinding: record.binding,
     routeEvidence: record.evidence, checkpointAt: record.checkpointAt,
     refreshMode: 'new-agent',
-    warnings: [
-      ...(roleOf(source) === 'advisor' ? [`Steer ${slot} is an advisor; advisors never coordinate`] : []),
-      ...(record.selection === 'preference' ? [`Using fallback "${record.profile}" after checking the live route`] : []),
-    ],
-    fallbackFrom: record.selection === 'preference' ? config?.steers?.slots?.[slot] ?? null : null,
+    warnings: roleOf(source) === 'advisor' ? [`Steer ${slot} is an advisor; advisors never coordinate`] : [],
+    fallbackFrom: null,
     profileSuggestion: null,
     applied: apply, delivered: false, deliveryError: null, previousNotified: false, reused: false, renameError: null,
   });
@@ -1509,6 +1518,12 @@ async function replacementFresh({ client, discovery, config, status, expected, k
       record ??= currentRoute;
     }
     const result = resultOf(from, record);
+    const live = freshLiveRoute(agent);
+    if (!confirmPreview && (record.binding?.managedAccount || record.binding?.account ||
+        agent.metadata?.[ACCOUNT_METADATA_KEY] || agent.metadata?.['zerosub.agent'] ||
+        result.provider !== live.provider || result.model !== live.model)) {
+      throw new SwitchRefused('Preview and confirm the replacement route and account selection before creating a new agent.');
+    }
     confirmPreview?.(result);
     if (!receipt && !pending) {
       const key = record.op.params.idempotencyKey;
@@ -1558,12 +1573,12 @@ async function replacementFresh({ client, discovery, config, status, expected, k
 /**
  * Refreshes the active steer, a standby slot, or a worker. Same-tab rewind
  * is preferred when available and consistent with the requested route.
- * Replacement starts an empty agent using the live route or an eligible
- * role preference. Before creation, persist the precise request and receipt
+ * Replacement starts an empty agent using the live route or an explicitly
+ * selected route. Before creation, persist the precise request and receipt
  * key under the workspace lock. Only active replacement advances the epoch.
  * `send: false` leaves the brief for the caller to stage or deliver.
  */
-export async function freshSteer({ client, discovery, config, apply = false, send = true, stageRewind = false, notifyPrevious = true, slot: slotArg = null, workerId = null, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, now = () => new Date(), workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, quotaExhaustedPct = config?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct, zerosub = null, paseoCli = null, rewindClient = null, requireRefreshMode = null, promptOptions, callerId = null, admitTarget = null, provider = null, model = null, confirmPreview = null, readPolicy = null, repoPublic = discoveredRepoPublic(discovery), allowDepletedReset = false }) {
+export async function freshSteer({ client, discovery, config, apply = false, send = true, stageRewind = false, notifyPrevious = true, slot: slotArg = null, workerId = null, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, now = () => new Date(), workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, quotaExhaustedPct = config?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct, zerosub = null, paseoCli = null, rewindClient = null, requireRefreshMode = null, promptOptions, callerId = null, admitTarget = null, provider = null, model = null, confirmPreview = null, readPolicy = null, repoPublic = discoveredRepoPublic(discovery) }) {
   const status = steerStatus(discovery, { config });
   if (!status.workspace || !status.state) throw new SwitchRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
@@ -1578,7 +1593,7 @@ export async function freshSteer({ client, discovery, config, apply = false, sen
   if (Boolean(provider) !== Boolean(model)) throw new SwitchRefused('Explicit Fresh needs both provider and model');
   const intent = provider ? { mode: 'explicit', provider, model } : { mode: 'automatic' };
   const policy = { config, providers: discovery.providers, repoPublic,
-    quotaSnapshot, quotaExhaustedPct, zerosub, allowDepletedReset };
+    quotaSnapshot, quotaExhaustedPct, zerosub };
   const replacement = (options) => replacementFresh({ client, discovery, config, status, expected, apply,
     lookupReceipt, execute, lock, now, callerId, policy, intent, confirmPreview, readPolicy, ...options });
   const hasPending = (sources, kind, slot = null) =>
@@ -1612,7 +1627,7 @@ export async function freshSteer({ client, discovery, config, apply = false, sen
     if (rewound && !rewound.fallback) return rewound;
     if (rewound?.fallback) rewindFallback = rewound.fallback;
   }
-  if (apply && requireRefreshMode === 'rewind') throw new SwitchRefused('Bound rewind route changed; reopen the Fresh preview');
+  if (requireRefreshMode === 'rewind') throw rewindRequired(slot);
   const { from, result } = await replacement({ kind: 'steer', active: true, slot, single, sources: holders });
   const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory) : null;
   result.checkpoint = Boolean(status.checkpoint?.task);
@@ -1667,13 +1682,15 @@ async function tryTabRewind({ client, discovery, status, expected, from, kind, p
   const checkpoint = Boolean(taskCheckpoint ? taskCheckpoint.task || taskCheckpoint.block : status.checkpoint?.task);
   const identity = (point, recheck = false) => rewindIdentity({ client, status, expected, from, slot: resultBase.slot,
     checkpointAt: kind === 'worker' ? entry?.noteAt ?? null : checkpointStamp(status.checkpoint), intent, point, recheck, worker: kind === 'worker' });
-  const eligibleRewind = intent.mode !== 'explicit' || routeMatchesIntent((await identity(null)).routeBinding.live, intent);
-  if (!eligibleRewind) return { fallback: 'route changed' };
-  const confirmRewind = confirmPreview || intent.mode === 'explicit' ? async (point) => {
+  const current = await identity(null);
+  if (!current.rewindSupported) return { fallback: 'unsupported' };
+  if (!routeMatchesIntent(current.routeBinding.live, intent)) return { fallback: 'route changed' };
+  const confirmRewind = async (point) => {
     const current = await identity(point, true);
+    if (!current.rewindSupported) throw new SwitchRefused('This provider no longer supports conversation rewind for this session.');
     if (!routeMatchesIntent(current.routeBinding.live, intent)) throw new SwitchRefused('Requested rewind route changed');
     confirmPreview?.(current);
-  } : null;
+  };
   const packetOf = async () => buildRefreshPacket(status, {
     kind, from, to: { id: from.id }, epoch: expected.epoch, git: gitSnapshot,
     note: entry?.note ?? null, noteAt: entry?.noteAt ?? null, interrupted: entry?.interrupted ?? null,
@@ -1684,6 +1701,7 @@ async function tryTabRewind({ client, discovery, status, expected, from, kind, p
     const point = await previewRewindPoint(from.id, rewindClient, previousBriefId);
     if (!point) return { fallback: 'unavailable' };
     const route = await identity(point);
+    if (!route.rewindSupported) return { fallback: 'unsupported' };
     if (!routeMatchesIntent(route.routeBinding.live, intent)) return { fallback: 'route changed' };
     await checkPrivacy(from.id);
     const packet = await packetOf();
@@ -1711,7 +1729,7 @@ async function tryTabRewind({ client, discovery, status, expected, from, kind, p
   const { outcome, recordingError, stageId } = await runTabRewind({ client, workspaceId: status.workspace.id, agentId: from.id, packet, checkpoint: savedCheckpoint, lock, now, rewindClient, previousBriefId, send, stageRewind: stageRewind && kind === 'steer', checkPrivacy, confirmRewind, note: block ? formatCheckpointBlock(block) : null });
   if (outcome.status !== 'rewound') {
     if (requireRefreshMode === 'rewind') {
-      const error = new SwitchRefused(`Bound rewind route failed (${outcome.status}${outcome.error ? `: ${outcome.error}` : ''}); nothing sent, nothing recorded, no new agent created. The brief is kept.`);
+      const error = new SwitchRefused(`Bound rewind route failed (${outcome.status}${outcome.error ? `: ${outcome.error}` : ''}). ${rewindRequired(resultBase.slot, kind === 'worker' ? from.id : null).message} The brief is kept.`);
       error.packet = packet;
       error.refreshMode = 'rewind';
       throw error;
@@ -1744,7 +1762,7 @@ async function freshNonActiveSteer({ client, discovery, status, expected, slot, 
     if (rewound && !rewound.fallback) return rewound;
     if (rewound?.fallback) rewindFallback = rewound.fallback;
   }
-  if (apply && requireRefreshMode === 'rewind') throw new SwitchRefused('Bound rewind route changed; reopen the Fresh preview');
+  if (requireRefreshMode === 'rewind') throw rewindRequired(slot);
   const { from, result } = await replacement({ kind: 'steer', slot, single, sources: holders });
   const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory) : null;
   const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;
@@ -1810,7 +1828,7 @@ async function freshWorkerAgent({ client, discovery, status, expected, workerId,
     if (rewound && !rewound.fallback) return rewound;
     if (rewound?.fallback) rewindFallback = rewound.fallback;
   }
-  if (apply && requireRefreshMode === 'rewind') throw new SwitchRefused('Bound rewind route changed; reopen the Fresh preview');
+  if (requireRefreshMode === 'rewind') throw rewindRequired(null, from.id);
   const { result } = await replacement({ kind: 'worker', single: from, sources: [from], owner });
   const gitSnapshot = git ? readGitSnapshot(git, status.workspace.directory) : null;
   const agentState = discovery.mainWorkspace?.metadata?.[AGENTS_KEY] ?? null;

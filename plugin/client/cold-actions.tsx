@@ -106,7 +106,6 @@ export function ColdActions({
     if (next.from !== agentId) {
       setError("Refresh is no longer available for this chat.");
     } else if (next.refreshMode !== "rewind") {
-      // The existing new-agent fallback also prompts the old agent.
       setError("This chat cannot be refreshed here.");
     } else {
       setPreview(next);

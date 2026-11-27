@@ -351,18 +351,15 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
     onError: fail,
   });
   const freshMutation = useMutation({
-    mutationFn: async (vars: { repo?: string; workspaceId: string; slot?: string; fingerprint: string }) =>
-      vars.repo
-        ? callFresh({ repo: vars.repo, slot: vars.slot, fingerprint: vars.fingerprint })
-        : callFresh({ workspaceId: vars.workspaceId, slot: vars.slot, fingerprint: vars.fingerprint }),
+    mutationFn: (input: RpcInput<typeof factoryFresh>) => callFresh(input),
     onSuccess: (fresh) =>
       setFactoryResult({
         kind: "info",
         at: new Date().toISOString(),
-        text: [
-          `Fresh Steer ${text(field(fresh, "slot"))} is active (epoch ${text(field(fresh, "epoch"))}).`,
-          `The old agent (${text(field(fresh, "from"))}) keeps its tab; archive it in Paseo when done.`,
-        ].join("\n"),
+        text: fresh.idempotent ? "This chat was already refreshed."
+          : fresh.deliveryError ? String(fresh.deliveryError)
+          : fresh.refreshMode === "rewind" ? "Conversation rewound and continuation brief sent."
+          : `Replacement agent ${text(field(fresh, "to"))} created. The previous chat is still available.`,
       }),
     onError: fail,
   });
@@ -457,12 +454,7 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
   };
   const confirmFresh = () => {
     if (result?.kind !== "freshPreview") return;
-    freshMutation.mutate({
-      slot: result.preview.slot,
-      repo: result.repo,
-      workspaceId: result.workspaceId,
-      fingerprint: result.preview.fingerprint,
-    });
+    freshMutation.mutate({ ...result.input, fingerprint: result.preview.fingerprint });
   };
   const confirmAssign = () => {
     if (result?.kind !== "assignPreview") return;
@@ -1375,12 +1367,16 @@ function FreshPreviewView({
   styles: Styles;
   actions: PanelActions;
 }) {
+  const replacement = preview.refreshMode === "new-agent";
+  const target = preview.kind === "worker" ? "worker" : `Steer ${preview.slot}`;
   return (
     <View style={styles.card}>
       <Text style={styles.body}>
-        Fresh preview: new agent for Steer {preview.slot} (epoch {preview.epoch}) · profile{" "}
-        {text(preview.profile)} ({text(preview.provider)}/{text(preview.model)})
+        {replacement ? `Replacement for ${target}` : `Rewind ${target} in place`}
+        {` · ${text(preview.provider)}/${text(preview.model)}`}
       </Text>
+      {replacement ? <Text style={styles.label}>Paseo may route the replacement to a different account.</Text> : null}
+      {preview.warnings?.map((warning) => <Text key={warning} style={styles.conflict}>{warning}</Text>)}
       <Text style={styles.label}>{at}</Text>
       {!preview.checkpoint ? (
         <Text style={styles.conflict}>NO task checkpoint. Confirm it with the user first.</Text>
@@ -1388,12 +1384,11 @@ function FreshPreviewView({
       <Text style={styles.body}>{preview.packet}</Text>
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel={`Confirm fresh Steer ${preview.slot}`}
         style={styles.button}
         disabled={actions.busy}
         onPress={actions.confirmFresh}
       >
-        <Text style={styles.buttonText}>Fresh and deliver</Text>
+        <Text style={styles.buttonText}>{replacement ? "Create replacement with automatic account selection" : "Rewind and deliver"}</Text>
       </Pressable>
     </View>
   );

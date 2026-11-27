@@ -155,7 +155,7 @@ function ResetOrResumeSteer({ kind, steer, liveSteer, workspaceId, host, theme, 
         if (details.workspaceId !== workspaceId || details.from !== agentId || details.slot !== slot) {
           throw new Error("The steer changed. Open Reset Steer again for the current holder.");
         }
-        if (details.refreshMode !== "rewind" && details.refreshMode !== "new-agent") {
+        if (details.refreshMode !== "rewind") {
           throw new Error("Factory could not verify how the reset would change this tab.");
         }
         return { kind, details } as const;
@@ -196,8 +196,7 @@ function ResetOrResumeSteer({ kind, steer, liveSteer, workspaceId, host, theme, 
         resetQuota, deliver: !quota && initialize === "send" ? "send" : "stage", notifyPrevious: false });
       const error = label(result.deliveryError) ?? label(result.stagingError);
       if (!result.applied && result.idempotent !== true) throw new Error(error ?? "Factory could not confirm the reset.");
-      const completed = result.idempotent ? "This reset was already applied."
-        : details.refreshMode === "new-agent" ? "Steer replaced." : "Steer reset.";
+      const completed = result.idempotent ? "This reset was already applied." : "Steer reset.";
       return { tone: error ? "statusWarning" : "statusSuccess", stagedTo: result.staged ? result.stagedTo : null,
         detail: `${completed}${error ? ` ${error}` : result.staged ? " The continuation brief is staged."
           : result.delivered ? " The continuation brief was sent." : ""}` } as const;
@@ -212,7 +211,6 @@ function ResetOrResumeSteer({ kind, steer, liveSteer, workspaceId, host, theme, 
   const details = preview.data;
   const result = confirmation.data;
   const stagedTo = result?.stagedTo;
-  const replacement = details?.kind === "reset" && details.details.refreshMode === "new-agent";
   const error = preview.error ?? (confirmation.error && !isExpiredPreviewError(confirmation.error) ? confirmation.error : null);
   return (
     <View style={{ gap: 8, padding: 8 }}>
@@ -230,8 +228,7 @@ function ResetOrResumeSteer({ kind, steer, liveSteer, workspaceId, host, theme, 
           {details?.kind === "reset" ? (
             <>
               {quota ? <Text style={styles.conflict}>{resetQuotaConfirmationText(quota, liveSteer)}</Text> : null}
-              <Text style={styles.body}>{replacement ? "A new agent takes this slot. The previous tab keeps its chat."
-                : "This rewinds the conversation and removes later messages from this tab."}</Text>
+              <Text style={styles.body}>This rewinds the conversation and removes later messages from this tab.</Text>
               <Text style={styles.label}>{details.details.packetChars.toLocaleString()} characters in the continuation brief
                 {details.details.checkpoint ? " · includes checkpoint" : ""}</Text>
               {details.details.warnings?.map((warning) => <Text key={warning} style={styles.conflict}>{warning}</Text>)}
@@ -244,7 +241,7 @@ function ResetOrResumeSteer({ kind, steer, liveSteer, workspaceId, host, theme, 
             </>
           ) : null}
           {details && !error ? <Action theme={theme} icon={kind === "reset" ? "ListRestart" : "RotateCcw"}
-            title={confirmation.isPending ? "Applying…" : replacement ? "Replace steer" : kind === "reset" ? "Confirm reset" : "Confirm resume"}
+            title={confirmation.isPending ? "Applying…" : kind === "reset" ? "Confirm reset" : "Confirm resume"}
             emphasized disabled={Boolean(blocked) || preview.isFetching || confirmation.isPending} onPress={() => {
               if (applying.current) return;
               applying.current = true;

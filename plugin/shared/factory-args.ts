@@ -37,11 +37,11 @@ export const FACTORY_COMMANDS: Record<string, CommandHelp> = {
     examples: ["/factory cleanup"],
   },
   fresh: {
-    usage: "/factory fresh [scope]",
-    summary: "Replace the active steer with a new agent of the same slot.",
+    usage: "/factory fresh [scope] [--slot E | --worker <id>] [--model <provider/model>] [--keep-chat-history]",
+    summary: "Preview a same-tab refresh or a replacement agent.",
     details: [
       "Shows a preview; confirm it in the Factory panel.",
-      "The old agent keeps its tab; archive it in Paseo when done.",
+      "Use --model to select a different provider/model and --keep-chat-history to request a new agent.",
     ],
     examples: ["/factory fresh", "/factory fresh me/my-repo"],
   },
@@ -241,7 +241,7 @@ export type FactoryCommand =
     }
   | { command: "switch"; repo?: string; to: string; apply: boolean }
   | { command: "resume"; repo?: string; agentId?: string; brief: boolean }
-  | { command: "fresh"; repo?: string; slot?: string }
+  | { command: "fresh"; repo?: string; slot?: string; workerId?: string; provider?: string; model?: string; keepChatHistory?: boolean }
   | { command: "assign"; repo?: string; task: string; tests: string[]; blockers: string[]; next?: string }
   | { command: "workers"; repo?: string }
   | { command: "models" }
@@ -322,8 +322,8 @@ interface ParsedFlags {
 }
 
 const REPEATABLE = new Set(["test", "blocker", "adopt", "adopt-worker", "local", "hub"]);
-const VALUE_FLAGS = new Set(["slots", "slot", "to", "task", "from-agent", "from-steer", "next", "test", "blocker", "agent", "thinking", "mode", "profile", "timeout", "adopt", "adopt-worker", "local", "hub", "name", "main", "domain"]);
-const BOOL_FLAGS = new Set(["apply", "candidates", "brief", "dry-run", "detach"]);
+const VALUE_FLAGS = new Set(["slots", "slot", "worker", "model", "to", "task", "from-agent", "from-steer", "next", "test", "blocker", "agent", "thinking", "mode", "profile", "timeout", "adopt", "adopt-worker", "local", "hub", "name", "main", "domain"]);
+const BOOL_FLAGS = new Set(["apply", "candidates", "brief", "dry-run", "detach", "keep-chat-history"]);
 
 function parseFlags(tokens: string[]): ParsedFlags {
   const positionals: string[] = [];
@@ -705,14 +705,22 @@ export function parseFactoryArgs(args: string): FactoryCommand {
     };
   }
   if (sub === "fresh") {
-    checkAllowed(flags, "fresh", ["slot"]);
+    checkAllowed(flags, "fresh", ["slot", "worker", "model", "keep-chat-history"]);
     if (flags.positionals.length > 1) fail("fresh takes at most one scope address (project); leave it out for this workspace.");
     const slot = flags.singles.get("slot");
     if (slot !== undefined && !/^[A-Za-z]$/.test(slot)) fail("fresh --slot needs one steer letter, e.g. --slot E.");
+    const workerId = flags.singles.get("worker");
+    if (workerId && slot) fail("fresh takes either --slot or --worker.");
+    const spec = flags.singles.get("model");
+    const slash = spec?.indexOf("/") ?? -1;
+    if (spec !== undefined && (slash <= 0 || slash === spec.length - 1)) fail("fresh --model needs provider/model.");
     return {
       command: "fresh",
       ...(flags.positionals.length === 1 ? { repo: flags.positionals[0] } : {}),
       ...(slot ? { slot: slot.toUpperCase() } : {}),
+      ...(workerId ? { workerId } : {}),
+      ...(spec ? { provider: spec.slice(0, slash), model: spec.slice(slash + 1) } : {}),
+      ...(flags.bools.has("keep-chat-history") ? { keepChatHistory: true } : {}),
     };
   }
   if (sub === "assign") {

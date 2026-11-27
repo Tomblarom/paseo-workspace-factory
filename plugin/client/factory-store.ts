@@ -1,4 +1,4 @@
-import type { RpcOutput } from "@getpaseo/plugin";
+import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
 import type {
   factoryApply,
   factoryAssignPreview,
@@ -76,8 +76,7 @@ export type FactoryPanelResult =
   | { kind: "switched"; repo: string; at: string; result: RpcOutput<typeof factorySwitch> }
   | {
       kind: "freshPreview";
-      repo?: string;
-      workspaceId: string;
+      input: RpcInput<typeof factoryFreshPreview>;
       at: string;
       preview: RpcOutput<typeof factoryFreshPreview>;
     }

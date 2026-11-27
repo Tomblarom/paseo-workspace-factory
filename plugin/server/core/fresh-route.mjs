@@ -21,7 +21,7 @@ export function freshLiveRoute(agent) {
   };
 }
 
-export function freshCreationRoute({ config, providers, from, role, slot, steers, repoPublic, quotaSnapshot, quotaExhaustedPct, zerosub, metadata, now, intent, allowDepletedReset = false }) {
+export function freshCreationRoute({ config, providers, from, role, slot, steers, repoPublic, quotaSnapshot, quotaExhaustedPct, zerosub, metadata, now, intent }) {
   const live = freshLiveRoute(from);
   const profiles = config?.profiles ?? {};
   const worker = role === 'worker';
@@ -41,11 +41,24 @@ export function freshCreationRoute({ config, providers, from, role, slot, steers
     if (sensitive && repoPublic !== true) {
       return { ...base, reason: 'sensitive runtime is private or unknown; public scope required' };
     }
-    const model = providers?.find((entry) => entry.provider === pair.provider)?.models?.find((entry) => entry.id === pair.model);
+    const provider = providers?.find((entry) => entry.provider === pair.provider);
+    const model = provider?.models?.find((entry) => entry.id === pair.model);
     if (model?.isSelectable === false) return { ...base, reason: 'model is unavailable for new agents' };
     const candidateConfig = name === key ? { ...config, profiles: { ...profiles, [key]: { ...profile, sensitive } } } : config;
-    const result = resolveProfile(candidateConfig, providers, [name], { ...catalog,
-      ignoreQuotaExhaustion: allowDepletedReset && source === "live" });
+    // A proxy can advertise an alias while the running session reports its
+    // concrete model ID. Only the live candidate can supply missing catalog data.
+    let observedCatalog = providers;
+    if (source === 'live' && provider && !model) {
+      const modes = provider.modes ?? [];
+      const liveModeMissing = live.mode && !modes.some(({ id }) => id === live.mode);
+      const observedProvider = {
+        ...provider,
+        modes: liveModeMissing ? [...modes, { id: live.mode }] : modes,
+        models: [...(provider.models ?? []), { id: live.model, thinkingOptions: live.thinking ? [{ id: live.thinking }] : [] }],
+      };
+      observedCatalog = providers.map((entry) => entry === provider ? observedProvider : entry);
+    }
+    const result = resolveProfile(candidateConfig, observedCatalog, [name], catalog);
     return result.profile ? { ...base, route: result.profile, account: result.zerosubAccount } :
       { ...base, reason: result.skipped[0]?.reason ?? 'not startable' };
   };
@@ -68,9 +81,11 @@ export function freshCreationRoute({ config, providers, from, role, slot, steers
     profile.provider === intent.provider && profile.model === intent.model)) {
     candidates.push(check(key, { provider: intent.provider, model: intent.model, pool: liveAgentPool(intent, config) }, names.length + 1, 'explicit'));
   }
-  const selected = candidates.find((candidate) => candidate.route && routeMatchesIntent(candidate, intent));
+  const requestedBy = (candidate) => intent.mode === 'automatic'
+    ? candidate.source === 'live' : routeMatchesIntent(candidate, intent);
+  const selected = candidates.find((candidate) => candidate.route && requestedBy(candidate));
   const evidence = candidates.map(({ route, account, ...candidate }) => ({
-    ...candidate, eligible: !!route, requested: routeMatchesIntent(candidate, intent), account: account ?? null,
+    ...candidate, eligible: !!route, requested: requestedBy(candidate), account: account ?? null,
   }));
   if (!selected) {
     const requested = evidence.filter((candidate) => candidate.requested);
@@ -78,7 +93,7 @@ export function freshCreationRoute({ config, providers, from, role, slot, steers
     const alternatives = [...new Set(evidence.filter((candidate) => candidate.eligible && !candidate.requested)
       .map((candidate) => `${candidate.provider}/${candidate.model}`))];
     const target = intent.mode === 'explicit' ? `Requested route ${intent.provider}/${intent.model}` : `Live route ${live.provider ?? '?'}/${live.model ?? '?'}`;
-    return { error: `${target} is not startable: ${reason}${alternatives.length ? `; eligible alternatives: ${alternatives.join(', ')}` : ' (no fallback available)'}` };
+    return { error: `${target} is not startable: ${reason}${alternatives.length ? `; eligible alternatives for /factory fresh --model: ${alternatives.join(', ')}` : ' (no fallback available)'}` };
   }
   const { route, source, account, profile } = selected;
   return { route, live, profile, source, account, evidence };

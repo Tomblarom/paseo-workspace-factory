@@ -624,8 +624,8 @@ test("entry subscribes to factory.steers and keeps attention worker-only", () =>
 test("the Reset popover is keyboard/screen-reader labelled and theme driven", () => {
   for (const token of [
     'accessibilityRole="button"',
-    'accessibilityRole="checkbox"',
-    "accessibilityState={{ checked: clearChatHistory",
+    'accessibilityRole="alert"',
+    "accessibilityState={{ busy }}",
     "theme.colors.",
     "resetQuotaConfirmationText",
   ]) {

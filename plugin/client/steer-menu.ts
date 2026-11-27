@@ -320,21 +320,19 @@ export async function handoverSteer(
 
 export async function resetSteer(
   { workspaceId, agentId, slot }: Pick<SteerPillRow, "workspaceId" | "agentId"> & { slot: string },
-  clearChatHistory: boolean,
-  saveHistory: (keepChatHistory: boolean) => Promise<InitializeNewSteer>,
-  preview: Call<typeof factoryFreshPreview>,
+  plan: RpcOutput<typeof factoryFreshPreview>,
+  initialize: InitializeNewSteer,
   apply: Call<typeof factoryFresh>,
-  resetQuota?: RpcInput<typeof factoryFresh>["resetQuota"],
+  resetQuota: NonNullable<RpcInput<typeof factoryFresh>["resetQuota"]>,
 ): Promise<{ result: RpcOutput<typeof factoryFresh>; initialize: InitializeNewSteer }> {
-  const keepChatHistory = !clearChatHistory;
-  const input = { workspaceId, slot, keepChatHistory, ...(resetQuota ? { resetQuota } : {}) };
-  const plan = await preview(input);
   if (plan.workspaceId !== workspaceId || plan.from !== agentId || plan.slot !== slot) {
     throw new Error("The steer changed. Open Reset Steer again for the current holder.");
   }
-  const initialize = await saveHistory(keepChatHistory);
-  const result = await apply({ ...input, fingerprint: plan.fingerprint,
-    deliver: initialize === "send" && (!resetQuota || resetQuota === "available") ? "send" : "stage", notifyPrevious: false });
+  if (plan.refreshMode !== "rewind") {
+    throw new Error("An in-place rewind is unavailable. Use /factory fresh to preview and confirm a replacement.");
+  }
+  const result = await apply({ workspaceId, slot, resetQuota, fingerprint: plan.fingerprint,
+    deliver: initialize === "send" && resetQuota === "available" ? "send" : "stage", notifyPrevious: false });
   return { result, initialize };
 }
 

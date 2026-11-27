@@ -396,44 +396,36 @@ test("a Handover target previews and applies in one press with source and target
   }
 });
 
-test("Reset saves the inverse of Clear chat history before applying its bound preview", async () => {
+test("Reset applies the bound rewind to the same holder and stages at unknown quota", async () => {
   const source = self();
-  for (const clearChatHistory of [true, false]) {
-    const calls = [];
-    const plan = { workspaceId: source.workspaceId, from: source.agentId, slot: source.slot, fingerprint: "reset-fingerprint" };
-    const result = { applied: true, refreshMode: clearChatHistory ? "rewind" : "new-agent" };
-    const reset = await menu.resetSteer(source, clearChatHistory,
-      async (keep) => { calls.push(["save", keep]); return "send"; },
-      async (input) => { calls.push(["preview", input]); return plan; },
-      async (input) => { calls.push(["apply", input]); return result; });
-    const keepChatHistory = !clearChatHistory;
-    const expected = { workspaceId: source.workspaceId, slot: source.slot, keepChatHistory };
-    assert.deepEqual(calls, [
-      ["preview", expected],
-      ["save", keepChatHistory],
-      ["apply", { ...expected, fingerprint: plan.fingerprint, deliver: "send", notifyPrevious: false }],
-    ]);
+  const plan = { workspaceId: source.workspaceId, from: source.agentId, slot: source.slot,
+    fingerprint: "reset-fingerprint", refreshMode: "rewind" };
+  for (const [resetQuota, deliver] of [["available", "send"], ["unknown", "stage"], ["depleted", "stage"]]) {
+    const result = { applied: true, refreshMode: "rewind" };
+    const reset = await menu.resetSteer(source, plan, "send", async (input) => {
+      assert.deepEqual(input, { workspaceId: source.workspaceId, slot: source.slot, resetQuota, deliver,
+        fingerprint: plan.fingerprint, notifyPrevious: false });
+      return result;
+    }, resetQuota);
     assert.deepEqual(reset, { result, initialize: "send" });
   }
 });
 
-test("Reset stops on a stale holder or a failed settings write", async () => {
+test("Reset stops on a stale holder or a replacement preview", async () => {
   const source = self();
-  const plan = { workspaceId: source.workspaceId, from: source.agentId, slot: source.slot, fingerprint: "reset-fingerprint" };
+  const plan = { workspaceId: source.workspaceId, from: source.agentId, slot: source.slot,
+    fingerprint: "reset-fingerprint", refreshMode: "rewind" };
   const apply = async () => assert.fail("reset applied");
-  await assert.rejects(menu.resetSteer(source, false, async () => assert.fail("settings written"),
-    async () => ({ ...plan, from: "new-holder" }), apply), /steer changed/);
-  await assert.rejects(menu.resetSteer(source, false, async () => { throw new Error("Settings unavailable"); },
-    async () => plan, apply), /Settings unavailable/);
+  await assert.rejects(menu.resetSteer(source, { ...plan, from: "new-holder" }, "send", apply, "available"), /steer changed/);
+  await assert.rejects(menu.resetSteer(source, { ...plan, refreshMode: "new-agent" }, "send", apply, "available"), /preview and confirm a replacement/);
 });
 
 const menuSource = readFileSync(new URL("../client/steer-menu-content.tsx", import.meta.url), "utf8");
 const entrySource = readFileSync(new URL("../index.client.tsx", import.meta.url), "utf8");
 
-test("the single confirmation popover prefills from the saved setting and Cancel closes it", () => {
-  assert.match(menuSource, /choice \?\? \(state.status === "ready" && !state.values.keepChatHistory\)/);
-  assert.match(menuSource, /accessibilityRole="checkbox"[\s\S]*?>Clear chat history</);
-  assert.match(menuSource, /change\("history"\)\(\(current\) => \(\{ \.\.\.current, keepChatHistory \}\)\)/);
+test("the Reset popover checks rewind availability before enabling its confirmation", () => {
+  assert.match(menuSource, /queryFn:[\s\S]*?callPreview\(\{ workspaceId, slot: slot \?\? undefined, resetQuota \}\)/);
+  assert.match(menuSource, /canReset = plan\?\.refreshMode === "rewind"/);
   assert.match(menuSource, /onPress=\{close\}[\s\S]*?>Cancel</);
   assert.match(menuSource, /onPress=\{\(\) => void confirmReset\(\)\}[\s\S]*?>Reset</);
 });

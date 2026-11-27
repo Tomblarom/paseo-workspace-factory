@@ -169,8 +169,7 @@ export default function contribute(client: PluginClientContext) {
       if (props.context !== "agent") return null;
       return <ResetSteerPopover {...props} feed={panelSteers} onReset={async (source, { result, initialize }) => {
         const summary = result.idempotent ? "Steer already reset" : "Steer reset";
-        const chat = result.idempotent ? "" : result.refreshMode === "rewind"
-          ? "The context was reset in this tab." : "A new agent continues. The original chat stays available.";
+        const chat = result.idempotent ? "" : "The context was reset in this tab.";
         const brief = result.idempotent ? "" : await briefResult(source.workspaceId, result, initialize);
         reportSteerResult(source, summary, [`${summary}.`, chat, brief].filter(Boolean).join(" "));
       }} />;

@@ -331,11 +331,7 @@ export async function applyResumeRpc(
       buildBrief: extra?.buildBrief ?? createResumeBriefBuilder(loader, extra),
       refreshWorker: async (workspaceId, workerId) => {
         const { options } = await freshRpcOptions({ workspaceId, workerId }, paseo, loader, extra);
-        const lookupReceipt = lookupCreationReceipt;
-        return freshSteer({
-          ...options, apply: true, notifyPrevious: false, lookupReceipt,
-          execute: (createExecutors as any)({ client: paseo, getZerosub: () => resolveZerosub(extra ?? {}), lookupReceipt }),
-        } as any);
+        return freshSteer({ ...options, apply: true, requireRefreshMode: "rewind" });
       },
       beforeDelivery: input.takeover === true ? async () => {
         try {
@@ -429,16 +425,19 @@ async function freshRpcOptions(input: FreshInput, paseo: any, loader: ConfigLoad
   if (input.resetQuota !== undefined && (!input.slot || input.workerId)) {
     throw new Error("Reset Steer requires a steer slot.");
   }
-  const allowDepletedReset = input.resetQuota === "depleted";
+  const resetting = input.resetQuota !== undefined;
+  if (resetting && (input.keepChatHistory === true || input.provider || input.model)) {
+    throw new Error("Reset Steer rewinds this tab. Use /factory fresh to preview and confirm a replacement.");
+  }
   const policy = await freshPolicy(paseo, loader, deps, discovery, config);
   const options: any = {
     client: paseo, discovery, config, slot: input.slot ?? null, workerId: input.workerId ?? null,
     provider: input.provider ?? null, model: input.model ?? null,
-    ...(input.keepChatHistory === true ? { requireRefreshMode: "new-agent" } : {}),
+    ...(resetting ? { requireRefreshMode: "rewind" } : input.keepChatHistory === true ? { requireRefreshMode: "new-agent" } : {}),
     git: createGit(), rewindClient: deps?.rewindClient ?? defaultCreateRewindClient,
     promptOptions: await loader.loadPromptOptions(paseo), admitTarget: freshPrivacyReader(paseo, loader, deps),
-    quotaSnapshot: policy.quotaSnapshot, zerosub: policy.zerosub, repoPublic: policy.repoPublic, allowDepletedReset,
-    readPolicy: async () => ({ ...await freshPolicy(paseo, loader, deps, discovery), allowDepletedReset }),
+    quotaSnapshot: policy.quotaSnapshot, zerosub: policy.zerosub, repoPublic: policy.repoPublic,
+    readPolicy: () => freshPolicy(paseo, loader, deps, discovery),
     lookupReceipt: deps?.lookupFreshReceipt ?? lookupCreationReceipt,
     ...(deps?.lock ? { lock: deps.lock } : {}),
   };
@@ -448,7 +447,7 @@ async function freshRpcOptions(input: FreshInput, paseo: any, loader: ConfigLoad
 async function confirmResetQuota(
   input: FreshInput, sourceId: unknown, found: Awaited<ReturnType<typeof freshRpcOptions>>, paseo: any, deps?: FreshDeps,
 ) {
-  if (input.resetQuota === undefined) return null;
+  if (input.resetQuota === undefined) return;
   const source = found.snapshot.agents.find((agent: any) => agent.id === sourceId);
   if (!source) throw new Error("Reset Steer source is unavailable.");
   const entries = found.discovery.mainWorkspace.metadata?.[AGENTS_KEY] ?? {};
@@ -457,7 +456,6 @@ async function confirmResetQuota(
   if ((quota.confirmation ?? "available") !== input.resetQuota) {
     throw new Error("Something changed since the Reset Steer confirmation. Review the current quota and confirm again.");
   }
-  return source;
 }
 
 export async function previewFresh(
@@ -549,9 +547,7 @@ export async function applyFresh(
   };
   const dry: any = await freshSteer(dryOptions);
   confirmPreview(dry);
-  const resetSource = await confirmResetQuota(input, dry.from, found, paseo, deps);
-  const allowDepletedSteerCreate = input.resetQuota === "depleted" && resetSource?.provider === dry.provider &&
-    resetSource?.model === dry.model ? { provider: dry.provider, model: dry.model } : null;
+  await confirmResetQuota(input, dry.from, found, paseo, deps);
   const lookupReceipt = deps?.lookupFreshReceipt ?? lookupCreationReceipt;
   // CLI resolution is lazy for rewind, which never retires a tab.
   const paseoCli: ReturnType<typeof createPaseoCli> = deps?.freshPaseoCli ?? ((args) => createPaseoCli()(args));
@@ -563,7 +559,7 @@ export async function applyFresh(
     notifyPrevious: input.notifyPrevious !== false && (!input.resetQuota || input.resetQuota === "available"),
     lookupReceipt, paseoCli,
     execute: (createExecutors as any)({ client: paseo, paseoCli, getZerosub: () => resolveZerosub(deps ?? {}),
-      lookupReceipt, allowDepletedSteerCreate }),
+      lookupReceipt }),
     requireRefreshMode: dry.refreshMode,
   };
   let applied: any;

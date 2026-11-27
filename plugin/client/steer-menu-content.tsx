@@ -1,52 +1,64 @@
 import type { PluginButtonContentProps } from "@getpaseo/plugin/client";
-import { useRpc } from "@getpaseo/plugin/client";
-import { Icon } from "@getpaseo/plugin/client/ui";
+import { useRpc, useSettings } from "@getpaseo/plugin/client";
+import { useQuery } from "@tanstack/react-query";
 import { useRef, useState, useSyncExternalStore } from "react";
 import { Pressable, Text, View } from "react-native";
 import { factoryFresh, factoryFreshPreview } from "../shared/factory.js";
 import { factorySteerMenuSettings } from "../shared/settings.js";
 import type { FactorySteerFeed } from "./factory-workspace-state.js";
-import { useAutosave } from "./settings-autosave.js";
-import { resetQuotaConfirmationText, resetSteer, resetSteerBlock, steerQuotaConfirmation } from "./steer-menu.js";
+import { isExpiredPreviewError, normalizeInitializeNewSteer, resetQuotaConfirmationText, resetSteer, resetSteerBlock, steerQuotaConfirmation } from "./steer-menu.js";
 
 type ResetSteerPopoverProps = Extract<PluginButtonContentProps, { context: "agent" }> & {
   feed: FactorySteerFeed;
   onReset: (source: { workspaceId: string; agentId: string }, outcome: Awaited<ReturnType<typeof resetSteer>>) => Promise<void>;
 };
 
-export function ResetSteerPopover({ agentId, workspaceId, theme, close, feed, onReset }: ResetSteerPopoverProps) {
-  const { state, change } = useAutosave(factorySteerMenuSettings);
-  const preview = useRpc(factoryFreshPreview);
+export function ResetSteerPopover({ agentId, workspaceId, host, theme, close, feed, onReset }: ResetSteerPopoverProps) {
+  const settings = useSettings(factorySteerMenuSettings);
+  const callPreview = useRpc(factoryFreshPreview);
   const apply = useRpc(factoryFresh);
   const { rows, disconnected } = useSyncExternalStore(feed.subscribe, feed.getSnapshot, feed.getSnapshot);
   const row = disconnected ? undefined : rows?.find((entry) => entry.agentId === agentId && entry.workspaceId === workspaceId);
   const blocked = row ? resetSteerBlock(row) : "This steer is no longer available.";
   const quota = row ? steerQuotaConfirmation(row) : null;
-  const [choice, setChoice] = useState<boolean | null>(null);
+  const resetQuota = quota ?? "available";
+  const slot = row?.slot;
+  const preview = useQuery({
+    queryKey: ["workspace-factory", "reset-popover", host.id, workspaceId, agentId, slot, resetQuota],
+    queryFn: async () => {
+      const plan = await callPreview({ workspaceId, slot: slot ?? undefined, resetQuota });
+      if (plan.from !== agentId || plan.workspaceId !== workspaceId || plan.slot !== slot) {
+        throw new Error("The steer changed. Open Reset Steer again for the current holder.");
+      }
+      if (plan.refreshMode !== "rewind") {
+        throw new Error("An in-place rewind is unavailable. Use /factory fresh to preview and confirm a replacement.");
+      }
+      return plan;
+    },
+    enabled: !blocked && Boolean(slot),
+    retry: false,
+    gcTime: 0,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: false,
+  });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const running = useRef(false);
-  const clearChatHistory = choice ?? (state.status === "ready" && !state.values.keepChatHistory);
-  const canReset = state.status === "ready" && !blocked && !busy;
-  const settingsError = state.status === "error" || state.status === "invalid" ? state.error : null;
+  const plan = preview.data;
+  const canReset = plan?.refreshMode === "rewind" && settings.status === "ready" && !preview.isFetching && !blocked && !busy;
+  const settingsError = settings.status === "error" || settings.status === "invalid" ? settings.error : null;
   const foreground = { color: theme.colors.foreground };
   const button = { minHeight: 36, paddingHorizontal: 12, borderRadius: 8, justifyContent: "center" } as const;
 
   async function confirmReset() {
-    if (!canReset || !row?.slot || running.current) return;
+    if (!canReset || !plan || !slot || running.current) return;
     running.current = true;
-    setChoice(clearChatHistory);
     setBusy(true);
     setError(null);
     try {
-      const source = { agentId, workspaceId, slot: row.slot };
-      const outcome = await resetSteer(source, clearChatHistory, async (keepChatHistory) => {
-        const saved = await change("history")((current) => ({ ...current, keepChatHistory }));
-        if (saved.status !== "saved") {
-          throw new Error(saved.status === "superseded" ? "The history setting could not be saved." : saved.error);
-        }
-        return saved.values.initializeNewSteer;
-      }, preview, apply, quota ?? "available");
+      const source = { agentId, workspaceId, slot };
+      const initialize = normalizeInitializeNewSteer(settings.status === "ready" ? settings.values.initializeNewSteer : undefined);
+      const outcome = await resetSteer(source, plan, initialize, apply, resetQuota);
       if (!outcome.result.applied && !outcome.result.idempotent) {
         throw new Error(String(outcome.result.deliveryError ?? "Factory could not confirm the reset."));
       }
@@ -54,6 +66,7 @@ export function ResetSteerPopover({ agentId, workspaceId, theme, close, feed, on
       close();
     } catch (thrown) {
       setError(thrown instanceof Error ? thrown.message : String(thrown));
+      if (isExpiredPreviewError(thrown)) void preview.refetch();
     } finally {
       running.current = false;
       setBusy(false);
@@ -65,20 +78,13 @@ export function ResetSteerPopover({ agentId, workspaceId, theme, close, feed, on
       {quota ? <Text style={{ color: theme.colors.statusWarning }}>
         {resetQuotaConfirmationText(quota, row)}
       </Text> : null}
-      <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: clearChatHistory, disabled: !canReset }}
-        disabled={!canReset} onPress={() => setChoice(!clearChatHistory)}
-        style={{ flexDirection: "row", alignItems: "center", gap: 8, minHeight: 36 }}>
-        <Icon name={clearChatHistory ? "SquareCheck" : "Square"} size={18} color={theme.colors.foreground} />
-        <Text style={foreground}>Clear chat history</Text>
-      </Pressable>
-      <Text style={{ color: theme.colors.foregroundMuted }}>
-        {clearChatHistory ? "If this tab cannot be cleared, a new agent continues and the original chat stays available."
-          : "A new agent continues. The original chat stays available in this tab."}
-      </Text>
-      {state.status === "loading" ? <Text style={foreground}>Loading settings…</Text> : null}
-      {error || blocked || settingsError ? (
+      {preview.isFetching ? <Text style={foreground}>Checking rewind availability…</Text> : null}
+      {plan && !blocked ? <Text style={{ color: theme.colors.foregroundMuted }}>
+        This rewinds the conversation and removes later messages from this tab.
+      </Text> : null}
+      {error || blocked || preview.error || settingsError ? (
         <Text accessibilityRole="alert" style={{ color: theme.colors.statusDanger }}>
-          {error ?? blocked ?? settingsError}
+          {error ?? blocked ?? preview.error?.message ?? settingsError}
         </Text>
       ) : null}
       <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>

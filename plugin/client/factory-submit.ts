@@ -151,15 +151,10 @@ export async function submitFactoryCommand(
     return pill("Quota");
   }
   if (parsed.command === "fresh") {
-    const address = parsed.repo ? { repo: parsed.repo } : { workspaceId: ctx.workspaceId };
-    const preview = await ctx.rpc(factoryFreshPreview, { ...address, ...(parsed.slot ? { slot: parsed.slot } : {}) });
-    setFactoryResult({
-      kind: "freshPreview",
-      repo: parsed.repo,
-      workspaceId: ctx.workspaceId,
-      at,
-      preview,
-    });
+    const { command: _command, repo, ...options } = parsed;
+    const input = { ...(repo ? { repo } : { workspaceId: ctx.workspaceId }), ...options };
+    const preview = await ctx.rpc(factoryFreshPreview, input);
+    setFactoryResult({ kind: "freshPreview", input, at, preview });
     return PANEL;
   }
   if (parsed.command === "assign") {

@@ -615,17 +615,19 @@ test('suggestSlotProfile distinguishes existing, ambiguous and missing matches',
   assert.match(formatSlotProfileSuggestion(twin, 'B', 'codex', 'gpt-6.2-sol'), /one of "standard", "twin"/);
 });
 
-test('fresh uses an eligible fallback without suggesting a host preference edit', async () => {
+test('fresh requires an explicit route when the live provider is unavailable', async () => {
   const world = makeWorld();
   const { steers } = provisioned(world);
   steers.B.provider = 'codex';
   steers.B.model = 'gpt-6.2-sol'; // B no longer occupies the cheap pair
   world.providers = world.providers.filter((p) => p.provider === 'muse'); // standard unstartable
-  const result = await freshSteer({ paseoCli: fakePaseoCli(world), client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, git: fakeGit(), lock: testLock, language: 'en' });
+  const fresh = (route) => freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG,
+    git: fakeGit(), lock: testLock, language: 'en', ...route });
+  await assert.rejects(fresh(), /Live route.*not configured.*fresh --model.*muse/);
+  const result = await fresh({ provider: 'muse', model: 'muse-spark-1.3-contributor' });
   assert.equal(result.profile, 'cheap');
-  assert.equal(result.fallbackFrom, 'standard');
+  assert.equal(result.fallbackFrom, null);
   assert.equal(result.profileSuggestion, null);
-  assert.ok(result.warnings.some((w) => w.includes('Using fallback "cheap"')));
 });
 
 test('steer add builds the selected route without editing the host preferences', () => {
@@ -971,7 +973,7 @@ test('Fresh preserves observed provider, model, thinking, mode and options for e
   }
 });
 
-test('Fresh uses the preference of the live role when its route is unsupported', async () => {
+test('Fresh preserves live model IDs absent from the catalog and validates explicit alternatives by role', async () => {
   const world = makeWorld();
   const { steers, worker } = provisionedWithWorker(world);
   const config = structuredClone(CONFIG);
@@ -986,11 +988,15 @@ test('Fresh uses the preference of the live role when its route is unsupported',
   steers.B.metadata = { [LABEL.steerRole]: 'advisor' };
   for (const source of [steers.A, steers.B, worker]) source.model = 'no-longer-offered';
   const preview = (target) => freshSteer({ ...target, client: fakeClient(world), discovery: discoveryOf(world), config, lock: testLock });
-  assert.equal((await preview({})).model, 'coordinator-alt');
-  assert.equal((await preview({ slot: 'B' })).model, 'advisor-alt');
-  assert.equal((await preview({ workerId: worker.id })).model, 'worker-alt');
-  await assert.rejects(preview({ slot: 'B', provider: 'codex', model: 'coordinator-alt' }), /not tagged as advisor.*eligible alternatives: codex\/advisor-alt/);
-  await assert.rejects(preview({ workerId: worker.id, provider: 'codex', model: 'advisor-alt' }), /tagged as advisor.*eligible alternatives: codex\/worker-alt/);
+  for (const target of [{}, { slot: 'B' }, { workerId: worker.id }]) {
+    const result = await preview(target);
+    assert.equal(result.model, 'no-longer-offered');
+    assert.equal(result.routeEvidence[0].eligible, true);
+    assert.equal(result.routeEvidence[0].requested, true);
+    assert.equal(result.routeEvidence[1].requested, false);
+  }
+  await assert.rejects(preview({ slot: 'B', provider: 'codex', model: 'coordinator-alt' }), /not tagged as advisor.*eligible alternatives .*codex\/advisor-alt/);
+  await assert.rejects(preview({ workerId: worker.id, provider: 'codex', model: 'advisor-alt' }), /tagged as advisor.*eligible alternatives .*codex\/worker-alt/);
   assert.deepEqual(world.calls, []);
 });
 
@@ -1045,8 +1051,14 @@ test('Fresh uses account quota as selection evidence without pinning a new agent
   const fresh = (extra) => freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config, zerosub,
     send: false, notifyPrevious: false, lock: testLock, lookupReceipt: fakeLookup(world),
     paseoCli: fakePaseoCli(world), ...extra });
-  await assert.rejects(fresh({ provider: 'codex', model: 'gpt-6.2-sol' }), /accounts exhausted.*eligible alternatives: muse/);
-  const result = await fresh({ apply: true });
+  await assert.rejects(fresh({ apply: true }), /accounts exhausted.*eligible alternatives .*muse/);
+  const route = { provider: 'muse', model: 'muse-spark-1.3-contributor' };
+  await assert.rejects(fresh({ ...route, apply: true }), /Preview and confirm the replacement route and account selection/);
+  assert.equal(world.calls.some(([name]) => name === 'agent.create'), false);
+  const preview = await fresh(route);
+  const result = await fresh({ ...route, apply: true, confirmPreview: (current) => {
+    assert.deepEqual(current.routeBinding, preview.routeBinding);
+  } });
   assert.equal(result.profile, 'cheap');
   assert.equal(result.routeEvidence.find((candidate) => candidate.profile === 'cheap').account, 'muse-available');
   const request = world.calls.find(([name]) => name === 'agent.create')[1];

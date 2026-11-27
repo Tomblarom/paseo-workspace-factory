@@ -1183,42 +1183,127 @@ test("Fresh RPC binds the requested route and rechecks live options before creat
   assert.equal(world.workspaces[0].metadata[AGENTS_KEY], undefined);
 });
 
-test("confirmed Reset Steer stages the brief even when the live route has no quota", async () => {
+test("Fresh confirmation expires if the replacement account selection changes", async () => {
+  const world = makeWorld();
+  const [active] = world.agents;
+  const input = { workspaceId: MAIN, slot: "A", keepChatHistory: true };
+  const snapshot = {
+    accounts: [
+      { id: "current", family: "codex", maxUsedPct: 10 },
+      { id: "other", family: "codex", maxUsedPct: 20 },
+    ],
+    agentAccount: { [active.id]: "current" },
+  };
+  const context = { paseo: fakePaseo(world) };
+  const deps = { getZerosub: async () => snapshot };
+  const preview = await handlers.previewFresh(input, context, loader, deps);
+  assert.equal(preview.routeEvidence[0].account, "current");
+  snapshot.accounts[0].maxUsedPct = 30;
+  await assert.rejects(handlers.applyFresh({ ...input, fingerprint: preview.fingerprint }, context, loader, deps),
+    /changed since the Fresh preview/);
+  assert.equal(world.agents.length, 3);
+  assert.equal(world.workspaces[0].metadata[AGENTS_KEY], undefined);
+});
+
+test("Reset Steer rewinds the live proxy tuple in place and stages the brief at unknown or depleted quota", async () => {
   for (const resetQuota of ["unknown", "depleted"]) {
     const world = makeWorld();
-    const [workspace] = world.workspaces;
-    const target = world.agents[1];
-    target.status = "idle";
-    const paseo = fakePaseo(world);
-    world.createAgent = async (workspaceId, request) => {
-      const [provider, model] = request.config.provider.split("/");
-      const agent = { ...target, id: "steer-replacement", workspaceId, title: request.title,
-        provider, model, labels: request.labels, metadata: request.metadata };
-      world.agents.push(agent);
-      return { refresh: async () => ({ agent }) };
-    };
-    const account = { id: "b", family: target.provider, sampledAt: new Date().toISOString(), maxUsedPct: 100 };
+    const [workspace, active] = [world.workspaces[0], world.agents[0]];
+    Object.assign(active, {
+      title: "Steer E", provider: "claude", model: "anthropic/claude-opus-5-5",
+      effectiveThinkingOptionId: "high", currentModeId: "bypassPermissions",
+      capabilities: { supportsRewindConversation: true }, persistence: { sessionId: "live-session" },
+    });
+    active.labels[LABEL.slot] = "E";
+    Object.assign(workspace.metadata[METADATA_KEY], { activeSteer: "E", activeAgentId: active.id, epoch: 2 });
+    world.providers[1].models.push({ id: "claude-opus-5-5", thinkingOptions: [{ id: "high" }] });
+    const resetLoader = { ...loader, loadEffectiveConfig: async () => ({
+      ...CONFIG, profiles: { ...CONFIG.profiles, sol: { ...CONFIG.profiles.sol, thinking: "medium" } },
+      steers: { ...CONFIG.steers, priority: ["sol"] },
+    }) };
+    const before = structuredClone(active);
+    const rewinds = [];
+    const account = { id: "proxy", family: "claude", sampledAt: new Date().toISOString(),
+      maxUsedPct: resetQuota === "depleted" ? 100 : null };
     const deps = {
-      ...(resetQuota === "depleted" ? { zerosub: { accounts: [account], agentAccount: { [target.id]: "b" } } } : {}),
-      lookupFreshReceipt: async () => null,
-      freshPaseoCli: () => "",
-      rewindClient: () => assert.fail("preserving chat explicitly skips rewind"),
+      zerosub: { accounts: [account], agentAccount: { [active.id]: account.id } },
+      lookupFreshReceipt: async () => assert.fail("Reset Steer must not look up a replacement"),
+      freshPaseoCli: () => assert.fail("Reset Steer must not retire a tab"),
+      rewindClient: async () => ({
+        fetchAgentTimeline: async () => ({ entries: [{ item: { type: "user_message", messageId: "start" } }] }),
+        rewindAgent: async (...args) => { rewinds.push(args); },
+      }),
       isFactoryPaused: async () => true,
     };
-    const input = { workspaceId: MAIN, slot: "B", keepChatHistory: true };
-    await assert.rejects(handlers.previewFresh({ ...input, resetQuota: "available" }, { paseo }, loader, deps),
-      /changed since the Reset Steer confirmation|accounts exhausted/);
-    const preview = await handlers.previewFresh({ ...input, resetQuota }, { paseo }, loader, deps);
-    assert.equal(preview.provider, target.provider);
-    assert.equal(preview.model, target.model);
-    const result = await handlers.applyFresh({ ...input, resetQuota, deliver: "send", fingerprint: preview.fingerprint },
-      { paseo }, loader, deps);
+    const context = { paseo: fakePaseo(world) };
+    const input = { workspaceId: MAIN, slot: "E", resetQuota };
+    await assert.rejects(handlers.previewFresh({ ...input, resetQuota: "available" }, context, resetLoader, deps),
+      /changed since the Reset Steer confirmation/);
+    const preview = await handlers.previewFresh(input, context, resetLoader, deps);
+    assert.equal(preview.provider, before.provider);
+    assert.equal(preview.model, before.model);
+    assert.equal(preview.refreshMode, "rewind");
+    if (resetQuota === "unknown") {
+      const fresh = await handlers.previewFresh({ workspaceId: MAIN, slot: "E", keepChatHistory: true }, context, resetLoader, deps);
+      assert.equal(fresh.model, before.model);
+      assert.equal(fresh.routeEvidence[0].eligible, true);
+      assert.equal(fresh.routeEvidence[0].source, "live");
+      assert.equal(fresh.routeEvidence[1].requested, false);
+    }
+    const result = await handlers.applyFresh({ ...input, deliver: "send", fingerprint: preview.fingerprint }, context, resetLoader, deps);
     assert.equal(result.applied, true);
-    assert.equal(result.staged, true);
+    assert.equal(result.to, active.id);
+    assert.equal(result.stagedTo, active.id);
     assert.equal(result.delivered, false);
-    assert.equal(workspace.metadata[METADATA_KEY].epoch, 3);
+    assert.equal(workspace.metadata[METADATA_KEY].epoch, 2);
+    assert.equal(workspace.metadata[METADATA_KEY].activeAgentId, active.id);
+    assert.equal(workspace.metadata[AGENTS_KEY][active.id].freshCreation, undefined);
+    assert.equal(world.agents.length, 3);
+    assert.deepEqual(active, before);
+    assert.deepEqual(rewinds, [[active.id, "start", "conversation"]]);
     assert.deepEqual(world.sent, []);
   }
+});
+
+test("Reset without a rewind route requires a separate Fresh confirmation even with an existing replacement fingerprint", async () => {
+  const { world, workspace, active, paseo } = activationWorld();
+  active.capabilities = { supportsRewindConversation: false };
+  const deps = {
+    zerosub: null,
+    rewindClient: async () => assert.fail("the live capability rejects rewind before timeline lookup"),
+    lookupFreshReceipt: async () => assert.fail("neither preview nor Reset may start a replacement"),
+  };
+  const input = { workspaceId: workspace.id, slot: "A" };
+  const alternative = await handlers.previewFresh(input, { paseo }, loader, deps);
+  assert.equal(alternative.refreshMode, "new-agent");
+  await assert.rejects(handlers.previewFresh({ ...input, resetQuota: "unknown" }, { paseo }, loader, deps),
+    /in-place rewind is unavailable.*preview and confirm a replacement/);
+  await assert.rejects(handlers.applyFresh({ ...input, resetQuota: "unknown", fingerprint: alternative.fingerprint },
+    { paseo }, loader, deps), /in-place rewind is unavailable/);
+  await assert.rejects(handlers.applyFresh({ ...input, resetQuota: "unknown", keepChatHistory: true, fingerprint: alternative.fingerprint },
+    { paseo }, loader, deps), /Reset Steer rewinds this tab/);
+  assert.equal(workspace.metadata[METADATA_KEY].epoch, 3);
+  assert.equal(workspace.metadata[AGENTS_KEY], undefined);
+  assert.equal(world.agents.length, 4);
+  assert.deepEqual(world.sent, []);
+});
+
+test("a worker Resume RPC with no rewind point preserves the worker and offers a confirmed Fresh", async () => {
+  const world = makeWorld();
+  const [workspace] = world.workspaces;
+  const worker = world.agents[2];
+  const at = "2026-11-22T00:00:00.000Z";
+  workspace.metadata[WORKERS_KEY][worker.id].state = "interrupted";
+  workspace.metadata[AGENTS_KEY] = { [worker.id]: { interrupted: { at }, lastTurnEndedAt: at } };
+  const context = { paseo: fakePaseo(world) };
+  await assert.rejects(handlers.applyResumeRpc({ workspaceId: MAIN, agentId: worker.id }, context, loader, {
+    zerosub: null,
+    rewindClient: async () => ({ fetchAgentTimeline: async () => ({ entries: [] }), rewindAgent: async () => assert.fail("missing point") }),
+  }), /in-place rewind is unavailable|Bound rewind route failed.*no-point/);
+  assert.equal(workspace.metadata[AGENTS_KEY][worker.id].freshCreation, undefined);
+  assert.equal(workspace.metadata[WORKERS_KEY][worker.id].state, "interrupted");
+  assert.equal(world.agents.length, 3);
+  assert.deepEqual(world.sent, []);
 });
 
 test("Fresh RPC can keep chat history by replacing a steer whose tab supports rewind", async () => {
