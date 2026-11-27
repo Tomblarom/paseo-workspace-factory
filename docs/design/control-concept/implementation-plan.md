@@ -792,6 +792,12 @@ section 6 of the concept requires. One pill click reached the server twice, and
 the second call failed on the workspace lock. Overlapping activations of the
 same tab and epoch now share one result.
 
+Activate as a native menu action (2026-11-27, bundle `6e5926f`) passed in a
+fresh scratch workspace through a trusted click in the web client: one
+`factory.steer.activate` call, one continuation brief to the target and none to
+the old controller, epoch 1 to 2, and the same guarded checkpoint write refused
+for the old steer and accepted for the new one.
+
 Track read-only dispatch receipt recovery with the existing
 [Paseo issue #9947](https://github.com/getpaseo/paseo/issues/9947) and
 [PR #9548](https://github.com/getpaseo/paseo/pull/9548). Recheck the released
