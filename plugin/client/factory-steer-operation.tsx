@@ -296,6 +296,10 @@ export function FactorySteerOperation({
         throw thrown;
       }
       setFlow(null);
+      if (applied.workerHandoverPending) {
+        setNotice(`Steer ${applied.to} is now active. Worker transfer is pending.`);
+        return;
+      }
       if (applied.deliveryPending) {
         setNotice(`Steer ${applied.to} is now active. The brief is queued pending context renewal.`);
         return;

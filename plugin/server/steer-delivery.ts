@@ -37,6 +37,7 @@ type AssignmentRef = { workspaceId: string; actionId: string; text?: string };
 type AssignmentTarget = { workspaceId: string; agentId: string; epoch: number; scopeId: string; deliveryId?: string; unreserved?: boolean };
 
 export interface SteerDeliveryDeps extends ZerosubSource, AdmissionDeps {
+  workerHandoverCli?: (args: string[]) => unknown;
   isFactoryPaused?: () => Promise<boolean>;
   automatic?: boolean;
   confirmActivationQuota?: QuotaConfirmation;
@@ -675,6 +676,10 @@ export async function finishSteerDelivery(
   try {
     const workspace = paseo.workspaces.ref(input.workspaceId);
     let meta = (await workspace.refresh())?.metadata ?? {};
+    const control = scopeState(meta);
+    if (control?.activeAgentId === input.agentId && control.workerHandover) {
+      return deferred("Worker transfer is pending.");
+    }
     let entry = meta[AGENTS_KEY]?.[input.agentId];
     const receipt = readSteerAction(entry);
     const effect = readEffectReceipt(meta, receipt);

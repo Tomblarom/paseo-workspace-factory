@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { LABEL, METADATA_KEY, PARENT_LABEL } from '../plugin/server/core/paseo.mjs';
+import { retryWorkerHandover } from '../plugin/server/core/workers.mjs';
 
 // ---------------------------------------------------------------- fixtures
 
@@ -926,6 +927,61 @@ test('switch apply: locked check-and-write, one handoff; a failed delivery keeps
   assert.equal(next.applied, true);
   assert.equal(next.delivered, false);
   assert.match(next.deliveryError, /unreachable/);
+});
+
+test('handover reparents live workers in place and preserves a retry after a partial update', async () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  const addWorker = (fields = {}) => addAgent(world, {
+    title: 'Worker', status: 'running', workspaceId: ws.id, labels: { [PARENT_LABEL]: steers.A.id }, ...fields,
+  });
+  const first = addWorker();
+  const second = addWorker();
+  const archived = addWorker({ archivedAt: 'now' });
+  const other = addWorker({ labels: { [PARENT_LABEL]: steers.B.id } });
+  const independent = addWorker({ labels: {} });
+  const detached = addWorker({ labels: { [LABEL.role]: 'worker', [LABEL.scope]: FIRMWARE, [LABEL.owner]: 'A' } });
+  const workerSpace = addWorkspace(world, { path: '/p/worker-worktree', title: 'Worker checkout', kind: 'worktree' });
+  const offsite = addWorker({ workspaceId: workerSpace.id });
+  ws.metadata['wsf.workers'] = { [first.id]: { task: 'Open work', startedBy: 'A', state: 'running', resumes: 1 } };
+  const client = fakeClient(world);
+  const updates = [];
+  const paseoCli = ([command, operation, id, field, labels]) => {
+    if (field !== '--label') return;
+    assert.deepEqual([command, operation], ['agent', 'update']);
+    if (id === second.id && !updates.includes(id)) {
+      updates.push(id);
+      throw new Error('lost update');
+    }
+    updates.push(id);
+    Object.assign(world.agents.find((agent) => agent.id === id).labels,
+      Object.fromEntries(labels.split(',').map((item) => item.split('='))));
+  };
+
+  const result = await switchSteer({ client, paseoCli, discovery: await discoveryOf(world), toSlot: 'C',
+    apply: true, lock: testLock });
+  assert.equal(result.workerHandoverPending, true);
+  assert.equal(world.calls.some(([event]) => event === 'agent.send'), false);
+  assert.equal(first.labels[PARENT_LABEL], steers.C.id);
+  assert.equal(second.labels[PARENT_LABEL], steers.A.id);
+  assert.equal(ws.metadata[METADATA_KEY].activeSteer, 'C');
+  assert.equal(ws.metadata[METADATA_KEY].workerHandover.epoch, 2);
+
+  await retryWorkerHandover(client, ws.id, testLock, paseoCli);
+  await retryWorkerHandover(client, ws.id, testLock, paseoCli);
+  assert.deepEqual(updates, [first.id, second.id, second.id, detached.id, offsite.id]);
+  for (const worker of [first, second, detached, offsite]) {
+    assert.equal(worker.labels[PARENT_LABEL], steers.C.id);
+    assert.equal(worker.labels[LABEL.owner], 'C');
+    assert.equal(worker.status, 'running');
+  }
+  assert.equal(archived.labels[PARENT_LABEL], steers.A.id);
+  assert.equal(other.labels[PARENT_LABEL], steers.B.id);
+  assert.equal(independent.labels[PARENT_LABEL], undefined);
+  assert.equal(offsite.workspaceId, workerSpace.id);
+  assert.equal(ws.metadata[METADATA_KEY].workerHandover, undefined);
+  assert.deepEqual(ws.metadata['wsf.workers'][first.id],
+    { task: 'Open work', startedBy: 'A', state: 'running', resumes: 1 });
 });
 
 test('two simultaneous switches from the same state: exactly one succeeds (and without the lock both would)', async () => {

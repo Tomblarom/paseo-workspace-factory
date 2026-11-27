@@ -32,6 +32,7 @@ import { actionFact } from './action-facts.mjs';
 import { freshCreationRoute, freshLiveRoute } from './fresh-route.mjs';
 import { routeMatchesIntent } from './routing.mjs';
 import { ACCOUNT_METADATA_KEY } from './zerosub.mjs';
+import { finishWorkerHandover, planWorkerHandover } from './workers.mjs';
 
 export const CHECKPOINT_KEY = `${METADATA_KEY}.checkpoint`;
 // Worker efficiency rule, same wording as the Worker instructions block in docs/steer-instructions.md.
@@ -924,6 +925,7 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
       epoch: expected.epoch, slot: expected.activeSteer, agentId: from?.id, expectVacant: Boolean(activation && !from),
       aliases: discoveryScopeAliases(discovery), config,
     });
+    if (fresh.workerHandover) throw new SwitchRefused('A previous worker handover is still being reconciled');
     if (holder && (BUSY.has(holder.status) || holder.activeTurn)) throw new SwitchRefused(`Active Steer ${from.slot} is running; stop it or wait for its turn to end first`);
     const entries = metadata[AGENTS_KEY] ?? {};
     const outgoingEntry = holder ? entries[holder.id] : null;
@@ -966,6 +968,10 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
       if (targetEntry?.stagedBrief) targetEntry = { ...targetEntry, stagedBrief: null };
     }
     if (selfTakeover) await checkSelfTakeover?.();
+    const scopeId = fresh.scope?.id ?? status.repo;
+    const workers = planWorkerHandover({ agents, scopeId, workspaceId: status.workspace.id,
+      fromId: holder?.id ?? fresh.activeAgentId, fromSlot: fresh.activeSteer, aliases: discoveryScopeAliases(discovery) });
+    if (workers.length) next.workerHandover = { toId: to.id, epoch: next.epoch, scopeId, workers };
     held.verify(); // commit authority and delivery intent together
     await workspace.setMetadata({ [METADATA_KEY]: next, ...(switchAction ? { [AGENTS_KEY]: { ...entries, [to.id]: actionEntry(targetEntry, switchAction) } } : {}) });
     const writtenMeta = (await workspace.refresh())?.metadata;
@@ -974,6 +980,13 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
     if (activation && (written.activeAgentId !== to.id || readSteerAction(writtenMeta?.[AGENTS_KEY]?.[to.id])?.wakeId !== switchAction?.wakeId)) {
       throw new Error('Steer activation receipt not verifiable after write');
     }
+    if (workers.length) {
+      try {
+        await finishWorkerHandover({ client, workspaceId: status.workspace.id, state: written, held, paseoCli });
+      } catch {
+        result.workerHandoverPending = true;
+      }
+    }
   });
   result.applied = true;
   result.renameError = applyActiveMarker({
@@ -981,6 +994,11 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
     mark: { id: to.id, title: to.title ?? null, slot: toSlot },
     unmark: from ? { id: from.id, title: from.title ?? null, slot: from.slot } : null,
   });
+  if (result.workerHandoverPending) {
+    const detail = 'Worker transfer is pending. Factory will retry before sending the handover brief.';
+    return { ...result, deliveryPending: Boolean(send && !selfTakeover), deliveryError: detail,
+      ...(activation ? { deliveryDetail: detail } : {}), ...(stage && switchAction ? { stageId: switchAction.wakeId } : {}) };
+  }
   let deliveryId = null;
   if (send && !selfTakeover) { // never message oneself; the brief is only returned
     try {
@@ -1421,6 +1439,7 @@ async function replacementFresh({ client, discovery, config, status, expected, k
   return lock(workspaceLockName(workspaceId), async (held) => {
     const metadata = (await workspace.refresh())?.metadata ?? {};
     const current = metadata[METADATA_KEY];
+    if (current?.workerHandover) throw new SwitchRefused('A worker handover is still being reconciled');
     if (!current || current.activeSteer !== expected.activeSteer || current.epoch !== expected.epoch ||
         (expected.scope && !sameScopeId(current.scope?.id, expected.scope.id)) ||
         (current.scope && !sameScopeId(current.scope.id, scopeId))) {

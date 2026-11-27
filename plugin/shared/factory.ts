@@ -187,6 +187,7 @@ export const factorySwitch = defineRpc({
     applied: z.boolean(),
     delivered: z.boolean(),
     deliveryPending: z.boolean().optional(),
+    workerHandoverPending: z.boolean().optional(),
     deliveryBlocked: z.boolean().optional(),
     /** True when the packet was staged (deliver=stage or a failed send). */
     staged: z.boolean().optional(),

@@ -953,7 +953,7 @@ async function applySteerActivation(
   const switched = await switchSteer({
     client: paseo, discovery, config, toSlot: target.slot, apply: true,
     ...(deps.lock ? { lock: deps.lock } : {}),
-    paseoCli: createPaseoCli(),
+    paseoCli: deps.workerHandoverCli ?? createPaseoCli(),
     admitTarget: (agent: any) => readPrivacyAdmission(agent, { ...deps, paseo }, workspaceId),
     activation: {
       agentId, epoch,
@@ -1055,7 +1055,7 @@ export async function applySwitch(
     language,
     workerModel,
     git,
-    paseoCli: createPaseoCli(),
+    paseoCli: delivery?.workerHandoverCli ?? createPaseoCli(),
     admitTarget: (agent: any) => readPrivacyAdmission(agent, {
       ...delivery, paseo, getConfig: () => loader.loadEffectiveConfig(),
     }, dry.workspaceId),

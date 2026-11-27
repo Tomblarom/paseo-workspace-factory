@@ -20,6 +20,7 @@ import { quotaAdmission } from "./steer-admission.js";
 import { readRoutingSnapshot, routingProjection, steerRouteCandidate, planSteerRoutes } from "./steer-routing.js";
 import { hasActiveAgentWork } from "./agent-context.js";
 import { canMarkWorkerStale, filterStaleWorkerEvents } from "./worker-wakes.js";
+import { retryWorkerHandover } from "./core/workers.mjs";
 import * as paseoCore from "./core/paseo.mjs";
 import * as scopeCore from "./core/scope.mjs";
 import * as lockCore from "./core/lock.mjs";
@@ -1024,6 +1025,9 @@ export async function flushScope(
     return { flushed: false, reason: "drain" };
   }
   if (!(deps.bootCheckDone ?? isBootCheckDone())) return { flushed: false, reason: "boot" };
+  if (wsfOf(flushedMeta)?.workerHandover) {
+    await retryWorkerHandover(paseo, scope.workspaceId, lockOf(deps), deps.delivery?.workerHandoverCli);
+  }
   const retry = await retryPendingWakeBrief(paseo, scope, { ...deps, allowBatches: settings?.enabled === true });
   if (retry.delivered) {
     return { flushed: true, target: retry.target ?? null, events: retry.events };
@@ -1068,7 +1072,7 @@ export async function flushAllScopes(paseo: any, deps: SuperviseDeps & { state?:
       }
     }
     const hasBrief = Object.values(meta?.[AGENTS_KEY] ?? {}).some((entry) => retryableDelivery(entry, meta, settings?.enabled === true));
-    if (!hasBrief && !(settings?.enabled && collectPendingWakes(readWorkers(meta)).length)) continue;
+    if (!hasBrief && !meta?.[METADATA_KEY]?.workerHandover && !(settings?.enabled && collectPendingWakes(readWorkers(meta)).length)) continue;
     try {
       const result = await flushScope(paseo, scope, { ...deps, settings, state: paseoState });
       out.push(result);

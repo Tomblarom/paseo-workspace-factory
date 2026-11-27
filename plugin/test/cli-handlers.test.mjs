@@ -187,6 +187,12 @@ function activationWorld() {
   const paseo = fakePaseo(world);
   const activate = (agentId = target.id, epoch = 3, workspaceId = workspace.id, { confirmQuota, ...extra } = {}) =>
     handlers.activateSteer({ workspaceId, agentId, epoch, confirmQuota }, { paseo }, localLoader, {
+      workerHandoverCli: (args) => {
+        if (args[3] !== "--label") return;
+        const agent = world.agents.find(({ id }) => id === args[2]);
+        assert.ok(agent);
+        Object.assign(agent.labels, Object.fromEntries(args[4].split(",").map((item) => item.split("="))));
+      },
       getZerosub: async () => ({
         agentAccount: { [target.id]: "b", [alternative.id]: "b" },
         accounts: [{ id: "b", sampledAt: extra.now?.() ?? new Date(Date.now()).toISOString(), maxUsedPct: 10 }],
@@ -269,7 +275,7 @@ test("the next activation RPC after restart settles a confirmed send without rep
 });
 
 test("own-tab activation retries a lost delivery receipt with the same target, epoch, packet and message ID", async () => {
-  const { world, workspace, active, target, paseo, activate } = activationWorld();
+  const { world, workspace, active, target, worker, paseo, activate } = activationWorld();
   const meta = workspace.metadata;
   meta[`${METADATA_KEY}.checkpoint`] = { task: "Latest stored checkpoint", tests: [], blockers: [], epoch: 3 };
   meta[AGENTS_KEY] = { [active.id]: { quotaLimit: { provider: active.provider, model: active.model } } };
@@ -308,6 +314,7 @@ test("own-tab activation retries a lost delivery receipt with the same target, e
   assert.equal(meta[METADATA_KEY].epoch, 4);
   assert.equal(meta[AGENTS_KEY][target.id].action.phase, "done");
   assert.deepEqual(meta[WORKERS_KEY], workers);
+  assert.equal(worker.labels[LABEL.owner], target.labels[LABEL.slot]);
   assert.equal(previousTimelineReads, 0);
   assert.equal(sends.length, 2);
   assert.deepEqual(sends[0], sends[1]);

@@ -183,7 +183,8 @@ export default function contribute(client: PluginClientContext) {
         const result = await handoverSteer(source, target, initializeNewSteer,
           (input) => client.rpc(factorySwitchPreview, input), (input) => client.rpc(factorySwitch, input));
         if (!result.applied) throw new Error(String(result.deliveryError ?? "Factory could not confirm the handover."));
-        const detail = result.deliveryPending ? "The brief is queued pending context renewal."
+        const detail = result.workerHandoverPending ? "Worker transfer is pending."
+          : result.deliveryPending ? "The brief is queued pending context renewal."
           : result.deliveryBlocked ? String(result.deliveryError ?? "Continuation is blocked. Review recovery in Factory.")
             : await briefResult(source.workspaceId, result, initializeNewSteer);
         const summary = `Steer ${result.to} active`;
