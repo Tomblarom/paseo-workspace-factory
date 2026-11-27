@@ -300,7 +300,7 @@ export default function contribute(server: PluginServerContext) {
     await handleWorkerTurnAfter(payload, context, { getSettings: readSupervision, getConfig: () => loader.loadEffectiveConfig(), delivery, getZerosub, buildBrief: buildResumeBrief });
     notifyFeeds();
   });
-  // Immediate worker retirement on archive; a close alone never retires.
+  // Remove worker register entries on archive.
   const removeArchiveHook = server.addHook("agent.archive.after", async (payload, context) => {
     captureSupervisionPaseo(context.paseo);
     await handleArchiveAfter(payload, context, { getSettings: readSupervision });
@@ -318,7 +318,7 @@ export default function contribute(server: PluginServerContext) {
       try {
         const agents = await readPaseoAgents(context.paseo);
         const current = agents.find((agent: any) => agent.id === request.agentId);
-        if (continuedFromId(current)) labels = resolveFactoryLabels(current, agents) ?? labels;
+        if (continuedFromId(current)) labels = { ...labels, ...resolveFactoryLabels(current, agents) };
       } catch (error) {
         console.error(`[factory] role identity lookup failed (${error instanceof Error ? error.message : String(error)})`);
       }

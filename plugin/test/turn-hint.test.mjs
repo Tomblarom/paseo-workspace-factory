@@ -1502,6 +1502,7 @@ test("replan waits for the exact queued worker event and marks its receipt once"
     const source = addWorkspace(f.world, { metadata: { [METADATA_KEY]: { epoch: 5 } } });
     const queuedAt = f.deps.now();
     source.metadata[WORKERS_KEY] = { worker: { state: "done", pendingWake: { state: "done", queuedAt } } };
+    addAgent(f.world, { id: "worker", workspaceId: source.id });
     f.action().batch = { workspaceId: source.id, epoch: 5, events: [{ workerId: "worker", state: "done", queuedAt }] };
     const account = f.zerosub.accounts.find((item) => item.id === "acc-b");
     account.windows[0].usedPct = 95;

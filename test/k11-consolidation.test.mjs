@@ -54,8 +54,8 @@ function scopeState(agents) {
   };
 }
 
-/** Status/supervision row shape for one resolved agent (slot/id/archivedAt/superseded/retired). */
-const rowOf = (a) => ({ slot: a.labels?.[LABEL.slot] ?? null, id: a.id, archivedAt: a.archivedAt ?? null, retired: false, superseded: a.superseded === true });
+/** Status/supervision row shape for one resolved agent (slot/id/archivedAt/superseded). */
+const rowOf = (a) => ({ slot: a.labels?.[LABEL.slot] ?? null, id: a.id, archivedAt: a.archivedAt ?? null, superseded: a.superseded === true });
 
 // ------------------------------------------------------- one snapshot
 
@@ -108,15 +108,13 @@ test('holder selectors agree on labelled, ZeroSub multi-hop and same-slot cases'
   assert.throws(() => viaGuard('C'), /found 2/);
 });
 
-test('liveSlotHolders skips archived, superseded and retired rows; empty without a slot', () => {
+test('liveSlotHolders skips archived and superseded rows; empty without a slot', () => {
   const rows = [
-    { slot: 'A', id: 'live', archivedAt: null, retired: false, superseded: false },
-    { slot: 'A', id: 'old', archivedAt: null, retired: false, superseded: true },
-    { slot: 'A', id: 'gone', archivedAt: 'x', retired: false, superseded: false },
-    { slot: 'A', id: 'prev', archivedAt: null, retired: true, superseded: false },
+    { slot: 'A', id: 'live', archivedAt: null, superseded: false },
+    { slot: 'A', id: 'old', archivedAt: null, superseded: true },
+    { slot: 'A', id: 'gone', archivedAt: 'x', superseded: false },
   ];
   assert.deepEqual(liveSlotHolders(rows, 'A').map((r) => r.id), ['live']);
-  assert.deepEqual(liveSlotHolders(rows, 'A', { includeRetired: true }).map((r) => r.id), ['live', 'prev']);
   assert.deepEqual(liveSlotHolders(rows, null), []);
   assert.deepEqual(liveSlotHolders(rows, ''), []);
 });

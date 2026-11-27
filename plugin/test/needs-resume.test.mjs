@@ -330,7 +330,7 @@ test("boot rule: config failure fails closed for the active-recent rule", async 
   assert.equal(marks.length, 0);
 });
 
-test("boot rule: foreign scope, missing scope label, missing slot, retired scope and archived are not marked", async () => {
+test("boot rule: foreign scope, missing scope label, missing slot, and archived are not marked", async () => {
   const { world, made } = bootWorld({ agents: { a: { slot: "A", entry: { lastTurnEndedAt: at(NOW - HOUR) } } } });
   const entry = { lastTurnEndedAt: at(NOW - HOUR) };
   const noLabel = addAgent(world, { workspaceId: world.workspaces[0].id, status: "closed", labels: {} });
@@ -340,10 +340,7 @@ test("boot rule: foreign scope, missing scope label, missing slot, retired scope
   for (const agent of [noLabel, foreign, noSlot, archived]) world.workspaces[0].metadata[AGENTS_KEY][agent.id] = entry;
   const { marks } = await boot(world);
   assert.deepEqual(marks.map((m) => m.agentId), [made.a.id]);
-  world.workspaces[0].metadata[AGENTS_KEY][made.a.id] = entry;
-  delete world.workspaces[0].metadata[AGENTS_KEY][made.a.id].needsResume;
-  world.workspaces[0].metadata[METADATA_KEY].retired = true;
-  assert.equal((await boot(world)).marks.length, 0);
+
 });
 
 test("boot rule: stale daemon-restart entries are removed at the next boot, other reasons stay", async () => {
@@ -620,6 +617,7 @@ test("sendScopeWake auto-resumes a flagged steer instead of the wake text", asyn
     labels: { [LABEL.repo]: REPO, [LABEL.role]: "steer", [LABEL.slot]: "A", [LABEL.scope]: REPO },
   });
   const workerId = "worker-1";
+  addAgent(world, { id: workerId, workspaceId: ws.id });
   world.workspaces[0].metadata[WORKERS_KEY] = {
     [workerId]: {
       task: "do it",
@@ -698,6 +696,7 @@ test("sendScopeWake without health information and without a recovery flag sends
     labels: { [LABEL.repo]: REPO, [LABEL.role]: "steer", [LABEL.slot]: "A", [LABEL.scope]: REPO },
   });
   const workerId = "worker-1";
+  addAgent(world, { id: workerId, workspaceId: ws.id });
   const register = () => ({
     [workerId]: {
       task: "do it",

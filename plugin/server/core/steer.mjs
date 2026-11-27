@@ -4,8 +4,7 @@
 //   wsf.checkpoint     { task, tests[], blockers[], next?, epoch, updatedAt,
 //                        source, agentId?, turnId?, capturedAt, interrupted? }
 //   wsf.agents         { <agentId>: per-agent turn/note/interrupt records } (see agent-state.mjs)
-// previousSteer is the replaced slot letter after a switch, or the retired agent
-// id after a fresh (same slot, so the letter would not identify it).
+// previousSteer is the preceding slot letter, including same-slot replacement.
 // Paseo has no compare-and-set for metadata, so writes from factory processes are
 // serialized by a per-workspace flock on this host; agents, the UI and other hosts
 // are not blocked. Between held.verify() and the daemon write remains a short
@@ -106,11 +105,22 @@ export function resolveTargetEntry(address, paseoState) {
 
 export function steerStatus(discovery, { warnContextTokens, daemonStartedAt = null, lastTurnCheckpoints = null, config = null } = {}) {
   const main = discovery.mainWorkspace;
-  const state = main?.metadata?.[METADATA_KEY] ?? null;
-  const checkpoint = main?.metadata?.[CHECKPOINT_KEY] ?? null;
+  const liveIds = new Set([...discovery.steers.labelled, ...discovery.workers].filter((agent) => !agent.archivedAt).map((agent) => agent.id));
+  const rawState = main?.metadata?.[METADATA_KEY];
+  const state = rawState ? {
+    main: rawState.main, activeSteer: rawState.activeSteer,
+    ...(liveIds.has(rawState.activeAgentId) ? { activeAgentId: rawState.activeAgentId } : {}),
+    epoch: rawState.epoch, scope: rawState.scope, switchedAt: rawState.switchedAt,
+    ...(/^[A-Z]$/.test(rawState.previousSteer ?? '') ? { previousSteer: rawState.previousSteer } : {}),
+  } : null;
+  const rawCheckpoint = main?.metadata?.[CHECKPOINT_KEY];
   const agentState = main?.metadata?.[AGENTS_KEY] ?? null;
-  const retiredId = typeof state?.previousSteer === 'string' && !/^[A-Z]$/.test(state.previousSteer) ? state.previousSteer : null;
-  const marked = restartInterruptions({ checkpoint, agentState });
+  const checkpoint = rawCheckpoint ? {
+    ...rawCheckpoint,
+    ...(rawCheckpoint.agentId && !liveIds.has(rawCheckpoint.agentId) ? { agentId: null } : {}),
+    ...(rawCheckpoint.interrupted?.agentId && !liveIds.has(rawCheckpoint.interrupted.agentId) ? { interrupted: null } : {}),
+  } : null;
+  const marked = restartInterruptions({ checkpoint, agentState }).filter(({ agentId }) => liveIds.has(agentId));
   const markedIds = new Set(marked.map((m) => m.agentId));
   const checkpointAt = checkpoint?.capturedAt ?? checkpoint?.updatedAt ?? null;
   const heuristicIds = new Set();
@@ -133,20 +143,21 @@ export function steerStatus(discovery, { warnContextTokens, daemonStartedAt = nu
   };
   const steers = discovery.steers.labelled
     .filter((a) => !a.archivedAt)
-    .map((a) => ({ slot: a.labels[LABEL.slot], id: a.id, title: a.title, provider: a.provider, model: a.model, status: a.status, parent: parentOf(a), workspaceId: a.workspaceId, usage: agentUsage(a), retired: retiredId !== null && a.id === retiredId, superseded: a.superseded === true, ...(a.continuedFrom ? { continuedFrom: a.continuedFrom } : {}), ...(config || a.labels[LABEL.steerRole] !== undefined || a.metadata?.[LABEL.steerRole] !== undefined ? { advisor: isAdvisorSteer(config, a.labels, a.metadata), sensitive: providerIsSensitive(config, a.provider) } : {}), ...withInterruption(a.id) }))
+    .map((a) => ({ slot: a.labels[LABEL.slot], id: a.id, title: a.title, provider: a.provider, model: a.model, status: a.status, parent: parentOf(a), workspaceId: a.workspaceId, usage: agentUsage(a), superseded: a.superseded === true, ...(a.continuedFrom ? { continuedFrom: a.continuedFrom } : {}), ...(config || a.labels[LABEL.steerRole] !== undefined || a.metadata?.[LABEL.steerRole] !== undefined ? { advisor: isAdvisorSteer(config, a.labels, a.metadata), sensitive: providerIsSensitive(config, a.provider) } : {}), ...withInterruption(a.id) }))
     .sort((a, b) => a.slot.localeCompare(b.slot));
   const steerById = new Map(steers.map((s) => [s.id, s]));
   // Unlabelled steer candidates by id (lettered and digit-titled): a worker
   // whose parent is such a candidate names it instead of "Steer ?".
   const candidateById = new Map();
   for (const a of [...(discovery.steers.legacy ?? []), ...(discovery.steers.digitCandidates ?? [])]) {
+    if (a.archivedAt) continue;
     candidateById.set(a.id, {
       id: a.id, title: a.title ?? null,
       slot: (a.title ?? '').trim().match(STEER_TITLE)?.[1] ?? null,
     });
   }
-  const workerRegister = readWorkers(main?.metadata ?? null);
-  const workers = discovery.workers.map((w) => {
+  const workerRegister = Object.fromEntries(Object.entries(readWorkers(main?.metadata ?? null)).filter(([id]) => liveIds.has(id)));
+  const workers = discovery.workers.filter((agent) => !agent.archivedAt).map((w) => {
     const parent = parentOf(w);
     return {
       id: w.id, title: w.title, provider: w.provider, model: w.model, status: w.status, cwd: w.cwd,
@@ -159,7 +170,7 @@ export function steerStatus(discovery, { warnContextTokens, daemonStartedAt = nu
       ...withInterruption(w.id),
     };
   });
-  const candidates = [...(discovery.steers.legacy ?? []), ...(discovery.steers.digitCandidates ?? [])].map((a) => ({
+  const candidates = [...(discovery.steers.legacy ?? []), ...(discovery.steers.digitCandidates ?? [])].filter((agent) => !agent.archivedAt).map((a) => ({
     id: a.id, title: a.title ?? null, slot: (a.title ?? '').trim().match(STEER_TITLE)?.[1] ?? null,
     provider: a.provider, model: a.model, status: a.status, parent: parentOf(a), usage: agentUsage(a),
   }));
@@ -277,7 +288,6 @@ const TEXT = {
     refreshNote: (id, at) => `Notiz von ${id}${at ? ` (${at})` : ''}:`,
     noNote: 'Agentennotiz: keine dokumentiert; der Checkpoint unten ist die einzige Quelle.',
     workerHint: () => 'Unverifizierter Hinweis – letzte Antwort des vorherigen Workers, gekürzt, keine Auftragsquelle:',
-    refreshNotice: (to, what) => `Hinweis: Ein neuer Agent (${to.id}) führt ${what} fort; dieser Tab ist ausgedient — archiviere ihn in Paseo, sobald der neue läuft. Antworte nur auf ausdrückliche Anfrage.`,
   },
   en: {
     head: (repo, e) => `Steer handoff for ${repo}: epoch ${e} → ${e + 1}.`,
@@ -302,7 +312,6 @@ const TEXT = {
     refreshNote: (id, at) => `Note of ${id}${at ? ` (${at})` : ''}:`,
     noNote: 'Agent note: none recorded; the checkpoint below is the only source.',
     workerHint: () => 'Unverified hint – last answer of the previous worker, shortened, not a task source:',
-    refreshNotice: (to, what) => `Note: a fresh agent (${to.id}) continues ${what}; this tab is retired — archive it in Paseo once the new one runs. Reply only when asked explicitly.`,
   },
 };
 
@@ -426,16 +435,6 @@ export function previousSteerNotice(to, epoch, language = 'en') {
   return (TEXT[language] ?? TEXT.en).notice(to, epoch);
 }
 
-export function refreshSteerNotice(to, slot, language = 'en') {
-  const t = TEXT[language] ?? TEXT.en;
-  return t.refreshNotice(to, language === 'de' ? `Steer ${slot}` : `Steer ${slot}`);
-}
-
-export function refreshWorkerNotice(to, language = 'en') {
-  const t = TEXT[language] ?? TEXT.en;
-  return t.refreshNotice(to, language === 'de' ? 'diesen Worker' : 'this worker');
-}
-
 /**
  * Refresh packet for a non-active steer or a worker: same agent role in a
  * new agent, no takeover and no epoch change. The brief comes from the
@@ -443,7 +442,7 @@ export function refreshWorkerNotice(to, language = 'en') {
  * assignment and checkpoint only.
  * Deterministic like buildHandoff; no model call is made to build it.
  * With `rewound: true` the packet heads the same tab after a Paseo rewind
- * (from.id is kept, no new agent, no retire notice).
+ * (from.id is kept, same agent and no archival).
  */
 export function buildRefreshPacket(status, { kind, slot = null, owner = null, title = null, from, to, epoch, git, note = null, noteAt = null, interrupted = null, lastMessage = null, maxLastChars = 800, language = 'en', workerModel = null, rewound = false, promptOptions }) {
   const t = TEXT[language] ?? TEXT.en;
@@ -494,7 +493,7 @@ export async function requireFreshPrivacy({ client, workspaceId, scopeId, epoch,
   const agent = snapshot?.agent;
   if (agent?.id !== agentId || agent.archivedAt || agent.background === true) throw new SwitchRefused('Fresh refused: the target agent is unavailable.');
   const scope = workspace?.metadata?.[METADATA_KEY];
-  if (!scope || scope.retired || (scopeId && !sameScopeId(scope.scope?.id, scopeId)) || (epoch != null && scope.epoch !== epoch)) {
+  if (!scope || (scopeId && !sameScopeId(scope.scope?.id, scopeId)) || (epoch != null && scope.epoch !== epoch)) {
     throw new SwitchRefused('Fresh refused: the scope changed.');
   }
   const admission = await admitTarget(agent, workspaceId);
@@ -528,7 +527,7 @@ export async function reconcileFreshDelivery({ client, workspaceId, agentId, act
 // A Fresh creation and its first prompt are separate durable operations. Pin
 // the exact prompt and native receipt key before the first send, and retain it
 // on recovery even if the newly built packet has changed meanwhile.
-async function deliverFreshPacket({ client, workspaceId, agentId, packet, epoch, lock, checkPrivacy, authority = null, messageId = null }) {
+async function reserveFreshPacket({ client, workspaceId, agentId, packet, epoch, lock, authority = null, messageId = null }) {
   const reserved = await updateAgentEntry({ client, workspaceId, agentId, lock, patch: (entry) => {
     const existing = readSteerAction(entry);
     if (existing?.kind === 'fresh-delivery') return null;
@@ -538,8 +537,8 @@ async function deliverFreshPacket({ client, workspaceId, agentId, packet, epoch,
     return { action };
   } });
   const action = readSteerAction(reserved);
-  if (action?.kind !== 'fresh-delivery') return { status: 'blocked', detail: 'Another agent action needs reconciliation.' };
-  return reconcileFreshDelivery({ client, workspaceId, agentId, actionId: action.wakeId, lock, checkPrivacy });
+  if (action?.kind !== 'fresh-delivery') throw new SwitchRefused('Another agent action needs reconciliation.');
+  return action.wakeId;
 }
 
 /**
@@ -604,7 +603,7 @@ export async function settleRewindReceipt({ client, workspaceId, agentId, action
     const { at, messageId, briefMessageId, sendError, checkpointAt, note, stage } = receipt;
     const scope = metadata[METADATA_KEY];
     const epoch = scope?.epoch ?? null;
-    const staged = stage && scope && !scope.retired && epoch === current.epoch;
+    const staged = stage && scope && epoch === current.epoch;
     const next = staged ? {
       ...newSteerAction({ kind: 'stage', id: actionId, epoch, at, text: current.packet, phase: 'staged' }),
       at, stageKind: 'fresh',
@@ -853,28 +852,6 @@ export function applyActiveMarker({ paseoCli, marker, mark, unmark }) {
   }
 }
 
-/**
- * A retired steer tab that stays open must drop its "Steer X" title, or the
- * slot has two title holders and stays locked. Returns null or the error text.
- */
-export function retireSteerTab({ paseoCli, agent, slot }) {
-  if (!agent?.id) return null;
-  if (!paseoCli) return `Rename ${agent.id} so its title no longer starts with "Steer ${slot}"`;
-  try {
-    paseoCli(['agent', 'update', agent.id, '--name', `Retired ${slot}`]);
-    return null;
-  } catch (error) {
-    return error.message;
-  }
-}
-
-/** Retired scopes never coordinate here again; revival needs an explicit un-retire. */
-function refuseIfRetired(status) {
-  if (status.state?.retired === true) {
-    throw new SwitchRefused(`Scope ${status.repo} is retired${status.state.movedTo ? ` (moved to ${status.state.movedTo})` : ''}; coordinate in the successor scope instead`);
-  }
-}
-
 async function waitForSwitchDelivery(workspace, agentId, deliveryId, epoch, deadline) {
   while (Date.now() < deadline) {
     const meta = (await workspace.refresh())?.metadata ?? {};
@@ -898,9 +875,8 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
   const status = steerStatus(discovery, { config });
   if (!status.workspace || !status.state) throw new SwitchRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
-  refuseIfRetired(status);
   // Several live tabs titled for one slot are ambiguous and refuse below.
-  const liveHolders = (slot) => liveSlotHolders(status.steers, slot, { includeRetired: true });
+  const liveHolders = (slot) => liveSlotHolders(status.steers, slot);
   const from = liveHolders(expected.activeSteer)[0] ?? null;
   const to = liveHolders(toSlot)[0] ?? null;
   if (activation && expected.epoch !== activation.epoch) throw new SwitchRefused('Scope authority changed. Reopen Activate Steer in this tab.');
@@ -910,8 +886,8 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
   if (to.advisor) {
     throw new SwitchRefused(`Steer ${toSlot} is an advisor and cannot coordinate`);
   }
-  if (liveHolders(toSlot).length > 1) throw new SwitchRefused(`Steer ${toSlot} has several live agents (${liveHolders(toSlot).map((s) => s.id).join(', ')}); archive the retired one in Paseo, then rerun`);
-  if (from && liveHolders(from.slot).length > 1) throw new SwitchRefused(`Active Steer ${from.slot} has several live agents (${liveHolders(from.slot).map((s) => s.id).join(', ')}); archive the retired one in Paseo, then rerun`);
+  if (liveHolders(toSlot).length > 1) throw new SwitchRefused(`Steer ${toSlot} has several live agents (${liveHolders(toSlot).map((s) => s.id).join(', ')}); resolve the duplicate titles in Paseo, then rerun`);
+  if (from && liveHolders(from.slot).length > 1) throw new SwitchRefused(`Active Steer ${from.slot} has several live agents (${liveHolders(from.slot).map((s) => s.id).join(', ')}); resolve the duplicate titles in Paseo, then rerun`);
   const privacy = steerPrivacyAdmission(config, to, discoveredRepoPublic(discovery));
   if (!privacy.allowed) throw new SwitchRefused(`Steer ${toSlot} cannot receive a handoff: ${privacy.reason}.`);
   if (to.parent) throw new SwitchRefused(`Steer ${toSlot} has parent ${to.parent}; refusing to make it coordinator`);
@@ -1333,12 +1309,11 @@ async function legacyFreshReceipt({ sources, single, kind, slot, status, config,
 }
 
 function freshSourceRecord(metadata, sources, kind, expected, slot, active = false) {
-  const committedSource = active && sources.some((source) => source.id === expected.activeAgentId)
-    ? expected.previousSteer : null;
   const records = sources.flatMap((source) => {
     const record = metadata?.[AGENTS_KEY]?.[source.id]?.freshCreation;
     if (record?.kind !== kind || record.slot !== slot) return [];
-    const committed = source.id === committedSource && record.epoch === expected.epoch - 1;
+    const committed = active && record.replacementId && record.replacementId === expected.activeAgentId &&
+      record.epoch === expected.epoch - 1 && sources.some((agent) => agent.id === record.replacementId);
     return record.epoch === expected.epoch || committed ? [{ source, record, committed }] : [];
   });
   if (records.length > 1) throw freshRecoveryFail('multiple replacement attempts for this slot');
@@ -1373,17 +1348,17 @@ function replacementRequest({ source, route, role, slot, owner, scopeId, repo, w
 }
 
 function freshSourceChanged(before, current) {
-  return current?.id !== before.id || current.archivedAt || current.background === true || BUSY.has(current.status) ||
+  return current?.id !== before.id || current.archivedAt || current.background === true || BUSY.has(current.status) || current.activeTurn || current.pendingPermissions?.length ||
     (current.workspaceId && current.workspaceId !== before.workspaceId) || parentOf(current) !== before.parent;
 }
 
 async function replacementFresh({ client, discovery, config, status, expected, kind, slot = null, active = false,
   single, sources, owner = null, apply, lookupReceipt, execute, lock, now, callerId = null, policy, intent,
-  confirmPreview, readPolicy }) {
+  confirmPreview, readPolicy, archivePrevious }) {
   const workspaceId = status.workspace.id;
   const workspace = client.workspaces.ref(workspaceId);
   const scopeId = discovery.scope?.id ?? status.repo;
-  const ambiguous = () => new SwitchRefused(`Steer ${slot} has several live agents (${sources.map((s) => s.id).join(', ')}); if a previous fresh apply was interrupted, rerun with --apply to recover it, otherwise archive the retired one in Paseo`);
+  const ambiguous = () => new SwitchRefused(`Steer ${slot} has several live agents (${sources.map((s) => s.id).join(', ')}); retry an interrupted Fresh or resolve the duplicate titles in Paseo`);
   const metadataAtPreview = discovery.mainWorkspace?.metadata;
   const context = (source, config, role) => ({
     source, scopeId, repo: status.repo, workspaceId: kind === 'worker' ? source.workspaceId ?? workspaceId : workspaceId,
@@ -1412,7 +1387,7 @@ async function replacementFresh({ client, discovery, config, status, expected, k
     ...(kind === 'worker' ? { workerId: source.id, owner } : {}),
     to: null, epoch: record.epoch + (active ? 1 : 0), epochBumped: active,
     profile: record.profile, provider: record.placement.provider, model: record.placement.model,
-    idempotencyKey: record.op.params.idempotencyKey, routeBinding: record.binding,
+    idempotencyKey: record.op.params.idempotencyKey, routeBinding: record.binding ? { ...record.binding, archivePrevious: true } : null,
     routeEvidence: record.evidence, checkpointAt: record.checkpointAt,
     refreshMode: 'new-agent',
     warnings: roleOf(source) === 'advisor' ? [`Steer ${slot} is an advisor; advisors never coordinate`] : [],
@@ -1441,11 +1416,12 @@ async function replacementFresh({ client, discovery, config, status, expected, k
     return { from, result };
   }
 
+  if (!archivePrevious) throw new SwitchRefused('Confirm a Fresh preview that archives the previous agent.');
   const run = execute ?? createExecutors({ client, lookupReceipt });
   return lock(workspaceLockName(workspaceId), async (held) => {
     const metadata = (await workspace.refresh())?.metadata ?? {};
     const current = metadata[METADATA_KEY];
-    if (!current || current.retired || current.activeSteer !== expected.activeSteer || current.epoch !== expected.epoch ||
+    if (!current || current.activeSteer !== expected.activeSteer || current.epoch !== expected.epoch ||
         (expected.scope && !sameScopeId(current.scope?.id, expected.scope.id)) ||
         (current.scope && !sameScopeId(current.scope.id, scopeId))) {
       throw new SwitchRefused('Steer state changed since discovery; repeat Fresh');
@@ -1467,7 +1443,7 @@ async function replacementFresh({ client, discovery, config, status, expected, k
     const receiptId = receipt ? checkedCreationReceipt(receipt, record.op.params.idempotencyKey, freshRecoveryFail) : null;
     if (receiptId === from.id) throw freshRecoveryFail('the receipt names the source itself');
     if (pending?.committed) {
-      if (!receiptId || receiptId !== current.activeAgentId || current.previousSteer !== from.id) {
+      if (!receiptId || receiptId !== current.activeAgentId || record.replacementId !== receiptId) {
         throw freshRecoveryFail('the committed authority does not match the original receipt');
       }
       await guardSteerScope({ client, held, workspaceId, scopeId: expected.scope?.id ?? status.repo,
@@ -1478,6 +1454,7 @@ async function replacementFresh({ client, discovery, config, status, expected, k
       return { from, result: { ...result, to: receiptId, reused: true, epochBumped: false } };
     }
     if (active && record?.op.params.steerRole === 'advisor') throw freshRecoveryFail('an advisor cannot become active');
+    if (typeof client.agents.ref(from.id).archive !== 'function') throw new SwitchRefused('Paseo cannot archive the previous agent.');
     const agent = await readSource(from);
     if (freshSourceChanged(from, agent)) throw new SwitchRefused('Fresh source changed since discovery; repeat Fresh');
     if (kind === 'worker' && ((agent.labels?.[LABEL.owner] !== undefined && agent.labels[LABEL.owner] !== owner) ||
@@ -1559,15 +1536,62 @@ async function replacementFresh({ client, discovery, config, status, expected, k
     await verifyCreatedAgent(client, created, record.placement, freshVerifyFail(created));
     if (active) {
       held.verify();
-      await workspace.setMetadata({ [METADATA_KEY]: { ...current, activeSteer: slot, activeAgentId: created,
-        epoch: current.epoch + 1, previousSteer: from.id, switchedAt: now().toISOString() } });
-      const written = (await workspace.refresh())?.metadata?.[METADATA_KEY];
-      if (written?.epoch !== expected.epoch + 1 || written.activeAgentId !== created || written.activeSteer !== slot) {
+      const latest = (await workspace.refresh())?.metadata?.[AGENTS_KEY] ?? {};
+      await workspace.setMetadata({
+        [METADATA_KEY]: { ...current, activeSteer: slot, activeAgentId: created,
+          epoch: current.epoch + 1, previousSteer: slot, switchedAt: now().toISOString() },
+        [AGENTS_KEY]: { ...latest, [from.id]: { ...latest[from.id], freshCreation: { ...record, replacementId: created } } },
+      });
+      const written = (await workspace.refresh())?.metadata;
+      const writtenScope = written?.[METADATA_KEY];
+      if (writtenScope?.epoch !== expected.epoch + 1 || writtenScope.activeAgentId !== created || writtenScope.activeSteer !== slot ||
+          written?.[AGENTS_KEY]?.[from.id]?.freshCreation?.replacementId !== created) {
         throw new Error('Fresh steer not verifiable after write');
       }
     }
     return { from, result: { ...result, to: created, reused: !!receiptId } };
   });
+}
+
+async function archiveFreshSource(client, agentId) {
+  const handle = client.agents.ref(agentId);
+  const before = (await handle.refresh())?.agent;
+  if (!before || before.archivedAt) return;
+  if (BUSY.has(before.status) || before.activeTurn || before.pendingPermissions?.length) {
+    throw new SwitchRefused('The previous agent is running. Wait for it to finish, then retry the confirmed Fresh.');
+  }
+  try {
+    const archived = await handle.archive();
+    if (archived?.archivedAt) return;
+  } catch {
+    // The archive may have landed before the reply was lost.
+  }
+  const after = (await handle.refresh())?.agent;
+  if (after && !after.archivedAt) {
+    throw new SwitchRefused('The replacement was created, but archiving the previous agent could not be confirmed. Retry Fresh.');
+  }
+}
+
+async function finishFreshReplacement({ client, workspaceId, sourceId, result, send, stageReplacement, lock, checkPrivacy, authority, messageId }) {
+  const agentId = result.to;
+  const { packet, epoch } = result;
+  const actionId = send ? await reserveFreshPacket({ client, workspaceId, agentId, packet, epoch, lock, authority, messageId }) : null;
+  if (!send && stageReplacement) {
+    const { stageId } = await stageReplacement({ workspaceId, agentId, packet, epoch });
+    result.stageId = stageId;
+  }
+  await archiveFreshSource(client, sourceId);
+  if (actionId) {
+    try {
+      const delivery = await reconcileFreshDelivery({ client, workspaceId, agentId, actionId, lock, checkPrivacy });
+      result.delivered = delivery.status === 'sent';
+      if (delivery.recordingError) result.recordingError = delivery.recordingError;
+      if (!result.delivered) result.deliveryError = delivery.detail ?? `Fresh delivery ${delivery.status}`;
+    } catch (error) {
+      result.deliveryError = error.message;
+    }
+  }
+  return result;
 }
 
 /**
@@ -1578,11 +1602,10 @@ async function replacementFresh({ client, discovery, config, status, expected, k
  * key under the workspace lock. Only active replacement advances the epoch.
  * `send: false` leaves the brief for the caller to stage or deliver.
  */
-export async function freshSteer({ client, discovery, config, apply = false, send = true, stageRewind = false, notifyPrevious = true, slot: slotArg = null, workerId = null, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, now = () => new Date(), workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, quotaExhaustedPct = config?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct, zerosub = null, paseoCli = null, rewindClient = null, requireRefreshMode = null, promptOptions, callerId = null, admitTarget = null, provider = null, model = null, confirmPreview = null, readPolicy = null, repoPublic = discoveredRepoPublic(discovery) }) {
+export async function freshSteer({ client, discovery, config, apply = false, send = true, stageRewind = false, stageReplacement = null, archivePrevious = false, slot: slotArg = null, workerId = null, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, now = () => new Date(), workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, quotaExhaustedPct = config?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct, zerosub = null, rewindClient = null, requireRefreshMode = null, promptOptions, callerId = null, admitTarget = null, provider = null, model = null, confirmPreview = null, readPolicy = null, repoPublic = discoveredRepoPublic(discovery) }) {
   const status = steerStatus(discovery, { config });
   if (!status.workspace || !status.state) throw new SwitchRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
-  refuseIfRetired(status);
   const checkPrivacy = (agentId, epoch = expected.epoch) => requireFreshPrivacy({ client, workspaceId: status.workspace.id,
     scopeId: expected.scope?.id, epoch, agentId,
     admitTarget: admitTarget ?? ((agent) => steerPrivacyAdmission(config, agent, repoPublic)),
@@ -1595,7 +1618,7 @@ export async function freshSteer({ client, discovery, config, apply = false, sen
   const policy = { config, providers: discovery.providers, repoPublic,
     quotaSnapshot, quotaExhaustedPct, zerosub };
   const replacement = (options) => replacementFresh({ client, discovery, config, status, expected, apply,
-    lookupReceipt, execute, lock, now, callerId, policy, intent, confirmPreview, readPolicy, ...options });
+    lookupReceipt, execute, lock, now, callerId, policy, intent, confirmPreview, readPolicy, archivePrevious, ...options });
   const hasPending = (sources, kind, slot = null) =>
     !!freshSourceRecord(discovery.mainWorkspace?.metadata, sources, kind, expected, slot, slot === expected.activeSteer);
   const tryRewind = (source, sources, kind, slot = null) => typeof rewindClient === 'function' && source &&
@@ -1604,19 +1627,15 @@ export async function freshSteer({ client, discovery, config, apply = false, sen
     workerModel, rewindClient, checkPrivacy, requireRefreshMode, promptOptions, confirmPreview, intent };
   const target = wantSlot ? String(slotArg).trim().toUpperCase() : expected.activeSteer;
   if (!wantWorker && !/^[A-Z]$/.test(target ?? '')) throw new SwitchRefused(`Not a steer slot: ${JSON.stringify(slotArg)}`);
-  const shared = { client, discovery, status, expected, apply, send, notifyPrevious, language, git, workerModel,
+  const shared = { client, discovery, status, expected, apply, send, stageReplacement, language, git, workerModel,
     lock, now, checkPrivacy, requireRefreshMode, promptOptions, replacement, tryRewind, rewindArgs };
   if (wantWorker) return freshWorkerAgent({ ...shared, workerId: String(workerId).trim() });
-  if (target !== expected.activeSteer) return freshNonActiveSteer({ ...shared, slot: target, paseoCli });
+  if (target !== expected.activeSteer) return freshNonActiveSteer({ ...shared, slot: target });
   const slot = expected.activeSteer;
   const holders = status.steers.filter((s) => s.slot === slot);
   if (!holders.length) throw new SwitchRefused(`No live Steer ${slot} to refresh for ${status.repo}; plan and apply one first`);
-  // One live holder plus a continuation origin from a completed fresh
-  // (previousSteer) proceeds; other extras keep the recovery-or-archive
-  // refusal below.
-  const live = liveSlotHolders(holders, slot, { includeRetired: true });
-  const unexplained = holders.filter((h) => h.superseded && h.id !== expected.previousSteer);
-  const single = holders.length === 1 ? holders[0] : (live.length === 1 && !unexplained.length ? live[0] : null);
+  const live = liveSlotHolders(holders, slot);
+  const single = live.length === 1 ? live[0] : null;
   if (single && BUSY.has(single.status)) throw new SwitchRefused(`Active Steer ${slot} is ${single.status}; stop it or wait for its turn to end first`);
   // Same-tab rewind first (when a DaemonClient factory is injected): the
   // agent keeps its tab, id and labels; a new parent-free agent is only the
@@ -1641,29 +1660,12 @@ export async function freshSteer({ client, discovery, config, apply = false, sen
     return result;
   }
   const freshId = result.to;
-  result.renameError = retireSteerTab({ paseoCli, agent: from, slot }); // the title is membership: the old tab must leave the slot
   result.packet = handoffWithBrief(status, { from, to: { slot, id: freshId }, epoch: result.epoch - 1, git: gitSnapshot, lastMessage: await hintOf(client, from.id), language }, { discovery, git, language, workerModel, quotaSnapshot, quotaWarnPct, zerosub, promptOptions });
   result.packetChars = result.packet.length;
-  if (send) {
-    try {
-      const delivery = await deliverFreshPacket({ client, workspaceId: status.workspace.id, agentId: freshId, packet: result.packet, epoch: result.epoch, lock, checkPrivacy, authority: { scopeId: expected.scope?.id ?? status.repo, agentId: freshId } });
-      result.delivered = delivery.status === 'sent';
-      if (delivery.recordingError) result.recordingError = delivery.recordingError;
-      if (!result.delivered) result.deliveryError = delivery.detail ?? `Fresh delivery ${delivery.status}`;
-    } catch (error) {
-      result.deliveryError = error.message; // the fresh steer stands; resend the packet manually
-    }
-  }
-  if (notifyPrevious) {
-    try {
-      await checkPrivacy(from.id, result.epoch);
-      await client.agents.ref(from.id).send(previousSteerNotice({ slot, id: freshId }, result.epoch, language)); // costs one turn of the retired steer
-      result.previousNotified = true;
-    } catch {
-      result.previousNotified = false;
-    }
-  }
-  return result;
+  return finishFreshReplacement({
+    client, workspaceId: status.workspace.id, sourceId: from.id, result, send, stageReplacement, lock, checkPrivacy,
+    authority: { scopeId: expected.scope?.id ?? status.repo, agentId: freshId },
+  });
 }
 
 /**
@@ -1748,11 +1750,11 @@ async function tryTabRewind({ client, discovery, status, expected, from, kind, p
 }
 
 /** A standby replacement keeps the slot and role without taking authority. */
-async function freshNonActiveSteer({ client, discovery, status, expected, slot, apply, send, notifyPrevious, language,
-  git, workerModel, lock, checkPrivacy, requireRefreshMode, promptOptions, paseoCli, replacement, tryRewind, rewindArgs }) {
+async function freshNonActiveSteer({ client, discovery, status, expected, slot, apply, send, stageReplacement, language,
+  git, workerModel, lock, checkPrivacy, requireRefreshMode, promptOptions, replacement, tryRewind, rewindArgs }) {
   const holders = status.steers.filter((s) => s.slot === slot);
   if (!holders.length) throw new SwitchRefused(`No live Steer ${slot} to refresh for ${status.repo}; plan and apply one first`);
-  const live = liveSlotHolders(holders, slot, { includeRetired: true });
+  const live = liveSlotHolders(holders, slot);
   const single = holders.length === 1 ? holders[0] : (live.length === 1 ? live[0] : null);
   if (single && BUSY.has(single.status)) throw new SwitchRefused(`Steer ${slot} is ${single.status}; stop it or wait for its turn to end first`);
   let rewindFallback = null;
@@ -1781,37 +1783,19 @@ async function freshNonActiveSteer({ client, discovery, status, expected, slot, 
     return result;
   }
   const freshId = result.to;
-  result.renameError = retireSteerTab({ paseoCli, agent: from, slot });
   result.packet = buildRefreshPacket(status, {
     kind: 'steer', slot, from, to: { id: freshId }, epoch: expected.epoch, git: gitSnapshot,
     note: agentState?.[from.id]?.note ?? null, noteAt: agentState?.[from.id]?.noteAt ?? null,
     lastMessage: await hintOf(client, from.id), language, workerModel, promptOptions,
   });
   result.packetChars = result.packet.length;
-  if (send) {
-    try {
-      const delivery = await deliverFreshPacket({ client, workspaceId: status.workspace.id, agentId: freshId, packet: result.packet, epoch: expected.epoch, lock, checkPrivacy });
-      result.delivered = delivery.status === 'sent';
-      if (delivery.recordingError) result.recordingError = delivery.recordingError;
-      if (!result.delivered) result.deliveryError = delivery.detail ?? `Fresh delivery ${delivery.status}`;
-    } catch (error) {
-      result.deliveryError = error.message; // the fresh steer stands; resend the packet manually
-    }
-  }
-  if (notifyPrevious) {
-    try {
-      await checkPrivacy(from.id);
-      await client.agents.ref(from.id).send(refreshSteerNotice({ id: freshId }, slot, language)); // costs one turn of the retired steer
-      result.previousNotified = true;
-    } catch {
-      result.previousNotified = false;
-    }
-  }
-  return result;
+  return finishFreshReplacement({
+    client, workspaceId: status.workspace.id, sourceId: from.id, result, send, stageReplacement, lock, checkPrivacy,
+  });
 }
 
 /** Worker replacement retains the owner, workspace and original parent. */
-async function freshWorkerAgent({ client, discovery, status, expected, workerId, apply, send, notifyPrevious, language,
+async function freshWorkerAgent({ client, discovery, status, expected, workerId, apply, send, stageReplacement, language,
   git, workerModel, lock, now, checkPrivacy, requireRefreshMode, promptOptions, replacement, tryRewind, rewindArgs }) {
   const matches = (status.workers ?? []).filter((w) => w.id === workerId || w.id.startsWith(workerId));
   if (!matches.length) throw new SwitchRefused(`${workerId} is not a live worker of ${status.repo}`);
@@ -1864,7 +1848,6 @@ async function freshWorkerAgent({ client, discovery, status, expected, workerId,
       if (metadata[METADATA_KEY]?.epoch !== expected.epoch) throw new SwitchRefused('The scope moved before the worker could be refreshed');
       const workers = readWorkers(metadata);
       const entries = metadata[AGENTS_KEY] ?? {};
-      if (entries[from.id]?.replacedBy === freshId) return;
       if (workers[from.id]) {
         workers[freshId] = { ...workers[freshId], ...workers[from.id] };
         delete workers[from.id];
@@ -1875,7 +1858,6 @@ async function freshWorkerAgent({ client, discovery, status, expected, workerId,
         [WORKERS_KEY]: workers,
         [AGENTS_KEY]: {
           ...entries,
-          [from.id]: { ...entries[from.id], replacedBy: freshId },
           [freshId]: {
             ...(worker.interrupted ? { workerResumeMessageId: resumeMessageId, interrupted: entry?.interrupted ?? { at: now().toISOString() } } : {}),
             ...(block ? { note: formatCheckpointBlock(block), noteAt: entry?.noteAt ?? null } : {}),
@@ -1885,26 +1867,9 @@ async function freshWorkerAgent({ client, discovery, status, expected, workerId,
       });
     });
   }
-  if (send) {
-    try {
-      const delivery = await deliverFreshPacket({ client, workspaceId: status.workspace.id, agentId: freshId, packet: result.packet, epoch: expected.epoch, lock, checkPrivacy, messageId: resumeMessageId });
-      result.delivered = delivery.status === 'sent';
-      if (delivery.recordingError) result.recordingError = delivery.recordingError;
-      if (!result.delivered) result.deliveryError = delivery.detail ?? `Fresh delivery ${delivery.status}`;
-    } catch (error) {
-      result.deliveryError = error.message; // the fresh worker stands; resend the packet manually
-    }
-  }
-  if (notifyPrevious && !worker.interrupted) {
-    try {
-      await checkPrivacy(from.id);
-      await client.agents.ref(from.id).send(refreshWorkerNotice({ id: freshId }, language)); // costs one turn of the retired worker
-      result.previousNotified = true;
-    } catch {
-      result.previousNotified = false;
-    }
-  }
-  return result;
+  return finishFreshReplacement({
+    client, workspaceId: status.workspace.id, sourceId: from.id, result, send, stageReplacement, lock, checkPrivacy, messageId: resumeMessageId,
+  });
 }
 
 export async function hintOf(client, agentId) {

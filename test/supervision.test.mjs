@@ -323,7 +323,7 @@ test('wake target resolves at send time from the scope state', () => {
   assert.equal(resolveWakeTarget({ activeSteer: 'A', epoch: 3 }, [...steers, { slot: 'A', id: 'steer-a2' }]), null);
   assert.equal(resolveWakeTarget({ activeSteer: 'Z', epoch: 3 }, steers), null);
   assert.equal(resolveWakeTarget({ activeSteer: 'A', epoch: 3 }, [{ slot: 'A', id: 'steer-a', archivedAt: 't' }]), null);
-  assert.equal(resolveWakeTarget({ activeSteer: 'A', epoch: 3 }, [{ slot: 'A', id: 'steer-a', retired: true }]), null);
+  assert.equal(resolveWakeTarget({ activeSteer: 'A', epoch: 3 }, [{ slot: 'A', id: 'steer-a', archivedAt: 'archived' }]), null);
   assert.equal(resolveWakeTarget({ activeSteer: 'A', epoch: 3 }, [{ slot: 'A', id: 'steer-a', status: 'closed' }]), 'steer-a');
   assert.equal(resolveWakeTarget(null, steers), null);
 });
@@ -390,7 +390,7 @@ test('failover chain: next slots, then domain, then hub', () => {
     { slot: 'A', id: 'steer-a' },
     { slot: 'B', id: 'steer-b' },
     { slot: 'C', id: 'steer-c' },
-    { slot: 'D', id: 'steer-d', retired: true },
+    { slot: 'D', id: 'steer-d', archivedAt: 'archived' },
     { slot: 'E', id: 'steer-e', archivedAt: 't' },
     { slot: 'F', id: 'steer-f', interrupted: { reason: 'daemon-restart' } },
   ];
@@ -409,7 +409,6 @@ test('failover chain: next slots, then domain, then hub', () => {
     failoverChain({ steers, activeSlot: 'C', domainSteer, hubSteer }).map((c) => c.steerId),
     ['steer-a', 'steer-b', 'steer-dom', 'steer-hub'],
   );
-  assert.deepEqual(failoverChain({ steers, activeSlot: 'A', retiredIds: ['steer-b'] }).map((c) => c.slot), ['C']);
   assert.deepEqual(failoverChain({ steers, activeSlot: 'A', interruptedIds: ['steer-c'] }).map((c) => c.slot), ['B']);
   assert.deepEqual(failoverChain({ steers: [], activeSlot: 'A' }), []);
   assert.deepEqual(failoverChain({ steers, activeSlot: 'A' }).map((c) => c.kind), ['steer', 'steer']);
@@ -445,7 +444,7 @@ function supervisedDiscovery(world) {
 
 test('steerStatus exposes open register entries with task and state', () => {
   const status = steerStatus(supervisedDiscovery(makeWorld()));
-  assert.deepEqual(status.openWorkers.map((e) => e.id), ['w-ghost', 'w-live']);
+  assert.deepEqual(status.openWorkers.map((e) => e.id), ['w-live']);
   assert.equal(status.openWorkers.find((e) => e.id === 'w-live').task, 'fix pwm');
   assert.equal(steerStatus(discoveryOf((() => { const w = makeWorld(); provisioned(w); return w; })())).openWorkers.length, 0);
 });
@@ -455,7 +454,7 @@ test('resume brief lists open supervised workers; silent without a register', ()
   const d = supervisedDiscovery(world);
   const brief = buildResumeBrief(steerStatus(d), { scope: d.scope, now: () => NOW });
   assert.match(brief, /w-live "PWM" idle · no note · supervised: blocked fix pwm/);
-  assert.match(brief, /w-ghost \(agent not live\) · supervised: interrupted lost task/);
+  assert.doesNotMatch(brief, /w-ghost \(agent not live\) · supervised: interrupted lost task/);
   assert.ok(!brief.includes('old task'), 'done entries stay out of the brief');
   const plain = makeWorld();
   provisioned(plain);
@@ -469,7 +468,7 @@ test('switch handoff lists open supervised workers with task and state', () => {
   const status = steerStatus(d);
   const packet = buildHandoff(status, { from: { slot: 'A', id: status.steers[0].id }, to: { slot: 'B', id: status.steers[1].id }, epoch: 3, git: null, lastMessage: null });
   assert.match(packet, /supervised blocked: fix pwm/);
-  assert.match(packet, /w-ghost \(agent not live\) · supervised interrupted: lost task/);
+  assert.doesNotMatch(packet, /w-ghost \(agent not live\) · supervised interrupted: lost task/);
   const plain = makeWorld();
   provisioned(plain);
   const ps = steerStatus(discoveryOf(plain));

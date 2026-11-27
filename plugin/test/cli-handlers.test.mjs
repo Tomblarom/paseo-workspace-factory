@@ -119,6 +119,12 @@ function fakePaseo(world) {
       list: async () => page(world.agents.map((agent) => ({ agent }))),
       ref: (id) => ({
         refresh: async () => ({ agent: structuredClone(world.agents.find((a) => a.id === id) ?? null) }),
+        archive: async () => {
+          const agent = world.agents.find((entry) => entry.id === id);
+          if (world.archiveAgent) await world.archiveAgent(agent);
+          agent.archivedAt = new Date().toISOString();
+          return { archivedAt: agent.archivedAt };
+        },
         send: async (text) => { world.sent.push([id, text]); },
         timeline: {
           refetch: async () => ({
@@ -840,7 +846,7 @@ test("steer add serializes competing confirmations and reuses an archived letter
     { workspaceId: MAIN, spec }, { paseo }, configLoader, settings, readZerosub,
   );
   const apply = (spec, plan) => handlers.applySteerAddRpc(
-    { workspaceId: MAIN, slot: plan.slot, spec, fingerprint: plan.fingerprint, revision: plan.revision },
+    { workspaceId: MAIN, slot: plan.slot, spec, fingerprint: plan.fingerprint, revision: plan.revision, creationId: plan.creationId },
     { paseo }, configLoader, settings, deps,
   );
   const firstPlan = await preview("sol");
@@ -939,7 +945,7 @@ test("steer add replays legacy pins and sends the recorded unpinned request for 
       return { refresh: async () => ({ agent }) };
     };
     const result = await handlers.applySteerAddRpc({ workspaceId: MAIN, slot: preview.slot, spec: "sol", fingerprint,
-      revision: preview.revision }, { paseo }, configLoader, settings, { lookupReceipt, readZerosub });
+      revision: preview.revision, ...(fingerprint === preview.fingerprint ? { creationId: preview.creationId } : {}) }, { paseo }, configLoader, settings, { lookupReceipt, readZerosub });
     assert.equal(result.reused, true);
     assert.equal(result.agentId, agent.id);
     assert.equal(writes.length, 1);
@@ -951,6 +957,7 @@ test("workspace status counts queued wakes from completed workers", async () => 
   world.workspaces[0].metadata[WORKERS_KEY]["w-done"] = {
     id: "w-done", state: "done", pendingWake: { state: "done", queuedAt: "2026-11-26T18:01:00Z" },
   };
+  world.agents.push({ ...world.agents[2], id: "w-done" });
   const status = await handlers.getStatus({ workspaceId: MAIN }, { paseo: fakePaseo(world) }, loader);
   assert.equal(status.pendingWorkerWakeCount, 1);
   assert.ok(status.openWorkers.every((worker) => worker.id !== "w-done"));
@@ -963,17 +970,18 @@ test("getStatus and getWorkers (list + prune) match core text formatting", async
   assert.equal(status.text, formatStatus(status));
 
   const workers = await handlers.getWorkers({ repo: SCOPE }, { paseo }, loader);
-  const expectedReport = workersReport(world.workspaces[0].metadata[WORKERS_KEY]);
+  const expectedReport = workersReport(world.workspaces[0].metadata[WORKERS_KEY]).filter(({ id }) => id === "w-live");
   assert.equal(workers.text, formatWorkersText(SCOPE, 3, expectedReport));
 
   const preview = await handlers.getWorkers({ repo: SCOPE, prune: true }, { paseo }, loader);
   assert.equal(preview.applied, false);
-  assert.deepEqual(preview.stale.map((s) => s.id), ["w-stale"]);
+  assert.equal(preview.stale, 1);
+  assert.doesNotMatch(preview.text, /w-stale|Old job/);
   assert.equal(preview.text, formatWorkersPruneText(SCOPE, 3, preview.stale));
 
   const pruned = await handlers.getWorkers({ repo: SCOPE, prune: true, apply: true }, { paseo }, loader);
   assert.equal(pruned.applied, true);
-  assert.deepEqual(pruned.removed.map((r) => r.id), ["w-stale"]);
+  assert.equal(pruned.removed, 1);
   assert.equal(world.workspaces[0].metadata[WORKERS_KEY]["w-stale"], undefined);
 });
 
@@ -1026,10 +1034,8 @@ test("workspace Resources binds an exact enrolled workspace even with shared pat
   other.metadata[PROFILE_HEALTH_KEY] = {
     sol: { class: "foreign-diagnostic", unhealthyUntil: "2099-11-26T23:00:00Z" },
   };
-  const retired = { ...workspace, id: "wks_retired", metadata: {
-    [METADATA_KEY]: { ...workspace.metadata[METADATA_KEY], retired: true },
-  } };
-  world.workspaces.push(other, retired, { ...workspace, id: "wks_unenrolled", metadata: {} });
+  const archivedWorkspace = { ...workspace, id: "wks_archived", archivedAt: new Date().toISOString() };
+  world.workspaces.push(other, archivedWorkspace, { ...workspace, id: "wks_unenrolled", metadata: {} });
   world.agents.push({ ...world.agents[0], id: "foreign-agent", workspaceId: otherId, provider: "foreign-provider" });
   const now = Date.now();
   const account = (id, family) => ({
@@ -1070,7 +1076,7 @@ test("workspace Resources binds an exact enrolled workspace even with shared pat
   ]);
   assert.doesNotMatch(JSON.stringify(otherView), /foreign-diagnostic|foreign-agent|foreign-account-id/);
   assert.throws(() => factoryWorkspaceResources.input.parse({ repo: SCOPE }));
-  for (const id of [SCOPE, "wks_unknown", "wks_unenrolled", "wks_retired"]) {
+  for (const id of [SCOPE, "wks_unknown", "wks_unenrolled", "wks_archived"]) {
     await assert.rejects(read(id), /require an enrolled, active Factory workspace/);
   }
   assert.deepEqual(world, before);
@@ -1170,14 +1176,13 @@ test("Fresh RPC binds the requested route and rechecks live options before creat
       if (changed && ++lookups === 2) source.options = { service_tier: "fast" };
       return null;
     },
-    freshPaseoCli: () => assert.fail("the old tab must stay intact"),
   };
   const preview = await handlers.previewFresh(input, { paseo }, loader, deps);
   assert.equal(preview.model, "claude-sonnet");
   assert.equal(preview.refreshMode, "new-agent");
-  await assert.rejects(handlers.applyFresh({ ...scope, fingerprint: preview.fingerprint }, { paseo }, loader, deps), /Something changed/);
+  await assert.rejects(handlers.applyFresh({ ...scope, archivePrevious: true, fingerprint: preview.fingerprint }, { paseo }, loader, deps), /Something changed/);
   changed = true;
-  await assert.rejects(handlers.applyFresh({ ...input, fingerprint: preview.fingerprint }, { paseo }, loader, deps), /Something changed/);
+  await assert.rejects(handlers.applyFresh({ ...input, archivePrevious: true, fingerprint: preview.fingerprint }, { paseo }, loader, deps), /Something changed/);
   assert.equal(world.agents.length, 3);
   assert.equal(world.workspaces[0].metadata[METADATA_KEY].epoch, 3);
   assert.equal(world.workspaces[0].metadata[AGENTS_KEY], undefined);
@@ -1199,7 +1204,7 @@ test("Fresh confirmation expires if the replacement account selection changes", 
   const preview = await handlers.previewFresh(input, context, loader, deps);
   assert.equal(preview.routeEvidence[0].account, "current");
   snapshot.accounts[0].maxUsedPct = 30;
-  await assert.rejects(handlers.applyFresh({ ...input, fingerprint: preview.fingerprint }, context, loader, deps),
+  await assert.rejects(handlers.applyFresh({ ...input, archivePrevious: true, fingerprint: preview.fingerprint }, context, loader, deps),
     /changed since the Fresh preview/);
   assert.equal(world.agents.length, 3);
   assert.equal(world.workspaces[0].metadata[AGENTS_KEY], undefined);
@@ -1222,13 +1227,13 @@ test("Reset Steer rewinds the live proxy tuple in place and stages the brief at 
       steers: { ...CONFIG.steers, priority: ["sol"] },
     }) };
     const before = structuredClone(active);
+    world.archiveAgent = () => assert.fail("Reset Steer must preserve the tab");
     const rewinds = [];
     const account = { id: "proxy", family: "claude", sampledAt: new Date().toISOString(),
       maxUsedPct: resetQuota === "depleted" ? 100 : null };
     const deps = {
       zerosub: { accounts: [account], agentAccount: { [active.id]: account.id } },
       lookupFreshReceipt: async () => assert.fail("Reset Steer must not look up a replacement"),
-      freshPaseoCli: () => assert.fail("Reset Steer must not retire a tab"),
       rewindClient: async () => ({
         fetchAgentTimeline: async () => ({ entries: [{ item: { type: "user_message", messageId: "start" } }] }),
         rewindAgent: async (...args) => { rewinds.push(args); },
@@ -1309,7 +1314,8 @@ test("a worker Resume RPC with no rewind point preserves the worker and offers a
 test("Fresh RPC can keep chat history by replacing a steer whose tab supports rewind", async () => {
   const { world, workspace, active, paseo } = activationWorld();
   const created = [];
-  const renamed = [];
+  const archived = [];
+  world.archiveAgent = (agent) => { archived.push(agent.id); };
   world.createAgent = async (workspaceId, request) => {
     const [provider, model] = request.config.provider.split("/");
     const agent = { ...active, id: "steer-replacement", workspaceId, title: request.title,
@@ -1324,21 +1330,24 @@ test("Fresh RPC can keep chat history by replacing a steer whose tab supports re
       rewindAgent: async () => assert.fail("The original chat must not be rewound"),
     }),
     lookupFreshReceipt: async () => null,
-    freshPaseoCli: (args) => { renamed.push(args); },
   };
   const input = { workspaceId: workspace.id, slot: "A", keepChatHistory: true };
   const preview = await handlers.previewFresh(input, { paseo }, loader, deps);
   assert.equal(preview.refreshMode, "new-agent");
-  await assert.rejects(handlers.applyFresh({ ...input, keepChatHistory: false, fingerprint: preview.fingerprint },
-    { paseo }, loader, deps), /Something changed/);
-  const result = await handlers.applyFresh({ ...input, fingerprint: preview.fingerprint, deliver: "stage", notifyPrevious: false },
+  await assert.rejects(handlers.applyFresh({ ...input, fingerprint: preview.fingerprint }, { paseo }, loader, deps),
+    /Confirm the archive action/);
+  assert.equal(world.agents.length, 4);
+  assert.deepEqual(archived, []);
+  await assert.rejects(handlers.applyFresh({ ...input, archivePrevious: true, keepChatHistory: false, fingerprint: preview.fingerprint },
+    { paseo }, loader, deps), /Something changed|Confirm the archive action/);
+  const result = await handlers.applyFresh({ ...input, fingerprint: preview.fingerprint, deliver: "stage", archivePrevious: true },
     { paseo }, loader, deps);
   assert.equal(result.applied, true);
   assert.equal(result.refreshMode, "new-agent");
   assert.equal(result.to, "steer-replacement");
   assert.equal(result.stagedTo, "steer-replacement");
   assert.equal(created.length, 1);
-  assert.equal(renamed.length, 1);
+  assert.deepEqual(archived, [active.id]);
   assert.deepEqual(world.sent, []);
 });
 
@@ -1369,7 +1378,7 @@ test("Fresh RPC confirms Worker replacement and carries the requested provider a
   };
   const input = { workspaceId: MAIN, workerId: worker.id, provider: "claude", model: "claude-sonnet" };
   const preview = await handlers.previewFresh(input, { paseo }, loader, deps);
-  const result = await handlers.applyFresh({ ...input, fingerprint: preview.fingerprint, notifyPrevious: false },
+  const result = await handlers.applyFresh({ ...input, fingerprint: preview.fingerprint, archivePrevious: true },
     { paseo }, loader, deps);
   assert.equal(result.applied, true);
   assert.equal(result.to, "worker-replaced");

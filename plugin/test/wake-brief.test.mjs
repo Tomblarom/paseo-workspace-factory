@@ -134,6 +134,7 @@ function provisioned(world) {
     workspaceId: ws.id,
     labels: { [LABEL.repo]: REPO, [LABEL.role]: "steer", [LABEL.slot]: "A", [LABEL.scope]: REPO },
   });
+  for (const id of ["worker-1", "worker-2"]) addAgent(world, { id, workspaceId: ws.id });
   return { ws, steer };
 }
 
@@ -335,6 +336,7 @@ test("flush retries at most once per tick without duplicate briefs", async () =>
     title: "Steer B", workspaceId: ws.id,
     labels: { [LABEL.repo]: REPO, [LABEL.role]: "steer", [LABEL.slot]: "B", [LABEL.scope]: REPO },
   });
+  for (const id of ["worker-1", "worker-2"]) addAgent(world, { id, workspaceId: ws.id });
   world.workspaces[0].metadata[WORKERS_KEY] = {
     "worker-1": entry("done", "t", { pendingWake: { state: "done", queuedAt: at(NOW - 3 * MIN) } }),
     "worker-2": entry("blocked", "t", { pendingWake: { state: "blocked", queuedAt: at(NOW - 2 * MIN) } }),

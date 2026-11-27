@@ -77,7 +77,7 @@ decision logic · 5 historical · 6 not yet assessable.
    per-login errors, and cannot force refresh. Factory needs per-account data. Keep the CLI
    until a public modern report API exists; fix the parser and make sampling non-blocking.
 5. **The surface is larger than the users.** Dead or caller-less: `ping` RPC, `FactoryPopover`,
-   `factory.attention` alias, `retire` (dormant executor behind `RETIREMENT_ENABLED = false`),
+   `factory.attention` alias,
    deprecated `slot set/rm` and `worker-default`, `advisors.profiles`, `runtime.scratchDir`, the
    top-level `quotaSampleMinutes` copy, `settingsObserved` clip branch, 4 of 5 Command Center
    items (all open the same panel). Duplicated logic: two quota defaults (90 vs. 95), two
@@ -97,7 +97,7 @@ decision logic · 5 historical · 6 not yet assessable.
 | Read-only receipt lookup | 3 | needed (native create is not a read-only lookup); fix 0.17.4 support, request public lookup upstream |
 | Status, wait for turn end | 2 | subscriptions + `waitForFinish` instead of metadata polling (switch wait, drain) |
 | Message delivery | 4 + 2 | keep Factory epoch/wake policy; use native message-ID receipts for exact replay instead of own resend logic |
-| Archive | 3 | native; add `agent.archive.after` for immediate worker retirement instead of later scans |
+| Archive | 3 | native; add `agent.archive.after` for immediate worker register cleanup instead of later scans |
 | Projects (create/rename/delete), clone, label update | 3 | CLI bridge stays (no public SDK) |
 | Resume after restart | 2 | native open/resume; do not enable native `resumeOnStartup` for Factory agents (no epoch/quota gates) |
 | Rewind | 3 | internal RPC until a public one exists; one transport (two today) |
@@ -125,7 +125,7 @@ lines, estimates to be checked in the diff; tests not counted.
 | K7 | action record (planned P0): 10 delivery paths, 5 recovery owners, 3 pending records → one intent/attempt/observe/finish record, one reconciler, native message-ID replay | grew per feature (`8c00f3f`, `d44c36c`, `6b458a3`, `ccf1d2b`, `3c41322`) | delivery, brief, supervise, boot, sweep, turn hook, resume, settings; `src/{agent-state,steer,rewind,assign,relocate}.mjs` | ≈170–300; −2 state shapes | crash/disconnect at every step; unknown success never starts a second turn; fixtures listed in internal-architecture.md §A | merge | F |
 | K8 | scope guard (planned P0): scattered epoch checks with gaps (manual checkpoint, resume before takeover, same-slot hooks, inactive fresh) → one guard: expected scope, epoch, exact active agent | added per command | `src/{lock,agent-state,steer,workers,assign,cli}.mjs`, handlers, hooks | ≈45–95 (adds missing checks) | A→B→A, stale preview, self-takeover, allowed inactive maintenance | merge | F |
 | K9 | creation: near-identical steer request builders (plan, add, fresh ×2, relocate) → one builder + placement verifier | each feature added its own | `src/{planner,steer,steer-add,apply,workers,relocate}.mjs` | ≈70–130 | foreign occupant, parent/account mismatch, same key changed request | merge | F (after K1) |
-| K10 | timers → one subscribed projection for steer feed and attention (2 per-subscriber timers), `agent.archive.after` for worker retirement, deadline scheduler for idle/cache/quota/stale | polling was the simple first version | `steer-feed.ts`, `cold-sweep.ts`, `supervise.ts`, `quota.ts` | 5 intervals → 1–2 deadline schedulers; less load per open app | reconnect, daemon downtime, missed hook; keep bounded reconciliation | simplify | F |
+| K10 | timers → one subscribed projection for steer feed and attention (2 per-subscriber timers), `agent.archive.after` for worker register cleanup, deadline scheduler for idle/cache/quota/stale | polling was the simple first version | `steer-feed.ts`, `cold-sweep.ts`, `supervise.ts`, `quota.ts` | 5 intervals → 1–2 deadline schedulers; less load per open app | reconnect, daemon downtime, missed hook; keep bounded reconciliation | simplify | F |
 | K11 | discovery: full daemon state read several times per RPC, 5 holder selectors → one snapshot per call, one holder selector | per-module needs | `src/{paseo,discovery,scope}.mjs`, feed, sweep, boot, settings, supervise | ≈50–110 | legacy labels, ZeroSub multi-hop, same-slot holders | simplify | F |
 | K12 | CLI thin RPC client (with TODO 16): keep only agent-facing commands (`status`, `resume`, `checkpoint`, `worker pick/start`, `workers`, `switch`/takeover, `assign`); move core into `plugin/` as single source; delete generated mirror and the sync script (mirror half done in K12a, thin-client half open) | CLI predates the plugin | `src/cli.mjs`, `src/*`, the generated in-package copy, scripts, docs | −10,353 generated; `cli.mjs` 1,021 → ≈250; one copy of core | spike done (production compiler bundles `.mjs` in both bundles); CLI needs a running plugin (decided) | merge | F |
 | K13 | plan/apply beyond onboarding → initial enrollment of one existing workspace + repair only; drop recurring top-up, retitle, project rename, expected-model drift, fork/clone knobs | built for bulk provisioning | `src/{planner,apply,factory,github}.mjs`, plan UI | ≈500–900 | keep durable compound replay for enrollment; ties to slots-live (TODO 17) | simplify | F |

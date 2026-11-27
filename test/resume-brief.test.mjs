@@ -110,15 +110,15 @@ test('brief header names scope, role and activity', () => {
 test('brief shows checkpoint with source, age, stale and interrupted warnings', () => {
   const world = makeWorld();
   provisioned(world, {
-    checkpoint: { task: 'Ship it', tests: ['npm test'], blockers: ['hub:needs-review', 'flaky'], next: 'confirm', epoch: 2, updatedAt: hoursAgo(3), capturedAt: hoursAgo(3), source: 'agent', interrupted: { agentId: 'agent-9', at: hoursAgo(1) } },
-    agents: { 'agent-9': { interrupted: { at: hoursAgo(1), outcome: 'failed', error: 'boom', excerpt: 'tail of the last answer' } } },
+    checkpoint: { task: 'Ship it', tests: ['npm test'], blockers: ['hub:needs-review', 'flaky'], next: 'confirm', epoch: 2, updatedAt: hoursAgo(3), capturedAt: hoursAgo(3), source: 'agent', interrupted: { agentId: 'agent-2', at: hoursAgo(1) } },
+    agents: { 'agent-2': { interrupted: { at: hoursAgo(1), outcome: 'failed', error: 'boom', excerpt: 'tail of the last answer' } } },
   });
   const d = discoveryOf(world);
   const brief = buildResumeBrief(steerStatus(d), { agentState: d.mainWorkspace.metadata[AGENTS_KEY], scope: d.scope, now: () => NOW });
   assert.match(brief, /Task checkpoint \(agent, 3h ago\):/);
   assert.match(brief, /- Task: Ship it/);
   assert.match(brief, /! Checkpoint is stale: from epoch 2, scope is at epoch 3/);
-  assert.match(brief, /! Interrupted: agent-9 at .* — last answer tail:/);
+  assert.match(brief, /! Interrupted: agent-2 at .* — last answer tail:/);
   assert.match(brief, /tail of the last answer/);
   assert.match(brief, /Open hub items:\n- hub:needs-review/);
   assert.ok(!brief.includes('flaky\n- hub') || true);
@@ -429,8 +429,8 @@ test('switch handoff carries a single brief for interruptions or recorded assign
   const { switchSteer: runSwitch } = await import('../plugin/server/core/steer.mjs');
   const world = makeWorld();
   provisioned(world, {
-    checkpoint: { task: 't', tests: [], blockers: [], next: null, epoch: 3, updatedAt: hoursAgo(1), source: 'manual', interrupted: { agentId: 'agent-1', at: hoursAgo(1) } },
-    agents: { 'agent-1': { interrupted: { excerpt: 'boom tail' } } },
+    checkpoint: { task: 't', tests: [], blockers: [], next: null, epoch: 3, updatedAt: hoursAgo(1), source: 'manual', interrupted: { agentId: 'agent-2', at: hoursAgo(1) } },
+    agents: { 'agent-2': { interrupted: { excerpt: 'boom tail' } } },
   });
   const dry = await runSwitch({ client: fakeClient(world), discovery: discoveryOf(world), toSlot: 'B', git: fakeGit({}), lock: noLock, promptOptions: { factoryRoot: '/srv/factory' } });
   assert.match(dry.packet, /Previous steer was interrupted at .*; verify git state before continuing\./);
@@ -458,8 +458,8 @@ test('switch handoff carries a single brief for interruptions or recorded assign
 test('fresh preview carries the brief when interrupted', async () => {
   const world = makeWorld();
   provisioned(world, {
-    checkpoint: { task: 't', tests: [], blockers: [], next: null, epoch: 3, updatedAt: hoursAgo(1), source: 'manual', interrupted: { agentId: 'agent-1', at: hoursAgo(1) } },
-    agents: { 'agent-1': { interrupted: { excerpt: 'fresh tail' } } },
+    checkpoint: { task: 't', tests: [], blockers: [], next: null, epoch: 3, updatedAt: hoursAgo(1), source: 'manual', interrupted: { agentId: 'agent-2', at: hoursAgo(1) } },
+    agents: { 'agent-2': { interrupted: { excerpt: 'fresh tail' } } },
   });
   const config = { version: 1, github: { owner: 'e', cloneProtocol: 'https', upstreamRemote: 'upstream' }, checkoutRoot: '/p', workspaceTitle: 'Main', profiles: { std: { provider: 'codex', model: 'gpt-6.2-sol', thinking: null, mode: null } }, steers: { slots: { A: 'std', B: 'std' }, prepare: ['A'], initialActive: 'A' } };
   const providers = [{ provider: 'codex', enabled: true, status: 'ready', models: [{ id: 'gpt-6.2-sol', thinkingOptions: [] }], modes: [] }];

@@ -4,7 +4,7 @@ import { hasActiveAgentWork } from "./agent-context.js";
 
 export function canMarkWorkerStale(agent: any, entry: any): boolean {
   return agent?.status === "idle" && !agent.archivedAt && agent.background !== true &&
-    !entry?.replacedBy && !hasActiveAgentWork(agent, entry);
+    !hasActiveAgentWork(agent, entry);
 }
 
 /** Old batches can outlive a worker, its register entry or its assignment. */
@@ -13,10 +13,10 @@ export async function filterStaleWorkerEvents<T extends { workerId: string; stat
 ): Promise<T[]> {
   const workers: Record<string, any> = readWorkers(metadata);
   const eligible = await Promise.all(events.map(async ({ workerId, state }) => {
-    if (state !== "stale") return true;
-    if (workers[workerId]?.state !== "stale") return false;
-    const live = await paseo.agents.ref(workerId).refresh().catch(() => null);
-    return canMarkWorkerStale(live?.agent, metadata?.[AGENTS_KEY]?.[workerId]);
+    if (!workers[workerId] || (state === "stale" && workers[workerId].state !== "stale")) return false;
+    const live = (await paseo.agents.ref(workerId).refresh().catch(() => null))?.agent;
+    if (!live || live.archivedAt) return false;
+    return state !== "stale" || canMarkWorkerStale(live, metadata?.[AGENTS_KEY]?.[workerId]);
   }));
   return events.filter((_, index) => eligible[index]);
 }

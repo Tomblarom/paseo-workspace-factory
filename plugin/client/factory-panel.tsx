@@ -359,7 +359,7 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
         text: fresh.idempotent ? "This chat was already refreshed."
           : fresh.deliveryError ? String(fresh.deliveryError)
           : fresh.refreshMode === "rewind" ? "Conversation rewound and continuation brief sent."
-          : `Replacement agent ${text(field(fresh, "to"))} created. The previous chat is still available.`,
+          : `Replacement agent ${text(field(fresh, "to"))} created. The previous agent was archived.`,
       }),
     onError: fail,
   });
@@ -401,9 +401,9 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
       workspaceId: string;
       fingerprint: string;
       inputs: SteerAddPreviewInputs;
-      revision: string;
+      revision: string; creationId: string;
     }) => {
-      return callSteerAdd({ ...vars.inputs, workspaceId: vars.workspaceId, fingerprint: vars.fingerprint, revision: vars.revision });
+      return callSteerAdd({ ...vars.inputs, workspaceId: vars.workspaceId, fingerprint: vars.fingerprint, revision: vars.revision, creationId: vars.creationId });
     },
     onSuccess: (added, vars) =>
       setFactoryResult({
@@ -454,7 +454,8 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
   };
   const confirmFresh = () => {
     if (result?.kind !== "freshPreview") return;
-    freshMutation.mutate({ ...result.input, fingerprint: result.preview.fingerprint });
+    freshMutation.mutate({ ...result.input, fingerprint: result.preview.fingerprint,
+      archivePrevious: result.preview.refreshMode === "new-agent" });
   };
   const confirmAssign = () => {
     if (result?.kind !== "assignPreview") return;
@@ -473,6 +474,7 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
       workspaceId: result.workspaceId,
       fingerprint: result.preview.fingerprint,
       revision: result.preview.revision,
+      creationId: result.preview.creationId,
       inputs: { ...result.inputs, slot: result.preview.slot },
     });
   };
@@ -1375,7 +1377,7 @@ function FreshPreviewView({
         {replacement ? `Replacement for ${target}` : `Rewind ${target} in place`}
         {` · ${text(preview.provider)}/${text(preview.model)}`}
       </Text>
-      {replacement ? <Text style={styles.label}>Paseo may route the replacement to a different account.</Text> : null}
+      {replacement ? <Text style={styles.label}>The previous agent will be archived. Paseo may route the replacement to a different account.</Text> : null}
       {preview.warnings?.map((warning) => <Text key={warning} style={styles.conflict}>{warning}</Text>)}
       <Text style={styles.label}>{at}</Text>
       {!preview.checkpoint ? (
@@ -1388,7 +1390,7 @@ function FreshPreviewView({
         disabled={actions.busy}
         onPress={actions.confirmFresh}
       >
-        <Text style={styles.buttonText}>{replacement ? "Create replacement with automatic account selection" : "Rewind and deliver"}</Text>
+        <Text style={styles.buttonText}>{replacement ? "Create replacement and archive previous agent" : "Rewind and deliver"}</Text>
       </Pressable>
     </View>
   );

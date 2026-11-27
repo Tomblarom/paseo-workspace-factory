@@ -119,7 +119,6 @@ function handoverReason(
   if (row.advisor) {
     return { eligible: false, reason: "Advisor steers never coordinate", needsRecovery: false };
   }
-  if (row.state === "retired") return { eligible: false, reason: "retired", needsRecovery: false };
   if (opts.ambiguousSlot || unresolvedSteerStatus(row)) {
     const detail = row.detail && row.detail !== "Not enough data" ? ` (${row.detail})` : "";
     return { eligible: false, reason: `Ambiguous membership${detail}`, needsRecovery: false };
@@ -161,7 +160,7 @@ export function handoffTargets(
     );
   const perSlot = new Map<string, number>();
   for (const row of holders) {
-    if (row.state !== "retired") perSlot.set(row.slot as string, (perSlot.get(row.slot as string) ?? 0) + 1);
+    perSlot.set(row.slot as string, (perSlot.get(row.slot as string) ?? 0) + 1);
   }
   return holders.map((row) => {
     const slot = row.slot as string;
@@ -207,7 +206,6 @@ export function resetSteerBlock(row: SteerPillRow): string | null {
   }
   if (row.permissionNeeded) return "A permission request is waiting. Answer it first.";
   if (row.state === "waiting") return `Busy (${row.detail}). Try again after it finishes.`;
-  if (row.state === "retired") return "This tab was replaced. Open the current holder instead.";
   if (unresolvedSteerStatus(row)) return `Steer status is unknown: ${row.detail}.`;
   if (!row.scopeId || !row.slot) return "Steer membership is unavailable";
   return null;
@@ -268,7 +266,7 @@ export type SteerMenuEntryDescriptor =
 export function describeSteerMenu(self: SteerPillRow, rows: SteerPillRow[]): SteerMenuEntryDescriptor[] {
   const items: SteerMenuEntryDescriptor[] = [];
   const targets = handoffTargets(rows, self.agentId);
-  if (self.slot && self.scopeId && !self.advisor && self.state !== "retired" && self.activationEpoch != null) {
+  if (self.slot && self.scopeId && !self.advisor && self.activationEpoch != null) {
     const target = handoffTargets(rows, self.agentId, true).find((entry) => entry.agentId === self.agentId);
     const disabled = target?.eligible !== true;
     const quotaConfirmation = steerQuotaConfirmation(self);
@@ -332,7 +330,7 @@ export async function resetSteer(
     throw new Error("An in-place rewind is unavailable. Use /factory fresh to preview and confirm a replacement.");
   }
   const result = await apply({ workspaceId, slot, resetQuota, fingerprint: plan.fingerprint,
-    deliver: initialize === "send" && resetQuota === "available" ? "send" : "stage", notifyPrevious: false });
+    deliver: initialize === "send" && resetQuota === "available" ? "send" : "stage" });
   return { result, initialize };
 }
 

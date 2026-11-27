@@ -111,6 +111,11 @@ function fakeClient(world, { sendFails = false } = {}) {
           const agent = findAgent(id);
           return agent ? { agent: structuredClone(agent) } : null;
         },
+        archive: async () => {
+          const archivedAt = at(NOW);
+          findAgent(id).archivedAt = archivedAt;
+          return { archivedAt };
+        },
         send: async (text, options) => {
           world.calls.push(["agent.send", id, text, options]);
           if (sendFails) throw new Error("agent is closed");
@@ -453,6 +458,7 @@ test("worker fresh fallback transfers supervision before sending to the replacem
   const applied = await resumeApply.applyResume(paseo, { workspaceId: ws.id, agentId: worker.id }, {
     lock: noLock, now: () => at(NOW),
     refreshWorker: (_workspaceId, agentId) => freshSteer({
+      archivePrevious: true,
       client: paseo, discovery: discovery(), config: {}, workerId: agentId, apply: true, lock: noLock,
       lookupReceipt: async () => null,
       execute: async () => ({ agentId: addAgent(world, { workspaceId: ws.id, labels: worker.labels }).id }),
@@ -466,10 +472,9 @@ test("worker fresh fallback transfers supervision before sending to the replacem
   assert.equal(ws.metadata[WORKERS_KEY][worker.id], undefined);
   assert.equal(ws.metadata[WORKERS_KEY][applied.agentId].task, "Repair PWM");
   assert.equal(ws.metadata[WORKERS_KEY][applied.agentId].pendingWake.state, "interrupted");
-  assert.equal(ws.metadata[AGENTS_KEY][worker.id].replacedBy, applied.agentId);
-  const old = await resumeApply.applyResume(paseo, { workspaceId: ws.id, agentId: worker.id }, { lock: noLock });
-  assert.equal(old.status, "blocked");
-  assert.equal(old.agentId, applied.agentId);
+  assert.ok(worker.archivedAt);
+  await assert.rejects(resumeApply.applyResume(paseo, { workspaceId: ws.id, agentId: worker.id }, { lock: noLock }),
+    /Unknown agent/);
   assert.deepEqual(sendsTo(world, worker.id), []);
 });
 

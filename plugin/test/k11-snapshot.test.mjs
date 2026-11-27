@@ -114,7 +114,7 @@ test("feed rows agree with scopeHolder and resolveWakeTarget on continuation and
     world.agents,
     [],
   );
-  const statusRows = resolved.map((a) => ({ slot: a.labels?.[LABEL.slot] ?? null, id: a.id, archivedAt: a.archivedAt ?? null, retired: false, superseded: a.superseded === true }));
+  const statusRows = resolved.map((a) => ({ slot: a.labels?.[LABEL.slot] ?? null, id: a.id, archivedAt: a.archivedAt ?? null, superseded: a.superseded === true }));
   assert.equal(scopeHolder({ agents: world.agents, workspaceId: MAIN, scopeId: SCOPE, slot: "A" }).id, "live-a");
   assert.equal(resolveWakeTarget({ activeSteer: "A" }, statusRows), "live-a");
   assert.throws(() => scopeHolder({ agents: world.agents, workspaceId: MAIN, scopeId: SCOPE, slot: "B" }), /found 2/);

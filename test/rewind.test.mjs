@@ -77,6 +77,13 @@ function fakeClient(world) {
   const agentHandle = (id) => ({
     id,
     refresh: async () => ({ agent: structuredClone(findAgent(id)) }),
+    archive: async () => {
+      world.calls.push(['agent.archive', id]);
+      if (world.hooks?.archiveFails) throw new Error('archive failed');
+      const archivedAt = '2026-11-25T00:00:00Z';
+      findAgent(id).archivedAt = archivedAt;
+      return { archivedAt };
+    },
     send: async (text) => {
       if (world.hooks.sendFails) throw new Error('agent unreachable');
       world.calls.push(['agent.send', id, text]);
@@ -401,7 +408,7 @@ test('buildRefreshPacket tells a refreshed active steer to coordinate', async ()
 test('fresh --slot preview shows rewind vs new agent', async () => {
   const world = makeWorld();
   const { steers } = provisioned(world);
-  const rewind = await freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', git: fakeGit(), lock: testLock, language: 'en', rewindClient: fakeDaemon({ timeline: userTimeline() }), promptOptions: { factoryRoot: '/srv/factory' } });
+  const rewind = await freshSteer({ archivePrevious: true, client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', git: fakeGit(), lock: testLock, language: 'en', rewindClient: fakeDaemon({ timeline: userTimeline() }), promptOptions: { factoryRoot: '/srv/factory' } });
   assert.equal(rewind.refreshMode, 'rewind');
   assert.equal(rewind.from, steers.B.id);
   assert.equal(rewind.to, steers.B.id);
@@ -414,7 +421,7 @@ test('fresh --slot preview shows rewind vs new agent', async () => {
 
   const world2 = makeWorld();
   provisioned(world2);
-  const fallback = await freshSteer({ client: fakeClient(world2), discovery: discoveryOf(world2), config: CONFIG, slot: 'B', git: fakeGit(), lock: testLock, language: 'en', rewindClient: fakeDaemon({ timeline: { entries: [] } }), promptOptions: { findingsInPrompts: false } });
+  const fallback = await freshSteer({ archivePrevious: true, client: fakeClient(world2), discovery: discoveryOf(world2), config: CONFIG, slot: 'B', git: fakeGit(), lock: testLock, language: 'en', rewindClient: fakeDaemon({ timeline: { entries: [] } }), promptOptions: { findingsInPrompts: false } });
   assert.equal(fallback.refreshMode, 'new-agent');
   assert.equal(fallback.to, null);
   assert.match(fallback.packet, /gets a new agent/);
@@ -423,7 +430,7 @@ test('fresh --slot preview shows rewind vs new agent', async () => {
 
   const world3 = makeWorld();
   provisioned(world3);
-  const legacy = await freshSteer({ client: fakeClient(world3), discovery: discoveryOf(world3), config: CONFIG, slot: 'B', git: fakeGit(), lock: testLock, language: 'en' });
+  const legacy = await freshSteer({ archivePrevious: true, client: fakeClient(world3), discovery: discoveryOf(world3), config: CONFIG, slot: 'B', git: fakeGit(), lock: testLock, language: 'en' });
   assert.equal(legacy.refreshMode, 'new-agent');
 });
 
@@ -435,6 +442,7 @@ test('fresh preview and apply use the recorded resume brief when it is still a u
   timeline.entries.push({ item: { type: 'user_message', messageId: 'brief-previous' } });
   const daemon = fakeDaemon({ timeline });
   const run = (apply) => freshSteer({
+    archivePrevious: true,
     client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG,
     slot: 'B', language: 'en', lock: testLock, rewindClient: daemon, apply,
   });
@@ -456,7 +464,7 @@ test('fresh --slot apply rewinds the same tab and records cleared/refreshed', as
   const { steers } = provisioned(world);
   world.workspaces[0].metadata[AGENTS_KEY] = { [steers.B.id]: { note: 'Rework the queue', noteAt: '2026-11-24T10:00:00.000Z', lastTurnEndedAt: '2026-11-24T11:00:00.000Z' } };
   const daemon = fakeDaemon({ timeline: userTimeline('msg-a') });
-  const result = await freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon });
+  const result = await freshSteer({ archivePrevious: true, client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon });
   assert.equal(result.refreshMode, 'rewind');
   assert.equal(result.applied, true);
   assert.equal(result.from, steers.B.id);
@@ -499,7 +507,7 @@ test('fresh --worker apply rewinds the same tab with its owner', async () => {
     labels: { [PARENT_LABEL]: steers.A.id, [LABEL.scope]: REPO, [LABEL.role]: 'worker', [LABEL.owner]: 'A' },
   });
   const daemon = fakeDaemon({ timeline: userTimeline() });
-  const result = await freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, workerId: worker.id, apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon });
+  const result = await freshSteer({ archivePrevious: true, client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, workerId: worker.id, apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon });
   assert.equal(result.refreshMode, 'rewind');
   assert.equal(result.kind, 'worker');
   assert.equal(result.owner, 'A');
@@ -509,11 +517,11 @@ test('fresh --worker apply rewinds the same tab with its owner', async () => {
   assert.equal(world.workspaces[0].metadata[AGENTS_KEY][worker.id].action.facts.cleared.mode, 'rewind');
 });
 
-test('active fresh apply rewinds without an epoch bump or retire notice', async () => {
+test('active fresh apply rewinds without an epoch bump or archive', async () => {
   const world = makeWorld();
   const { steers } = provisioned(world);
   const daemon = fakeDaemon({ timeline: userTimeline() });
-  const result = await freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon });
+  const result = await freshSteer({ archivePrevious: true, client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon });
   assert.equal(result.refreshMode, 'rewind');
   assert.equal(result.applied, true);
   assert.equal(result.from, steers.A.id);
@@ -522,7 +530,7 @@ test('active fresh apply rewinds without an epoch bump or retire notice', async 
   assert.equal(result.epochBumped, false);
   assert.match(result.packet, /keeps agent .* in the same tab/);
   assert.deepEqual(world.workspaces[0].metadata[METADATA_KEY], { main: true, activeSteer: 'A', epoch: 1 });
-  assert.ok(!world.calls.some((c) => c[0] === 'agent.send'), 'no retire notice: the tab survives');
+  assert.ok(!world.calls.some((c) => c[0] === 'agent.send'), 'the tab receives no outgoing message');
   assert.equal(world.workspaces[0].metadata[AGENTS_KEY][steers.A.id].action.facts.refreshed.mode, 'rewind');
 });
 
@@ -532,7 +540,7 @@ test('no rewind point falls back to a new parent-free agent', async () => {
   const world = makeWorld();
   const { steers } = provisioned(world);
   const daemon = fakeDaemon({ timeline: { entries: [{ item: { type: 'tool_call', kind: 'paseo-agent-message', messageId: 'tool-1' } }] } });
-  const result = await freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon });
+  const result = await freshSteer({ archivePrevious: true, client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon });
   assert.equal(result.refreshMode, 'new-agent');
   assert.equal(result.rewindFallback, 'no-point');
   assert.ok(result.to && result.to !== steers.B.id);
@@ -540,14 +548,14 @@ test('no rewind point falls back to a new parent-free agent', async () => {
   assert.ok(!daemon.calls.some((c) => c[0] === 'sendMessage'), 'nothing sent through the rewind path');
   const created = world.agents.find((a) => a.id === result.to);
   assert.equal(created.labels[PARENT_LABEL], undefined);
-  assert.deepEqual(world.calls.filter((c) => c[0] === 'agent.send').map((c) => c[1]), [result.to, steers.B.id]);
+  assert.deepEqual(world.calls.filter((c) => c[0] === 'agent.send').map((c) => c[1]), [result.to]);
 });
 
 test('unsupported error after rewind dispatch remains uncertain and does not fall back', async () => {
   const world = makeWorld();
   const { steers } = provisioned(world);
   const daemon = fakeDaemon({ timeline: userTimeline(), rewindFails: new Error('rewindAgent not supported') });
-  const run = () => freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon });
+  const run = () => freshSteer({ archivePrevious: true, client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon });
   await assert.rejects(run(), /uncertain outcome/);
   assert.equal(world.workspaces[0].metadata[AGENTS_KEY][steers.B.id].action.phase, 'uncertain');
   const result = await run();
@@ -562,7 +570,7 @@ test('rewind failure leaves a durable uncertain action', async () => {
   world.workspaces[0].metadata[AGENTS_KEY] = { [steers.B.id]: { note: 'keep me', noteAt: '2026-11-24T10:00:00.000Z' } };
   const daemon = fakeDaemon({ timeline: userTimeline(), rewindFails: new Error('could not find user message') });
   await assert.rejects(
-    freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon }),
+    freshSteer({ archivePrevious: true, client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon }),
     /Rewind of .* has an uncertain outcome \(could not find user message\)/,
   );
   assert.equal(world.agents.length, 2, 'no agent created');
@@ -583,7 +591,7 @@ test('lost metadata write after a committed rewind reports it as applied and can
       throw new Error('metadata disconnected after rewind');
     }
   };
-  const run = () => freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon });
+  const run = () => freshSteer({ archivePrevious: true, client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon });
   const result = await run();
   assert.equal(result.applied, true);
   assert.match(result.recordingError, /Rewind applied.*metadata disconnected/);
@@ -597,7 +605,7 @@ test('a landed rewind with a failed brief send records done, not uncertain', asy
   const world = makeWorld();
   const { steers } = provisioned(world);
   const daemon = fakeDaemon({ timeline: userTimeline(), sendFails: new Error('brief transport down') });
-  const run = () => freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon });
+  const run = () => freshSteer({ archivePrevious: true, client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon });
   const result = await run();
   assert.equal(result.applied, true);
   assert.equal(result.delivered, false);
@@ -622,7 +630,7 @@ test('lost metadata receipt after a settled rewind leaves the action and facts t
       throw new Error('metadata receipt lost after settle');
     }
   };
-  const run = () => freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon, now: () => new Date('2026-11-24T12:00:00.000Z') });
+  const run = () => freshSteer({ archivePrevious: true, client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon, now: () => new Date('2026-11-24T12:00:00.000Z') });
   const result = await run();
   assert.equal(result.applied, true);
   assert.match(result.recordingError, /Rewind applied.*metadata receipt lost/);
@@ -640,7 +648,7 @@ test('double-click apply is idempotent: the second run rewinds nothing', async (
   const world = makeWorld();
   const { steers } = provisioned(world);
   const daemon = fakeDaemon({ timeline: userTimeline() });
-  const run = () => freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon });
+  const run = () => freshSteer({ archivePrevious: true, client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon });
   const first = await run();
   assert.equal(first.applied, true);
   assert.equal(first.refreshMode, 'rewind');
@@ -662,7 +670,7 @@ test('a pending cleanup action makes the rewind apply idempotent without daemon 
   const { steers } = provisioned(world);
   world.workspaces[0].metadata[AGENTS_KEY] = { [steers.B.id]: { action: { kind: 'cleanup', wakeId: 'c', phase: 'renewing', cleanup: { kind: 'clear', at: '2026-11-24T11:00:00.000Z' } } } };
   const daemon = fakeDaemon({ timeline: userTimeline() });
-  const result = await freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon });
+  const result = await freshSteer({ archivePrevious: true, client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', rewindClient: daemon });
   assert.equal(result.applied, false);
   assert.equal(result.idempotent, true);
   assert.match(result.idempotentReason, /already pending/);

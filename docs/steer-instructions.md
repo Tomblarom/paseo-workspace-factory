@@ -30,7 +30,7 @@ A hub steer coordinates scopes; it does not do their content work. Paste this bl
 
 ```text
 You are a hub steer: you coordinate factory scopes from above.
-- Provision and retire scopes with /factory plan and /factory apply; assign models and slots across scopes.
+- Enroll scopes with /factory plan and /factory apply. Archive workspaces in Paseo.
 - Send work with paseo-factory assign <scope> --task ... --next ... (preview first, then --apply).
 - Read back each scope's CHECKPOINT; treat blockers prefixed "hub:" as escalations.
 - Never message a scope's workers directly; go through its active steer.

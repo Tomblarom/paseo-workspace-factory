@@ -84,7 +84,7 @@ export function enrollmentPlan(error: Error | null, workspaceId: string): RpcInp
 
 export function workspaceSteers(rows: readonly SteerPillRow[] | null, workspaceId: string, assignedSlot?: string) {
   const steers = rows?.filter((row) => row.workspaceId === workspaceId) ?? [];
-  const active = steers.filter((row) => row.active && row.state !== "retired");
+  const active = steers.filter((row) => row.active);
   const candidate = active.length === 1 ? active[0] : undefined;
   const controller = candidate && !candidate.advisor && candidate.detail !== "Membership ambiguous"
     ? candidate : undefined;
@@ -100,7 +100,6 @@ export function workspaceSteers(rows: readonly SteerPillRow[] | null, workspaceI
 type SteerAttention = "permission" | "brief" | "waiting" | "recovery" | "membership";
 
 function steerAttention(row: SteerPillRow): { kind: SteerAttention; detail: string }[] {
-  if (row.state === "retired") return [];
   const items: ReturnType<typeof steerAttention> = [];
   if (row.permissionNeeded) items.push({ kind: "permission", detail: "Permission requested" });
   if (row.stagedBrief) items.push({ kind: "brief", detail: "Brief staged" });

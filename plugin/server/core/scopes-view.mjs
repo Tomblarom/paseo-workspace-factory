@@ -10,8 +10,9 @@ import { applyContinuations, isWorktreeWorkspace, liveSlotHolders, resolveSteerH
 
 /** One row per live scope: id, kind, active steer, epoch, checkpoint, usage, hints. */
 export function scopeRows(paseoState, { now = () => Date.now(), daemonStartedAt = null, lastTurnCheckpoints = null, config = null, zerosubSwitches = [] } = {}) {
-  const agents = paseoState?.agents ?? [];
+  const agents = (paseoState?.agents ?? []).filter((agent) => !agent.archivedAt);
   const scopes = listScopes(paseoState);
+  const liveIds = new Set(agents.map((agent) => agent.id));
   // Live continuation tabs inherit their origin's slot/scope labels (see
   // zerosub.mjs); the heuristic scan below runs over the resolved list so the
   // live tab — not the superseded origin — is checked, without duplicates.
@@ -38,7 +39,7 @@ export function scopeRows(paseoState, { now = () => Date.now(), daemonStartedAt 
     const updatedMs = updatedAt ? Date.parse(updatedAt) : NaN;
     const ageMs = Number.isFinite(updatedMs) ? Math.max(0, now() - updatedMs) : null;
     const blockers = blockersOf.get(scope.id) ?? [];
-    const marked = restartInterruptions({ checkpoint, agentState });
+    const marked = restartInterruptions({ checkpoint, agentState }).filter(({ agentId }) => liveIds.has(agentId));
     const markedIds = new Set(marked.map((m) => m.agentId));
     const heuristic = [];
     const checkpointAt = checkpoint?.capturedAt ?? checkpoint?.updatedAt ?? null;
@@ -93,7 +94,7 @@ export function scopeRows(paseoState, { now = () => Date.now(), daemonStartedAt 
           updatedAt, ageMs, next: checkpoint.next ?? null,
           escalations: blockers.filter((b) => typeof b === 'string' && b.startsWith('hub:')),
           domainEscalations: blockers.filter((b) => typeof b === 'string' && b.startsWith('domain:')),
-          ...(checkpoint.interrupted ? { interrupted: checkpoint.interrupted } : {}),
+          ...(liveIds.has(checkpoint.interrupted?.agentId) ? { interrupted: checkpoint.interrupted } : {}),
         }
         : null,
       usage: agentUsage(active),
@@ -128,7 +129,7 @@ export function formatScopeRows(rows) {
   // levels: Hub → Domain → Kind), then the rest. Rows without a domain keep
   // their exact previous shape.
   const byId = new Map(rows.map((r) => [r.id.toLowerCase(), r]));
-  // Emission is keyed by workspace: a retired scope and its successor can
+  // Emission is keyed by workspace: multiple scoped workspaces can
   // share the scope id (the domain pointer is carried over),
   // and both rows — old and new — must print.
   const emitted = new Set();
@@ -177,7 +178,7 @@ export function formatScopeRows(rows) {
 
 /** Workspaces without factory metadata: adoption candidates with a plan suggestion. Read-only. */
 export function scopeCandidates(paseoState, { factoryCmd = '/factory' } = {}) {
-  const agents = paseoState?.agents ?? [];
+  const agents = (paseoState?.agents ?? []).filter((agent) => !agent.archivedAt);
   const byId = new Map(agents.map((a) => [a.id, a]));
   const projects = new Map((paseoState?.projects ?? []).map((p) => [p.projectId, p]));
   return (paseoState?.workspaces ?? [])
@@ -233,10 +234,9 @@ function formatStatusUsage(usage) {
 
 /** Human-readable `status` output: checkpoint, steers, workers, warnings. */
 export function formatStatus(status, warnContextTokens) {
-  const retired = status.state?.retired === true ? ` · RETIRED${status.state.movedTo ? ` → ${status.state.movedTo}` : ''}` : '';
   const domain = status.domain ? ` · domain ${status.domain}` : '';
   const children = (status.domainChildren ?? []).length ? ` · domain of ${status.domainChildren.length} (${status.domainChildren.join(', ')})` : '';
-  const lines = [`${status.repo} · workspace ${status.workspace?.id ?? '(none)'}${status.worktree ? ' (worktree)' : ''} · active Steer ${status.state?.activeSteer ?? '-'} (epoch ${status.state?.epoch ?? '-'})${domain}${children}${retired}`];
+  const lines = [`${status.repo} · workspace ${status.workspace?.id ?? '(none)'}${status.worktree ? ' (worktree)' : ''} · active Steer ${status.state?.activeSteer ?? '-'} (epoch ${status.state?.epoch ?? '-'})${domain}${children}`];
   const cp = status.checkpoint;
   if (cp?.task) {
     const stale = cp.epoch !== status.state?.epoch ? ` · from epoch ${cp.epoch}, older than the current one` : '';
@@ -253,7 +253,7 @@ export function formatStatus(status, warnContextTokens) {
   for (const w of status.warnings ?? []) lines.push(`  ! ${w}`);
   for (const s of status.steers) {
     const tags = `${s.advisor ? ' [advisor]' : ''}${s.sensitive ? ' [sensitive]' : ''}`;
-    lines.push(`  Steer ${s.slot}${tags}  ${s.id}  ${s.provider}/${s.model}  ${s.status}  ${formatStatusUsage(s.usage)}${s.continuedFrom ? `  continued-from ${s.continuedFrom}` : ''}${s.retired ? '  RETIRED — archive it in Paseo' : ''}${s.superseded && !s.retired ? '  SUPERSEDED — archive it in Paseo' : ''}${s.parent ? `  PARENT ${s.parent}` : ''}`);
+    lines.push(`  Steer ${s.slot}${tags}  ${s.id}  ${s.provider}/${s.model}  ${s.status}  ${formatStatusUsage(s.usage)}${s.continuedFrom ? `  continued-from ${s.continuedFrom}` : ''}${s.parent ? `  PARENT ${s.parent}` : ''}`);
   }
   for (const c of status.candidates ?? []) lines.push(`  candidate "${c.title}" ${c.id} ${c.provider}/${c.model} ${c.status}  ${formatStatusUsage(c.usage)} → adopt with --adopt ${c.slot ?? '<slot>'}=${c.id}${c.parent ? ` (has parent ${c.parent}; needs --detach)` : ''}`);
   const supervised = new Map((status.openWorkers ?? []).map((e) => [e.id, e]));

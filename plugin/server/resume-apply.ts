@@ -55,15 +55,14 @@ async function applyWorkerResume(paseo: any, mainId: string, agentId: string, sc
     const agent = snapshot?.agent;
     const meta = workspace?.metadata ?? {};
     const scope = asRecord(meta[METADATA_KEY]);
-    if (!scope || scope.retired === true) throw new Error("The worker scope is no longer active.");
+    if (!scope) throw new Error("The worker scope is no longer active.");
     const identity = cleanupIdentity(agent?.labels) ?? workerIdentityFromMetadata(agent);
     const entry = asRecord(meta[AGENTS_KEY]?.[agentId]);
     const worker = meta[WORKERS_KEY]?.[agentId];
-    if (typeof entry?.replacedBy === "string") {
-      return { agentId: entry.replacedBy, status: "blocked", cleared: false, detail: `Continue in replacement worker ${entry.replacedBy}.` };
-    }
+
     const partial = worker?.state === "partial";
-    if (identity?.role !== "worker" || !sameScopeId(identity.scopeId, scopeId) || agent.archivedAt || agent.background === true || (!entry?.interrupted && worker?.state !== "interrupted" && !partial)) {
+    const pendingFresh = readSteerAction(entry)?.kind === "fresh-delivery" && readSteerAction(entry)?.phase !== "done";
+    if (identity?.role !== "worker" || !sameScopeId(identity.scopeId, scopeId) || agent.archivedAt || agent.background === true || (!entry?.interrupted && worker?.state !== "interrupted" && !partial && !pendingFresh)) {
       throw new Error("/factory resume is available for steers and workers with interrupted or partial work.");
     }
     if (readCleanupAction(entry) || hasActiveAgentWork(agent, entry)) {
@@ -106,11 +105,11 @@ async function applyWorkerResume(paseo: any, mainId: string, agentId: string, sc
       const latestWorker = metadata?.[WORKERS_KEY]?.[agentId];
       const latestEntry = metadata?.[AGENTS_KEY]?.[agentId];
       const liveIdentity = cleanupIdentity(live?.agent?.labels) ?? workerIdentityFromMetadata(live?.agent);
-      if (!at || metadata?.[METADATA_KEY]?.epoch !== scope.epoch || metadata?.[METADATA_KEY]?.retired ||
+      if (!at || metadata?.[METADATA_KEY]?.epoch !== scope.epoch ||
           latestWorker?.state !== "partial" || latestWorker.task !== worker.task ||
           latestWorker.startedBy !== worker.startedBy || latestWorker.epoch !== worker.epoch ||
           latestEntry?.lastTurnId !== entry?.lastTurnId || latestEntry?.lastTurnEndedAt !== entry?.lastTurnEndedAt ||
-          latestEntry?.noteAt !== entry?.noteAt || latestEntry?.replacedBy || readCleanupAction(latestEntry) ||
+          latestEntry?.noteAt !== entry?.noteAt || readCleanupAction(latestEntry) ||
           liveIdentity?.role !== "worker" || !sameScopeId(liveIdentity.scopeId, scopeId) ||
           live.agent.archivedAt || live.agent.background || hasActiveAgentWork(live.agent, latestEntry)) {
         return { agentId, status: "blocked", cleared: false, detail: "The partial worker checkpoint is unavailable or changed during resume." };

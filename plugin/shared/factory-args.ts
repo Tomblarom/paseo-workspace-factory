@@ -40,7 +40,7 @@ export const FACTORY_COMMANDS: Record<string, CommandHelp> = {
     usage: "/factory fresh [scope] [--slot E | --worker <id>] [--model <provider/model>] [--keep-chat-history]",
     summary: "Preview a same-tab refresh or a replacement agent.",
     details: [
-      "Shows a preview; confirm it in the Factory panel.",
+      "Confirm the preview in the Factory panel. Replacing an agent archives the previous one.",
       "Use --model to select a different provider/model and --keep-chat-history to request a new agent.",
     ],
     examples: ["/factory fresh", "/factory fresh me/my-repo"],

@@ -208,7 +208,7 @@ export function projectWorkspaceActivity(
   const scope = asRecord(state?.scope);
   if (state?.main !== true || (scope?.kind === "workspace" && scope.locator != null && scope.locator !== workspaceId)) return null;
 
-  const members = new Map(agents.filter((agent) => agent.workspaceId === workspaceId).map((agent) => [agent.id, agent]));
+  const members = new Map(agents.filter((agent) => agent.workspaceId === workspaceId && !agent.archivedAt).map((agent) => [agent.id, agent]));
   const workers = readWorkers(metadata);
   const participant = (id: unknown) => {
     const agent = typeof id === "string" ? members.get(id) : undefined;
@@ -238,14 +238,13 @@ export function projectWorkspaceActivity(
   };
   const holderGroup: Group = { kind: "holder-change" };
   let holderChange: DraftEvent | undefined;
-  if (typeof state.previousSteer === "string" && state.previousSteer && typeof state.activeSteer === "string") {
-    const previousSlot = slotLabel(state.previousSteer);
+  const previousSlot = slotLabel(state.previousSteer);
+  if (previousSlot && typeof state.activeSteer === "string" && (!state.activeAgentId || liveAgentId(state.activeAgentId))) {
     holderChange = record(
-      { kind: "holder-change", state: "recorded", reason: previousSlot ? "slot-changed" : "holder-replaced" },
+      { kind: "holder-change", state: "recorded", reason: state.previousSteer === state.activeSteer ? "holder-replaced" : "slot-changed" },
       state.switchedAt,
       {
-        from: previousSlot ?? participant(state.previousSteer),
-        fromAgentId: previousSlot ? undefined : liveAgentId(state.previousSteer),
+        from: previousSlot,
         participant: slotLabel(state.activeSteer) ?? participant(state.activeAgentId),
         participantAgentId: liveAgentId(state.activeAgentId),
       },
@@ -308,7 +307,7 @@ export function projectWorkspaceActivity(
           holderChange.observedAt && recordedTime(action.queuedAt) === holderChange.observedAt &&
           (action.kind === "switch" || action.kind === "activate" || (action.kind === "stage" && action.stageKind === "switch"));
         // Fresh only writes this authority on the replacement's initial brief.
-        const replaced = forCurrentHolder && holderChange?.reason === "holder-replaced" && agentId !== state.previousSteer &&
+        const replaced = forCurrentHolder && holderChange?.reason === "holder-replaced" &&
           action.kind === "fresh-delivery" && asRecord(action.authority)?.agentId === agentId;
         const resumed = action === currentAction && recoveryEvent?.observedAt &&
           recordedTime(action.needsResumeAt) === recoveryEvent.observedAt ? recoveryEvent : undefined;
@@ -328,7 +327,7 @@ export function projectWorkspaceActivity(
       if (agentLabel === "Worker") forAgent({ kind: "creation", state: "recorded", reason: "worker-created" }, agent.createdAt);
       else if (agent.labels?.[LABEL.role] === "steer") {
         const creation = forAgent({ kind: "creation", state: "recorded", reason: "steer-created" }, agent.createdAt);
-        if (holderChange?.reason === "holder-replaced" && agentId === state.activeAgentId && agentId !== state.previousSteer) {
+        if (holderChange?.reason === "holder-replaced" && agentId === state.activeAgentId) {
           creation.related = holderGroup;
           holderChange.related = holderGroup;
         }

@@ -102,7 +102,7 @@ permissions for review and require reconciliation before retrying external side 
 Missing evidence may cost rework since the last checkpoint. Resume automatically after
 recoverable limit or crash according to policy. An explicit user Stop pauses that request
 until Continue. Treat an ambiguous cancellation as paused for review. A closed app leaves
-daemon supervision in charge. Carry the request through a generation change and retire the
+daemon supervision in charge. Carry the request through a generation change and clear the
 old attempt when the new holder has actually accepted it.
 
 ## C. Warn before costly turns and renew by opt-in

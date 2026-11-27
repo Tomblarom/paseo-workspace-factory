@@ -193,7 +193,7 @@ function ResetOrResumeSteer({ kind, steer, liveSteer, workspaceId, host, theme, 
       const { details } = preview.data;
       const initialize = normalizeInitializeNewSteer(menuSettings.status === "ready" ? menuSettings.values.initializeNewSteer : undefined);
       const result = await callFresh({ workspaceId, slot: details.slot, fingerprint: details.fingerprint,
-        resetQuota, deliver: !quota && initialize === "send" ? "send" : "stage", notifyPrevious: false });
+        resetQuota, deliver: !quota && initialize === "send" ? "send" : "stage" });
       const error = label(result.deliveryError) ?? label(result.stagingError);
       if (!result.applied && result.idempotent !== true) throw new Error(error ?? "Factory could not confirm the reset.");
       const completed = result.idempotent ? "This reset was already applied." : "Steer reset.";
@@ -297,7 +297,7 @@ export function FactoryWorkspaceStatus({
   const { steers, controller, ambiguous, advisorAssigned } = workspaceSteers(observation.rows, workspaceId, assignedSlot);
   const pending = pendingWorkspaceWork(status, steers);
   const controllerText = ambiguous ? "Membership unresolved"
-    : advisorAssigned ? "Advisor assigned" : state?.retired === true ? "Scope retired"
+    : advisorAssigned ? "Advisor assigned"
       : stale || !observation.rows || !status ? "Controller unknown" : assignedSlot ? `Steer ${assignedSlot} unavailable` : "Unassigned";
   const hasFocusedRow = view === "Steers" && steers.some(({ agentId }) => agentId === focusedSteerId);
   useEffect(() => {
@@ -312,9 +312,9 @@ export function FactoryWorkspaceStatus({
   const card = { ...styles.card, gap: 8, padding: layout.compact ? 10 : 12 };
   const divider = { borderTopWidth: 1, borderTopColor: theme.colors.border, paddingTop: 5 };
   const openAgent = navigation && ((steer: SteerPillRow) => navigation.openAgent({ agentId: steer.agentId, serverId: host.id }));
-  const assignedCount = observation.rows ? steers.filter(({ state }) => state !== "retired").length : null;
+  const assignedCount = observation.rows ? steers.length : null;
   const targets = controller ? handoffTargets(steers, controller.agentId)
-    .filter((target) => target.agentId !== controller.agentId && target.state !== "retired") : [];
+    .filter((target) => target.agentId !== controller.agentId) : [];
   const hasHandoverTarget = targets.some(({ eligible }) => eligible);
   const currentOperation = operation && !stale ? operation : null;
   const closeOperation = () => setOperation(null);
@@ -325,10 +325,9 @@ export function FactoryWorkspaceStatus({
     const controls = describeSteerMenu(steer, steers);
     const activation = controls.find((item) => item.kind === "activate");
     const epoch = activation?.activationEpoch;
-    const retired = steer.state === "retired";
     const controlsHere = steer === controller;
     const focused = !overview && steer.agentId === focusedSteerId;
-    const role = retired ? "Retired" : steer.advisor ? "Advisor"
+    const role = steer.advisor ? "Advisor"
       : controlsHere ? stale ? "Last known controller" : overview ? "Controlling steer" : "Controlling"
         : steer.detail === "Membership ambiguous" || steer.active ? "Role unresolved" : "Standby";
     const { runtime, context, cache, quota, attention } = steerConditions(steer);
@@ -391,15 +390,13 @@ export function FactoryWorkspaceStatus({
         <View style={[inline, divider, { gap: 2 }]}>
           {openAgent ? <Action theme={theme} icon="ArrowUpRight" title="Open" name={`Open ${name}`} emphasized={overview}
             onPress={() => openAgent(steer)} /> : null}
-          {retired ? null : (
-            <Action theme={theme} icon="ListRestart" title="Reset Steer" name={`Reset ${name}`} disabled={stale || !!eligibility.reset}
+          <Action theme={theme} icon="ListRestart" title="Reset Steer" name={`Reset ${name}`} disabled={stale || !!eligibility.reset}
               hint={eligibility.reset ?? undefined} onPress={() => setOperation({ kind: "reset", steer })} />
-          )}
           {steer.state === "needs-resume" ? (
             <Action theme={theme} icon="RotateCcw" title="Resume work" name={`Resume pending work in ${name}`}
               disabled={stale || !!eligibility.resume} hint={eligibility.resume ?? undefined} onPress={() => setOperation({ kind: "resume", steer })} />
           ) : null}
-          {steer.stagedBrief && !retired && !overview ? (
+          {steer.stagedBrief && !overview ? (
             <Action theme={theme} icon="Send" title="Review brief" name={`Review staged brief for ${name}`}
               disabled={stale} onPress={() => setOperation({ kind: "staged", steer })} />
           ) : null}
@@ -528,7 +525,7 @@ export function FactoryWorkspaceStatus({
               {assignedCount !== null ? <Text style={styles.label}>{assignedCount} assigned</Text> : null}
             </View>
             <Action theme={theme} icon="Plus" title="Create Steer" emphasized
-              disabled={stale || !status || state?.retired === true}
+              disabled={stale || !status}
               hint={setupPlan ? "Set up Factory in Overview" : undefined} onPress={() => setOperation({ kind: "create" })} />
           </View>
           {stale ? <Text accessibilityRole="alert" style={styles.conflict}>
@@ -545,7 +542,6 @@ export function FactoryWorkspaceStatus({
           <View style={{ gap: 7 }}>
             {[...steers].sort((first, second) =>
               Number(second === controller) - Number(first === controller) ||
-              Number(first.state === "retired") - Number(second.state === "retired") ||
               (first.slot ?? "").localeCompare(second.slot ?? "")).map((steer) => steerRow(steer))}
           </View>
         </>

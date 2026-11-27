@@ -1,6 +1,6 @@
 // Scoped worker creation plus the git-state reader the archive guards use.
 // Accepted workers are archived natively in Paseo (`paseo archive`); there is
-// no factory retire command.
+// Paseo owns agent archiving.
 import { LABEL, METADATA_KEY } from './paseo.mjs';
 import { liveSlotHolders } from './discovery.mjs';
 import { idempotencyKey, profileAgentConfig, requestDigest } from './steer-create.mjs';
@@ -15,7 +15,7 @@ export async function startScopedWorker({ client, status, callerId, aliases = []
   const slot = state?.activeSteer;
   const holders = liveSlotHolders(steers, slot);
   const parent = holders.length === 1 ? holders[0] : null;
-  if (!workspace?.id || state?.retired || !parent || parent.id !== callerId || parent.advisor || parent.parent || parent.workspaceId !== workspace.id) {
+  if (!workspace?.id || !parent || parent.id !== callerId || parent.advisor || parent.parent || parent.workspaceId !== workspace.id) {
     throw new Error('Only the active steer can start a worker in this scope');
   }
   if (!prompt?.trim()) throw new Error('worker start needs --task <text>');

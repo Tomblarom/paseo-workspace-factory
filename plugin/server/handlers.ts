@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { appendFileSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -62,10 +63,7 @@ import {
 } from "./core/apply.mjs";
 import { assignScope } from "./core/assign.mjs";
 import { discoveredRepoPublic, liveSlotHolders, outgoingAssignmentRecords } from "./core/discovery.mjs";
-import {
-  attachProjectArchivedAgents,
-  collectCleanupCandidates,
-} from "./core/cleanup.mjs";
+import { collectCleanupCandidates } from "./core/cleanup.mjs";
 import { isAdvisorSteer, isSensitiveProfile, workerPriority } from "./core/config.mjs";
 import { DRAIN_DEFAULT_TIMEOUT_MS, drain, parseTimeout } from "./core/drain.mjs";
 import { createRunner } from "./core/factory.mjs";
@@ -264,7 +262,7 @@ export async function getResume(
     zerosub: await resolveZerosub(quotaSource),
   };
   const brief: string = buildResumeBrief(status, briefOptions);
-  const restartInterrupted = status.restartInterrupted ?? restartInterruptions({ checkpoint: status.checkpoint, agentState });
+  const restartInterrupted = status.restartInterrupted ?? [];
   if (recipients.size) await checkRecipients();
   return {
     scope: scope?.id ?? status.repo,
@@ -402,7 +400,7 @@ function freshPrivacyReader(paseo: any, loader: ConfigLoader, deps?: SteerDelive
 }
 
 type FreshInput = RpcInput<typeof factoryFreshPreview>;
-type FreshDeps = SteerDeliveryDeps & { lookupFreshReceipt?: typeof lookupCreationReceipt; freshPaseoCli?: ReturnType<typeof createPaseoCli> };
+type FreshDeps = SteerDeliveryDeps & { lookupFreshReceipt?: typeof lookupCreationReceipt };
 
 async function freshPolicy(paseo: any, loader: ConfigLoader, deps: FreshDeps | undefined, discovery: any, config?: any) {
   const [snapshot, providers, workspace] = await Promise.all([
@@ -546,19 +544,25 @@ export async function applyFresh(
     }
   };
   const dry: any = await freshSteer(dryOptions);
+  if (Boolean(input.archivePrevious) !== (dry.refreshMode === "new-agent")) {
+    throw new Error("Confirm the archive action shown in the Fresh preview.");
+  }
   confirmPreview(dry);
   await confirmResetQuota(input, dry.from, found, paseo, deps);
   const lookupReceipt = deps?.lookupFreshReceipt ?? lookupCreationReceipt;
-  // CLI resolution is lazy for rewind, which never retires a tab.
-  const paseoCli: ReturnType<typeof createPaseoCli> = deps?.freshPaseoCli ?? ((args) => createPaseoCli()(args));
   const stage = input.deliver === "stage" || input.resetQuota === "unknown" || input.resetQuota === "depleted";
+  if (stage && dry.kind === "worker" && dry.refreshMode === "new-agent") {
+    throw new Error("For a replacement worker, confirm delivery to the new agent.");
+  }
   const applyOptions: any = {
     ...dryOptions, apply: true, confirmPreview,
     send: !stage,
     stageRewind: stage,
-    notifyPrevious: input.notifyPrevious !== false && (!input.resetQuota || input.resetQuota === "available"),
-    lookupReceipt, paseoCli,
-    execute: (createExecutors as any)({ client: paseo, paseoCli, getZerosub: () => resolveZerosub(deps ?? {}),
+    ...(stage ? { stageReplacement: (args: { workspaceId: string; agentId: string; packet: string; epoch: number }) =>
+      stageSteerBrief(paseo, { ...args, kind: "fresh" }, deps) } : {}),
+    archivePrevious: input.archivePrevious === true,
+    lookupReceipt,
+    execute: (createExecutors as any)({ client: paseo, getZerosub: () => resolveZerosub(deps ?? {}),
       lookupReceipt }),
     requireRefreshMode: dry.refreshMode,
   };
@@ -822,7 +826,8 @@ export async function getPlan(
   const detach = input.detach ?? false;
   const runnerOptions: any = { config, client: paseo, gh: createGh(), git: createGit(), getZerosub: readZerosubStateSafe };
   const runner = createRunner(runnerOptions);
-  const planOptions: any = { adopt, adoptWorker, detach, ...(slots ? { slots } : {}), ...(snapshot ? { state: snapshot } : {}) };
+  const creationId = randomUUID();
+  const planOptions: any = { adopt, adoptWorker, detach, creationId, ...(slots ? { slots } : {}), ...(snapshot ? { state: snapshot } : {}) };
   const plans = await runner.runPlans(entries, planOptions);
   const hash = planHash(plans, config);
   if (plans.some((p: any) => p.ops.length)) {
@@ -831,6 +836,7 @@ export async function getPlan(
       adopt,
       adoptWorker,
       detach,
+      creationId,
       ...(slots ? { slots } : {}),
     };
     storeAuthorization(runtime().planDir, createAuthorization(plans, config, authOptions), config);
@@ -926,8 +932,8 @@ async function applySteerActivation(
   const { workspaceId, agentId, epoch } = input;
   const { config, discovery, status, snapshot } = await discoverOne(paseo, loader, undefined, workspaceId);
   const scope = status.state;
-  const target = status.steers.find((steer: any) => steer.id === agentId && !steer.retired && !steer.superseded);
-  if (status.workspace?.id !== workspaceId || !scope || scope.retired || target?.workspaceId !== workspaceId) {
+  const target = status.steers.find((steer: any) => steer.id === agentId && !steer.superseded);
+  if (status.workspace?.id !== workspaceId || !scope || target?.workspaceId !== workspaceId) {
     throw new Error("This tab is no longer a live steer in this Factory workspace.");
   }
   const live = (scopeHolder as any)({ agents: snapshot.agents, workspaceId, scopeId: scope.scope?.id ?? status.repo,
@@ -1302,11 +1308,11 @@ export async function getWorkers(
       return {
         scope: scopeId,
         epoch,
-        stale,
+        stale: stale.length,
         applied: false,
         deprecatedAlias,
         scopeInfo: scope,
-        text: (formatWorkersPruneText as any)(scopeId, epoch, stale),
+        text: (formatWorkersPruneText as any)(scopeId, epoch, stale.length),
       };
     }
     if (!discovery.mainWorkspace) {
@@ -1320,14 +1326,16 @@ export async function getWorkers(
     return {
       scope: scopeId,
       epoch,
-      removed: pruned.removed,
+      removed: pruned.removed.length,
       applied: true,
       deprecatedAlias,
       scopeInfo: scope,
-      text: (formatWorkersPruneText as any)(scopeId, epoch, pruned.removed, { applied: true }),
+      text: (formatWorkersPruneText as any)(scopeId, epoch, pruned.removed.length, { applied: true }),
     };
   }
-  const report = (workersReport as any)((readWorkers as any)(discovery.mainWorkspace?.metadata ?? null));
+  const liveIds = new Set((discovery.agents ?? []).map((agent: any) => agent.id));
+  const report = (workersReport as any)((readWorkers as any)(discovery.mainWorkspace?.metadata ?? null))
+    .filter(({ id }: any) => liveIds.has(id));
   return {
     scope: scopeId,
     epoch,
@@ -1377,7 +1385,7 @@ async function resolveWorkerSelection(
   });
   const exactScope = exactWorkspaceId === null ? null
     : listScopes(snapshot).find((scope) => scope.workspaceId === exactWorkspaceId);
-  if (exactWorkspaceId !== null && (!exactScope || exactScope.workspace.metadata?.[METADATA_KEY]?.retired === true)) {
+  if (exactWorkspaceId !== null && !exactScope) {
     throw new Error("Resources require an enrolled, active Factory workspace.");
   }
   const scopeAddress = exactScope ? `workspace:${exactWorkspaceId}` : input.repo?.trim() || (defaultPickAddress as any)(snapshot, {
@@ -1761,13 +1769,13 @@ export async function previewSteerAdd(
       "This project is not set up by the factory yet (no main workspace with steers). Run /factory plan, then /factory apply <hash>.",
     );
   }
-  if (status.state.retired) throw new Error("This scope is retired; choose an active scope.");
   const scopeId = discovery.scope?.id ?? discovery.forkName;
   const repo = discovery.forkName;
   const workspaceId = status.workspace.id;
   const quotaSnapshot = getQuotaSnapshot();
   const profileHealth = readProfileHealth(discovery.mainWorkspace?.metadata);
   const zerosub = await readZerosub().catch(() => null);
+  const creationId = randomUUID();
   const plan: any = (planSteerAdd as any)(config, discovery.providers ?? [], discovery.agents ?? [], {
     slot: input.slot ?? null,
     spec: input.spec ?? null,
@@ -1778,6 +1786,7 @@ export async function previewSteerAdd(
     workspaceId,
     repo,
     repoPublic: discoveredRepoPublic(discovery),
+    creationId,
     resolvedSteers: discovery.steers?.labelled ?? [],
     epoch: status.state.epoch,
     activeSlot: status.state.activeSteer,
@@ -1805,6 +1814,7 @@ export async function previewSteerAdd(
     text,
     fingerprint: plan.fingerprintInput ? (steerAddFingerprint as any)(plan.fingerprintInput) : null,
     revision: (state as any).revision ?? "",
+    creationId,
     values: state.values,
   };
 }
@@ -1834,7 +1844,6 @@ export async function applySteerAddRpc(
         "This project is not set up by the factory yet (no main workspace with steers). Run /factory plan, then /factory apply <hash>.",
       );
     }
-    if (status.state.retired) throw new Error("This scope is retired; choose an active scope.");
     if (status.workspace.id !== workspaceId) throw new Error("The creation target changed. Review the preview again.");
     const workspace = paseo.workspaces.ref(workspaceId);
     const agents = discovery.agents ?? [];
@@ -1876,6 +1885,7 @@ export async function applySteerAddRpc(
       repoPublic: discoveredRepoPublic(discovery),
       fingerprint: input.fingerprint,
       fingerprintOf: steerAddFingerprint,
+      creationId: input.creationId,
       resolvedSteers: discovery.steers?.labelled ?? [],
       epoch: status.state.epoch,
       activeSlot: status.state.activeSteer,

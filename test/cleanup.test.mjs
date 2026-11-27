@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { METADATA_KEY } from '../plugin/server/core/paseo.mjs';
-import { attachProjectArchivedAgents, collectCleanupCandidates, formatCandidate, SCRATCH_LABEL } from '../plugin/server/core/cleanup.mjs';
+import { collectCleanupCandidates, formatCandidate, SCRATCH_LABEL } from '../plugin/server/core/cleanup.mjs';
 import { createExecutors } from '../plugin/server/core/apply.mjs';
 
 // ---------------------------------------------------------------- fakes
@@ -51,7 +51,7 @@ test('scratch: labelled agents and metadata flags mark the scope; orphans stay v
   };
   const found = byKind(collectCleanupCandidates(state, { existsDir: () => true }), 'scratch');
   assert.deepEqual(found.map((c) => c.id).sort(), ['agent-3', 'wks_1', 'wks_2']);
-  assert.match(found.find((c) => c.id === 'wks_1').detail, /2 scratch agent/);
+  assert.match(found.find((c) => c.id === 'wks_1').detail, /1 scratch agent/);
   assert.match(found.find((c) => c.id === 'wks_2').detail, /marked at creation/);
   assert.equal(found.find((c) => c.id === 'wks_1').loss.agents, 1, 'only live agents count as loss');
   assert.match(found.find((c) => c.id === 'agent-3').action, /paseo archive <agent-id>/);
@@ -112,22 +112,6 @@ test('non_git projects without a scope are reported; scoped and git ones are not
   const found = byKind(collectCleanupCandidates(state, { existsDir: () => true }), 'non-git-no-scope');
   assert.deepEqual(found.map((c) => c.id), ['prj_plain']);
   assert.match(found[0].action, /adopt a workspace as scope/);
-  assert.match(found[0].action, /paseo workspace archive/);
-});
-
-test('retired scopes are reported with their move target', () => {
-  const state = {
-    projects: [project('prj_1', '/p/demo')],
-    workspaces: [
-      workspace('wks_old', { metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 4, retired: true, movedTo: 'wks_new' } } }),
-      workspace('wks_new', { metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1 } } }),
-    ],
-    agents: [],
-  };
-  const found = byKind(collectCleanupCandidates(state, { existsDir: () => true }), 'retired-scope');
-  assert.deepEqual(found.map((c) => c.id), ['wks_old']);
-  assert.match(found[0].detail, /wks_new/);
-  assert.match(found[0].action, /retired scope workspace natively/);
   assert.match(found[0].action, /paseo workspace archive/);
 });
 
@@ -197,41 +181,19 @@ test('one compact line per candidate; git stays silent without a git function', 
   assert.match(formatCandidate(missing), /git n\/a/);
 });
 
-test('archived members surface in the inventory through the project listing', async () => {
-  const world = {
-    projects: [project('prj_old', '/p/old')],
-    workspaces: [],
-    agents: [
-      { id: 'agent-old', status: 'idle', archivedAt: 'archived', labels: {}, workspaceId: 'wks_vanished', title: 'Old worker' },
-    ],
-  };
-  const client = {
-    agents: {
-      list: async () => ({ entries: world.agents.map((a) => ({ agent: a })), pageInfo: { hasMore: false } }),
-    },
-  };
-  const enriched = await attachProjectArchivedAgents(world, client);
-  assert.deepEqual(enriched.projectArchivedAgents.prj_old, [{ id: 'agent-old', title: 'Old worker' }]);
-
-  const [candidate] = byKind(collectCleanupCandidates(enriched, { existsDir: () => true }), 'empty-project');
-  assert.equal(candidate.loss.archivedAgents.count, 1);
-  assert.match(formatCandidate(candidate), /1 archived agent \(Old worker\)/);
-});
-
-test('snapshot fallback attributes archived agents of live workspaces', () => {
+test('cleanup ignores archived agents of live workspaces', () => {
   const state = {
     projects: [project('prj_plain', '/p/plain', 'non_git')],
     workspaces: [workspace('wks_1', { projectId: 'prj_plain', workspaceDirectory: '/p/plain' })],
     agents: [agent('agent-arch', { workspaceId: 'wks_1', archivedAt: 'archived' })],
   };
   const [candidate] = byKind(collectCleanupCandidates(state, { existsDir: () => true }), 'non-git-no-scope');
-  assert.equal(candidate.loss.archivedAgents.count, 1);
-  assert.match(formatCandidate(candidate), /1 archived agent \(agent-arch\)/);
+  assert.equal(candidate.loss.agents, 0);
+  assert.doesNotMatch(formatCandidate(candidate), /agent-arch/);
 });
 
 test('removed destructive op kinds fail closed with no executor', async () => {
   const execute = createExecutors({});
   await assert.rejects(execute({ key: 'x', kind: 'workspace.archive', params: {} }, {}), /No executor for workspace\.archive/);
   await assert.rejects(execute({ key: 'x', kind: 'project.delete', params: {} }, {}), /No executor for project\.delete/);
-  await assert.rejects(execute({ key: 'x', kind: 'scope.retire', params: {} }, {}), /No executor for scope\.retire/);
 });

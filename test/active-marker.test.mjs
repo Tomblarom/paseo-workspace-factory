@@ -60,6 +60,11 @@ function fakeClient(world) {
   const agentHandle = (id) => ({
     id,
     refresh: async () => ({ agent: structuredClone(world.agents.find((a) => a.id === id) ?? null) }),
+    archive: async () => {
+      const archivedAt = '2026-11-26T00:00:00Z';
+      world.agents.find((agent) => agent.id === id).archivedAt = archivedAt;
+      return { archivedAt };
+    },
     send: async (text) => { world.calls.push(['agent.send', id, text]); },
     timeline: { refetch: async () => ({ entries: [] }) },
   });
@@ -209,10 +214,11 @@ test('marker: switch with a disabled marker renames nothing', async () => {
 
 // ---------------------------------------------------------------- fresh
 
-test('marker: fresh creates the new steer marked and renames the retired one', async () => {
+test('marker: fresh creates the new steer marked and archives the previous agent', async () => {
   const world = makeWorld();
   const { steers } = provisioned(world, { A: '▷ Steer A' });
   const result = await freshSteer({
+    archivePrevious: true,
     client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG,
     apply: true, lock: testLock, lookupReceipt: async () => null, language: 'en', paseoCli: fakePaseoCli(world),
   });
@@ -220,20 +226,23 @@ test('marker: fresh creates the new steer marked and renames the retired one', a
   assert.equal(result.renameError, null);
   const created = world.agents.find((a) => a.id === result.to);
   assert.equal(created.title, '▷ Steer A');
-  assert.deepEqual(world.cli, [['agent', 'update', steers.A.id, '--name', 'Retired A']]);
+  assert.ok(steers.A.archivedAt);
+  assert.deepEqual(world.cli, []);
 });
 
-test('marker: fresh with a disabled marker creates a plain title and retires the old tab', async () => {
+test('marker: fresh with a disabled marker creates a plain title and archives the previous agent', async () => {
   const world = makeWorld();
   const { steers } = provisioned(world);
   const config = { ...CONFIG, steers: { ...CONFIG.steers, activeMarker: '' } };
   const result = await freshSteer({
+    archivePrevious: true,
     client: fakeClient(world), discovery: discoveryOf(world), config,
     apply: true, lock: testLock, lookupReceipt: async () => null, language: 'en', paseoCli: fakePaseoCli(world),
   });
   assert.equal(result.applied, true);
   assert.equal(world.agents.find((a) => a.id === result.to).title, 'Steer A');
-  assert.deepEqual(world.cli, [['agent', 'update', steers.A.id, '--name', 'Retired A']]);
+  assert.ok(steers.A.archivedAt);
+  assert.deepEqual(world.cli, []);
 });
 
 // ---------------------------------------------------------------- helper

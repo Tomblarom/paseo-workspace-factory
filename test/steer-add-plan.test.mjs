@@ -238,14 +238,14 @@ test('planSteerAdd reports all accounts exhausted with the earliest reset', () =
   assert.equal(bare.earliestReset, null);
 });
 
-test('a newly archived holder releases its letter and changes the generation', () => {
-  const first = planSteerAdd(CONFIG, PROVIDERS, [], BASE);
+test('an archived holder does not contribute to a new creation key', () => {
+  const first = planSteerAdd(CONFIG, PROVIDERS, [], { ...BASE, creationId: "first" });
   const old = { ...liveSteer('A'), archivedAt: '2026-11-24T10:00:00Z' };
-  const second = planSteerAdd(CONFIG, PROVIDERS, [old], BASE);
+  const second = planSteerAdd(CONFIG, PROVIDERS, [old], { ...BASE, creationId: "second" });
   assert.equal(second.slot, first.slot);
   assert.notEqual(second.fingerprintInput.generation, first.fingerprintInput.generation);
   assert.notEqual(second.op.params.idempotencyKey, first.op.params.idempotencyKey);
-  assert.equal(planSteerAdd(CONFIG, PROVIDERS, [old, old], BASE).op.params.idempotencyKey, second.op.params.idempotencyKey);
+  assert.equal(planSteerAdd(CONFIG, PROVIDERS, [], { ...BASE, creationId: "second" }).op.params.idempotencyKey, second.op.params.idempotencyKey);
 });
 
 test('formatSteerAddPreview names slot, profile, account, skips and the op', () => {

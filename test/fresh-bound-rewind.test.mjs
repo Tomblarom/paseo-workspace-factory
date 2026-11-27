@@ -69,6 +69,13 @@ function fakeClient(world) {
   const agentHandle = (id) => ({
     id,
     refresh: async () => ({ agent: structuredClone(findAgent(id)) }),
+    archive: async () => {
+      world.calls.push(['agent.archive', id]);
+      if (world.hooks?.archiveFails) throw new Error('archive failed');
+      const archivedAt = '2026-11-25T00:00:00Z';
+      findAgent(id).archivedAt = archivedAt;
+      return { archivedAt };
+    },
     send: async (text) => {
       world.calls.push(['agent.send', id, text]);
     },
@@ -130,6 +137,7 @@ test('a bound rewind that finds no point throws and creates nothing', async () =
   provisioned(world);
   // Preview with a point promises rewind.
   const dry = await freshSteer({
+    archivePrevious: true,
     client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, apply: false,
     slot: 'B', git: fakeGit(), lock: testLock, language: 'en',
     rewindClient: rewindClientWith(world, pointTimeline),
@@ -138,6 +146,7 @@ test('a bound rewind that finds no point throws and creates nothing', async () =
   // At apply time the point is gone: the bound route throws, keeps the
   // packet on the error, and creates no new agent.
   const error = await freshSteer({
+    archivePrevious: true,
     client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, apply: true,
     slot: 'B', git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup, language: 'en',
     rewindClient: rewindClientWith(world, emptyTimeline), requireRefreshMode: 'rewind',
@@ -155,6 +164,7 @@ test('an unsupported error after dispatch is uncertain and retains the bound bri
   const world = makeWorld();
   provisioned(world);
   const error = await freshSteer({
+    archivePrevious: true,
     client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, apply: true,
     slot: 'B', git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup, language: 'en',
     rewindClient: rewindClientWith(world, pointTimeline, { rewindError: 'rewind not supported' }),
@@ -170,6 +180,7 @@ test('without binding the same failure still falls back to a new agent', async (
   const world = makeWorld();
   provisioned(world);
   const applied = await freshSteer({
+    archivePrevious: true,
     client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, apply: true,
     slot: 'B', git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup, language: 'en',
     rewindClient: rewindClientWith(world, emptyTimeline),
@@ -183,6 +194,7 @@ test('a bound rewind that lands returns rewound with no new agent', async () => 
   const world = makeWorld();
   provisioned(world);
   const applied = await freshSteer({
+    archivePrevious: true,
     client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, apply: true,
     slot: 'B', git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup, language: 'en',
     rewindClient: rewindClientWith(world, pointTimeline), requireRefreshMode: 'rewind',

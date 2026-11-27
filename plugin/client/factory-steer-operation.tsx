@@ -245,7 +245,7 @@ export function FactorySteerOperation({
     void run(async () => {
       const preview = current.preview;
       if (!preview.fingerprint) throw new Error("Choose an eligible steer before creating it.");
-      const added = await callSteerAdd({ workspaceId: preview.workspaceId, slot: preview.slot, fingerprint: preview.fingerprint, revision: preview.revision });
+      const added = await callSteerAdd({ workspaceId: preview.workspaceId, slot: preview.slot, fingerprint: preview.fingerprint, revision: preview.revision, creationId: preview.creationId });
       setFlow(null);
       setNotice(
         `Steer ${added.slot} created (${added.provider}/${added.model}). ` +

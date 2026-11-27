@@ -17,7 +17,7 @@ import { createRunner } from '../plugin/server/core/factory.mjs';
 import { LABEL, METADATA_KEY, PARENT_LABEL } from '../plugin/server/core/paseo.mjs';
 
 test('steerTitleSlot extracts only valid slot titles', () => {
-  for (const [title, slot] of [['Steer C', 'C'], ['▷ Steer c · note', 'C'], ['Steer B (continued)', 'B'], ['Retired C', null], ['Steer C copy', null], ['Steer 3', null], [null, null]]) {
+  for (const [title, slot] of [['Steer C', 'C'], ['▷ Steer c · note', 'C'], ['Steer B (continued)', 'B'], ['Discussion C', null], ['Steer C copy', null], ['Steer 3', null], [null, null]]) {
     assert.equal(steerTitleSlot(title), slot, String(title));
   }
 });
@@ -35,7 +35,7 @@ test('title labels apply only to eligible tabs of a live main scope', () => {
       { ...base, id: 'elsewhere', workspaceId: 'other' },
       { ...base, id: 'archived', archivedAt: '2026-01-01' },
       { ...base, id: 'background', background: true },
-      { ...base, id: 'other-title', title: 'Retired C' },
+      { ...base, id: 'other-title', title: 'Discussion C' },
       { ...base, id: 'labelled', labels: { [LABEL.scope]: 'o/r', [LABEL.repo]: 'o/r', [LABEL.role]: 'steer', [LABEL.slot]: 'C' } },
     ],
   };

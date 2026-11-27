@@ -86,6 +86,7 @@ function isGithubRepo(value) {
 export function listScopes(paseoState) {
   const scopes = [];
   for (const w of paseoState?.workspaces ?? []) {
+    if (w.archivedAt) continue;
     const meta = w.metadata?.[METADATA_KEY];
     if (!meta || typeof meta !== 'object') continue;
     const stored = meta.scope;
@@ -102,7 +103,7 @@ export function listScopes(paseoState) {
     }
     const labels = new Set();
     for (const a of paseoState?.agents ?? []) {
-      if (a.workspaceId !== w.id) continue;
+      if (a.archivedAt || a.workspaceId !== w.id) continue;
       if (a.labels?.[LABEL.role] !== 'steer') continue;
       const repo = a.labels?.[LABEL.repo];
       if (typeof repo === 'string' && repo) labels.add(repo);

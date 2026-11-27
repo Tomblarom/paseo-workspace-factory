@@ -28,7 +28,6 @@ import { QUOTA_DEFAULTS, QUOTA_SAMPLE_MINUTES, isQuotaSampleStale } from "./defa
 
 /** Face states in priority order (highest first); Unknown is the fallback. */
 export const STEER_STATES = [
-  "retired",
   "running",
   "limited",
   "waiting",
@@ -45,7 +44,6 @@ export type SteerFaceState = (typeof STEER_STATES)[number];
 
 /** Collapsed-face labels (the pill adds the slot prefix, e.g. "A · Warm"). */
 export const STEER_STATE_LABELS: Record<SteerFaceState, string> = {
-  retired: "Retired",
   running: "Running",
   limited: "Limited",
   waiting: "Waiting",
@@ -60,7 +58,6 @@ export const STEER_STATE_LABELS: Record<SteerFaceState, string> = {
 
 /** Primary-action keys, one per state-table row (menu wiring is step 3). */
 export type SteerPrimaryAction =
-  | "open-holder"
   | "view-turn"
   | "handoff-or-reset"
   | "view-operation"
@@ -275,8 +272,8 @@ export interface QuotaResult {
   /** Percentage data exists but none of it is fresh ("Awaiting quota update"). */
   awaitingUpdate: boolean;
   unavailableReason: string | null;
-  /** A past reset or newer usable evidence retired the limit inference. */
-  limitRetired: boolean;
+  /** A past reset or newer usable evidence cleared the limit inference. */
+  limitCleared: boolean;
   rows: QuotaRow[];
 }
 
@@ -311,7 +308,7 @@ export function resolveQuota(input: QuotaInput): QuotaResult {
     resetUnknown: false,
     awaitingUpdate: false,
     unavailableReason: null,
-    limitRetired: false,
+    limitCleared: false,
     rows: [],
   };
   const isStale = (sampledAtMs: number | null | undefined): boolean =>
@@ -345,8 +342,8 @@ export function resolveQuota(input: QuotaInput): QuotaResult {
     }
     return result;
   };
-  /** A past reset (after the failure) or newer usable evidence retires it. */
-  const retiredByEvidence = (resets: readonly unknown[], worstFreshPct: number | null): boolean => {
+  /** A past reset (after the failure) or newer usable evidence clears it. */
+  const clearedByEvidence = (resets: readonly unknown[], worstFreshPct: number | null): boolean => {
     if (input.needsResumeReason !== "limit") return false;
     if (worstFreshPct !== null && worstFreshPct < exhaustedPct) return true;
     const failedAt = stampMs(input.needsResumeAt);
@@ -421,9 +418,9 @@ export function resolveQuota(input: QuotaInput): QuotaResult {
         const limitedUntilMs = stampMs(account.limitedUntil);
         const holdFuture = limitedUntilMs !== null && limitedUntilMs > nowMs;
         const statusLimited = account.exhausted === true && !holdFuture;
-        const limitRetired = retiredByEvidence(resets, worst);
+        const limitCleared = clearedByEvidence(resets, worst);
         const flagUnrecovered =
-          input.needsResumeReason === "limit" && input.limitRecovered !== true && !limitRetired;
+          input.needsResumeReason === "limit" && input.limitRecovered !== true && !limitCleared;
         const thresholdHit = worst !== null && worst >= exhaustedPct;
         const limited = (!stale && statusLimited) || holdFuture || flagUnrecovered || thresholdHit;
         const limitedReasons: string[] = [];
@@ -457,7 +454,7 @@ export function resolveQuota(input: QuotaInput): QuotaResult {
           limitedReasons,
           blockers,
           awaitingUpdate: hasPct && worst === null && !holdFuture,
-          limitRetired,
+          limitCleared,
           rows,
         });
       }
@@ -490,9 +487,9 @@ export function resolveQuota(input: QuotaInput): QuotaResult {
     const worstFresh = worst >= 0 ? worst : null;
     const holdMs = stampMs(limitUntil);
     const holdFuture = holdMs !== null && holdMs > nowMs;
-    const limitRetired = retiredByEvidence(resetsAt ? [resetsAt] : [], worstFresh);
+    const limitCleared = clearedByEvidence(resetsAt ? [resetsAt] : [], worstFresh);
     const flagUnrecovered =
-      input.needsResumeReason === "limit" && input.limitRecovered !== true && !limitRetired;
+      input.needsResumeReason === "limit" && input.limitRecovered !== true && !limitCleared;
     const thresholdHit = worstFresh !== null && worstFresh >= exhaustedPct;
     const limited = holdFuture || flagUnrecovered || thresholdHit;
     const limitedReasons: string[] = [];
@@ -521,7 +518,7 @@ export function resolveQuota(input: QuotaInput): QuotaResult {
       limitedReasons,
       blockers,
       awaitingUpdate: (session !== null || weekly !== null) && worstFresh === null && !holdFuture,
-      limitRetired,
+      limitCleared,
       rows: [
         {
           id: "session",
@@ -561,11 +558,6 @@ export interface SteerProjectionInput {
   /** False renders Unknown (transient disconnect keeps the last verified push). */
   connected?: boolean;
   membership?: SteerMembership;
-  scopeRetired?: boolean;
-  /** The tab is the scope's recorded replaced holder. */
-  replacedHolder?: boolean;
-  /** Discovery marks this tab superseded by the unique current holder. */
-  superseded?: boolean;
   liveStatus?: string | null;
   /** Current-generation open turn: not ended, not marked interrupted. */
   openTurn?: boolean;
@@ -727,7 +719,7 @@ export function projectSteer(input: SteerProjectionInput): SteerProjection {
   const status =
     typeof input.liveStatus === "string" ? input.liveStatus.trim().toLowerCase() : "";
   const needsResume = input.needsResume ?? null;
-  const limitEffectiveRecovered = input.limitRecovered === true || quota.limitRetired;
+  const limitEffectiveRecovered = input.limitRecovered === true || quota.limitCleared;
   const freshHint = typeof input.freshHint === "string" && input.freshHint ? input.freshHint : null;
 
   const base = {
@@ -794,14 +786,7 @@ export function projectSteer(input: SteerProjectionInput): SteerProjection {
     if (input.membership === "ambiguous") return finish("unknown", "Membership ambiguous", "reload-or-open");
     return finish("unknown", "Membership unknown", "reload-or-open");
   }
-  if (input.scopeRetired === true || input.replacedHolder === true || input.superseded === true) {
-    const detail = input.scopeRetired === true
-      ? "Scope retired"
-      : input.replacedHolder === true
-        ? "Replaced by a newer holder"
-        : "Superseded by the current holder";
-    return finish("retired", detail, "open-holder");
-  }
+
   if (status === "running" || input.openTurn === true) {
     return finish(
       "running",

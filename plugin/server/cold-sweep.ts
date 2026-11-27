@@ -872,7 +872,7 @@ export async function collectColdAgents(
     const reads = scope ? scopeReads(scope) : null;
     if (!scope || !reads) continue;
     const entry = asRecord(reads.entries[agent.id]);
-    if (agent.archivedAt || entry?.replacedBy) continue;
+    if (agent.archivedAt) continue;
     const needsResume = asRecord(entry?.needsResume);
     const needsReason = isNeedsResumeReason(needsResume?.reason)
       ? (needsResume.reason as NeedsResumeReason)

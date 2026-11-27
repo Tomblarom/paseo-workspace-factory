@@ -2,7 +2,7 @@
 // epoch-checked (same per-workspace lock as switches and checkpoints) and
 // delivers it to the active scope steer. A busy steer is allowed: unlike a
 // switch, an assignment changes neither the active steer nor the epoch, and
-// sending only queues a message. Retired scopes refuse.
+// sending only queues a message.
 import { CHECKPOINT_KEY, checkpointRules, formatCheckpointBlock, steerStatus } from './steer.mjs';
 import { discoveredRepoPublic, liveSlotHolders } from './discovery.mjs';
 import { steerPrivacyAdmission } from './config.mjs';
@@ -59,13 +59,10 @@ export async function assignScope({ client, discovery, task, tests = [], blocker
   const status = steerStatus(discovery);
   if (!status.workspace || !status.state) throw new AssignRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
-  if (expected.retired === true) {
-    throw new AssignRefused(`Scope ${status.repo} is retired${expected.movedTo ? ` (moved to ${expected.movedTo})` : ''}; assign to its successor instead`);
-  }
   if (typeof task !== 'string' || !task.trim()) throw new AssignRefused('An assignment needs a task');
   const holders = liveSlotHolders(status.steers, expected.activeSteer);
   if (!holders.length) throw new AssignRefused(`No live Steer ${expected.activeSteer} to assign to for ${status.repo}; plan and apply one first`);
-  if (holders.length > 1) throw new AssignRefused(`Steer ${expected.activeSteer} has several live agents (${holders.map((s) => s.id).join(', ')}); archive the retired one in Paseo, then rerun`);
+  if (holders.length > 1) throw new AssignRefused(`Steer ${expected.activeSteer} has several live agents (${holders.map((s) => s.id).join(', ')}); resolve the duplicate titles in Paseo, then rerun`);
   const target = holders[0];
   if (target.parent) throw new AssignRefused(`Steer ${expected.activeSteer} has parent ${target.parent}; refusing to assign to a subagent`);
   if (target.workspaceId !== status.workspace.id) throw new AssignRefused(`Steer ${expected.activeSteer} is not in the main workspace`);

@@ -84,7 +84,7 @@ not merely that `createSession` exists. Reject unsupported cases explicitly.
    current provider/session generation and an expected model/options revision;
    reject stale selections before effects. Drain events and ensure any legacy
    provider-only history is durably materialized before touching the old session.
-2. Record an idempotent operation ID, intent and old binding durably; retire
+2. Record an idempotent operation ID, intent and old binding durably. Stop
    the old writer and create a fresh session with the **same Paseo agent ID**,
    workspace/owner/title/labels/metadata and launch policy, hooks, environment,
    model, mode, thinking and effective provider options. Do not copy old provider

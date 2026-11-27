@@ -146,7 +146,6 @@ async function runTurnBefore(payload: TurnBeforePayload, paseo: any, deps: TurnH
   const meta = scope.workspace?.metadata ?? {};
   const wsf = asRecord(meta[METADATA_KEY]);
   if (!wsf) return;
-  if (identity.role === "worker" && asRecord(asRecord(meta[AGENTS_KEY])?.[agentId])?.replacedBy) return;
   const update = updateAgentEntry as unknown as (args: any) => Promise<any>;
   // turn.after may already have ended this turn (fast failures such as a
   // provider limit); reopening it would leave the steer busy for good.
@@ -346,7 +345,6 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
   const checkpoint = asRecord(meta[CHECKPOINT_KEY]);
   const previous = asRecord(agents[agentId]);
   const config = deps.getConfig ? await deps.getConfig().catch(() => false) : null;
-  if (identity.role === "worker" && previous?.replacedBy) return;
 
   let entries: any[] = [];
   let exactTurn: any[] = [];

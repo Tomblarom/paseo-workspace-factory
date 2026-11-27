@@ -279,7 +279,7 @@ function assignmentTarget(assignment: any, state: any): AssignmentTarget {
   let recipient = liveFor[assignment.by] ?? assignment.by;
   const requester = state.workspaces?.find((ws: any) => ws.id === assignment.requesterWorkspaceId);
   const requesterState = requester?.metadata?.[METADATA_KEY];
-  if (requester && !requester.archivedAt && requesterState && !requesterState.retired && requesterState.scope?.id && requesterState.activeSteer) {
+  if (requester && !requester.archivedAt && requesterState && requesterState.scope?.id && requesterState.activeSteer) {
     recipient = scopeHolder({ agents, workspaceId: requester.id, scopeId: requesterState.scope.id,
       slot: requesterState.activeSteer }).id;
   }
@@ -287,7 +287,7 @@ function assignmentTarget(assignment: any, state: any): AssignmentTarget {
   const workspace = state.workspaces?.find((entry: any) => entry.id === agent?.workspaceId);
   const scope = workspace?.metadata?.[METADATA_KEY];
   const labels = resolveFactoryLabels(agent, agents);
-  if (!agent || agent.archivedAt || !workspace || workspace.archivedAt || !scope || scope.retired ||
+  if (!agent || agent.archivedAt || !workspace || workspace.archivedAt || !scope ||
       labels?.["wsf.role"] !== "steer" || !scope.scope?.id || !Number.isInteger(scope.epoch)) {
     throw new Error("Assignment recipient is not a live Factory steer; K7 cannot deliver to it.");
   }
@@ -484,7 +484,7 @@ export async function reserveAssignmentDelivery(
   let missingBoundAction = false;
   const reserved = await changeEntry(paseo, input, lock, async (entry, meta, held) => {
     const scope = scopeState(meta);
-    if (!scope || scope.retired || scope.epoch !== input.epoch) return null;
+    if (!scope || scope.epoch !== input.epoch) return null;
     try {
       await guardScope({ client: paseo, held, workspaceId: input.workspaceId, scopeId: input.scopeId,
         epoch: input.epoch, agentId: input.agentId });
@@ -645,7 +645,7 @@ function clearConfirmed(entry: any, snapshot: any, pending: PendingSteerDelivery
 }
 
 async function staleBatchStillValid(paseo: any, batch: EventBatch | undefined): Promise<boolean> {
-  if (!batch?.events.some(({ state }) => state === "stale")) return true;
+  if (!batch || batch.takeover || !batch.events.length) return true;
   const source = (await paseo.workspaces.ref(batch.workspaceId).refresh())?.metadata ?? {};
   return (await filterStaleWorkerEvents(paseo, source, batch.events)).length === batch.events.length;
 }
@@ -725,7 +725,7 @@ export async function finishSteerDelivery(
       return blocked("Delivery is paused after a canceled turn.", cleared);
     }
     const targetScope = scopeState(meta);
-    if (pending.phase !== "sent" && (!targetScope || targetScope.retired || targetScope.previousSteer === input.agentId ||
+    if (pending.phase !== "sent" && (!targetScope ||
         (pending.epoch !== null && pending.epoch !== targetScope.epoch))) {
       if (unsettledAccountMove(pending)) return blocked("Scope authority changed; the account move remains recorded.", cleared);
       if (assignmentRefs(pending).length && !pending.attemptedAt && !pending.rewindAttempt && !readCleanupAction(entry) &&
@@ -1103,7 +1103,7 @@ export async function deliverSteer(
   };
   const targetScope = listScopes(projectionState).find((candidate: any) =>
     candidate.workspaceId === input.workspaceId && sameScopeId(candidate.id, identity.scopeId));
-  if (!targetScope || scope.retired === true) return blocked("The target does not belong to this live Factory scope.");
+  if (!targetScope) return blocked("The target does not belong to this live Factory scope.");
   const projected = routingProjection(projectionState, routing)
     .find((row) => row.agentId === input.agentId && row.workspaceId === input.workspaceId);
   const at = deps.now?.() ?? new Date().toISOString();

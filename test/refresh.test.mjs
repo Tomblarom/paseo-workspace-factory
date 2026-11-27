@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { freshSteer, steerStatus, switchSteer } from '../plugin/server/core/steer.mjs';
+import { freshSteer, reconcileFreshDelivery, steerStatus, switchSteer } from '../plugin/server/core/steer.mjs';
 import { steerPrivacyAdmission } from '../plugin/server/core/config.mjs';
 import { resolveSteerHolders } from '../plugin/server/core/discovery.mjs';
 import { planRepository } from '../plugin/server/core/planner.mjs';
@@ -93,6 +93,13 @@ function fakeClient(world) {
   const agentHandle = (id) => ({
     id,
     refresh: async () => ({ agent: structuredClone(findAgent(id)) }),
+    archive: async () => {
+      world.calls.push(['agent.archive', id]);
+      if (world.hooks?.archiveFails) throw new Error('archive failed');
+      const archivedAt = '2026-11-25T00:00:00Z';
+      findAgent(id).archivedAt = archivedAt;
+      return { archivedAt };
+    },
     send: async (text, options) => {
       if (world.hooks.sendFails) throw new Error('agent unreachable');
       world.calls.push(['agent.send', id, text, options]);
@@ -158,7 +165,7 @@ const testLock = (name, fn) => withLock(name, fn, { dir: LOCK_TMP });
 test('fresh --slot previews a non-active refresh without takeover or writes', async () => {
   const world = makeWorld();
   provisioned(world);
-  const result = await freshSteer({ paseoCli: fakePaseoCli(world), client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', git: fakeGit(), lock: testLock, language: 'en' });
+  const result = await freshSteer({ archivePrevious: true, paseoCli: fakePaseoCli(world), client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', git: fakeGit(), lock: testLock, language: 'en' });
   assert.equal(result.applied, false);
   assert.equal(result.kind, 'steer');
   assert.equal(result.slot, 'B');
@@ -183,6 +190,7 @@ test('new-agent fresh admits sensitive steers only on proven public scope', asyn
       config.profiles.cheap.sensitive = true;
       const discovery = discoveryOf(world, { github: { fork: { repo: { private: isPrivate } } } });
       const action = () => freshSteer({
+    archivePrevious: true,
         client: fakeClient(world), discovery, config, slot, send: false, notifyPrevious: false, apply: isPrivate !== false,
         git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en',
       });
@@ -197,7 +205,7 @@ test('fresh --slot apply creates an unmarked same-slot agent and leaves epoch an
   const world = makeWorld();
   const { ws, steers } = provisioned(world);
   world.workspaces[0].metadata[AGENTS_KEY] = { [steers.B.id]: { note: 'Rework the queue', noteAt: '2026-11-24T10:00:00.000Z' } };
-  const result = await freshSteer({ paseoCli: fakePaseoCli(world), client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en' });
+  const result = await freshSteer({ archivePrevious: true, paseoCli: fakePaseoCli(world), client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en' });
   assert.equal(result.applied, true);
   assert.equal(result.epochBumped, false);
   assert.equal(result.from, steers.B.id);
@@ -218,8 +226,8 @@ test('fresh --slot apply creates an unmarked same-slot agent and leaves epoch an
   assert.ok(!world.calls.some((c) => c[0] === 'workspace.setMetadata' && c[2]?.[METADATA_KEY]), 'no scope ownership write for a non-active refresh');
 
   const sends = world.calls.filter((c) => c[0] === 'agent.send');
-  assert.deepEqual(sends.map((c) => c[1]), [result.to, steers.B.id]);
-  assert.match(sends[1][2], /continues Steer B/);
+  assert.deepEqual(sends.map((c) => c[1]), [result.to]);
+  assert.ok(steers.B.archivedAt);
   assert.equal(ws.id, created.workspaceId);
 });
 
@@ -227,7 +235,7 @@ test('fresh --slot delivery failure keeps the pinned brief for a manual resend',
   const world = makeWorld();
   const { steers } = provisioned(world);
   world.hooks.sendFails = true;
-  const result = await freshSteer({ paseoCli: fakePaseoCli(world), client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, notifyPrevious: false, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en' });
+  const result = await freshSteer({ archivePrevious: true, paseoCli: fakePaseoCli(world), client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, notifyPrevious: false, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en' });
   assert.equal(result.applied, true);
   assert.equal(result.delivered, false);
   assert.match(result.deliveryError ?? '', /agent unreachable/);
@@ -245,6 +253,7 @@ test('fresh refuses a direct brief and notice when public visibility has no sani
   const config = structuredClone(CONFIG);
   config.profiles.cheap.sensitive = true;
   const result = await freshSteer({
+    archivePrevious: true,
     client: fakeClient(world), discovery: discoveryOf(world), config, slot: 'B',
     apply: true, paseoCli: fakePaseoCli(world), lock: testLock, lookupReceipt: fakeLookup(world),
   });
@@ -259,7 +268,7 @@ test('fresh refuses a direct brief and notice when public visibility has no sani
   assert.equal(action.attemptedAt, undefined);
 });
 
-test('fresh checks each old-agent notice after delivery to the replacement', async () => {
+test('fresh archives the old agent and sends only to the replacement', async () => {
   for (const kind of ['active', 'standby', 'worker']) {
     const world = makeWorld();
     const { steers, worker } = provisionedWithWorker(world);
@@ -269,6 +278,7 @@ test('fresh checks each old-agent notice after delivery to the replacement', asy
     const config = structuredClone(CONFIG);
     config.profiles.restricted = { provider: 'restricted', model: 'm', sensitive: true };
     const result = await freshSteer({
+    archivePrevious: true,
       client: fakeClient(world), discovery: discoveryOf(world), config, ...target,
       apply: true, paseoCli: fakePaseoCli(world), lock: testLock, lookupReceipt: fakeLookup(world),
     });
@@ -278,57 +288,35 @@ test('fresh checks each old-agent notice after delivery to the replacement', asy
   }
 });
 
-test('fresh --slot retry after a failed retirement reuses the creation receipt', async () => {
-  const world = makeWorld();
-  const { steers } = provisioned(world);
-  world.hooks.sendFails = true;
-  let renameFails = true;
-  const writer = (args) => {
-    if (renameFails) throw new Error('rename failed');
-    return fakePaseoCli(world)(args);
-  };
-  const liveConfig = structuredClone(CONFIG);
-  const run = () => freshSteer({ paseoCli: writer, client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', apply: true, notifyPrevious: false, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en',
-    admitTarget: (agent) => steerPrivacyAdmission(liveConfig, agent, true) });
-  const first = await run();
-  assert.equal(first.delivered, false);
-  assert.match(first.renameError, /rename failed/);
-  assert.equal(world.agents.length, 3, 'old + fresh agents share the slot, so no single holder resolves');
-  const originalAction = structuredClone(world.workspaces[0].metadata[AGENTS_KEY][first.to].action);
-  // A note written after the failure must not leak into the retried send:
-  // recovery replays the pinned brief, it does not rebuild it.
-  world.workspaces[0].metadata[AGENTS_KEY] = {
-    ...world.workspaces[0].metadata[AGENTS_KEY],
-    [steers.B.id]: { ...world.workspaces[0].metadata[AGENTS_KEY][steers.B.id], note: 'written after the failure', noteAt: '2026-11-24T12:00:00.000Z' },
-  };
-  world.hooks.sendFails = false;
-  liveConfig.profiles.cheap.sensitive = true;
-  const denied = await run();
-  assert.equal(denied.to, first.to);
-  assert.equal(denied.delivered, false);
-  assert.match(denied.deliveryError, /verified sanitized brief/);
-  assert.deepEqual(world.workspaces[0].metadata[AGENTS_KEY][first.to].action, originalAction);
-  assert.deepEqual(world.calls.filter(([kind]) => kind === 'agent.send'), []);
-  liveConfig.profiles.cheap.sensitive = false;
-  renameFails = false;
-  const second = await run();
-  assert.equal(second.to, first.to, 'recovery reuses the created agent');
-  assert.equal(second.from, steers.B.id, 'the old holder is still the refresh source');
-  assert.equal(second.reused, true);
-  assert.equal(second.delivered, true);
-  assert.equal(second.idempotencyKey, first.idempotencyKey, 'the retry finds the receipt under the same stable key');
-  assert.equal(world.agents.length, 3, 'no second agent created');
-  const sends = world.calls.filter((c) => c[0] === 'agent.send' && c[1] === first.to);
-  assert.equal(sends.length, 1);
-  assert.equal(sends[0][2], first.packet, 'the pinned brief is sent, not a rebuilt one');
-  assert.equal(sends[0][3].messageId, originalAction.wakeId);
-  assert.ok(!sends[0][2].includes('written after the failure'));
+test('fresh retry after an unconfirmed archive reuses the creation receipt', async () => {
+  for (const slot of ['A', 'B']) {
+    const world = makeWorld();
+    const { steers } = provisioned(world);
+    const run = () => freshSteer({ archivePrevious: true, client: fakeClient(world), discovery: discoveryOf(world),
+      config: CONFIG, slot, apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world) });
+
+    world.hooks.archiveFails = true;
+    await assert.rejects(run(), /archiving the previous agent could not be confirmed/);
+    assert.equal(steers[slot].archivedAt, null);
+    const replacement = world.agents.at(-1);
+    assert.deepEqual(world.calls.filter(([kind]) => kind === 'agent.send'), []);
+
+    world.hooks.archiveFails = false;
+    const result = await run();
+    assert.equal(result.from, steers[slot].id);
+    assert.equal(result.to, replacement.id);
+    assert.equal(result.reused, true);
+    assert.equal(result.delivered, true);
+    assert.ok(steers[slot].archivedAt);
+    assert.equal(world.agents.length, 3);
+    assert.deepEqual(world.calls.filter(([kind]) => kind === 'agent.send').map(([, id]) => id), [result.to]);
+  }
 });
 
 test('fresh --slot refuses busy, missing and ambiguous targets, and slot+worker together', async () => {
   const world = makeWorld();
   const { steers } = provisioned(world);
-  const run = (extra = {}) => freshSteer({ paseoCli: fakePaseoCli(world), client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', ...extra });
+  const run = (extra = {}) => freshSteer({ archivePrevious: true, paseoCli: fakePaseoCli(world), client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', ...extra });
   steers.B.status = 'running';
   await assert.rejects(run({ slot: 'B' }), /Steer B is running/);
   steers.B.status = 'idle';
@@ -342,7 +330,7 @@ test('fresh --slot refuses busy, missing and ambiguous targets, and slot+worker 
 test('fresh --slot with an explicit active slot behaves like the default takeover', async () => {
   const world = makeWorld();
   provisioned(world);
-  const result = await freshSteer({ paseoCli: fakePaseoCli(world), client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'a', git: fakeGit(), lock: testLock, language: 'en' });
+  const result = await freshSteer({ archivePrevious: true, paseoCli: fakePaseoCli(world), client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'a', git: fakeGit(), lock: testLock, language: 'en' });
   assert.equal(result.slot, 'A');
   assert.equal(result.epoch, 2);
   assert.equal(result.epochBumped, true);
@@ -364,7 +352,7 @@ test('fresh --worker previews and applies a same-role refresh without an epoch c
   const world = makeWorld();
   const { steers, worker } = provisionedWithWorker(world);
   world.workspaces[0].metadata[AGENTS_KEY] = { [worker.id]: { note: 'Halfway through the build', noteAt: '2026-11-24T11:00:00.000Z' } };
-  const preview = await freshSteer({ paseoCli: fakePaseoCli(world), client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, workerId: worker.id, git: fakeGit(), lock: testLock, language: 'en' });
+  const preview = await freshSteer({ archivePrevious: true, paseoCli: fakePaseoCli(world), client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, workerId: worker.id, git: fakeGit(), lock: testLock, language: 'en' });
   assert.equal(preview.kind, 'worker');
   assert.equal(preview.owner, 'A');
   assert.equal(preview.epoch, 1);
@@ -375,7 +363,7 @@ test('fresh --worker previews and applies a same-role refresh without an epoch c
   assert.match(preview.packet, /Halfway through the build/);
   assert.deepEqual(world.calls, [], 'preview reads only');
 
-  const result = await freshSteer({ paseoCli: fakePaseoCli(world), client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, workerId: worker.id, apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en' });
+  const result = await freshSteer({ archivePrevious: true, paseoCli: fakePaseoCli(world), client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, workerId: worker.id, apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en' });
   assert.equal(result.applied, true);
   assert.equal(result.from, worker.id);
   assert.ok(result.to && result.to !== worker.id);
@@ -386,22 +374,23 @@ test('fresh --worker previews and applies a same-role refresh without an epoch c
   assert.deepEqual(created.labels, { [LABEL.scope]: REPO, [LABEL.role]: 'worker', [LABEL.owner]: 'A', [PARENT_LABEL]: steers.A.id });
   assert.deepEqual(world.workspaces[0].metadata[METADATA_KEY], { main: true, activeSteer: 'A', epoch: 1 });
   const sends = world.calls.filter((c) => c[0] === 'agent.send');
-  assert.deepEqual(sends.map((c) => c[1]), [result.to, worker.id]);
-  assert.match(sends[1][2], /continues this worker/);
+  assert.deepEqual(sends.map((c) => c[1]), [result.to]);
+  assert.ok(worker.archivedAt);
 });
 
 test('fresh --worker delivery retry replays the pinned action on the same agent', async () => {
   const world = makeWorld();
   const { worker } = provisionedWithWorker(world);
   world.hooks.sendFails = true;
-  const run = () => freshSteer({ paseoCli: fakePaseoCli(world), client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, workerId: worker.id, apply: true, notifyPrevious: false, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en' });
+  const run = () => freshSteer({ archivePrevious: true, paseoCli: fakePaseoCli(world), client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, workerId: worker.id, apply: true, notifyPrevious: false, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en' });
   const first = await run();
   assert.equal(first.delivered, false);
   const actionId = world.workspaces[0].metadata[AGENTS_KEY][first.to].action.wakeId;
   world.hooks.sendFails = false;
-  const second = await run();
-  assert.equal(second.to, first.to, 'recovery reuses the created agent');
-  assert.equal(second.delivered, true);
+  await assert.rejects(run(), /not a live worker/);
+  const second = await reconcileFreshDelivery({ client: fakeClient(world), workspaceId: world.workspaces[0].id,
+    agentId: first.to, actionId, lock: testLock, checkPrivacy: async () => {} });
+  assert.equal(second.status, 'sent');
   assert.equal(world.workspaces[0].metadata[AGENTS_KEY][first.to].action.wakeId, actionId, 'recovery replays the pinned action, not a new one');
   assert.equal(world.workspaces[0].metadata[AGENTS_KEY][first.to].action.phase, 'done');
   const sends = world.calls.filter((c) => c[0] === 'agent.send' && c[1] === first.to);
@@ -413,7 +402,7 @@ test('fresh --worker delivery retry replays the pinned action on the same agent'
 test('fresh --worker accepts a unique prefix and refuses unknown, ambiguous and busy workers', async () => {
   const world = makeWorld();
   const { worker } = provisionedWithWorker(world);
-  const run = (extra = {}) => freshSteer({ paseoCli: fakePaseoCli(world), client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', ...extra });
+  const run = (extra = {}) => freshSteer({ archivePrevious: true, paseoCli: fakePaseoCli(world), client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), language: 'en', ...extra });
   const prefix = await run({ workerId: worker.id.slice(0, 8) });
   assert.equal(prefix.from, worker.id);
   await assert.rejects(run({ workerId: 'no-such-worker' }), /not a live worker/);
@@ -444,7 +433,7 @@ test('fresh creates the steer without a parent link even when the caller is an a
   const saved = process.env.PASEO_AGENT_ID;
   process.env.PASEO_AGENT_ID = steers.A.id; // the calling agent must never become the parent
   try {
-    const result = await freshSteer({ paseoCli: fakePaseoCli(world), client, discovery: discoveryOf(world), config: CONFIG, apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), execute, language: 'en' });
+    const result = await freshSteer({ archivePrevious: true, paseoCli: fakePaseoCli(world), client, discovery: discoveryOf(world), config: CONFIG, apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), execute, language: 'en' });
     assert.ok(seen.length >= 1);
     for (const op of seen) assert.ok(!('parent' in op.params), 'steer create op carries no parent');
     const created = world.agents.find((a) => a.id === result.to);
@@ -465,7 +454,7 @@ test('fresh refuses a parented agent from a custom executor before any state wri
     return { agentId: agent.id };
   };
   await assert.rejects(
-    freshSteer({ paseoCli: fakePaseoCli(world), client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), execute, language: 'en' }),
+    freshSteer({ archivePrevious: true, paseoCli: fakePaseoCli(world), client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), execute, language: 'en' }),
     /failed placement verification.*PARENT VIOLATION/,
   );
   assert.equal(world.workspaces[0].metadata[METADATA_KEY].epoch, 1, 'no state write after the refusal');
@@ -525,7 +514,7 @@ test('fresh --worker keeps the previous parent and never the calling agent', asy
   const saved = process.env.PASEO_AGENT_ID;
   process.env.PASEO_AGENT_ID = 'caller-other';
   try {
-    const result = await freshSteer({ paseoCli: fakePaseoCli(world), client, discovery: discoveryOf(world), config: CONFIG, workerId: worker.id, apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), execute, language: 'en' });
+    const result = await freshSteer({ archivePrevious: true, paseoCli: fakePaseoCli(world), client, discovery: discoveryOf(world), config: CONFIG, workerId: worker.id, apply: true, git: fakeGit(), lock: testLock, lookupReceipt: fakeLookup(world), execute, language: 'en' });
     assert.equal(seen.length, 1);
     assert.equal(seen[0].params.parent, steers.A.id);
     const created = world.agents.find((a) => a.id === result.to);
@@ -545,8 +534,8 @@ test('staleWorkerEntries flags archived and unknown agents, never live ones', ()
   const register = { 'w-live': workerEntry('a', 'running'), 'w-arch': workerEntry('b', 'blocked'), 'w-gone': workerEntry('c', 'running') };
   const agents = [{ id: 'w-live', archivedAt: null }, { id: 'w-arch', archivedAt: '2026-11-24T00:00:00.000Z' }];
   assert.deepEqual(staleWorkerEntries(register, agents), [
-    { id: 'w-arch', reason: 'archived', state: 'blocked', task: 'b' },
-    { id: 'w-gone', reason: 'unknown', state: 'running', task: 'c' },
+    'w-arch',
+    'w-gone',
   ]);
 });
 
@@ -557,7 +546,7 @@ test('pruneWorkerRegister removes stale entries under the lock and verifies the 
   const agents = [{ id: 'w-live', archivedAt: null }, { id: 'w-arch', archivedAt: '2026-11-24T00:00:00.000Z' }];
   const client = fakeClient(world);
   const { removed, register } = await pruneWorkerRegister({ client, workspaceId: world.workspaces[0].id, agents, lock: testLock });
-  assert.deepEqual(removed.map((r) => r.id), ['w-arch', 'w-gone']);
+  assert.deepEqual(removed, ['w-arch', 'w-gone']);
   assert.deepEqual(Object.keys(register), ['w-live']);
   assert.deepEqual(Object.keys(world.workspaces[0].metadata[WORKERS_KEY]), ['w-live']);
   assert.equal(world.calls.filter((c) => c[0] === 'workspace.setMetadata').length, 1);
@@ -567,15 +556,15 @@ test('pruneWorkerRegister removes stale entries under the lock and verifies the 
 });
 
 test('formatWorkersPruneText previews and reports removals', () => {
-  const stale = [{ id: 'w-arch', reason: 'archived', state: 'blocked', task: 'b' }];
-  const preview = formatWorkersPruneText(REPO, 1, stale);
+  const stale = ['w-arch'];
+  const preview = formatWorkersPruneText(REPO, 1, stale.length);
   assert.match(preview, /prune preview: 1 stale entry/);
-  assert.match(preview, /w-arch blocked "b" · agent archived/);
+  assert.doesNotMatch(preview, /w-arch/);
   assert.match(preview, /--prune --apply/);
-  const applied = formatWorkersPruneText(REPO, 1, stale, { applied: true });
+  const applied = formatWorkersPruneText(REPO, 1, stale.length, { applied: true });
   assert.match(applied, /pruned 1 stale entry/);
   assert.ok(!applied.includes('--apply'));
-  assert.match(formatWorkersPruneText(REPO, 1, []), /nothing to prune/);
+  assert.match(formatWorkersPruneText(REPO, 1, 0), /nothing to prune/);
 });
 
 // ------------------------------------------------------- ambiguous holders
@@ -589,7 +578,7 @@ test('switch and refresh refuse two live same-title holders', async () => {
     createdAt: '2026-11-24T10:00:00.000Z', labels: { [LABEL.repo]: REPO, [LABEL.role]: 'steer', [LABEL.slot]: 'B' },
   });
   await assert.rejects(switchSteer({ client: fakeClient(world), discovery: discoveryOf(world), toSlot: 'B', lock: testLock, language: 'en' }), /several|ambiguous/i);
-  await assert.rejects(freshSteer({ paseoCli: fakePaseoCli(world), client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', git: fakeGit(), lock: testLock, language: 'en' }), /several|ambiguous/i);
+  await assert.rejects(freshSteer({ archivePrevious: true, paseoCli: fakePaseoCli(world), client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', git: fakeGit(), lock: testLock, language: 'en' }), /several|ambiguous/i);
 });
 
 test('scopes does not select an ambiguous holder', () => {
@@ -621,7 +610,7 @@ test('fresh requires an explicit route when the live provider is unavailable', a
   steers.B.provider = 'codex';
   steers.B.model = 'gpt-6.2-sol'; // B no longer occupies the cheap pair
   world.providers = world.providers.filter((p) => p.provider === 'muse'); // standard unstartable
-  const fresh = (route) => freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG,
+  const fresh = (route) => freshSteer({ archivePrevious: true, client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG,
     git: fakeGit(), lock: testLock, language: 'en', ...route });
   await assert.rejects(fresh(), /Live route.*not configured.*fresh --model.*muse/);
   const result = await fresh({ provider: 'muse', model: 'muse-spark-1.3-contributor' });
@@ -645,7 +634,7 @@ test('fresh preserves a live model that differs from the legacy slot profile', a
   steers.B.model = 'gpt-6.2-sol'; // slot B profile cheap names muse/...
   steers.B.currentModeId = 'full-access';
   steers.B.effectiveThinkingOptionId = 'high';
-  const result = await freshSteer({ paseoCli: fakePaseoCli(world), client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', git: fakeGit(), lock: testLock, language: 'en' });
+  const result = await freshSteer({ archivePrevious: true, paseoCli: fakePaseoCli(world), client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG, slot: 'B', git: fakeGit(), lock: testLock, language: 'en' });
   assert.equal(result.profile, 'standard');
   assert.equal(result.provider, 'codex');
   assert.equal(result.model, 'gpt-6.2-sol');
@@ -846,7 +835,7 @@ test('active Fresh settles a completed creation receipt on the next apply after 
     } };
   };
   const options = { config: CONFIG, apply: true, notifyPrevious: false, lock: testLock, language: 'en' };
-  await assert.rejects(freshSteer({ ...options, client, discovery: discoveryOf(world), lookupReceipt: fakeLookup(world) }), /authority write interrupted/);
+  await assert.rejects(freshSteer({ archivePrevious: true, ...options, client, discovery: discoveryOf(world), lookupReceipt: fakeLookup(world) }), /authority write interrupted/);
   const creation = ws.metadata[AGENTS_KEY][steers.A.id].freshCreation;
   const key = creation.op.params.idempotencyKey;
   const created = world.receipts.get(key);
@@ -855,7 +844,7 @@ test('active Fresh settles a completed creation receipt on the next apply after 
 
   const restarted = structuredClone(world);
   const { freshSteer: reloadedFresh } = await import('../plugin/server/core/steer.mjs?fresh-create-restart');
-  const resume = () => reloadedFresh({ ...options, client: fakeClient(restarted), discovery: discoveryOf(restarted),
+  const resume = () => reloadedFresh({ ...options, archivePrevious: true, client: fakeClient(restarted), discovery: discoveryOf(restarted),
     lookupReceipt: fakeLookup(restarted), paseoCli: fakePaseoCli(restarted) });
   const recovered = await resume();
   assert.equal(recovered.to, created);
@@ -957,7 +946,7 @@ test('Fresh preserves observed provider, model, thinking, mode and options for e
     world.providers[0].modes.push({ id: 'review' });
     const target = kind === 'standby' ? { slot: 'B' } : kind === 'worker' ? { workerId: worker.id } : {};
     const settingsBefore = structuredClone(CONFIG);
-    const result = await freshSteer({ ...target, client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG,
+    const result = await freshSteer({ archivePrevious: true, ...target, client: fakeClient(world), discovery: discoveryOf(world), config: CONFIG,
       apply: true, send: false, notifyPrevious: false, lock: testLock, lookupReceipt: fakeLookup(world), paseoCli: fakePaseoCli(world) });
     const [, request] = world.calls.find(([name]) => name === 'agent.create');
     assert.deepEqual(request.config, {
@@ -987,7 +976,7 @@ test('Fresh preserves live model IDs absent from the catalog and validates expli
   config.workers.priority = ['worker'];
   steers.B.metadata = { [LABEL.steerRole]: 'advisor' };
   for (const source of [steers.A, steers.B, worker]) source.model = 'no-longer-offered';
-  const preview = (target) => freshSteer({ ...target, client: fakeClient(world), discovery: discoveryOf(world), config, lock: testLock });
+  const preview = (target) => freshSteer({ archivePrevious: true, ...target, client: fakeClient(world), discovery: discoveryOf(world), config, lock: testLock });
   for (const target of [{}, { slot: 'B' }, { workerId: worker.id }]) {
     const result = await preview(target);
     assert.equal(result.model, 'no-longer-offered');
@@ -1011,7 +1000,7 @@ test('Fresh reconciles the original standby and worker requests after lost repli
     const lookupReceipt = fakeLookup(world);
     const run = createExecutors({ client, lookupReceipt });
     let config = CONFIG;
-    const fresh = (extra) => freshSteer({ ...target, client, discovery: discoveryOf(world), config,
+    const fresh = (extra) => freshSteer({ archivePrevious: true, ...target, client, discovery: discoveryOf(world), config,
       send: false, notifyPrevious: false, lock: testLock, lookupReceipt, paseoCli: fakePaseoCli(world), ...extra });
 
     await assert.rejects(fresh({ apply: true, execute: async (...args) => {
@@ -1048,7 +1037,7 @@ test('Fresh uses account quota as selection evidence without pinning a new agent
     ],
     agentAccount: { [world.agents[0].id]: 'codex-limited' },
   };
-  const fresh = (extra) => freshSteer({ client: fakeClient(world), discovery: discoveryOf(world), config, zerosub,
+  const fresh = (extra) => freshSteer({ archivePrevious: true, client: fakeClient(world), discovery: discoveryOf(world), config, zerosub,
     send: false, notifyPrevious: false, lock: testLock, lookupReceipt: fakeLookup(world),
     paseoCli: fakePaseoCli(world), ...extra });
   await assert.rejects(fresh({ apply: true }), /accounts exhausted.*eligible alternatives .*muse/);

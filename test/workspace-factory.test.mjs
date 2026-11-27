@@ -590,9 +590,9 @@ test('archived steer slot is recreated under a new idempotency generation', asyn
   const world = makeWorld();
   const { steers } = provisioned(world);
   steers.B.archivedAt = '2026-11-01';
-  const [p] = await plan(world, [FIRMWARE], { slots: ['A', 'B', 'C'], legacyEnrollment: true });
+  const [p] = await plan(world, [FIRMWARE], { slots: ['A', 'B', 'C'], legacyEnrollment: true, creationId: 'confirmed-plan' });
   assert.deepEqual(keys(p), ['steer.B']);
-  assert.match(p.ops[0].params.idempotencyKey, /:steer:B:g2:[0-9a-f]{10}$/);
+  assert.match(p.ops[0].params.idempotencyKey, /:steer:B:confirmed-plan:[0-9a-f]{10}$/);
 });
 
 test('profiles are validated against the live provider catalog per slot', async () => {

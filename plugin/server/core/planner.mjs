@@ -16,7 +16,7 @@ import { resolveContinuations, resolveFactoryLabels } from './zerosub.mjs';
 export const WORKSPACE_REF = { ref: 'main-workspace' };
 export { idempotencyKey, requestDigest };
 
-export function planRepository(discovery, config, { adopt = {}, slots, adoptWorker = {}, detach = false, zerosub = null, legacyEnrollment = false, enrollmentVersion } = {}) {
+export function planRepository(discovery, config, { adopt = {}, slots, adoptWorker = {}, detach = false, zerosub = null, legacyEnrollment = false, enrollmentVersion, creationId } = {}) {
   const ops = [];
   const conflicts = [];
   const notes = [...(discovery.github?.notes ?? [])];
@@ -142,17 +142,12 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
   const repoPublic = discoveredRepoPublic(discovery);
   const scopeId = stored?.id ?? effScopeId;
   const expectWorktree = discovery.requestedMain && main ? { directory: main.workspaceDirectory } : null;
-  const archiveHistory = liveEnrollment ? (discovery.agents ?? []).filter((agent) =>
-    agent.archivedAt && agent.workspaceId === main?.id && agent.labels?.[LABEL.role] === 'steer' &&
-    sameScopeId(agent.labels[LABEL.scope] ?? agent.labels[LABEL.repo], effScopeId)) : [];
-  const historicalSteers = [...discovery.steers.labelled, ...archiveHistory];
-
   const planCreate = (slot, profile) => {
-    const matching = historicalSteers.filter((a) => a.labels[LABEL.slot] === slot);
-    const generation = (liveEnrollment ? new Set(matching.map((a) => a.id)).size : matching.length) + 1;
+    const generation = creationId ?? `g${discovery.steers.labelled.filter((agent) =>
+      !agent.archivedAt && agent.labels[LABEL.slot] === slot).length + 1}`;
     const { request, idempotencyKey: createKey } = buildSteerCreate({
       keyScope: forkName, repo: effScopeId, scopeId: effScopeId, slot, workspaceId: main.id, profile,
-      keyParts: ['steer', slot, `g${generation}`],
+      keyParts: ['steer', slot, generation],
     });
     const key = `steer.${slot}`;
     add(key, 'paseo.agent.create', `Create top-level Steer ${slot} (${profile.provider}/${profile.model}) without prompt`, {
@@ -165,12 +160,12 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
   let activeAgentId;
   let holderScopeId;
   let enrollment;
-  if (currentEnrollment && main && !stateNow?.retired) {
+  if (currentEnrollment && main) {
     enrollment = planLiveEnrollment({ discovery, config, adopt, slots, adoptWorker, detach, zerosub, add, conflict, notes,
       scopeId, effScopeId, stateNow, repoPublic, expectWorktree, planCreate });
     ({ activeAgentId, holderScopeId, activeSlot: effectiveInitialActive } = enrollment);
   }
-  if (oldLiveEnrollment && main && !stateNow?.retired) {
+  if (oldLiveEnrollment && main) {
     const { coordinators, occupied } = enrollmentHolders(discovery, config, scopeId, conflict);
     const eligible = (agent) => {
       if (agent.provider && (repoPublic || !providerIsSensitive(config, agent.provider))) return true;
@@ -244,8 +239,6 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
         ...(currentEnrollment ? { liveHolder: true, ...(enrollment?.activeRuntime ? { holderRuntime: enrollment.activeRuntime } : {}) } : {}),
         ...(expectWorktree ? { expectWorktree } : {}),
       });
-    } else if (state?.retired === true) {
-      conflict('workspace.main', `Scope in workspace ${main.id} is retired, movedTo ${state.movedTo ?? '(unknown)'}; use the successor scope instead of planning here`);
     } else if (!liveEnrollment && state && !config.steers.slots[state.activeSteer]) {
       conflict('workspace.main', `Workspace ${main.id} names unknown active steer "${state.activeSteer}"`);
     }
@@ -334,8 +327,6 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
       notes.push(`Adopted Steer ${slot} context ${usage.usedTokens}/${usage.maxTokens} tokens reaches usage.warnContextTokens=${warn}; consider fresh after the takeover (docs/saving-context.md)`);
     }
   };
-  // Retired scopes keep their conflict above and plan no steers at all.
-  const scopeRetired = main?.metadata?.[METADATA_KEY]?.retired === true;
   const plannedSlots = new Set(slotsToPlan);
   const prepared = new Set(effectivePrepare);
   // Live labelled steers in slots outside prepare (e.g. D/E running while the
@@ -351,7 +342,7 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
   const outsideDesc = liveOutsidePrepare.map((a) => `${a.labels[LABEL.slot]} (${a.id})`).join(', ');
   const outsideUndefined = outsideLetters.filter((s) => !config.steers.slots[s]);
   let outsideBlocked = false;
-  for (const slot of (scopeRetired ? [] : slotsToPlan)) {
+  for (const slot of slotsToPlan) {
     const key = `steer.${slot}`;
     const profile = slotProfile(config, slot);
     const labelled = discovery.steers.labelled.filter((a) => a.labels[LABEL.slot] === slot);
@@ -459,7 +450,7 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
 
   // Outside-prepare runners stay visible even when nothing would be created:
   // adopted or already-live planned slots leave them untouched but named.
-  if (!scopeRetired && liveOutsidePrepare.length && !outsideBlocked) {
+  if (liveOutsidePrepare.length && !outsideBlocked) {
     notes.push(`Live steers ${outsideDesc} run in slots outside prepare (${effectivePrepare.join(', ') || 'none'}) and are left untouched; cover them with --slots ${outsideSlotsFlag} to include them`);
   }
 

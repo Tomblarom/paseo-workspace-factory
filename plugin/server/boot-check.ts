@@ -260,7 +260,7 @@ export async function runBootCheck({
       : false;
     let reason: string | null = null;
     if (identity.role === "steer") {
-      if (!identity.slot || scopeMeta?.retired === true) continue;
+      if (!identity.slot) continue;
       const advisor = configFailed
         ? true
         : isAdvisorSteer(config, labels, agent.metadata);

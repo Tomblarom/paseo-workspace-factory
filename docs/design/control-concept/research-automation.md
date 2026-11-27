@@ -19,7 +19,7 @@ to this changing checkout; recheck them before implementation.
   (`docs/design/slots-live-design.md:17-30`,
   `plugin/server/core/discovery.mjs:285-317`).
 - **V** `scopeHolder` requires exactly one eligible holder; `guardScope` rereads scope/epoch,
-  active slot, holder ID and retirement/advisor state under lock
+  active slot, holder ID and advisor state under lock
   (`plugin/server/core/scope-guard.mjs:11-54`). Title-to-label reconciliation
   lets label-based paths find newly titled steers, but can lag or fail
   (`plugin/server/steer-title-labels.ts:1-30`).
@@ -248,7 +248,7 @@ Each row cites the observation, not an independently reproduced incident. `Yes` 
    so this is a concept option, not already authorized behavior.
 3. **I: Auto-create guards.** Require explicitly enabled scope policy and a
    real pending work item; wait for ZeroSub move/continuation or known reset as
-   policy dictates. Reject ambiguous titles, retired scope, pending permissions,
+   policy dictates. Reject ambiguous titles, pending permissions,
    unsafe privacy/role, no usable account, stale hard limits, drain/boot or an
    unresolved previous attempt. Under the workspace lock re-read scope epoch,
    live slots, account/model and request; reserve one creation generation with

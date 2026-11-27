@@ -24,7 +24,7 @@ explicitly marked **Inference**, **Assumption**, or **Open**.
   `plugin/server/steer-feed.ts:144-207,219-249,319-371`;
   `plugin/index.server.ts:228-253`.
 - The face is `slot · state`, or `slot · settings changed`. Hover text adds
-  Active/Standby/Advisor/Retired, tokens and quota summary; the visible face
+  Active/Standby/Advisor, tokens and quota summary; the visible face
   does not show all lower-priority facts. `plugin/client/steer-pill.ts:220-303`.
 - Current menu, in order (conditional entries explicitly marked):
   1. **Revert settings** and **Continue with fresh context…**, only on an
@@ -42,7 +42,7 @@ explicitly marked **Inference**, **Assumption**, or **Open**.
   directly in the handover menu. `plugin/index.client.tsx:57-121`.
 - Handover lists rows in the same scope sorted by slot and agent ID; it includes
   the current tab as well as other holders. The active row is disabled.
-  Advisors, retired, ambiguous or unknown, running/initializing, waiting,
+  Advisors, ambiguous or unknown, running/initializing, waiting,
   permission-pending and quota-limited rows are disabled with a reason.
   A `needs-resume` row is eligible and marked as needing recovery.
   `plugin/client/steer-menu.ts:111-182,400-427`.
@@ -67,7 +67,7 @@ explicitly marked **Inference**, **Assumption**, or **Open**.
   `plugin/server/core/steer.mjs:906-955`;
   `plugin/server/steer-delivery.ts:133-149,754-769`;
   `plugin/client/steer-menu-content.tsx:209-258,294-323`.
-- Refresh route: blocked during running, waiting, permission, retired or
+- Refresh route: blocked during running, waiting, permission or
   unknown; limited yields quota details. Claude with clear allowed and history
   not kept uses resume preview/apply; otherwise fresh preview chooses rewind or
   replacement. Codex is routed to fresh/rewind. Resume can take over the slot.
@@ -81,7 +81,7 @@ explicitly marked **Inference**, **Assumption**, or **Open**.
 
 ### State dimensions and “needs resume”
 
-- A single prioritized face mixes membership/ownership (`unknown`, `retired`),
+- A single prioritized face mixes membership/ownership (`unknown`),
   runtime (`running`), quota (`limited`), pending operation (`waiting`),
   interruption (`needs-resume`), context readiness, cache age and context
   size (`ready`, `cold`, `large`, `cooling`, `warm`). Connected/membership
@@ -167,14 +167,9 @@ explicitly marked **Inference**, **Assumption**, or **Open**.
 
 ## 2. Contradictions, redundancies, superseded parts
 
-- The slot decision explicitly overrides older “superseded holder” wording in
-  the same design document. Feed now filters archived/origin tabs, yet pill,
-  menu and state code retain `retired`/successor presentation paths; scope
-  retirement and recorded replacement can still produce retired, so these
-  branches are not all proven dead.
-  `docs/design/slots-live-design.md:17-29,59-80`;
-  `plugin/server/steer-feed.ts:177-195,226-233,275-281`;
-  `plugin/shared/steer-state.ts:797-804`.
+- The feed shows live, uniquely resolved title holders. Paseo archives agents, and
+  Factory omits them from the feed.
+
 - `handoffTargets` includes self, so its “no other holders” fallback is not
   reached merely because self is the only row. An inactive self can be an
   eligible takeover candidate; whether that is desired is a product question.

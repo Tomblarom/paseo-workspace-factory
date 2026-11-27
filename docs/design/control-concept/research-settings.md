@@ -212,7 +212,7 @@ line pointers describe that snapshot.
   Runtime environment overrides still exist; handoff defaults to English
   (`plugin/server/core/runtime.mjs:20-36`).
 - **Fact:** `workspaceTitle`, `workspaceTitleMultiRepo`, clone protocol and
-  upstream remote are retired planner knobs, though still accepted/validated;
+  upstream remote are deprecated planner knobs, though still accepted/validated;
   conversion emits `Main`, `https`, `upstream`
   (`plugin/server/core/config.mjs:104-112`,
   `plugin/shared/settings-validate.ts:190-197`).

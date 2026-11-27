@@ -63,7 +63,6 @@ test("face priority follows the state table top to bottom", () => {
     resetAwaitingBrief: true,
   };
   const cases = [
-    ["retired", { ...low, needsResume: "failed", queuedWake: true, ...exhaustedPool(), liveStatus: "running", superseded: true }, "open-holder"],
     ["running", { ...low, needsResume: "failed", queuedWake: true, ...exhaustedPool(), liveStatus: "running" }, "view-turn"],
     ["limited", { ...low, needsResume: "failed", queuedWake: true, ...exhaustedPool() }, "handoff-or-reset"],
     ["waiting", { ...low, needsResume: "failed", queuedWake: true }, "view-operation"],
@@ -95,13 +94,6 @@ test("disconnected, ambiguous or unknown membership renders Unknown", () => {
   assert.equal(unknown.primaryAction, "reload-or-open");
 });
 
-test("retired covers scope, replaced holder and supersession", () => {
-  assert.equal(projectSteer(base({ scopeRetired: true, liveStatus: "running" })).state, "retired");
-  assert.equal(projectSteer(base({ replacedHolder: true, liveStatus: "running" })).state, "retired");
-  const retired = projectSteer(base({ superseded: true, liveStatus: "running" }));
-  assert.equal(retired.state, "retired");
-  assert.equal(retired.detail, "Superseded by the current holder");
-});
 
 test("running covers live status and open turns, with review requests", () => {
   assert.equal(projectSteer(base({ liveStatus: "running" })).state, "running");
@@ -638,12 +630,12 @@ test("the default exhaustion boundary is 95% unless configured otherwise", () =>
   assert.equal(at(94, { exhaustedPct: 90 }).limited, true, "an explicit threshold still wins");
 });
 
-test("a past reset or newer usable evidence retires the limit inference", () => {
+test("a past reset or newer usable evidence clears the limit inference", () => {
   const zerosub = {
     accounts: [account("acc-1", { windows: [window("five_hour", 20, iso(NOW + 60 * MIN))] })],
     agentAccount: { "steer-a": "acc-1" },
   };
-  // Newer usable evidence: fresh 20% retires the flagged limit.
+  // Newer usable evidence: fresh 20% clears the flagged limit.
   const usable = resolveQuota({
     nowMs: NOW,
     agentId: "steer-a",
@@ -651,11 +643,11 @@ test("a past reset or newer usable evidence retires the limit inference", () => 
     needsResumeReason: "limit",
     needsResumeAt: iso(NOW - 60 * MIN),
   });
-  assert.equal(usable.limitRetired, true);
+  assert.equal(usable.limitCleared, true);
   assert.equal(usable.limited, false);
   const face = projectSteer(base({ zerosub, needsResume: "limit", needsResumeAt: iso(NOW - 60 * MIN) }));
   assert.equal(face.state, "needs-resume");
-  // Past reset after the failure retires it even without fresh percents.
+  // Past reset after the failure clears it even without fresh percents.
   const reset = resolveQuota({
     nowMs: NOW,
     agentId: "steer-a",
@@ -667,7 +659,7 @@ test("a past reset or newer usable evidence retires the limit inference", () => 
     needsResumeReason: "limit",
     needsResumeAt: iso(NOW - 60 * MIN),
   });
-  assert.equal(reset.limitRetired, true);
+  assert.equal(reset.limitCleared, true);
   assert.equal(reset.limited, false);
   // A reset before the failure changes nothing.
   const kept = resolveQuota({
@@ -681,7 +673,7 @@ test("a past reset or newer usable evidence retires the limit inference", () => 
     needsResumeReason: "limit",
     needsResumeAt: iso(NOW - 60 * MIN),
   });
-  assert.equal(kept.limitRetired, false);
+  assert.equal(kept.limitCleared, false);
   assert.equal(kept.limited, true);
 });
 

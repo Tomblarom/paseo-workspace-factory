@@ -235,7 +235,7 @@ Provider details and evidence are in [lifecycle research](research-lifecycle.md)
 eligible target selection and an inline confirmation area. After selecting a
 target, show **Reuse context**, **Renew context**, or a concrete blocking reason,
 then one **Handover** button. This uses native popover content and avoids the
-current third menu level. Advisors, retired tabs, ambiguous holders and self
+current third menu level. Advisors, ambiguous holders and self
 are excluded. Temporary blockers can be explained in Factory's Steers view.
 
 The server decides target preparation from the same policy used by recovery.

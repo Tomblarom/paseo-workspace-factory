@@ -55,7 +55,7 @@ test('same-slot titles remain ambiguous regardless of creation time', () => {
   const old = agent('old', 'A', { createdAt: '2026-01-01T00:00:00Z' });
   const current = agent('new', 'A', { createdAt: '2026-01-02T00:00:00Z' });
   assert.throws(() => scopeHolder({ agents: [old, current], workspaceId, scopeId, slot: 'A' }), /found 2/);
-  assert.equal(scopeHolder({ agents: [old, { ...current, title: 'Retired A' }], workspaceId, scopeId, slot: 'A' }).id, 'old');
+  assert.equal(scopeHolder({ agents: [old, { ...current, title: 'Discussion A' }], workspaceId, scopeId, slot: 'A' }).id, 'old');
   assert.equal(scopeHolder({ agents: [{ ...old, archivedAt: '2026-01-03' }, current], workspaceId, scopeId, slot: 'A' }).id, 'new');
 });
 
@@ -81,7 +81,7 @@ test('a continuation inherits membership from its origin or its own title', asyn
   args.agents.push({ id: 'continued', workspaceId, labels: { [CONTINUED_FROM_LABEL]: 'a' } });
   assert.equal((await guardScope({ ...args, agentId: 'continued' })).holder.id, 'continued');
   await assert.rejects(guardScope(args), /Active steer changed/);
-  args.agents[0].title = 'Retired A';
+  args.agents[0].title = 'Discussion A';
   args.agents[2].title = '▷ Steer A · continuation';
   assert.equal((await guardScope({ ...args, agentId: 'continued' })).holder.id, 'continued');
 });
@@ -102,10 +102,10 @@ test('an archived origin does not archive its live continuation', () => {
   assert.equal(scopeHolder({ agents: [origin, continued], workspaceId, scopeId, slot: 'A' }).id, continued.id);
 });
 
-test('an errored origin cannot regain authority when its continuation is archived', async () => {
+test('an archived continuation cannot displace its live origin', async () => {
   const args = fixture();
   args.state.activeAgentId = 'a';
   args.agents[0].status = 'error';
   args.agents.push({ id: 'continued', workspaceId, archivedAt: '2026-01-01', labels: { [CONTINUED_FROM_LABEL]: 'a' } });
-  await assert.rejects(guardScope(args), /continuation.*cannot resume/);
+  assert.equal((await guardScope(args)).holder.id, 'a');
 });

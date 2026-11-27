@@ -1,6 +1,6 @@
 // K10 minimal: one shared timer per feed type (broadcast to all
 // subscribers, immediate push on hooked lifecycle events) and archive-driven
-// worker retirement (a close never retires). Server modules load through the
+// worker register cleanup on archive. Server modules load through the
 // ts-resolve-hooks remap.
 import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
@@ -226,7 +226,7 @@ test("cold subscribers share one timer and update together on notify", async () 
 });
 
 // ---------------------------------------------------------------------------
-// Archive retires; close never retires.
+// Archive removes the worker register entry.
 // ---------------------------------------------------------------------------
 
 const workerEntry = (over = {}) => ({
@@ -264,13 +264,13 @@ function workerWorld(entryOver = {}) {
   return { world, ws, steer, worker, paseo: fakeClient(world) };
 }
 
-test("agent.archive.after retires the worker and drops its queued wake", async () => {
+test("agent.archive.after removes the worker and drops its queued wake", async () => {
   const { world, worker, paseo } = workerWorld({
     state: "done",
     pendingWake: { state: "done", queuedAt: new Date(NOW - MIN).toISOString() },
   });
   const result = await supervise.runArchiveAfter(paseo, { id: worker.id }, superviseDeps());
-  assert.deepEqual(result, { ok: true, action: "retired" });
+  assert.deepEqual(result, { ok: true, action: "removed" });
   assert.equal(world.workspaces[0].metadata[WORKERS_KEY][worker.id], undefined);
 });
 
@@ -317,12 +317,12 @@ test("a closed worker stays supervised: turn.after never removes it", async () =
 // Static shape of the minimal wiring.
 // ---------------------------------------------------------------------------
 
-test("server entry pushes feeds on hooked events and retires on archive", () => {
+test("server entry pushes feeds on hooked events and removes workers on archive", () => {
   const entry = readFileSync(new URL("../index.server.ts", import.meta.url), "utf8");
   assert.ok(entry.includes('"agent.archive.after"'), "archive.after registered");
   assert.ok(entry.includes("handleArchiveAfter"), "archive handler wired");
   assert.ok(entry.includes("removeArchiveHook"), "archive hook removed on cleanup");
-  assert.ok(!entry.includes("agent.close.after"), "no close hook, so close can never retire");
+  assert.ok(!entry.includes("agent.close.after"), "no close hook, so a closed runtime keeps its worker entry");
   const notifies = entry.match(/notifyFeeds\(\);/g) ?? [];
   assert.ok(notifies.length >= 5, `all hooks push feeds, got ${notifies.length}`);
   for (const name of ["startCleanupTimer", "startSupervisionTimer", "startQuotaTimer"]) {

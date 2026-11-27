@@ -275,7 +275,7 @@ test('unknown, self and hub domains are conflicts; fresh mains inherit a valid p
   assert.match(freshUnknown.conflicts.find((c) => c.key === 'scope.domain').reason, /not a live scope/);
 });
 
-test('apply writes the domain epoch-checked; drift and retired scopes refuse', async () => {
+test('apply writes the domain only for the expected epoch', async () => {
   const world = makeWorld();
   provisionDir(world, { path: '/p/team-a', id: 'team-a' });
   const child = provisionDir(world, { path: '/p/web', id: 'web', epoch: 4 });
@@ -293,10 +293,6 @@ test('apply writes the domain epoch-checked; drift and retired scopes refuse', a
 
   const drift = { key: 'scope.domain', kind: 'scope.domain', params: { workspaceId: child.id, domain: 'team-a', epoch: 3 } };
   await assert.rejects(() => execute(drift, CONFIG), /expected epoch 3, found 4/);
-  child.metadata[METADATA_KEY].retired = true;
-  const retired = { key: 'scope.domain', kind: 'scope.domain', params: { workspaceId: child.id, domain: null, epoch: 4 } };
-  await assert.rejects(() => execute(retired, CONFIG), /retired/);
-  delete child.metadata[METADATA_KEY].retired;
   const same = { key: 'scope.domain', kind: 'scope.domain', params: { workspaceId: child.id, domain: 'TEAM-A', epoch: 4 } };
   assert.deepEqual(await execute(same, CONFIG), { workspaceId: child.id, domain: 'team-a', already: true });
 });
@@ -441,11 +437,10 @@ test('unknown domains still conflict and name the enroll-first option', async ()
   assert.match(p.conflicts.find((c) => c.key === 'scope.domain').reason, /not a live scope; enroll it first/);
 });
 
-test('scopes and status show the domain for the retired scope and its successor', async () => {
+test('scopes and status show the domain for multiple live workspaces of a scope', async () => {
   const world = makeWorld();
   provisionDir(world, { path: '/p/team-a', id: 'team-a' });
   const old = provisionDir(world, { path: '/p/demo', id: 'web', domain: 'team-a', epoch: 4 });
-  old.metadata[METADATA_KEY].retired = true;
   old.metadata[METADATA_KEY].movedTo = '/p/moved';
   old.metadata[METADATA_KEY].activeSteer = null;
   provisionDir(world, { path: '/p/moved', id: 'web', domain: 'team-a', epoch: 1 });
@@ -453,7 +448,7 @@ test('scopes and status show the domain for the retired scope and its successor'
   const rows = scopeRows(state);
   assert.equal(rows.filter((r) => r.id === 'web').length, 2);
   const lines = formatScopeRows(rows).split('\n').filter((l) => l.startsWith('web '));
-  assert.equal(lines.length, 2, 'both the retired and the successor row print');
+  assert.equal(lines.length, 2, 'both live workspace rows print');
   assert.ok(lines.every((l) => l.includes('domain team-a')), lines.join('\n'));
   const runner = runnerFor(world);
   const [fresh] = await runner.discoverAll([{ local: '/p/moved' }]);

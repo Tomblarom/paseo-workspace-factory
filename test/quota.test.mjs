@@ -80,7 +80,7 @@ test('resume and assignment quota follows the live holder, model and account', (
     repo: 'example/repo', state: { epoch: 1, activeSteer: 'A' },
     steers: [
       { ...holder, id: 'origin', superseded: true },
-      { ...holder, id: 'retired', retired: true },
+      { ...holder, id: 'archived', archivedAt: 'archived' },
       holder,
     ],
     workers: [], checkpoint: null, workspace: { id: 'w', directory: '/tmp' },

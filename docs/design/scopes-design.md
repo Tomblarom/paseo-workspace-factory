@@ -69,9 +69,9 @@ Relations stay logical (metadata/labels), never `parent`: steers stay parent-fre
 ## Decision 4 — lifecycle without data loss
 
 - **Retitle** was removed (K13): workspace titles stay as they are; rename natively in Paseo.
-- **Relocate** was removed (K14): to move a scope, create a new scope at the target and switch. Old installs may still carry scopes retired with `movedTo`; they stay readable (status, scopes, cleanup) and refuse coordination.
-- **Retire** scope was removed with relocate; archiving stays a separate native step.
-- **Cleanup** is a read-only report (scratch scopes labelled `wsf.scratch`, missing directories, empty or duplicate projects, retired scopes). Each candidate carries a loss inventory — agents (running?), owned worktree, uncommitted changes, unpushed commits — plus the native command that archives it (`paseo archive`, `paseo workspace archive`, `paseo project delete`).
+- **Relocate** was removed (K14): to move a scope, create a new scope at the target and switch.
+- Archive the previous workspace natively in Paseo when you are done with it.
+- **Cleanup** is a read-only report (scratch scopes labelled `wsf.scratch`, missing directories, empty or duplicate projects). Each candidate carries a loss inventory — agents (running?), owned worktree, uncommitted changes, unpushed commits — plus the native command that archives it (`paseo archive`, `paseo workspace archive`, `paseo project delete`).
 
 ## Decision 5 — safety model unchanged, plus a destructive gate
 

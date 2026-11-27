@@ -28,7 +28,7 @@ export function freshCreationRoute({ config, providers, from, role, slot, steers
   const advisor = role === 'advisor';
   const rolePriorities = advisor ? config?.advisors?.priority : config?.steers?.priority;
   const priorities = worker ? workerPriority(config) : rolePriorities ?? steerFallbackList(config, slot);
-  const used = new Set(usedProfilesByLiveSteers(config, steers.filter((s) => s.slot !== slot && !s.superseded && !s.retired)));
+  const used = new Set(usedProfilesByLiveSteers(config, steers.filter((s) => s.slot !== slot && !s.superseded)));
   const catalog = { role: worker ? 'worker' : 'steer', advisorSlot: advisor, repoPublic, quotaSnapshot,
     quotaExhaustedPct, zerosub, profileHealth: readProfileHealth(metadata), now };
   // resolveProfile uses string keys, including for unprofiled native routes.

@@ -121,8 +121,6 @@ interface ScopeReads {
   epoch: number | null;
   activeSteer: string | null;
   activeAgentId: string | null;
-  retired: boolean;
-  previousSteer: string | null;
   entries: Record<string, unknown>;
 }
 
@@ -136,8 +134,6 @@ function scopeReads(scope: any): ScopeReads | null {
     epoch: typeof wsf.epoch === "number" && Number.isInteger(wsf.epoch) && wsf.epoch >= 0 ? wsf.epoch : null,
     activeSteer: typeof wsf.activeSteer === "string" ? wsf.activeSteer : null,
     activeAgentId: typeof wsf.activeAgentId === "string" ? wsf.activeAgentId : null,
-    retired: wsf.retired === true,
-    previousSteer: typeof wsf.previousSteer === "string" ? wsf.previousSteer : null,
     entries: asRecord(meta[AGENTS_KEY]) ?? {},
   };
 }
@@ -217,11 +213,6 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
       : null;
     const projection = projectSteer({
       membership,
-      scopeRetired: reads.retired || Boolean(agent.archivedAt),
-      replacedHolder:
-        reads.previousSteer !== null &&
-        !/^[A-Z]$/.test(reads.previousSteer) &&
-        reads.previousSteer === agent.id,
       liveStatus: status,
       openTurn,
       permissionNeeded,
@@ -262,7 +253,7 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
     const action = readSteerAction(entry);
     const active = agent.id === activeHolder;
     let activationEpoch: number | null = null;
-    if (!reads.retired && reads.epoch !== null && !agent.background && !parentOf(agent) && agent.workspaceId === reads.mainId) {
+    if (reads.epoch !== null && !agent.background && !parentOf(agent) && agent.workspaceId === reads.mainId) {
       if (reads.activeSteer && slot !== reads.activeSteer) activationEpoch = reads.epoch;
       if (active && action?.kind === "activate" && action.epoch === reads.epoch && action.phase !== "done" && reads.epoch > 0) {
         activationEpoch = reads.epoch - 1;

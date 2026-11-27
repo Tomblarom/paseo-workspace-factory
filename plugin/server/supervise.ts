@@ -249,11 +249,6 @@ function findScope(scopes: any[], scopeId: string): any | null {
   return (scopes ?? []).find((s: any) => s && sameScopeId(s.id, scopeId)) ?? null;
 }
 
-/** Retired agent id after a fresh (a previousSteer that is not a slot letter). */
-function retiredAgentId(wsf: Record<string, any> | null): string | null {
-  const previous = wsf?.previousSteer;
-  return typeof previous === "string" && previous && !/^[A-Z]$/.test(previous) ? previous : null;
-}
 
 function isBusyStatus(status: unknown): boolean {
   return typeof status === "string" && BUSY_STATUSES.includes(status);
@@ -332,19 +327,15 @@ export async function requestQuotaFailover(
 }
 
 /**
- * Live steer rows of a scope for resolveWakeTarget/failoverChain: slot, id,
- * archived/retired/interrupted markers, status, background. Closed holders
- * stay eligible (a wake reopens them); retired and archived ones do not.
+ * Live steer rows for failover, with their runtime and interruption markers.
  */
 function steerRows(
   paseoState: any,
   scopeId: string,
-  wsf: Record<string, any> | null,
   agentState: Record<string, unknown>,
   config: any = null,
-): { slot: string | null; id: string; archivedAt: unknown; retired: boolean; superseded: boolean; status: unknown; background: unknown; interrupted: unknown; pool?: string | null; advisor?: boolean }[] {
-  const retired = retiredAgentId(wsf);
-  const rows: { slot: string | null; id: string; archivedAt: unknown; retired: boolean; superseded: boolean; status: unknown; background: unknown; interrupted: unknown; pool?: string | null; advisor?: boolean }[] = [];
+): { slot: string | null; id: string; archivedAt: unknown; superseded: boolean; status: unknown; background: unknown; interrupted: unknown; pool?: string | null; advisor?: boolean }[] {
+  const rows: { slot: string | null; id: string; archivedAt: unknown; superseded: boolean; status: unknown; background: unknown; interrupted: unknown; pool?: string | null; advisor?: boolean }[] = [];
   const labelled = (paseoState?.agents ?? []).filter((agent: any) => {
     const identity = factoryIdentity(agent?.labels ?? null);
     return identity?.role === "steer" && sameScopeId(identity.scopeId, scopeId);
@@ -357,7 +348,6 @@ function steerRows(
       id: agent.id,
       archivedAt: agent.archivedAt ?? null,
       superseded: agent.superseded === true,
-      retired: retired !== null && agent.id === retired,
       status: agent.status ?? null,
       background: agent.background ?? null,
       interrupted: (asRecord(agentState[agent.id])?.interrupted ?? null) as unknown,
@@ -402,7 +392,7 @@ function domainHubSteers(
     const targetWsf = wsfOf(target.workspace?.metadata ?? {});
     if (!targetWsf) return null;
     const entries = asRecord(target.workspace?.metadata?.[AGENTS_KEY]) ?? {};
-    const rows = steerRows(paseoState, target.id, targetWsf, entries, config);
+    const rows = steerRows(paseoState, target.id, entries, config);
     const id = resolveWakeTarget(targetWsf, rows);
     return rows.find((row) => row.id === id)?.advisor ? null : id;
   };
@@ -610,7 +600,7 @@ async function deliverScopeWake(paseo: any, args: ScopeWakeInput, deps: Supervis
   const paseoState = args.state ?? ((await readPaseoState(paseo)) as any);
   const settings = await resolveSettings(deps);
   const config = deps.getConfig ? await deps.getConfig().catch(() => null) : null;
-  const rows = steerRows(paseoState, scope.id, freshWsf, agentState, config);
+  const rows = steerRows(paseoState, scope.id, agentState, config);
   const target = activeHolder(paseoState, scope, freshWsf);
   if (!target) {
     log(`[factory] supervise: no live holder of ${scope.id} active steer; wake queued`);
@@ -810,7 +800,6 @@ export async function runWorkerTurnAfter(
   if (!wsf) return { ok: true, action: "skipped", reason: "no-wsf" };
   let register = readWorkers(meta);
   const workerAgentState = asRecord(asRecord(meta[AGENTS_KEY])?.[agentId]);
-  if (workerAgentState?.replacedBy) return { ok: true, action: "skipped", reason: "worker-replaced" };
   if (!register[agentId]) {
     await backfillWorker(paseo, scope, agent, wsf, workerAgentState, deps);
     meta = await refreshWorkspaceMeta(paseo, mainId);
@@ -916,11 +905,11 @@ export async function handleWorkerTurnAfter(
 
 export interface ArchiveAfterResult {
   ok: boolean;
-  action: "retired" | "skipped" | "disabled";
+  action: "removed" | "skipped" | "disabled";
   reason?: string;
 }
 
-/** K10: retires a worker the moment its agent is archived. A close event never retires. */
+/** Remove the worker register entry after Paseo archives its agent. */
 export async function runArchiveAfter(
   paseo: any,
   hookAgent: { id?: unknown } | null,
@@ -934,8 +923,7 @@ export async function runArchiveAfter(
     const meta = await refreshWorkspaceMeta(paseo, scope.workspaceId);
     if (!readWorkers(meta)[workerId]) continue;
     await removeWorker({ client: paseo, workspaceId: scope.workspaceId, workerId, lock: lockOf(deps) });
-    logOf(deps)(`[factory] supervise: retired archived worker ${workerId} of ${scope.id}`);
-    return { ok: true, action: "retired" };
+    return { ok: true, action: "removed" };
   }
   return { ok: true, action: "skipped", reason: "not-tracked" };
 }
@@ -1140,7 +1128,6 @@ export async function runBootFinished(
       if (!scope) continue;
       const meta = await refreshWorkspaceMeta(paseo, scope.workspaceId);
       const register = readWorkers(meta);
-      if (asRecord(asRecord(meta[AGENTS_KEY])?.[agentId])?.replacedBy) continue;
       const supervised = identity?.role === "worker" || !!register[agentId];
       if (!supervised) continue;
       const wsf = wsfOf(meta);
@@ -1363,7 +1350,7 @@ export async function runFailoverCheck(
   const routing = await readRoutingSnapshot({ ...deliveryDeps(deps), ...deps, paseo,
     now: () => nowIso }, routingState.workspaces, routingState.agents);
   const config = routing.config;
-  const rows = steerRows(paseoState, scope.id, wsf, agentState, config);
+  const rows = steerRows(paseoState, scope.id, agentState, config);
   const holder = activeHolder(paseoState, scope, wsf);
   if (deps.failingAgentId && holder !== deps.failingAgentId) return { action: "clear", reason: "holder-changed" };
   const zerosub = routing.zerosub;
@@ -1416,12 +1403,10 @@ export async function runFailoverCheck(
     return { action: "abort", reason: "moved" };
   }
   const scopes = deps.scopes ?? listScopes(paseoState);
-  const retired = retiredAgentId(wsf);
   const exhaustedPct = config?.quota?.exhaustedPct ?? settings?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct;
   const chain = failoverChain({
     steers: rows,
     activeSlot,
-    retiredIds: retired ? [retired] : [],
     interruptedIds: rows.filter((r) => r.interrupted).map((r) => r.id),
     advisorIds: rows.filter((r) => r.advisor).map((r) => r.id),
     ...domainHubSteers(paseoState, scopes, scope, wsf, config),
@@ -1603,7 +1588,7 @@ export async function watchdogScan(paseo: any, deps: SuperviseDeps & { state?: a
       let agentState = asRecord(meta[AGENTS_KEY]) ?? {};
       for (const worker of workerAgents(paseoState, scope.id)) {
         if (!worker || worker.archivedAt || worker.status === "closed" || worker.background === true) continue;
-        if (register[worker.id] || asRecord(agentState[worker.id])?.replacedBy) continue;
+        if (register[worker.id]) continue;
         const live = await refreshAgent(paseo, worker.id);
         if (!live || live.archivedAt || live.status === "closed" || live.background === true) continue;
         await backfillWorker(paseo, scope, live, wsf, asRecord(agentState[worker.id]), deps);
@@ -1613,8 +1598,8 @@ export async function watchdogScan(paseo: any, deps: SuperviseDeps & { state?: a
       register = readWorkers(meta);
       agentState = asRecord(meta[AGENTS_KEY]) ?? {};
       for (const id of Object.keys(register)) {
-        const agent = (paseoState.agents ?? []).find((a: any) => a && a.id === id) ?? null;
-        if (agent && agent.archivedAt) {
+        const listed = (paseoState.agents ?? []).some((agent: any) => agent?.id === id && !agent.archivedAt);
+        if (!listed && (await refreshAgent(paseo, id))?.archivedAt) {
           await removeWorker({ client: paseo, workspaceId: mainId, workerId: id, lock });
           result.removed.push(id);
           delete register[id];
@@ -1622,12 +1607,13 @@ export async function watchdogScan(paseo: any, deps: SuperviseDeps & { state?: a
       }
       for (const [id, entry] of Object.entries(register)) {
         if (!entry || typeof entry !== "object") continue;
+        const agent = (paseoState.agents ?? []).find((item: any) => item?.id === id && !item.archivedAt);
+        if (!agent) continue;
         const typed = entry as {
           state?: unknown;
           startedAt?: unknown;
           lastWakeAt?: unknown;
         };
-        const agent = (paseoState.agents ?? []).find((a: any) => a && a.id === id) ?? null;
         const agentEntry = asRecord(agentState[id]);
         const busy =
           (agent && (isBusyStatus(agent.status) || agent.activeTurn !== null && agent.activeTurn !== undefined)) ||

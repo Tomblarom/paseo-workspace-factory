@@ -141,8 +141,8 @@ export function withApplyLock(fn, options) {
 }
 
 /** Everything apply may later do, frozen at dry-run time. */
-export function createAuthorization(plans, config, { entries, adopt = {}, slots, adoptWorker = {}, detach = false } = {}) {
-  return { version: 1, hash: planHash(plans, config), createdAt: new Date().toISOString(), entries, adopt, adoptWorker, detach, ...(slots !== undefined ? { slots } : {}), plans: structuredClone(plans) };
+export function createAuthorization(plans, config, { entries, adopt = {}, slots, adoptWorker = {}, detach = false, creationId } = {}) {
+  return { version: 1, hash: planHash(plans, config), createdAt: new Date().toISOString(), entries, adopt, adoptWorker, detach, ...(slots !== undefined ? { slots } : {}), ...(creationId ? { creationId } : {}), plans: structuredClone(plans) };
 }
 
 function authorizedOps(plan) {
@@ -248,6 +248,7 @@ export async function applyPlans({ authorization, config, confirm, runPlans, exe
   if (!matchesStoredHash(authorization.plans, config, authorization.hash)) throw new ApplyRefused('Stored plan does not match the current config or was altered; run a new dry-run');
   const options = { adopt: authorization.adopt, adoptWorker: authorization.adoptWorker ?? {}, detach: authorization.detach ?? false, ...(authorization.slots !== undefined ? { slots: authorization.slots } : {}) };
   // Replan stored authorizations with the enrollment rules used to confirm them.
+  if (authorization.creationId) options.creationId = authorization.creationId;
   const enrollment = authorization.plans[0].enrollment;
   if (!enrollment) options.legacyEnrollment = true;
   if (enrollment === 'live') options.enrollmentVersion = enrollment;
@@ -355,7 +356,7 @@ export function createExecutors({ client, paseoCli, getZerosub = /** @type {(() 
     const [workspace, agents] = await Promise.all([client.workspaces.ref(guard.workspaceId).refresh(), readPaseoAgents(client)]);
     verifyWorktree(workspace, guard.workspaceId, guard.expectWorktree);
     const state = workspace?.metadata?.[METADATA_KEY];
-    if (!workspace || workspace.archivedAt || (state && (state.main !== true || state.retired)) || !isDeepStrictEqual(enrollmentState(state), guard.expectedState)) {
+    if (!workspace || workspace.archivedAt || (state && (state.main !== true)) || !isDeepStrictEqual(enrollmentState(state), guard.expectedState)) {
       throw new Error('Scope state changed since enrollment preview; run a new dry-run');
     }
     return { agents, tabs: enrollmentTabs(agents, guard.workspaceId, guard.scopeId, guard.aliases) };
@@ -544,10 +545,10 @@ export function createExecutors({ client, paseoCli, getZerosub = /** @type {(() 
       }
       return withLock(workspaceLockName(workspaceId), async (held) => {
         const handle = client.workspaces.ref(workspaceId);
-        const meta = (await handle.refresh())?.metadata?.[METADATA_KEY];
-        if (!meta || typeof meta !== 'object') throw new Error(`Workspace ${workspaceId} has no factory state; refusing to set the domain`);
+        const workspace = await handle.refresh();
+        const meta = workspace?.metadata?.[METADATA_KEY];
+        if (!meta || workspace.archivedAt || typeof meta !== 'object') throw new Error(`Workspace ${workspaceId} has no factory state; refusing to set the domain`);
         if (meta.epoch !== epoch) throw new Error(`Scope state changed (expected epoch ${epoch}, found ${meta.epoch}); replan`);
-        if (meta.retired === true) throw new Error(`Workspace ${workspaceId} scope is retired; refusing to set the domain`);
         if (!validScope(meta.scope)) throw new Error(`Workspace ${workspaceId} has no scope; plan the scope supplement first`);
         const have = typeof meta.scope.domain === 'string' && meta.scope.domain ? meta.scope.domain : null;
         const norm = (v) => (v ? v.toLowerCase() : null);

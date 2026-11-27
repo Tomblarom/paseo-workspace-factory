@@ -399,8 +399,8 @@ export const factoryFresh = defineRpc({
     fingerprint: z.string().min(1),
     /** "stage" applies without sending; the packet is staged for later delivery. */
     deliver: z.enum(["send", "stage"]).optional(),
-    /** Notify the retired agent (costs one of its turns). Default true. */
-    notifyPrevious: z.boolean().optional(),
+    /** Explicit approval to archive the source after creating the replacement. */
+    archivePrevious: z.boolean().optional(),
   }),
   output: z.looseObject({
     repo: z.string(),
@@ -944,6 +944,7 @@ export const factorySteerAddPreview = defineRpc({
     text: z.string(),
     fingerprint: z.string().nullable(),
     revision: z.string(),
+    creationId: z.uuid(),
     values: z.unknown(),
   }),
 });
@@ -951,7 +952,7 @@ export const factorySteerAddPreview = defineRpc({
 // Revalidate the confirmed selection against live membership under the workspace lock.
 export const factorySteerAdd = defineRpc({
   name: "factory.steer.add",
-  input: z.object({ ...steerAddArgs, fingerprint: z.string().min(1), revision: z.string().optional() }),
+  input: z.object({ ...steerAddArgs, fingerprint: z.string().min(1), revision: z.string().optional(), creationId: z.uuid().optional() }),
   output: z.looseObject({
     scope: z.string(),
     slot: z.string(),
@@ -1017,7 +1018,6 @@ const steerStateRow = z.looseObject({
   /** Live continuation or current slot holder for a superseded tab. */
   successor: z.string().nullable().optional(),
   state: z.enum([
-    "retired",
     "running",
     "limited",
     "waiting",

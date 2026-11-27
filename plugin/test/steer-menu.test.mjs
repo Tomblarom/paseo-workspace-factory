@@ -95,12 +95,11 @@ test("handover needs the current tab and its scope", () => {
   );
 });
 
-test("handover reasons cover active, advisor, retired and ambiguous rows", () => {
+test("handover reasons cover active, advisor and ambiguous rows", () => {
   const targets = menu.handoffTargets(
     [
       self(),
       row("steer-b", { slot: "B", advisor: true }),
-      row("steer-c", { slot: "C", state: "retired" }),
       row("steer-d1", { slot: "D" }),
       row("steer-d2", { slot: "D" }),
       row("steer-e", { slot: "E", state: "unknown", detail: "Membership ambiguous" }),
@@ -110,20 +109,12 @@ test("handover reasons cover active, advisor, retired and ambiguous rows", () =>
   const byId = Object.fromEntries(targets.map((t) => [t.agentId, t]));
   assert.equal(byId["steer-a"].reason, "Already active");
   assert.equal(byId["steer-b"].reason, "Advisor steers never coordinate");
-  assert.equal(byId["steer-c"].reason, "retired");
   assert.match(byId["steer-d1"].reason, /Ambiguous/);
   assert.match(byId["steer-d2"].reason, /Ambiguous/);
   assert.match(byId["steer-e"].reason, /Ambiguous membership \(Membership ambiguous\)/);
   for (const t of targets) assert.equal(t.eligible, false);
 });
 
-test("retired rows do not make a live destination ambiguous", () => {
-  const targets = menu.handoffTargets([
-    self(), row("old", { slot: "B", state: "retired" }), row("new", { slot: "B" }),
-  ], "steer-a");
-  assert.equal(targets.find((target) => target.agentId === "new").eligible, true);
-  assert.equal(targets.find((target) => target.agentId === "old").reason, "retired");
-});
 
 test("handover reasons cover busy targets and pending permissions", () => {
   const targets = menu.handoffTargets(
@@ -178,7 +169,6 @@ test("reset blocks busy tabs and incomplete membership", () => {
     [{ liveStatus: "initializing" }, /running/],
     [{ state: "waiting", detail: "Factory operation in progress" }, /Factory operation in progress/],
     [{ permissionNeeded: true }, /permission/],
-    [{ state: "retired" }, /replaced/],
     [{ state: "unknown", detail: "Membership ambiguous" }, /Membership ambiguous/],
     [{ scopeId: null }, /membership/],
   ]) {
@@ -233,7 +223,7 @@ test("expired-preview detection rejects delivery and validation errors", () => {
   for (const message of [
     "Handover applied, but the brief did not go out: agent unreachable",
     "Steer B is running",
-    "Steer B has several live agents (a1, a2); archive the retired one in Paseo, then rerun",
+    "Steer B has several live agents (a1, a2); resolve the duplicate titles in Paseo, then rerun",
     "Unknown agent \"agt_nope\"",
     "",
   ]) {
@@ -340,7 +330,6 @@ test("activation offers the own standby at its observed epoch, and an active rec
   });
   assert.equal(activation(self(), [standby]), undefined);
   assert.equal(activation({ ...standby, advisor: true }), undefined);
-  assert.equal(activation({ ...standby, state: "retired" }), undefined);
   assert.equal(activation({ ...standby, scopeId: null }), undefined);
   assert.equal(activation(standby, [row("duplicate-b", { slot: "B" })]).disabled, true);
   assert.equal(activation({ ...standby, permissionNeeded: true }).disabled, true);
@@ -404,7 +393,7 @@ test("Reset applies the bound rewind to the same holder and stages at unknown qu
     const result = { applied: true, refreshMode: "rewind" };
     const reset = await menu.resetSteer(source, plan, "send", async (input) => {
       assert.deepEqual(input, { workspaceId: source.workspaceId, slot: source.slot, resetQuota, deliver,
-        fingerprint: plan.fingerprint, notifyPrevious: false });
+        fingerprint: plan.fingerprint });
       return result;
     }, resetQuota);
     assert.deepEqual(reset, { result, initialize: "send" });

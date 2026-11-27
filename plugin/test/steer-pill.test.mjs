@@ -243,7 +243,6 @@ test("the recovery state stays in the tooltip while the pill keeps the context l
 
 test("face icons pin one Lucide name per state-table row", () => {
   assert.deepEqual(pill.STEER_PILL_ICONS, {
-    retired: "Archive",
     running: "Activity",
     limited: "Gauge",
     waiting: "Clock",
@@ -274,7 +273,6 @@ test("face colors come from the host theme, cold turns warning when large", () =
     },
   };
   const color = (state, large = false) => pill.steerStateColor(theme, state, large);
-  assert.equal(color("retired"), "muted");
   assert.equal(color("running"), "acc");
   assert.equal(color("limited"), "bad");
   assert.equal(color("waiting"), "muted");
@@ -288,20 +286,15 @@ test("face colors come from the host theme, cold turns warning when large", () =
   assert.equal(color("unknown"), "muted");
 });
 
-test("role and header title name Active, Advisor, Standby and Retired", () => {
+test("role and header title name Active, Advisor and Standby", () => {
   assert.equal(pill.steerRole(row("a")), "Active");
   assert.equal(pill.steerRole(row("a", { active: false })), "Standby");
   assert.equal(pill.steerRole(row("a", { active: false, advisor: true })), "Advisor");
-  assert.equal(pill.steerRole(row("a", { active: false, state: "retired" })), "Retired");
   assert.equal(pill.steerHeaderTitle(row("a")), "Steer A · Active");
   assert.equal(pill.steerHeaderTitle(row("a", { active: false, slot: "B" })), "Steer B · Standby");
   assert.equal(
     pill.steerHeaderTitle(row("a", { active: false, advisor: true, slot: "C" })),
     "Steer C · Advisor",
-  );
-  assert.equal(
-    pill.steerHeaderTitle(row("a", { active: false, state: "retired" })),
-    "Steer A · Retired",
   );
 });
 

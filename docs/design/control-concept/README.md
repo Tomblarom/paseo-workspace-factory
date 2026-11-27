@@ -60,7 +60,7 @@ independent of the current steer; hide complexity without making decisions opaqu
    prompts to the previous steer, no duplicate briefs or worker results. No user choice
    between "Resume and hand over" and "Confirm handover". Possible UX: pick target with an
    inline confirmation area saying whether context is reused or renewed. Show only relevant
-   targets (no retired, duplicate holders, advisors, other unsuitable).
+   targets (no duplicate holders, advisors, other unsuitable).
 7. **Create Steer.** Uses backend policy to suggest a steer (preferences, existing steers,
    providers/accounts, quota, capability, efficiency, role/privacy); user may override.
    Review steer-add/preview and init strategies Send/Composer/Later. Creating a steer in a

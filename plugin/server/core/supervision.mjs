@@ -408,7 +408,7 @@ export function isStaleWake(wakeEpoch, currentEpoch) {
 /**
  * Failover candidate chain after an unanswered wake: the next live steers of
  * the scope in slot order (circular after the failed active slot, skipping
- * retired/archived/interrupted/advisor ones), then the domain steer, then the
+ * archived/interrupted/advisor ones), then the domain steer, then the
  * hub steer. Domain/hub entries are { steerId, scopeId } or null when absent;
  * an advisor on domain or hub level is skipped like any advisor id. With
  * `zerosub` (normalized ZeroSub state), candidates on the exhausted failing
@@ -418,12 +418,11 @@ export function isStaleWake(wakeEpoch, currentEpoch) {
  * slot: a slot appears once (its first entry in the final order), so no
  * duplicate candidate is asked twice.
  */
-export function failoverChain({ steers = [], activeSlot = null, retiredIds = [], interruptedIds = [], advisorIds = [], domainSteer = null, hubSteer = null, failingPool = null, zerosub = null, failingAccountId = null, exhaustedPct = QUOTA_DEFAULTS.exhaustedPct, now = Date.now() } = {}) {
-  const retired = new Set(retiredIds ?? []);
+export function failoverChain({ steers = [], activeSlot = null, interruptedIds = [], advisorIds = [], domainSteer = null, hubSteer = null, failingPool = null, zerosub = null, failingAccountId = null, exhaustedPct = QUOTA_DEFAULTS.exhaustedPct, now = Date.now() } = {}) {
   const interrupted = new Set(interruptedIds ?? []);
   const advisors = new Set(advisorIds ?? []);
   const live = (steers ?? [])
-    .filter((s) => s && s.slot !== activeSlot && !s.archivedAt && !s.retired && !s.superseded && !s.advisor && !retired.has(s.id) && !interrupted.has(s.id) && !s.interrupted && !advisors.has(s.id))
+    .filter((s) => s && s.slot !== activeSlot && !s.archivedAt && !s.superseded && !s.advisor && !interrupted.has(s.id) && !s.interrupted && !advisors.has(s.id))
     .sort((a, b) => String(a.slot).localeCompare(String(b.slot)));
   const ordered = typeof activeSlot === 'string' && activeSlot
     ? [...live.filter((s) => String(s.slot) > activeSlot), ...live.filter((s) => String(s.slot) <= activeSlot)]
@@ -521,21 +520,10 @@ export async function removeWorker({ client, workspaceId, workerId, lock = withL
   return updateWorkerEntry({ client, workspaceId, workerId, event: 'archived', lock });
 }
 
-/**
- * Stale register entries for `workers --prune`: entries whose agent is
- * archived (`reason: 'archived'`) or unknown to the daemon
- * (`reason: 'unknown'`). `agents` is the daemon agent list (live and
- * archived, e.g. discovery.agents). Live agents keep their entry whatever
- * its state. Sorted by id for deterministic output.
- */
+/** Register IDs absent from the live daemon list, for explicit pruning. */
 export function staleWorkerEntries(register, agents) {
-  const byId = new Map((agents ?? []).map((agent) => [agent?.id, agent]));
-  return workersReport(register)
-    .filter((entry) => {
-      const agent = byId.get(entry.id);
-      return !agent || Boolean(agent.archivedAt);
-    })
-    .map((entry) => ({ id: entry.id, reason: byId.get(entry.id) ? 'archived' : 'unknown', state: entry.state ?? null, task: entry.task ?? '' }));
+  const live = new Set((agents ?? []).filter((agent) => agent && !agent.archivedAt).map((agent) => agent.id));
+  return workersReport(register).map(({ id }) => id).filter((id) => !live.has(id));
 }
 
 /**
@@ -552,8 +540,8 @@ export async function pruneWorkerRegister({ client, workspaceId, agents = null, 
     const register = readWorkers(metadata);
     const stale = staleWorkerEntries(register, agents);
     let state = { ...register };
-    for (const entry of stale) {
-      state = applyWorkerEvent(state, entry.id, 'archived');
+    for (const id of stale) {
+      state = applyWorkerEvent(state, id, 'archived');
     }
     if (stale.length) {
       held.verify(); // the lock file must still be the locked inode right before the write
@@ -567,14 +555,12 @@ export async function pruneWorkerRegister({ client, workspaceId, agents = null, 
 
 /** Human-readable output for `workers --prune` (dry-run preview or applied result). */
 export function formatWorkersPruneText(scopeId, epoch, stale, { applied = false, factoryCmd = 'paseo-factory' } = {}) {
-  const list = stale ?? [];
+  const count = stale ?? 0;
   const head = applied
-    ? `Workers of ${scopeId} · epoch ${epoch ?? '-'} · pruned ${list.length} stale entr${list.length === 1 ? 'y' : 'ies'}`
-    : `Workers of ${scopeId} · epoch ${epoch ?? '-'} · prune preview: ${list.length} stale entr${list.length === 1 ? 'y' : 'ies'}`;
-  if (!list.length) return applied ? `${head}\n(nothing to prune)` : `${head}\n(nothing to prune)`;
-  const lines = [head, ...list.map((entry) => `- ${entry.id} ${entry.state ?? '?'} "${clipTask(entry.task) || '(no task)'}" · agent ${entry.reason}`)];
-  if (!applied) lines.push(`Nothing written. Apply: ${factoryCmd} workers ${JSON.stringify(scopeId)} --prune --apply`);
-  return lines.join('\n');
+    ? `Workers of ${scopeId} · epoch ${epoch ?? '-'} · pruned ${count} stale entr${count === 1 ? 'y' : 'ies'}`
+    : `Workers of ${scopeId} · epoch ${epoch ?? '-'} · prune preview: ${count} stale entr${count === 1 ? 'y' : 'ies'}`;
+  if (!count) return applied ? `${head}\n(nothing to prune)` : `${head}\n(nothing to prune)`;
+  return applied ? head : `${head}\nApply: ${factoryCmd} workers ${JSON.stringify(scopeId)} --prune --apply`;
 }
 
 /** Human-readable register for `workers [scope]`: header plus one line per entry, deterministic. */

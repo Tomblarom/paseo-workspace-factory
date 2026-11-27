@@ -139,7 +139,6 @@ test('publishes allowlisted fields from the holder, renewal, recovery and assign
     { kind: 'delivery', state: 'uncertain', reason: 'delivery-unconfirmed', observedAt: at(5), participantAgentId: 'steer' },
     { kind: 'renewal', state: 'uncertain', reason: 'renewal-unconfirmed', observedAt: at(4), participantAgentId: 'steer' },
     { kind: 'renewal', state: 'confirmed', reason: 'context-rewound', observedAt: at(3), participantAgentId: 'steer' },
-    { kind: 'holder-change', state: 'recorded', reason: 'holder-replaced', observedAt: at(2), participant: 'Steer B' },
     { kind: 'worker-wake', state: 'pending', reason: 'worker-update', observedAt: null, participant: 'Worker', participantAgentId: 'worker' },
   ]);
   assert.equal(JSON.stringify(view).includes(sentinel), false);
@@ -175,14 +174,14 @@ test('groups a switch with the action reserved at its commit, even with an inter
 test('groups only the exact replacement and its authority-bound Fresh brief', () => {
   const brief = { kind: 'fresh-delivery', phase: 'done', epoch: 5, observedAt: at(4) };
   const metadata = {
-    wsf: { main: true, epoch: 5, activeSteer: 'B', activeAgentId: 'replacement', previousSteer: 'retired', switchedAt: at(3) },
+    wsf: { main: true, epoch: 5, activeSteer: 'B', activeAgentId: 'replacement', previousSteer: 'B', switchedAt: at(3) },
     'wsf.agents': {
       replacement: { action: { ...brief, authority: { agentId: 'replacement' } } },
       other: { action: brief },
     },
   };
   const agents = [
-    steer('retired', 'B', otherWorkspaceId),
+    { ...steer('archived-source', 'B'), archivedAt: at(4), createdAt: at(0) },
     { ...steer('replacement', 'B'), createdAt: at(2) },
     { ...steer('other', 'B'), createdAt: at(2) },
   ];
@@ -191,16 +190,11 @@ test('groups only the exact replacement and its authority-bound Fresh brief', ()
   assert.deepEqual(events.map((event) => [event.kind, event.group]), [
     ['delivery', undefined], ['delivery', group], ['holder-change', group], ['creation', undefined], ['creation', group],
   ]);
-  assert.equal(events[2].from, undefined);
+  assert.equal(events[2].from, 'Steer B');
   assert.equal(events[2].fromAgentId, undefined);
   assert.equal(events[2].participantAgentId, 'replacement');
 
-  const retiredSteer = steer('retired', 'B');
-  const activeReplacement = project(metadata, [retiredSteer, ...agents.slice(1)]).events[2];
-  assert.equal(activeReplacement.fromAgentId, 'retired');
-  const archivedReplacement = project(metadata, [{ ...retiredSteer, archivedAt: at(4) }, ...agents.slice(1)]).events[2];
-  assert.equal(archivedReplacement.from, 'Steer B');
-  assert.equal(archivedReplacement.fromAgentId, undefined);
+  assert.doesNotMatch(JSON.stringify(events), /archived-source/);
 });
 
 test('groups recovery by its saved reference and rewind by the acknowledged brief ID', () => {
@@ -359,7 +353,7 @@ test('the activity RPC reads the exact workspace and native creation timestamps 
   const paseo = {
     workspaces: { ref: (id) => ({ refresh: async () => id === workspaceId ? workspace : null }) },
     agents: { list: async ({ filter }) => {
-      assert.equal(filter.includeArchived, true);
+      assert.notEqual(filter.includeArchived, true);
       return { entries: agents.map((agent) => ({ agent })) };
     } },
   };
@@ -368,7 +362,6 @@ test('the activity RPC reads the exact workspace and native creation timestamps 
     kind: 'recent-recorded-activity',
     events: [
       { kind: 'creation', state: 'recorded', reason: 'steer-created', observedAt: at(2), participant: 'Steer', participantAgentId: 'steer' },
-      { kind: 'creation', state: 'recorded', reason: 'worker-created', observedAt: at(1), participant: 'Worker' },
     ],
   });
   await assert.rejects(getWorkspaceActivity({ workspaceId: otherWorkspaceId }, { paseo }), /enrolled Factory workspace/);

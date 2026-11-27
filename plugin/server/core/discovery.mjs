@@ -335,7 +335,7 @@ export function steerTitleLabelPatches(paseoState, config = null) {
   for (const workspace of paseoState?.workspaces ?? []) {
     const state = workspace?.metadata?.[METADATA_KEY];
     const scopeId = state?.scope?.id;
-    if (state?.main !== true || state.retired === true || typeof scopeId !== 'string' || !scopeId) continue;
+    if (state?.main !== true || typeof scopeId !== 'string' || !scopeId) continue;
     for (const agent of paseoState?.agents ?? []) {
       if (!agent || agent.workspaceId !== workspace.id || agent.archivedAt || agent.background === true || parentOf(agent)) continue;
       const slot = steerTitleSlot(agent.title);
@@ -369,16 +369,12 @@ export function steerTitleLabelPatches(paseoState, config = null) {
 }
 
 /**
- * Live holders of one slot from a resolved list: matching slot label, not
- * archived, not a superseded continuation origin, not retired unless
- * `includeRetired`. Agents and
- * status rows share this one selector.
+ * Live holders of one slot from a resolved list. Agents and status rows share the selector.
  */
-export function liveSlotHolders(list, slot, { includeRetired = false } = {}) {
+export function liveSlotHolders(list, slot) {
   if (typeof slot !== 'string' || !slot) return [];
   return (list ?? []).filter((entry) => {
     if (!entry || entry.archivedAt || entry.superseded === true) return false;
-    if (!includeRetired && entry.retired === true) return false;
     return (entry.labels?.[LABEL.slot] ?? entry.slot ?? null) === slot;
   });
 }

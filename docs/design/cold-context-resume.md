@@ -216,7 +216,12 @@ New field `wsf.agents[id].needsResume = {reason, at}`, reasons `daemon-restart |
 
 Only real `user_message` entries are rewind points. A brief sent via `paseo send` from inside an agent (with `PASEO_AGENT_ID`) arrives as a `tool_call` (`paseo-agent-message`), and rewinding to it fails ("could not find user message"). The brief after a rewind therefore goes through `DaemonClient.sendMessage` with an explicit `messageId` and WITHOUT a caller agent id, so it arrives as `user_message` and the next refresh rewinds to exactly that brief. The brief's message id is recorded in `refreshed.briefMessageId` when it landed. (Keeping earlier agents' history in the tab is a later package; not implemented.)
 
-Fallback and failure: a new parent-free agent is created only when no rewind point exists (agents driven only via `send` have no `messageId`) or the provider lacks rewind — the result carries the fallback reason as a warning. A failed rewind aborts with no side effects: nothing sent, nothing recorded, no new agent. A second apply while a cleanup action is pending, or with no new turn recorded since the rewind, is idempotent (no second rewind, no second brief). DaemonClient access lives in one small injectable module (`src/rewind.mjs`, fail-soft like the ZeroSub reader); tests inject a fake, production passes the real factory.
+Reset Steer requires a usable rewind point. When rewind is unavailable, a
+separate Fresh preview can offer a replacement. The user confirms the route
+and archival of the previous agent. A rewind failure after dispatch is
+uncertain and leaves the brief available for recovery. A repeated reset
+without an intervening turn is idempotent. The rewind adapter lives in
+[rewind.mjs](../../plugin/server/core/rewind.mjs).
 
 ## C1 / C7 Checks (live, scratch agent only)
 

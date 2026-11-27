@@ -46,8 +46,7 @@ function nextFreeSlot(members) {
 }
 
 function generationFor(agents, workspaceId, slot) {
-  // A renamed factory holder still contributes via its previous slot label.
-  const ids = agents.filter((agent) => inWorkspace(agent, workspaceId) &&
+  const ids = agents.filter((agent) => inWorkspace(agent, workspaceId) && !agent.archivedAt &&
     (steerTitleSlot(agent.title) === slot || (agent.labels?.[LABEL.role] === 'steer' && agent.labels[LABEL.slot] === slot)))
     .map((agent) => agent.id);
   return requestDigest([...new Set(ids)].sort());
@@ -75,7 +74,7 @@ function checkActiveVacancy(slot, activeSlot) {
 function buildPlan(config, providerEntries, agents, members, target, {
   spec = null, thinking, mode, profile: profileOption,
   scopeId = null, workspaceId = null, repo = null, repoPublic = null, epoch = null, settingsRevision = null,
-  quotaSnapshot, quotaExhaustedPct, profileHealth, now, zerosub,
+  quotaSnapshot, quotaExhaustedPct, profileHealth, now, zerosub, creationId,
 }, legacy = false) {
   const notes = [];
   const warnings = [];
@@ -120,7 +119,7 @@ function buildPlan(config, providerEntries, agents, members, target, {
   const profileName = profile.name;
   if (advisorSlot) notes.push(`Steer ${target} uses advisor profile "${profileName}" (advisor, never active)`);
   const effective = { provider: profile.provider, model: profile.model, thinking: profile.thinking ?? null, mode: profile.mode ?? null };
-  const generation = legacy ? null : generationFor(agents, workspaceId, target);
+  const generation = legacy ? null : creationId ?? generationFor(agents, workspaceId, target);
   const steerRole = advisorSlot ? 'advisor' : 'coordinator';
   const { request, idempotencyKey } = buildSteerCreate({
     keyScope: effectiveRepo ?? 'scope', repo: effectiveRepo ?? '?',
@@ -230,6 +229,7 @@ export async function applySteerAdd(config, providerEntries, agents, args = {}) 
     const receiptAgentId = checkedCreationReceipt(receipt, key, recoveryError);
     if (occupant && occupant.id !== receiptAgentId) throw occupiedError(plan.slot, occupant);
     const existing = occupant ?? agents.find((agent) => agent.id === receiptAgentId) ?? receipt.agent;
+    if (existing?.archivedAt || (!existing && args.creationId && pendingKey !== key)) throw staleError();
     if (existing) verifyReceiptPlacement(existing, plan, args.workspaceId);
     if (occupant) {
       agentId = receiptAgentId;

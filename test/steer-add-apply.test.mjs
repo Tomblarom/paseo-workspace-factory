@@ -117,20 +117,24 @@ test('apply rechecks public evidence after preview and keeps the receipt key', a
   assert.equal(calls[0].params.idempotencyKey, receipt.idempotencyKey);
 });
 
-test('an earlier confirmation cannot create in a released generation', async () => {
-  const first = planSteerAdd(CONFIG, PROVIDERS, LIVE, BASE);
-  const old = { ...liveSteer('C'), archivedAt: '2026-11-24T10:00:00Z' };
-  const agents = [...LIVE, old];
-  const next = planSteerAdd(CONFIG, PROVIDERS, agents, BASE);
+test('a completed confirmation cannot recreate a missing agent', async () => {
+  const prior = { ...BASE, creationId: 'first' };
+  const next = { ...BASE, creationId: 'second' };
+  const first = planSteerAdd(CONFIG, PROVIDERS, LIVE, prior);
+  const fresh = planSteerAdd(CONFIG, PROVIDERS, LIVE, next);
   const { calls, execute } = executor();
-  const args = { ...BASE, fingerprintOf: fp, lookupReceipt: noReceipt, execute };
-  await assert.rejects(applySteerAdd(CONFIG, PROVIDERS, agents, {
-    ...args, fingerprint: fp(first.fingerprintInput),
+  const completed = first.op.params.idempotencyKey;
+  const lookupReceipt = async (_, key) => key === completed ? { idempotencyKey: key, phase: 'completed', agentId: 'gone' } : null;
+  const common = { fingerprintOf: fp, lookupReceipt, execute };
+  await assert.rejects(applySteerAdd(CONFIG, PROVIDERS, LIVE, {
+    ...prior, ...common, fingerprint: fp(first.fingerprintInput),
   }), SteerAddStale);
   assert.equal(calls.length, 0);
-  const result = await applySteerAdd(CONFIG, PROVIDERS, agents, { ...args, fingerprint: fp(next.fingerprintInput) });
+  const result = await applySteerAdd(CONFIG, PROVIDERS, LIVE, {
+    ...next, ...common, fingerprint: fp(fresh.fingerprintInput),
+  });
   assert.equal(result.agentId, 'agent-C-new');
-  assert.notEqual(first.op.params.idempotencyKey, calls[0].params.idempotencyKey);
+  assert.notEqual(completed, calls[0].params.idempotencyKey);
 });
 
 test('apply refuses a tampered fingerprint as stale', async () => {
@@ -243,7 +247,7 @@ test('legacy preview can replay a completed g1 receipt and cannot start creation
   assert.equal(result.reused, true);
   assert.equal(calls[0].params.idempotencyKey, idempotencyKey);
   const archived = { ...liveSteer('C', { id: receipt.agentId, provider: 'fake-y', model: 'y1' }), archivedAt: '2026-11-24T10:00:00Z' };
-  await assert.rejects(applySteerAdd(CONFIG, PROVIDERS, [...LIVE, archived], { ...args, lookupReceipt }), /is archived/);
+  await assert.rejects(applySteerAdd(CONFIG, PROVIDERS, [...LIVE, archived], { ...args, lookupReceipt }), /Something changed since the steer-add preview/);
 });
 
 test('apply stops recovery on ambiguous or failed receipts', async () => {

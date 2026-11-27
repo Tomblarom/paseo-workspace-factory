@@ -86,7 +86,6 @@ function isSteerState(value: unknown): value is SteerFaceState {
 
 function isPrimaryAction(value: unknown): value is SteerPrimaryAction {
   return (
-    value === "open-holder" ||
     value === "view-turn" ||
     value === "handoff-or-reset" ||
     value === "view-operation" ||
@@ -184,7 +183,6 @@ export function steerAgentIds(rows: SteerPillRow[]): Set<string> {
 // ---------------------------------------------------------------------------
 
 export const STEER_PILL_ICONS: Record<SteerFaceState, string> = {
-  retired: "Archive",
   running: "Activity",
   limited: "Gauge",
   waiting: "Clock",
@@ -220,7 +218,6 @@ export function pillStateWord(state: SteerFaceState): string {
 export function steerRole(row: Pick<SteerPillRow, "active" | "advisor" | "state">): string {
   if (row.advisor) return "Advisor";
   if (row.active) return "Active";
-  if (row.state === "retired") return "Retired";
   return "Standby";
 }
 
@@ -450,13 +447,12 @@ export function steerHeaderTitle(row: SteerPillRow): string {
   const parts = [`Steer ${row.slot ?? "?"}`];
   if (row.active) parts.push("Active");
   if (row.advisor) parts.push("Advisor");
-  if (!row.active && !row.advisor) parts.push(row.state === "retired" ? "Retired" : "Standby");
+  if (!row.active && !row.advisor) parts.push("Standby");
   return parts.join(" · ");
 }
 
 /** Read-only next-step hint (step 3 wires these to previews and actions). */
 export const STEER_PRIMARY_ACTION_LABELS: Record<SteerPrimaryAction, string> = {
-  "open-holder": "Open the current holder",
   "view-turn": "View the turn",
   "handoff-or-reset": "Hand over or show reset details",
   "view-operation": "View the operation",

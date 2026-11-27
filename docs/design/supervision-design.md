@@ -86,7 +86,7 @@ Without the plugin, use `paseo wait` during an active turn and `<factory> worker
 
 A wake counts as unanswered when the active steer does not start a turn within `answerMinutes` (default 10), or its turn fails with a provider limit or error. Then the plugin wakes the next candidate with a takeover request:
 
-1. the next live steer of the scope in slot order (skipping retired, archived, interrupted and advisor ones),
+1. the next live steer of the scope in slot order (skipping archived, interrupted and advisor ones),
 2. the domain steer of the scope (skipped when it is an advisor, then on to the hub),
 3. the hub steer (skipped when it is an advisor; then no candidate is left).
 

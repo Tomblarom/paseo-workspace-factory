@@ -77,7 +77,7 @@ export async function reconcileSteerSend({ client, workspaceId, agentId, actionI
     }
     if (!['ready', 'uncertain'].includes(action.phase) || typeof action.packet !== 'string') return { status: 'pending', action };
     const scope = meta[METADATA_KEY];
-    if (scope?.retired || (action.epoch != null && action.epoch !== scope?.epoch)) return { status: 'blocked', action, detail: 'Scope authority changed before delivery.' };
+    if (action.epoch != null && action.epoch !== scope?.epoch) return { status: 'blocked', action, detail: 'Scope authority changed before delivery.' };
     if (action.authority) {
       try { await guardScope({ client, held, workspaceId, scopeId: action.authority.scopeId, epoch: action.epoch, agentId: action.authority.agentId }); }
       catch (error) { return { status: 'blocked', action, detail: `Scope authority changed before delivery (${error.message}).` }; }

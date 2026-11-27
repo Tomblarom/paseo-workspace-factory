@@ -95,7 +95,7 @@ export async function deliverSteerBrief(paseo: any, input: RpcInput<typeof facto
       if (identity.epoch !== (meta[METADATA_KEY]?.epoch ?? null)) return { ...result, detail: "Scope authority changed since this brief was staged." };
       const agent = (await paseo.agents.ref(agentId).refresh())?.agent;
       if (agent?.workspaceId !== input.workspaceId || agent.archivedAt || agent.background === true ||
-          cleanupIdentity(agent.labels)?.role !== "steer" || meta[METADATA_KEY]?.retired) {
+          cleanupIdentity(agent.labels)?.role !== "steer") {
         return { ...result, detail: "The target is no longer a live steer in this workspace." };
       }
       const privacy = await readPrivacyAdmission(agent, { ...deps, paseo }, input.workspaceId);

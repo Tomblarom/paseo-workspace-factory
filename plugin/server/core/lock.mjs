@@ -33,7 +33,7 @@ export async function retryOnLockBusy(fn, { timeoutMs = 2_000, delayMs = 50 } = 
   }
 }
 
-/** Shared lock name for one workspace's factory metadata (switch, checkpoint, fresh, retire, scope top-up). */
+/** Shared lock name for one workspace's factory metadata (switch, checkpoint, fresh, scope top-up). */
 export function workspaceLockName(workspaceId) {
   return `workspace-${workspaceId}`;
 }

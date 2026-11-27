@@ -1158,7 +1158,7 @@ test("turn backfills adopted workers and queues without a live holder", async ()
 });
 
 // ---------------------------------------------------------------------------
-// Watchdog: backfill, retire, reconcile, stale, failover per scope.
+// Watchdog: backfill, remove, reconcile, stale, failover per scope.
 // ---------------------------------------------------------------------------
 
 test("watchdog backfills adopted workers and drops archived entries", async () => {

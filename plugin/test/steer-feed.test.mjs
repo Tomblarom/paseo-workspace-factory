@@ -130,18 +130,13 @@ test("a live steer projects a warm row with identity and flags", () => {
   });
 });
 
-test("retired scopes and replaced holders project Retired", () => {
-  const retired = feed(
-    paseoState([agent("steer-a")], { entries: { "steer-a": { ...TURN } }, wsf: { retired: true } }),
-  );
-  assert.equal(retired[0].state, "retired");
-  const replaced = feed(
-    paseoState([agent("steer-a"), agent("steer-b", { labels: { "wsf.scope": SCOPE, "wsf.role": "steer", "wsf.slot": "B" } })], {
-      entries: { "steer-a": { ...TURN }, "steer-b": { ...TURN } },
-      wsf: { previousSteer: "steer-a" },
-    }),
-  );
-  assert.deepEqual(replaced.map((row) => [row.slot, row.state]), [["A", "retired"], ["B", "warm"]]);
+test("archived tabs have no row even when legacy metadata names them", () => {
+  const rows = feed(paseoState([
+    agent("old", { archivedAt: iso(NOW) }),
+    agent("current"),
+  ], { entries: { old: { ...TURN }, current: { ...TURN } }, wsf: { retired: true, previousSteer: "old" } }));
+  assert.deepEqual(rows.map(({ agentId, state, active }) => ({ agentId, state, active })),
+    [{ agentId: "current", state: "warm", active: true }]);
 });
 
 test("a continuation origin gets no row; the live tab holds the slot", () => {

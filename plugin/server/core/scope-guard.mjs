@@ -33,7 +33,7 @@ export function scopeHolder({ agents, workspaceId, scopeId, slot, switches = [],
   if (allowVacant && holders.length === 0) return null;
   if (holders.length !== 1) throw new ScopeGuardError(`Expected one active Steer ${slot}, found ${holders.length}`);
   const holder = holders[0];
-  if (holder.status === 'error' && (agents ?? []).some((agent) => continuedFromId(agent) === holder.id)) {
+  if (holder.status === 'error' && (agents ?? []).some((agent) => !agent.archivedAt && continuedFromId(agent) === holder.id)) {
     throw new ScopeGuardError('Errored steer has a continuation and cannot resume scope authority');
   }
   return holder;
@@ -46,7 +46,7 @@ export async function guardScope({ client, held, workspaceId, scopeId, epoch, ag
   }
   const metadata = (await client.workspaces.ref(workspaceId).refresh())?.metadata ?? {};
   const state = metadata[METADATA_KEY];
-  if (!state || state.retired || state.epoch !== epoch || (slot && state.activeSteer !== slot) || (state.scope?.id && !sameScopeId(state.scope.id, scopeId))) {
+  if (!state || state.epoch !== epoch || (slot && state.activeSteer !== slot) || (state.scope?.id && !sameScopeId(state.scope.id, scopeId))) {
     throw new ScopeGuardError(`Scope state changed since discovery (expected ${slot ?? '?'}@${epoch}, found ${state?.activeSteer}@${state?.epoch}); repeat the operation`);
   }
   const agents = await readPaseoAgents(client);

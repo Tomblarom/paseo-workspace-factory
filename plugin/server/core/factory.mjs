@@ -52,7 +52,7 @@ export function createRunner({ config, client, gh, git, readState = readPaseoSta
   }
   return {
     discoverAll,
-    async runPlans(entries, { adopt = {}, slots, adoptWorker = {}, detach = false, state = null, legacyEnrollment = false, enrollmentVersion } = {}) {
+    async runPlans(entries, { adopt = {}, slots, adoptWorker = {}, detach = false, state = null, legacyEnrollment = false, enrollmentVersion, creationId } = {}) {
       if (!Array.isArray(entries) || entries.length !== 1) {
         throw new Error(`plan needs exactly one workspace entry, got ${Array.isArray(entries) ? entries.length : '?'}; enroll one existing workspace at a time`);
       }
@@ -62,7 +62,7 @@ export function createRunner({ config, client, gh, git, readState = readPaseoSta
       // keys (scoped per-entry keys are retired with multi-repo plans).
       const adoptFor = adopt['*'] ?? adopt[d.scope?.id?.toLowerCase()] ?? adopt[d.forkName?.toLowerCase()] ?? adopt[String(d.input ?? '').toLowerCase()] ?? {};
       const zerosub = getZerosub ? await getZerosub() : null;
-      return [planRepository(d, config, { adopt: adoptFor, slots, adoptWorker, detach, zerosub, legacyEnrollment, enrollmentVersion })];
+      return [planRepository(d, config, { adopt: adoptFor, slots, adoptWorker, detach, zerosub, legacyEnrollment, enrollmentVersion, creationId })];
     },
   };
 }

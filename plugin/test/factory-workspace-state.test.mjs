@@ -34,7 +34,6 @@ test('only one eligible steer may control the current workspace', () => {
   const advisor = workspaceSteers([steer('d', { active: true, advisor: true })], 'wks_main');
   assert.equal(advisor.controller, undefined);
   assert.equal(advisor.advisorAssigned, true);
-  assert.equal(workspaceSteers([steer('e', { active: true, state: 'retired' })], 'wks_main').controller, undefined);
   const collision = workspaceSteers([steer('f', { state: 'unknown', detail: 'Membership ambiguous' })], 'wks_main', 'A');
   assert.equal(collision.ambiguous, true);
 });
@@ -72,12 +71,11 @@ test('attention preserves the affected steer and metrics only count observed wor
   const active = steer('a', { active: true });
   const recovering = steer('b', { slot: 'B', state: 'needs-resume', permissionNeeded: false, stagedBrief: false,
     detail: 'Last reply failed · recovery pending' });
-  const retired = steer('c', { slot: 'C', state: 'retired' });
   const pending = pendingWorkspaceWork({
     openWorkers: [{ id: 'registered', state: 'blocked' }],
     pendingWorkerWakeCount: 2,
     workers: [{ id: 'registered', status: 'running' }, { id: 'unregistered', status: 'running' }],
-  }, [active, recovering, retired]);
+  }, [active, recovering]);
   assert.equal(pending.workerCount, 2);
   assert.equal(pending.workerRunning, 1);
   assert.deepEqual(pending.workerItems, ['Blocked workers (1)', 'Worker updates queued (2)']);

@@ -194,12 +194,6 @@ test('missing state, steer, ambiguity, parent and foreign workspace refuse', asy
   await assert.rejects(assign(foreign, discoveryOf(foreign)), /not in the main workspace/);
 });
 
-test('retired scopes refuse, naming the successor', async () => {
-  const world = makeWorld();
-  provisioned(world, { main: true, activeSteer: null, epoch: 5, retired: true, movedTo: '/p/new' });
-  await assert.rejects(assign(world, discoveryOf(world), { apply: true }), /retired.*moved to \/p\/new/);
-  assert.deepEqual(world.calls, [], 'no write to a retired scope');
-});
 
 test('blank task refuses; no-send writes without delivery; failed delivery keeps the write', async () => {
   const world = makeWorld();

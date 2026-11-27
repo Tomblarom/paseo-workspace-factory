@@ -3,7 +3,6 @@
 // action names the native Paseo command that performs it (`paseo archive`,
 // `paseo workspace archive`, `paseo project delete`).
 import { statSync } from 'node:fs';
-import { METADATA_KEY } from './paseo.mjs';
 import { listScopes } from './scope.mjs';
 import { isWorktreeWorkspace } from './discovery.mjs';
 import { readGitState } from './workers.mjs';
@@ -24,43 +23,6 @@ export function defaultExistsDir(path) {
 
 function liveAgentsIn(agents, workspaceId) {
   return agents.filter((a) => !a.archivedAt && a.workspaceId === workspaceId);
-}
-
-/**
- * Archived agents per project, including agents whose workspace already
- * vanished from the list (archived workspaces are unlistable, but the daemon
- * still attributes their agents via the projectKeys filter). Archived agents
- * alone are recoverable (soft-delete); deleting their project destroys them
- * permanently, so project.delete inventories and verifies them. Callers
- * without a client get snapshot-attributable agents as a best-effort
- * fallback (see archivedFor).
- */
-export async function attachProjectArchivedAgents(paseoState, client) {
-  if (!client || typeof client.agents?.list !== 'function') return paseoState;
-  const projects = paseoState?.projects ?? [];
-  const map = { ...(paseoState?.projectArchivedAgents ?? {}) };
-  for (const project of projects) {
-    if (!project.projectKey) continue;
-    const entries = [];
-    let cursor;
-    for (let guard = 0; guard < 100; guard += 1) {
-      const page = await client.agents.list({ filter: { projectKeys: [project.projectKey], includeArchived: true }, page: { limit: 200, ...(cursor ? { cursor } : {}) } });
-      entries.push(...(page.entries ?? []));
-      if (!page.pageInfo?.hasMore || !page.pageInfo.nextCursor) break;
-      cursor = page.pageInfo.nextCursor;
-    }
-    map[project.projectId] = entries.map((entry) => entry.agent ?? entry)
-      .filter((a) => a.archivedAt)
-      .map((a) => ({ id: a.id, title: a.title ?? null }))
-      .sort((a, b) => a.id.localeCompare(b.id));
-  }
-  return { ...paseoState, projectArchivedAgents: map };
-}
-
-function archivedFor(paseoState, agents, workspaces, projectId) {
-  if (paseoState?.projectArchivedAgents?.[projectId]) return paseoState.projectArchivedAgents[projectId];
-  const liveWs = new Set(workspaces.filter((w) => w.projectId === projectId).map((w) => w.id));
-  return agents.filter((a) => a.archivedAt && liveWs.has(a.workspaceId)).map((a) => ({ id: a.id, title: a.title ?? null }));
 }
 
 function gitInventory(git, dir) {
@@ -102,15 +64,15 @@ function parseIgnoredPaths(output) {
 /**
  * Candidates over the whole instance: scratch scopes, workspaces with a
  * missing directory, empty projects, several projects on one path, non_git
- * projects without a scope, and retired factory scopes. One entry per match
+ * projects without a scope. One entry per match
  * (a workspace can match several rules); each carries a loss inventory and a
  * recommended action. Reads daemon state, the filesystem and git; writes
  * nothing.
  */
 export function collectCleanupCandidates(paseoState, { git = null, existsDir = defaultExistsDir } = {}) {
   const projects = paseoState?.projects ?? [];
-  const workspaces = paseoState?.workspaces ?? [];
-  const agents = paseoState?.agents ?? [];
+  const workspaces = (paseoState?.workspaces ?? []).filter((workspace) => !workspace.archivedAt);
+  const agents = (paseoState?.agents ?? []).filter((agent) => !agent.archivedAt);
   const byWorkspaceId = new Map(workspaces.map((w) => [w.id, w]));
   const scopeWorkspaceIds = new Set(listScopes(paseoState ?? {}).map((s) => s.workspaceId));
   const candidates = [];
@@ -129,19 +91,18 @@ export function collectCleanupCandidates(paseoState, { git = null, existsDir = d
   };
 
   // Scratch scopes: any agent labelled at creation, or the metadata flag the
-  // agentless crash test sets. Archived scratch agents still mark the scope.
+  // flag the agentless crash test sets.
   const scratchWorkspaces = new Set();
   const scratchAgentsByWorkspace = new Map();
   for (const agent of agents) {
     if (agent.labels?.[SCRATCH_LABEL] === undefined) continue;
     const ws = byWorkspaceId.get(agent.workspaceId);
     if (!ws) {
-      const live = !agent.archivedAt;
       candidates.push({
         kind: 'scratch', id: agent.id, title: agent.title ?? null, path: null,
         detail: `scratch agent in unknown workspace ${agent.workspaceId ?? '(none)'}`,
         action: 'archive the scratch agent natively (`paseo archive <agent-id>`)',
-        loss: { agents: live ? 1 : 0, running: live && BUSY.has(agent.status) ? 1 : 0, worktree: false, git: null },
+        loss: { agents: 1, running: BUSY.has(agent.status) ? 1 : 0, worktree: false, git: null },
       });
       continue;
     }
@@ -171,15 +132,13 @@ export function collectCleanupCandidates(paseoState, { git = null, existsDir = d
     if (!workspacesByProject.has(ws.projectId)) workspacesByProject.set(ws.projectId, []);
     workspacesByProject.get(ws.projectId).push(ws);
   }
-  const projectLoss = (members, rootPath, projectIds) => {
+  const projectLoss = (members, rootPath) => {
     const live = members.flatMap((ws) => liveAgentsIn(agents, ws.id));
-    const archived = projectIds.flatMap((id) => archivedFor(paseoState, agents, workspaces, id));
     return {
       agents: live.length,
       running: live.filter((a) => BUSY.has(a.status)).length,
       worktree: members.some(isWorktreeWorkspace),
       git: gitInventory(git, rootPath),
-      archivedAgents: { count: archived.length, first: archived.slice(0, 5) },
     };
   };
 
@@ -190,7 +149,7 @@ export function collectCleanupCandidates(paseoState, { git = null, existsDir = d
     candidates.push({
       kind: 'empty-project', id: project.projectId, title: project.projectDisplayName ?? null, path: project.projectRootPath ?? null,
       detail: 'project without workspaces', action: 'delete the project natively (`paseo project delete <project-id>`)',
-      loss: projectLoss([], project.projectRootPath, [project.projectId]),
+      loss: projectLoss([], project.projectRootPath),
     });
   }
 
@@ -208,7 +167,7 @@ export function collectCleanupCandidates(paseoState, { git = null, existsDir = d
       kind: 'duplicate-project-path', id: path, title: null, path,
       detail: `${group.length} projects share this path: ${group.map((p) => p.projectId).join(', ')}`,
       action: 'manual choice: keep one project, delete the rest natively (`paseo project delete <project-id>`)',
-      loss: projectLoss(members, path, group.map((p) => p.projectId)),
+      loss: projectLoss(members, path),
     });
   }
 
@@ -221,19 +180,8 @@ export function collectCleanupCandidates(paseoState, { git = null, existsDir = d
     candidates.push({
       kind: 'non-git-no-scope', id: project.projectId, title: project.projectDisplayName ?? null, path: project.projectRootPath ?? null,
       detail: `${members.length} workspace(s), none is a factory scope`, action: 'adopt a workspace as scope, or archive the workspaces natively (`paseo workspace archive <workspace-id>`)',
-      loss: projectLoss(members, project.projectRootPath, [project.projectId]),
+      loss: projectLoss(members, project.projectRootPath),
     });
-  }
-
-  // Retired factory scopes (marked retired, historically with movedTo).
-  for (const scope of listScopes(paseoState ?? {})) {
-    const meta = scope.workspace?.metadata?.[METADATA_KEY];
-    if (meta?.retired !== true) continue;
-    const ws = byWorkspaceId.get(scope.workspaceId) ?? scope.workspace;
-    if (!ws) continue;
-    workspaceCandidate('retired-scope', ws,
-      meta.movedTo ? `retired scope, moved to ${meta.movedTo}` : 'retired scope',
-      'archive the retired scope workspace natively (`paseo workspace archive <workspace-id>`)');
   }
 
   return candidates;
@@ -255,11 +203,7 @@ function formatGitLoss(git) {
 }
 
 export function formatLoss(loss) {
-  const base = `agents ${loss.agents} (${loss.running} running) · worktree ${loss.worktree ? 'yes' : 'no'} · ${formatGitLoss(loss.git)}`;
-  const archived = loss.archivedAgents?.count
-    ? ` · ${loss.archivedAgents.count} archived agent${loss.archivedAgents.count === 1 ? '' : 's'} (${(loss.archivedAgents.first ?? []).map((a) => a.title ?? a.id).join(', ')}${loss.archivedAgents.count > (loss.archivedAgents.first ?? []).length ? ', …' : ''})`
-    : '';
-  return `${base}${archived}`;
+  return `agents ${loss.agents} (${loss.running} running) · worktree ${loss.worktree ? 'yes' : 'no'} · ${formatGitLoss(loss.git)}`;
 }
 
 /** One compact line per candidate. */

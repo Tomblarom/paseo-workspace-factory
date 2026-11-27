@@ -83,17 +83,14 @@ older local Paseo checkout. `paseo agent --help` was also inspected.
   without source-agent ID to be a future rewindable user message, or staged.
   `plugin/server/core/rewind.mjs:33-83,134-149,193-235`;
   `plugin/server/core/steer.mjs:1083-1138,1330-1384`.
-- **Fresh, replacement:** if pre-dispatch discovery finds no point/client,
-  a new agent may be created from the slot profile/fallback, with a creation
-  receipt. Active replacement changes active agent and increments epoch; a
-  non-active replacement does neither. Old tab is renamed `Retired X` so its
-  title releases membership; failure to rename is reported. The old chat
-  remains in that tab. `plugin/server/core/steer.mjs:1206-1247,1259-1318,1480-1529`;
-  `plugin/server/core/steer.mjs:817-829`.
+- **Fresh, replacement:** the confirmed preview names the destination route and
+  states that Paseo will archive the outgoing agent. The creation receipt binds
+  the replacement. Active replacement records the new holder and advances the
+  epoch. Standby replacement preserves authority.
 - **Fresh failure safety:** after rewind dispatch, even an “unsupported” error
   is an uncertain outcome: no silent replacement or retry. Pre-dispatch
-  no-point/unavailable can fall back. The confirmed rewind route is bound by
-  the plugin RPC; on failure its packet is carried for staging.
+  no-point/unavailable requires a separate replacement confirmation. The plugin
+  RPC binds the rewind route and carries the packet on failure for staging.
   `plugin/server/core/rewind.mjs:134-149,167-189`;
   `plugin/server/core/steer.mjs:1018-1062`;
   `plugin/server/handlers.ts:456-511`.

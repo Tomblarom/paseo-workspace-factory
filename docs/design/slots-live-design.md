@@ -96,7 +96,7 @@ the current busy-agent, parent, caller-takeover and epoch checks; recheck the ta
 generation before activation. Show quota and cache estimates in the preview when available.
 Automatic failover and manual switch suggestions share a live-candidate selector.
 
-1. Resolve continuations and remove archived, retired, superseded, ambiguous, advisor,
+1. Resolve continuations and remove archived, superseded, ambiguous, advisor,
    interrupted and currently ineligible agents. A closed but wakeable agent is eligible.
 2. For quota failover, exclude exhausted candidates and those sharing the failing account
    or pool, unless account evidence confirms a separate usable account. Respect ZeroSub's
@@ -128,7 +128,7 @@ Automatic failover and manual switch suggestions share a live-candidate selector
   reconcile completed steps from receipts before evaluating remaining operations. If a
   relevant setting, holder or selected model/account changed, require a new preview before
   running the changed operation. A retry after creation and before activation uses the same
-  holder. A retired scope blocks provisioning.
+  holder.
 
 ## Settings RPC and offline behavior
 
@@ -198,7 +198,7 @@ errors. Keep the CLI entry and the in-package core consistent (single copy under
 | 1. Add the effective settings loader, RPC and v3 migration tests. Build the new snapshot from plugin settings only, with the old entry points still using their current schema during development. | v1/v2 documents, defaults, read-only RPC, transport errors and timeout, local-only setup, CLI/plugin snapshot parity and a fixture that detects legacy file reads. |
 | 2. Add shared holder resolution, generation and adoption/replacement primitives. | Existing labels and sparse slots, archive/reuse and unarchive, superseded duplicates, rewind and ZeroSub continuation, generation guards, concurrent mutation and receipt recovery. |
 | 3. Use live holders in status, resume, switch, worker ownership and supervision. | Actual model after a profile edit, advisor/privacy exclusions, quota/account/reset filtering, warm/cold/unknown cache ranking, stale wakes, and domain/hub escalation. |
-| 4. Cut plan/apply and add over to dynamic allocation and make the CLI use the RPC. Enable v3 settings with the UI in step 5 in the same release. Remove the JSON loader and file writes, and reject old confirmations. | Empty, adopted-only, initialized and retired scopes; preserved checkpoints; missing host setup; plan drift and retry between create and activate; two competing allocators. |
+| 4. Cut plan/apply and add over to dynamic allocation and make the CLI use the RPC. Enable v3 settings with the UI in step 5 in the same release. Remove the JSON loader and file writes, and reject old confirmations. | Empty, adopted-only, and initialized scopes; preserved checkpoints; missing host setup; plan drift and retry between create and activate; two competing allocators. |
 | 5. Update settings and scope UI, composer/CLI help, and setup docs. | Priority reorder/validation, migration and readiness messages, CLI and composer argument handling, and manual preview → confirm → switch smoke test. Run the root and plugin suites and plugin typecheck at each step. |
 
 ## Product decisions (2026-11-25)

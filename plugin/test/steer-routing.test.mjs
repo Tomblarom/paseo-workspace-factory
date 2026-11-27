@@ -207,7 +207,7 @@ test("sensitivity follows the runtime provider rather than an unrelated slot pre
 });
 
 test("an advisor continuation inherits the restriction across providers even with conflicting role metadata", async () => {
-  const origin = { id: "origin", provider: "codex", workspaceId: "ws", archivedAt: "2026-11-26",
+  const origin = { id: "origin", provider: "codex", workspaceId: "ws",
     labels: { [LABEL.role]: "steer", [LABEL.scope]: "owner/repo", [LABEL.steerRole]: "coordinator" },
     metadata: { [LABEL.steerRole]: "advisor" } };
   const target = { id: "target", provider: "claude", workspaceId: "ws", labels: { [CONTINUED_FROM_LABEL]: origin.id } };
@@ -217,6 +217,6 @@ test("an advisor continuation inherits the restriction across providers even wit
   assert.match(steerRouteCandidate({ agent: target, entry: {}, snapshot }).reason, /advisor brief requires verified/);
   delete origin.metadata;
   assert.equal((await readPrivacyAdmission(target, { paseo })).allowed, true);
-  target.labels[CONTINUED_FROM_LABEL] = "missing";
+  origin.archivedAt = "2026-11-26";
   assert.match((await readPrivacyAdmission(target, { paseo })).reason, /continuation role is unknown/);
 });
