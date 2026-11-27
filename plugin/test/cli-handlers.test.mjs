@@ -161,6 +161,21 @@ const loader = {
   loadPromptOptions: async () => ({ findingsInPrompts: false, factoryRoot: null }),
 };
 
+test("assignment suggests a current worktree scope for an obsolete folder-based address", async () => {
+  const world = makeWorld();
+  const [workspace] = world.workspaces;
+  const scope = workspace.metadata[METADATA_KEY].scope;
+  scope.kind = "workspace";
+  scope.id = "topic-1";
+  const old = { ...workspace, id: "wks_old", archivedAt: "2026-11-25T10:00:00Z",
+    metadata: { [METADATA_KEY]: { ...workspace.metadata[METADATA_KEY], scope: { ...scope, id: "topic" } } } };
+  world.workspaces.push(old);
+  const before = structuredClone(world.workspaces);
+  await assert.rejects(handlers.previewAssign({ repo: "topic", task: "Continue" }, { paseo: fakePaseo(world) }, loader),
+    new RegExp(`Unknown scope "topic".*Nearby live worktree scopes: "topic-1" \\(workspace:${MAIN}\\)`));
+  assert.deepEqual(world.workspaces, before);
+});
+
 test("plan RPC normalizes one live bootstrap letter without consulting configured slots", async () => {
   const world = makeWorld();
   const ws = world.workspaces[0];

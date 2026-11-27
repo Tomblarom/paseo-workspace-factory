@@ -53,7 +53,7 @@ function fakeGit(world) {
       if (!lines.length) throw new Error('exit 1');
       return lines.join('\n');
     }
-    if (args[0] === 'rev-parse') return args.includes('--abbrev-ref') ? 'main' : 'b1c2d3e4f5a6b7c8d9e0';
+    if (args[0] === 'rev-parse') return args.includes('--abbrev-ref') ? checkout.branch ?? 'main' : 'b1c2d3e4f5a6b7c8d9e0';
     if (args[0] === 'status') return '';
     throw new Error(`unexpected git ${args.join(' ')}`);
   };
@@ -174,6 +174,31 @@ test('1: plan workspace:<id> --domain plans a scope.domain op (worktree)', async
 });
 
 // ------------------------------------------------------------ package 2: plan by scope id
+
+test('a new checkout of the same branch can reuse the archived worktree scope id', async () => {
+  const world = makeWorld();
+  const parent = '/p/mainproj';
+  const branch = 'topic';
+  const oldPath = '/wt/topic';
+  const newPath = '/wt/topic-1';
+  const scope = { id: `mainproj@${branch}`, kind: 'workspace' };
+  world.checkouts[parent] = { remotes: {} };
+  world.checkouts[oldPath] = { remotes: {}, branch, linkedWorktree: true };
+  world.checkouts[newPath] = { remotes: {}, branch, linkedWorktree: true };
+  const old = addWorktree(world, { mainPath: parent, worktreePath: oldPath, scope });
+  const live = addWorktree(world, { mainPath: parent, worktreePath: newPath, scope: { ...scope, id: 'new-fixture' } });
+  old.ws.archivedAt = '2026-11-25T10:00:00Z';
+  for (const agent of Object.values(old.steers)) agent.archivedAt = old.ws.archivedAt;
+  live.ws.metadata = {};
+  world.agents = world.agents.filter((agent) => agent.workspaceId !== live.ws.id);
+  const [plan] = await runnerFor(world).runPlans([{ workspace: live.ws.id }]);
+  assert.equal(plan.repo, scope.id);
+  assert.deepEqual(plan.conflicts, []);
+  assert.equal(plan.ops.find((op) => op.params.metadata?.[METADATA_KEY])?.params.metadata[METADATA_KEY].scope.id, scope.id);
+  old.ws.archivedAt = null;
+  const [collision] = await runnerFor(world).runPlans([{ workspace: live.ws.id }]);
+  assert.ok(collision.conflicts.some(({ reason }) => reason.includes(`already used by workspace ${old.ws.id}`)));
+});
 
 test('2: plan addresses an existing dir scope by scope id, case-insensitively', async () => {
   const world = makeWorld();

@@ -170,6 +170,22 @@ async function resolveEntryForAddress(
         `Workspace "${title}" is not managed by the factory yet. To set it up, preview a plan: ${suggestion}`,
       );
     }
+    // A bare name can only be a managed scope. In particular, a recreated
+    // worktree can have a suffixed folder or now use the parent@branch id.
+    if (/^[\w-][\w.@-]*$/.test(address)) {
+      const name = address.toLowerCase();
+      const nearby = listScopes(paseoState)
+        .filter((scope) => {
+          if (scope.kind !== "workspace") return false;
+          const id = scope.id.toLowerCase();
+          return id.endsWith(`@${name}`) || (id.startsWith(`${name}-`) && /^\d+$/.test(id.slice(name.length + 1)));
+        })
+        .sort((a, b) => a.id.localeCompare(b.id) || a.workspaceId.localeCompare(b.workspaceId))
+        .slice(0, 3)
+        .map((scope) => `${JSON.stringify(scope.id)} (workspace:${scope.workspaceId})`);
+      const hint = nearby.length ? ` Nearby live worktree scopes: ${nearby.join(", ")}.` : "";
+      throw new Error(`Unknown scope ${JSON.stringify(address)}.${hint} Run /factory scopes to see the managed projects.`);
+    }
   }
   return {
     target: resolved.entry,
