@@ -236,6 +236,10 @@ export function projectWorkspaceActivity(
     events.push(event);
     return event;
   };
+  const checkpoint = asRecord(metadata?.[CHECKPOINT_KEY]);
+  const failover = checkpoint?.source === "failover" ? asRecord(checkpoint.failover) : null;
+  const failoverAt = recordedTime(checkpoint?.updatedAt);
+  const localFailover = failover?.kind === "local-switch";
   const holderGroup: Group = { kind: "holder-change" };
   let holderChange: DraftEvent | undefined;
   const previousSlot = slotLabel(state.previousSteer);
@@ -247,6 +251,8 @@ export function projectWorkspaceActivity(
         from: previousSlot,
         participant: slotLabel(state.activeSteer) ?? participant(state.activeAgentId),
         participantAgentId: liveAgentId(state.activeAgentId),
+        cause: localFailover && failoverAt && checkpoint?.epoch === state.epoch && failoverAt === recordedTime(state.switchedAt)
+          ? takeoverCause(failover.reason) : undefined,
       },
     );
   }
@@ -269,9 +275,6 @@ export function projectWorkspaceActivity(
     }
   }
 
-  const checkpoint = asRecord(metadata?.[CHECKPOINT_KEY]);
-  const failover = checkpoint?.source === "failover" ? asRecord(checkpoint.failover) : null;
-  const failoverAt = recordedTime(checkpoint?.updatedAt);
   let failoverProjected = false;
   const entries = asRecord(metadata?.[AGENTS_KEY]);
   for (const agentId of [...members.keys()].sort()) {
@@ -341,7 +344,7 @@ export function projectWorkspaceActivity(
       forAgent({ kind: "worker-wake", state: "recorded", reason: "wake-recorded" }, worker?.lastWakeAt);
     }
   }
-  if (failover && !failoverProjected) {
+  if (failover && !localFailover && !failoverProjected) {
     record({ kind: "takeover-request", state: "recorded", reason: "takeover-recorded" }, failoverAt, {
       from: slotLabel(failover.previousSteer),
       cause: takeoverCause(failover.reason),

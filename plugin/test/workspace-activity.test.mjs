@@ -222,6 +222,21 @@ test('groups recovery by its saved reference and rewind by the acknowledged brie
   assert.ok(project(metadata, agents).events.every((event) => !event.group));
 });
 
+test('projects a completed local failover as a control change', () => {
+  const metadata = {
+    wsf: { main: true, epoch: 5, previousSteer: 'A', activeSteer: 'B', activeAgentId: 'target', switchedAt: at(5) },
+    'wsf.checkpoint': { source: 'failover', epoch: 5, updatedAt: at(5),
+      failover: { kind: 'local-switch', previousSteer: 'A', reason: 'provider limit' } },
+  };
+  const agents = [steer('target', 'B')];
+  assert.deepEqual(project(metadata, agents).events, [
+    { kind: 'holder-change', state: 'recorded', reason: 'slot-changed', observedAt: at(5),
+      from: 'Steer A', participant: 'Steer B', participantAgentId: 'target', cause: 'provider-limit' },
+  ]);
+  metadata.wsf.epoch += 1;
+  assert.equal(project(metadata, agents).events[0].cause, undefined);
+});
+
 test('projects takeover cause and grouped rewind attempts without confirming delivery', () => {
   const secret = 'sensitive-pool-name';
   const reason = `quota exhausted for pool (${secret})`;
