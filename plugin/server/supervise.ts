@@ -123,7 +123,7 @@ export interface SuperviseDeps extends SettingsSource, ZerosubSource {
   force?: boolean;
   failingPool?: string | null;
   failoverReason?: string;
-  failingAgentId?: string;
+  failingAgentId?: string | null;
   quotaTrigger?: { accountId?: string | null };
 }
 
@@ -607,8 +607,17 @@ async function deliverScopeWake(paseo: any, args: ScopeWakeInput, deps: Supervis
   const rows = steerRows(paseoState, scope.id, agentState, config);
   const target = activeHolder(paseoState, scope, freshWsf);
   if (!target) {
+    const takeover = await runFailoverCheck(paseo, scope, {
+      ...deps, state: paseoState, force: true, failingAgentId: null,
+    });
+    if (takeover.action === "failover") {
+      return { sent: true, target: takeover.to?.steerId ?? null, events: events.length };
+    }
     log(`[factory] supervise: no live holder of ${scope.id} active steer; wake queued`);
-    return { sent: false, reason: "no-target", target: null };
+    return {
+      sent: false, reason: takeover.action === "wait" ? takeover.reason ?? "brief-pending" : "no-target", target: null,
+      ...(takeover.wakeAt ? { wakeAt: takeover.wakeAt } : {}),
+    };
   }
   const targetAgent = await refreshAgent(paseo, target);
   if (!canWakeAgent(targetAgent, scope.id)) {
@@ -1362,7 +1371,16 @@ export async function runFailoverCheck(
   const config = routing.config;
   const rows = steerRows(paseoState, scope.id, agentState, config);
   const holder = activeHolder(paseoState, scope, wsf);
-  if (deps.failingAgentId && holder !== deps.failingAgentId) return { action: "clear", reason: "holder-changed" };
+  if (deps.failingAgentId !== undefined && holder !== deps.failingAgentId) return { action: "clear", reason: "holder-changed" };
+  if (deps.failingAgentId === null) {
+    try {
+      scopeHolder({ agents: paseoState.agents, workspaceId: mainId, scopeId: scope.id, slot: activeSlot, allowVacant: true });
+    } catch {
+      return { action: "wait", reason: "holder-unresolved" };
+    }
+    const due = await filterStaleWorkerEvents(paseo, meta, collectPendingWakes(register));
+    if (!due.length) return { action: "clear", reason: "no-events" };
+  }
   const holderDelivery = pendingSteerDelivery(holder ? agentState[holder] : null);
   if (holderDelivery?.epoch === wsf.epoch && isAutomaticActivation(holderDelivery)) {
     return { action: "wait", reason: "brief-pending" };
@@ -1558,6 +1576,10 @@ export async function runFailoverCheck(
                   steerWakeResponse({ entry: entries[outgoing?.id], status: outgoing?.status, lastWakeAt: currentWake }) === "answered") {
                 throw new ST.SwitchRefused("The unanswered wake changed before failover");
               }
+            }
+            if (deps.failingAgentId === null &&
+                !(await filterStaleWorkerEvents(paseo, metadata, collectPendingWakes(readWorkers(metadata)))).length) {
+              throw new ST.SwitchRefused("No worker wake remains due");
             }
             const [observed, liveTarget, liveHolder] = await Promise.all([
               readAdmissionSnapshot(admissionDeps, workspaces),

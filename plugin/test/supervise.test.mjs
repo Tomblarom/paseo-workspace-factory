@@ -927,6 +927,52 @@ test("unanswered wake transfers local authority and sends one continuation", asy
   assert.equal(sendsTo(world, steers.B.id).length, 1);
 });
 
+test("a due worker wake activates a standby when the active slot is vacant", async () => {
+  const { world, ws, steers, worker } = unansweredWorld();
+  steers.A.archivedAt = at(NOW - MIN);
+  ws.metadata[METADATA_KEY].activeAgentId = steers.A.id;
+  worker.labels[PARENT_LABEL] = steers.A.id;
+  const pendingWake = { state: "done", queuedAt: at(NOW) };
+  ws.metadata[WORKERS_KEY][worker.id] = entry("done", "deliver result", { pendingWake });
+  const scope = { id: REPO, workspaceId: ws.id };
+  const paseo = fakeClient(world);
+  const deps = failoverDeps(world);
+  const first = await supervise.sendScopeWake(paseo, { scope }, deps);
+  assert.equal(first.sent, true);
+  assert.equal(first.target, steers.B.id);
+  assert.equal(ws.metadata[METADATA_KEY].activeAgentId, steers.B.id);
+  assert.equal(ws.metadata[METADATA_KEY].epoch, 4);
+  assert.equal(worker.labels[PARENT_LABEL], steers.B.id);
+  assert.deepEqual(ws.metadata[WORKERS_KEY][worker.id].pendingWake, pendingWake);
+  assert.equal(sendsTo(world, steers.A.id).length, 0);
+  assert.equal(sendsTo(world, steers.B.id).length, 1);
+  assert.equal((await supervise.retryPendingWakeBrief(paseo, scope, deps)).delivered, false);
+});
+
+test("a vacant-slot wake leaves authority and the report intact when membership or due work changes", async () => {
+  for (const race of ["ambiguous holder", "slot filled", "wake withdrawn"]) {
+    const { world, ws, steers, worker } = unansweredWorld();
+    const pendingWake = { state: "blocked", queuedAt: at(NOW) };
+    ws.metadata[WORKERS_KEY][worker.id].pendingWake = pendingWake;
+    steers.A.archivedAt = race === "ambiguous holder" ? null : at(NOW - MIN);
+    if (race === "ambiguous holder") {
+      addAgent(world, { title: steers.A.title, workspaceId: ws.id, labels: { ...steers.A.labels } });
+    }
+    const deps = failoverDeps(world, {
+      lock: (name, operation) => {
+        if (race === "slot filled") steers.A.archivedAt = null;
+        if (race === "wake withdrawn") ws.metadata[WORKERS_KEY][worker.id].pendingWake = null;
+        return noLock(name, operation);
+      },
+    });
+    const scope = { id: REPO, workspaceId: ws.id };
+    const result = await supervise.sendScopeWake(fakeClient(world), { scope }, deps);
+    assert.equal(result.sent, false, race);
+    assert.equal(ws.metadata[METADATA_KEY].epoch, 3, race);
+    assert.equal(world.calls.length, 0, race);
+  }
+});
+
 test("a cold successor holds authority during renewal and receives its continuation once", async () => {
   const { world, ws, steers, worker } = unansweredWorld();
   steers.C.archivedAt = at(NOW); // B is the only eligible route in this renewal test.
@@ -1314,7 +1360,7 @@ test("failover race: exactly one of two candidates wins the switch", async () =>
   assert.equal(world.workspaces[0].metadata[METADATA_KEY].activeSteer, "B");
 });
 
-test("turn backfills adopted workers and queues without a live holder", async () => {
+test("turn backfills adopted workers and queues without a live holder or successor", async () => {
   const world = makeWorld();
   const { ws, steers } = provisioned(world);
   const adopted = addWorker(world, ws);
@@ -1325,6 +1371,7 @@ test("turn backfills adopted workers and queues without a live holder", async ()
   assert.equal(written.state, "partial");
   assert.equal(written.startedBy, "A");
   world.workspaces[0].metadata[METADATA_KEY].activeSteer = "Z";
+  for (const steer of Object.values(steers)) steer.archivedAt = at(NOW - MIN);
   const lonely = addWorker(world, ws);
   world.workspaces[0].metadata[WORKERS_KEY][lonely.id] = entry("running", "lonely");
   const queued = await turnedOut(world, lonely, { assistant: checkpointOf("l", "blocked") }, { settings: settings({ wakeDebounceSeconds: 0 }) });
