@@ -10,6 +10,7 @@ import {
   applySteerAddRpc,
   applySteerSettingsRpc,
   applySwitch,
+  confirmAssign,
   createResumeBriefBuilder,
   deliverSteerBriefRpc,
   getCleanup,
@@ -74,6 +75,7 @@ import { shortHolderId } from "./server/core/steer-create.mjs";
 import {
   factoryApply,
   factoryAssign,
+  factoryAssignConfirm,
   factoryAssignPreview,
   factoryCheckpoint,
   factoryCheckpointPreview,
@@ -230,6 +232,7 @@ export default function contribute(server: PluginServerContext) {
     getZerosub, getQuotaSettings: readQuotaSettings,
   }));
   server.handle(factoryAssignPreview, (input, ctx) => previewAssign(input, ctx, loader));
+  server.handle(factoryAssignConfirm, (input, ctx) => confirmAssign(input, ctx, loader));
   server.handle(factoryAssign, (input, ctx) => applyAssign(input, ctx, loader));
   server.handle(factoryModelsList, (input, ctx) => listModels(input, ctx, loader, hostSettings));
   server.handle(factoryModelsSet, (input, ctx) => setModels(input, ctx, loader, hostSettings));

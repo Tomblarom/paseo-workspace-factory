@@ -13,6 +13,7 @@ const USAGE = `Usage: paseo-factory <command> [options]
   checkpoint [scope] --from-agent <steer-id> [--next <text>]   take the CHECKPOINT block of its last answer
   switch [scope] --to <slot> [--apply] [--no-send] [--wait] [--notify-previous] [--language en|de]
   assign <scope> --task <text> [--test <text>]... [--blocker <text>]... [--next <text>] [--report-to <agent-id>] [--expect-epoch <n>] [--apply] [--no-send] [--json]   (report-to defaults to the calling agent)
+  assign --confirm <hash> [--json]   apply the saved assignment
   workers [scope] [--prune] [--apply] [--json]   print the worker register (task, state, resumes); --prune removes entries whose agent is gone
   worker pick [scope] [--failed <profile> --reason <text>] [--json]   chosen worker profile plus paseo run flags
   worker start [scope] --task <text> [--title <title>] [--apply] [--json]   start a worker from the active steer
@@ -30,7 +31,7 @@ const OPTIONS = {
   wait: BOOL, 'notify-previous': BOOL, language: STR, task: STR,
   test: { type: 'string', multiple: true }, blocker: { type: 'string', multiple: true }, next: STR,
   'from-agent': STR, 'from-steer': STR, 'report-to': STR, 'expect-epoch': STR,
-  agent: STR, prune: BOOL, title: STR, failed: STR, reason: STR,
+  agent: STR, prune: BOOL, title: STR, failed: STR, reason: STR, confirm: STR,
 };
 
 function omit(obj, keys) {
@@ -108,6 +109,7 @@ export async function runCli(argv = process.argv.slice(2), { connectRpc = connec
   const [command, ...args] = positionals;
   if (!command || command === 'help' || values.help) return out(USAGE);
   if (values.prune && command !== 'workers') throw new Error('--prune is only accepted with workers');
+  if (values.confirm !== undefined && command !== 'assign') throw new Error('--confirm is only accepted with assign');
 
   if (command === 'worker') {
     const [sub, ...rest] = args;
@@ -161,8 +163,14 @@ export async function runCli(argv = process.argv.slice(2), { connectRpc = connec
     if (values['from-agent'] && values.task) throw new Error('use either --task or --from-agent');
     if (!values.task && !values['from-agent'] && !values['from-steer']) throw new Error('checkpoint needs --task or --from-agent');
   } else if (command === 'assign') {
-    if (!values.task) throw new Error('assign needs --task <text>');
-    if (values['expect-epoch'] !== undefined && !Number.isInteger(Number.parseInt(values['expect-epoch'], 10))) {
+    if (values.confirm !== undefined) {
+      if (scope || Object.keys(values).some((option) => !['confirm', 'json'].includes(option))) {
+        throw new Error('assign --confirm uses the saved scope and options; pass only the preview hash and optional --json');
+      }
+      if (!/^[0-9a-f]{16}$/.test(values.confirm)) throw new Error('--confirm needs the 16-character assignment preview hash');
+    } else if (!values.task) {
+      throw new Error('assign needs --task <text> or --confirm <hash>');
+    } else if (values['expect-epoch'] !== undefined && !Number.isInteger(Number.parseInt(values['expect-epoch'], 10))) {
       throw new Error('--expect-epoch needs an integer epoch from the preview');
     }
   }
@@ -243,23 +251,31 @@ export async function runCli(argv = process.argv.slice(2), { connectRpc = connec
       if (result.reply !== null && result.reply !== undefined) out(`--- reply of Steer ${result.to}\n${result.reply ?? '(no answer text)'}`);
       return;
     }
-    const expectEpoch = values['expect-epoch'] !== undefined ? Number.parseInt(values['expect-epoch'], 10) : undefined;
-    const assignInput = {
-      ...base, task: values.task, tests: values.test ?? [], blockers: values.blocker ?? [],
-      ...(values.next ? { next: values.next } : {}), ...(values['report-to'] ? { reportTo: values['report-to'] } : {}),
-      ...(agentId ? { callerId: agentId } : {}), ...(expectEpoch !== undefined ? { expectEpoch } : {}),
-    };
-    const preview = await client.call('factory.assign.preview', assignInput);
-    noteAlias(preview, scope, err);
-    const result = values.apply
-      ? await client.call('factory.assign', { ...assignInput, fingerprint: preview.fingerprint, send: !values['no-send'] })
-      : preview;
+    const caller = agentId ? { callerId: agentId } : {};
+    let result;
+    if (values.confirm !== undefined) {
+      result = await client.call('factory.assign.confirm', { hash: values.confirm, ...caller });
+    } else {
+      const expectEpoch = values['expect-epoch'] !== undefined ? Number.parseInt(values['expect-epoch'], 10) : undefined;
+      const send = !values['no-send'];
+      const assignInput = {
+        ...base, task: values.task, tests: values.test ?? [], blockers: values.blocker ?? [],
+        ...(values.next ? { next: values.next } : {}), ...(values['report-to'] ? { reportTo: values['report-to'] } : {}),
+        ...caller, ...(expectEpoch !== undefined ? { expectEpoch } : {}),
+      };
+      const preview = await client.call('factory.assign.preview', values.apply ? assignInput : { ...assignInput, save: { send } });
+      noteAlias(preview, scope, err);
+      result = values.apply
+        ? await client.call('factory.assign', { ...assignInput, fingerprint: preview.fingerprint, send })
+        : preview;
+      if (!values.apply) need(preview, 'factory.assign.preview', 'confirmationHash');
+    }
     if (!values.json) need(result, 'factory.assign', 'packet');
     if (values.json) return out(JSON.stringify(omit(result, ['fingerprint', 'deprecatedAlias', 'scopeInfo']), null, 2));
-    out(`${result.applied ? 'Assigned' : 'Dry-run'}: ${result.scope} epoch ${result.epoch} · Steer ${result.slot} ${result.steerId}${result.domain ? ` · domain ${result.domain}` : ''}${(result.domainChildren ?? []).length ? ` · domain of ${result.domainChildren.length} (${result.domainChildren.join(', ')})` : ''}${result.previous ? '' : ' · NO previous checkpoint'}${result.delivered ? ' · delivered' : ''}${result.deliveryError ? ` · delivery failed: ${result.deliveryError}` : ''}`);
+    out(`${result.applied ? 'Assigned' : 'Dry-run'}: ${result.scope} epoch ${result.epoch} · Steer ${result.slot} ${result.steerId}${result.domain ? ` · domain ${result.domain}` : ''}${(result.domainChildren ?? []).length ? ` · domain of ${result.domainChildren.length} (${result.domainChildren.join(', ')})` : ''}${result.previous ? '' : ' · NO previous checkpoint'}${result.delivered ? ' · delivered' : ''}${result.deliveryError ? ` · delivery failed: ${result.deliveryError}` : ''}${result.send === false ? ' · delivery disabled' : ''}`);
     if (result.previous) out(`Replaces task: ${result.previous}`);
     out(`---\n${result.packet}`);
-    if (!result.applied) out(`---\nNothing written. Apply: paseo-factory assign ${JSON.stringify(scope ?? result.scope)} --task ${JSON.stringify(values.task)} --apply`);
+    if (result.confirmationHash) out(`---\nConfirm: paseo-factory assign --confirm ${result.confirmationHash}`);
   } finally {
     await client.close();
   }

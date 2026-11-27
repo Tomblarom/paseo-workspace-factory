@@ -186,14 +186,18 @@ test('switch dry-run, --apply, --no-send and self-takeover call factory.switch.p
 });
 
 test('assign dry-run and --apply call factory.assign.preview and factory.assign', async () => {
+  const hash = '0123456789abcdef';
   const dry = await invoke(['assign', 'o/r', '--task', 'Ship it'], {
     responses: {
-      'factory.assign.preview': { scope: 'o/r', epoch: 2, slot: 'A', steerId: 's-a', previous: 'Old', packet: 'PKT', packetChars: 3, fingerprint: 'fp-a' },
+      'factory.assign.preview': { scope: 'o/r', epoch: 2, slot: 'A', steerId: 's-a', previous: 'Old', packet: 'PKT', packetChars: 3, fingerprint: 'fp-a', confirmationHash: hash },
     },
   });
+  assert.deepEqual(dry.calls[0].input, { repo: 'o/r', task: 'Ship it', tests: [], blockers: [], save: { send: true } });
   assert.match(dry.stdout, /Dry-run: o\/r epoch 2 · Steer A s-a/);
   assert.match(dry.stdout, /Replaces task: Old/);
-  assert.match(dry.stdout, /Apply: paseo-factory assign "o\/r" --task "Ship it" --apply/);
+  assert.equal(dry.stdout.split('\n').at(-1), `Confirm: paseo-factory assign --confirm ${hash}`);
+  await assert.rejects(invoke(['assign', 'other', '--confirm', hash]), /uses the saved scope and options/);
+  await assert.rejects(invoke(['assign', '--confirm', hash, '--no-send']), /uses the saved scope and options/);
 
   const applied = await invoke(['assign', 'o/r', '--task', 'Ship it', '--apply', '--no-send', '--expect-epoch', '2'], {
     responses: {
@@ -202,6 +206,7 @@ test('assign dry-run and --apply call factory.assign.preview and factory.assign'
     },
     env: { PASEO_AGENT_ID: 'hub-a' },
   });
+  assert.equal(applied.calls[0].input.save, undefined);
   assert.deepEqual(applied.calls[1].input, {
     repo: 'o/r', task: 'Ship it', tests: [], blockers: [], callerId: 'hub-a', expectEpoch: 2, fingerprint: 'fp-a', send: false,
   });

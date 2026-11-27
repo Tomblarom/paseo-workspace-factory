@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -12,11 +12,15 @@ register("./ts-resolve-hooks.mjs", import.meta.url);
 const handlers = await import("../server/handlers.ts");
 const { createConfigLoader } = await import("../server/config.ts");
 const { collectSteerStates } = await import("../server/steer-feed.ts");
-const { factoryWorkspaceResources } = await import("../shared/factory.ts");
+const { factoryAssign, factoryAssignConfirm, factoryAssignPreview, factoryWorkspaceResources } = await import("../shared/factory.ts");
+import { runCli } from "../cli.mjs";
+import { ASSIGNMENT_KEY } from "../server/core/assign.mjs";
+import { CHECKPOINT_KEY } from "../server/core/steer.mjs";
 import { LABEL, METADATA_KEY, PARENT_LABEL } from "../server/core/paseo.mjs";
 import { AGENTS_KEY } from "../server/core/agent-state.mjs";
 import { acquireLock, LockBusy, withLock, workspaceLockName } from "../server/core/lock.mjs";
 import { PROFILE_HEALTH_KEY } from "../server/core/quota.mjs";
+import { configureRuntime, runtime } from "../server/core/runtime.mjs";
 import { formatStatus, scopeCandidates } from "../server/core/scopes-view.mjs";
 import { formatSlotProfileSuggestion, resolveWorkerPick, workerListRows } from "../server/core/models.mjs";
 import { formatWorkersPruneText, formatWorkersText, workersReport, WORKERS_KEY } from "../server/core/supervision.mjs";
@@ -174,6 +178,154 @@ test("assignment suggests a current worktree scope for an obsolete folder-based 
   await assert.rejects(handlers.previewAssign({ repo: "topic", task: "Continue" }, { paseo: fakePaseo(world) }, loader),
     new RegExp(`Unknown scope "topic".*Nearby live worktree scopes: "topic-1" \\(workspace:${MAIN}\\)`));
   assert.deepEqual(world.workspaces, before);
+});
+
+function assignmentCli(world, callerId, { send } = {}) {
+  const stateDir = mkdtempSync(join(ROOT, "assign-"));
+  const context = { paseo: fakePaseo(world) };
+  if (send) {
+    const agentRef = context.paseo.agents.ref;
+    context.paseo.agents.ref = (id) => ({ ...agentRef(id), send });
+  }
+  const assignmentLoader = {
+    ...loader,
+    loadEffectiveConfig: async () => {
+      configureRuntime({ runtime: { stateDir } });
+      return loader.loadEffectiveConfig();
+    },
+  };
+  const routes = {
+    [factoryAssignPreview.name]: [factoryAssignPreview, handlers.previewAssign],
+    [factoryAssignConfirm.name]: [factoryAssignConfirm, handlers.confirmAssign],
+    [factoryAssign.name]: [factoryAssign, handlers.applyAssign],
+  };
+  return async (args, caller = callerId) => {
+    const output = [];
+    await runCli(["assign", ...args], {
+      env: caller ? { PASEO_AGENT_ID: caller } : {},
+      out: (line) => output.push(line),
+      connectRpc: async () => ({
+        async invokePluginRpc(pluginId, method, input) {
+          assert.equal(pluginId, "workspace-factory");
+          const [contract, handler] = routes[method];
+          return contract.output.parse(await handler(contract.input.parse(input), context, assignmentLoader, { getZerosub: async () => null }));
+        },
+      }),
+    });
+    return output.join("\n");
+  };
+}
+
+test("CLI confirms the saved multiline assignment and sends its exact preview packet once", async () => {
+  const world = makeWorld();
+  const cli = assignmentCli(world, "steer-a");
+  const fields = { task: "Review fixture\nsecond line", tests: ["test one\ntest two", "test three"], blockers: ["blocked\nby fixture"], next: "Next\nstep" };
+  const before = structuredClone(world.workspaces);
+  const output = await cli([
+    SCOPE, "--task", fields.task, "--test", fields.tests[0], "--test", fields.tests[1],
+    "--blocker", fields.blockers[0], "--next", fields.next, "--report-to", "steer-b",
+  ]);
+  const command = output.split("\n").at(-1);
+  assert.match(command, /^Confirm: paseo-factory assign --confirm [0-9a-f]{16}$/);
+  assert.equal(output.match(/^Confirm: /gm).length, 1);
+  assert.deepEqual(world.workspaces, before);
+  assert.deepEqual(world.sent, []);
+  const args = command.split(" ").slice(3);
+  await assert.rejects(cli(args, "steer-b"), /same caller/);
+  const [first, retry] = await Promise.allSettled([cli(args), cli(args)]);
+  const outcomes = [first, retry];
+  const success = outcomes.find(({ status }) => status === "fulfilled");
+  const refused = outcomes.find(({ status }) => status === "rejected");
+  assert.match(success?.value, /^Assigned: .* · delivered/m);
+  assert.match(refused?.reason.message, /held by another process|already used/);
+  await assert.rejects(cli(args), /already used/);
+  const packet = output.slice(output.indexOf("\n---\n") + 5, output.lastIndexOf("\n---\n"));
+  assert.deepEqual(world.sent, [["steer-a", packet]]);
+  const metadata = world.workspaces[0].metadata;
+  const checkpoint = metadata[CHECKPOINT_KEY];
+  assert.deepEqual({ task: checkpoint.task, tests: checkpoint.tests, blockers: checkpoint.blockers, next: checkpoint.next }, fields);
+  assert.equal(checkpoint.assignedBy, "steer-a");
+  assert.equal(metadata[ASSIGNMENT_KEY].by, "steer-b");
+});
+
+test("CLI rejects stale assignment epochs, holders and checkpoints before writing", async () => {
+  const scenarios = [
+    ["target epoch", /Assignment target changed/, (world) => world.workspaces[0].metadata[METADATA_KEY].epoch++],
+    ["target holder", /Assignment target changed/, (world) => { world.agents[0].id = "replacement"; }],
+    ["scope id", /Assignment target changed/, (world) => { world.workspaces[0].metadata[METADATA_KEY].scope.id = "renamed"; }],
+    ["checkpoint", /Checkpoint changed/, (world) => { world.workspaces[0].metadata[CHECKPOINT_KEY] = { task: "New work" }; }],
+  ];
+  for (const [name, reason, change] of scenarios) {
+    const world = makeWorld();
+    const cli = assignmentCli(world);
+    const { confirmationHash } = JSON.parse(await cli([SCOPE, "--task", "Continue", "--json"]));
+    change(world);
+    const before = structuredClone(world.workspaces);
+    await assert.rejects(cli(["--confirm", confirmationHash]), reason, name);
+    assert.deepEqual(world.workspaces, before, name);
+    assert.deepEqual(world.sent, [], name);
+  }
+});
+
+test("CLI refuses a stale requester epoch across workspaces", async () => {
+  const world = makeWorld();
+  const sourceDir = mkdtempSync(join(ROOT, "assignment-source-"));
+  const source = {
+    id: "wks_source", workspaceDirectory: sourceDir, workspaceKind: "local_checkout", title: "Main",
+    metadata: { [METADATA_KEY]: { main: true, activeSteer: "A", epoch: 5, scope: { id: "source", kind: "dir", locator: sourceDir } } },
+  };
+  world.workspaces.push(source);
+  world.agents.push({
+    ...world.agents[0], id: "source-a", workspaceId: source.id,
+    labels: { [LABEL.scope]: "source", [LABEL.role]: "steer", [LABEL.slot]: "A" },
+  });
+  const cli = assignmentCli(world, "source-a");
+  const { confirmationHash } = JSON.parse(await cli([SCOPE, "--task", "From source", "--json"]));
+  source.metadata[METADATA_KEY].epoch++;
+  const before = structuredClone(world.workspaces);
+  await assert.rejects(cli(["--confirm", confirmationHash]), /Assignment requester changed/);
+  assert.deepEqual(world.workspaces, before);
+  assert.deepEqual(world.sent, []);
+});
+
+test("CLI does not retry a send after a lost delivery response", async () => {
+  const world = makeWorld();
+  const cli = assignmentCli(world, null, { send: async (packet) => {
+    world.sent.push(packet);
+    throw new Error("Response lost");
+  } });
+  const { confirmationHash } = JSON.parse(await cli([SCOPE, "--task", "Continue", "--json"]));
+  const confirmed = JSON.parse(await cli(["--confirm", confirmationHash, "--json"]));
+  assert.equal(confirmed.applied, true);
+  assert.equal(confirmed.deliveryError, "Response lost");
+  await assert.rejects(cli(["--confirm", confirmationHash]), /already used/);
+  assert.equal(world.sent.length, 1);
+});
+
+test("CLI refuses unknown or altered saved assignments and preserves immediate apply", async () => {
+  const world = makeWorld();
+  const cli = assignmentCli(world, "steer-a");
+  const { confirmationHash } = JSON.parse(await cli([SCOPE, "--task", "Preview only", "--no-send", "--json"]));
+  const authorizationFile = join(runtime().planDir, "assignments", `${confirmationHash}.json`);
+  const authorization = JSON.parse(readFileSync(authorizationFile, "utf8"));
+  const modified = structuredClone(authorization);
+  modified.preview.fields.next = "Altered";
+  writeFileSync(authorizationFile, JSON.stringify(modified));
+  const before = structuredClone(world.workspaces);
+  await assert.rejects(cli(["--confirm", "ffffffffffffffff"]), /Unknown assignment preview hash/);
+  await assert.rejects(cli(["--confirm", confirmationHash]), /does not match the confirmation hash/);
+  assert.deepEqual(world.workspaces, before);
+  assert.deepEqual(world.sent, []);
+  writeFileSync(authorizationFile, JSON.stringify(authorization));
+  const silent = JSON.parse(await cli(["--confirm", confirmationHash, "--json"]));
+  assert.equal(silent.applied, true);
+  assert.equal(silent.delivered, false);
+  assert.deepEqual(world.sent, []);
+  const immediate = JSON.parse(await cli([SCOPE, "--task", "Automated", "--apply", "--json"]));
+  assert.equal(immediate.applied, true);
+  assert.equal(immediate.delivered, true);
+  assert.equal(immediate.checkpoint.task, "Automated");
+  assert.equal(world.sent.length, 1);
 });
 
 test("plan RPC normalizes one live bootstrap letter without consulting configured slots", async () => {

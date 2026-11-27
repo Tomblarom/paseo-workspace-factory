@@ -2,11 +2,13 @@ import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { appendFileSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import type { RpcInput } from "@getpaseo/plugin";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import {
   factoryApply,
   factoryAssign,
+  factoryAssignConfirm,
   factoryAssignPreview,
   factoryCheckpoint,
   factoryCheckpointPreview,
@@ -61,7 +63,7 @@ import {
   storeAuthorization,
   withApplyLock,
 } from "./core/apply.mjs";
-import { assignScope } from "./core/assign.mjs";
+import { assignmentCheckpointHash, assignScope, saveAssignmentPreview, withAssignmentConfirmation } from "./core/assign.mjs";
 import { discoveredRepoPublic, liveSlotHolders, outgoingAssignmentRecords } from "./core/discovery.mjs";
 import { collectCleanupCandidates } from "./core/cleanup.mjs";
 import { isAdvisorSteer, isSensitiveProfile, workerPriority } from "./core/config.mjs";
@@ -1628,13 +1630,30 @@ function formatDrainText(result: any): string {
   return lines.join("\n");
 }
 
+function assignmentRequester(snapshot: any, callerId: string | null | undefined) {
+  if (!callerId) return null;
+  const caller = (snapshot.agents ?? []).find((agent: any) => agent.id === callerId);
+  const source = (listScopes(snapshot) as any[]).find((item: any) => item.workspaceId === caller?.workspaceId);
+  const sourceState = source?.workspace?.metadata?.[METADATA_KEY];
+  if (!caller || !source || !Number.isInteger(sourceState?.epoch)) {
+    throw new Error("The requesting agent has no current factory scope authority");
+  }
+  return {
+    workspaceId: source.workspaceId,
+    scopeId: source.id,
+    epoch: sourceState.epoch,
+    agentId: caller.id,
+    aliases: [caller.labels?.[LABEL.scope], caller.labels?.[LABEL.repo]].filter(Boolean),
+  };
+}
+
 export async function previewAssign(
   input: RpcInput<typeof factoryAssignPreview>,
   { paseo }: PluginHandlerContext,
   loader: ConfigLoader,
   extra?: ZerosubHandlerExtra,
 ): Promise<any> {
-  const { config, discovery, scope, deprecatedAlias } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
+  const { config, discovery, scope, deprecatedAlias, snapshot } = await discoverOne(paseo, loader, input.repo, input.workspaceId);
   const zerosub = await readHandlerZerosub(extra);
   const dry: any = await (assignScope as any)({
     client: paseo,
@@ -1654,6 +1673,14 @@ export async function previewAssign(
     zerosub,
     ...(input.expectEpoch !== undefined ? { expectEpoch: input.expectEpoch } : {}),
   });
+  const confirmationHash = input.save ? saveAssignmentPreview({
+    workspaceId: discovery.mainWorkspace.id,
+    checkpointHash: assignmentCheckpointHash(discovery.mainWorkspace.metadata),
+    callerId: input.callerId ?? null,
+    requester: assignmentRequester(snapshot, input.callerId),
+    send: input.save.send,
+    preview: dry,
+  }) : undefined;
   return {
     scope: dry.scope,
     epoch: dry.epoch,
@@ -1671,6 +1698,7 @@ export async function previewAssign(
     deliveryError: null,
     deprecatedAlias,
     scopeInfo: scope,
+    ...(input.save ? { confirmationHash, send: input.save.send } : {}),
     fingerprint: assignFingerprint({
       scope: dry.scope,
       epoch: dry.epoch,
@@ -1681,6 +1709,37 @@ export async function previewAssign(
       next: dry.fields.next,
     }),
   };
+}
+
+export async function confirmAssign(
+  input: RpcInput<typeof factoryAssignConfirm>,
+  { paseo }: PluginHandlerContext,
+  loader: ConfigLoader,
+): Promise<any> {
+  await loader.loadEffectiveConfig(); // initialize the runtime path before looking up the saved preview
+  return withAssignmentConfirmation({
+    hash: input.hash,
+    callerId: input.callerId ?? null,
+    apply: async (saved: any, consume: () => void) => {
+      const { config, discovery, snapshot } = await discoverOne(paseo, loader, undefined, saved.workspaceId);
+      if (!isDeepStrictEqual(assignmentRequester(snapshot, saved.callerId), saved.requester)) {
+        throw new Error("Assignment requester changed since the preview; run a new preview");
+      }
+      return (assignScope as any)({
+        client: paseo,
+        discovery,
+        config,
+        ...saved.preview.fields,
+        apply: true,
+        send: saved.send,
+        assignedBy: saved.callerId,
+        requester: saved.requester,
+        reportTo: saved.preview.reportTo,
+        admitTarget: (agent: any) => readPrivacyAdmission(agent, { paseo, getConfig: () => loader.loadEffectiveConfig() }, saved.workspaceId),
+        confirmation: { ...saved, consume },
+      });
+    },
+  });
 }
 
 export async function applyAssign(
@@ -1727,22 +1786,7 @@ export async function applyAssign(
       "Something changed since the assign preview (for example a switch). Run /factory assign again and confirm the new preview.",
     );
   }
-  let requester: any = null;
-  if (input.callerId) {
-    const caller = (snapshot.agents ?? []).find((agent: any) => agent.id === input.callerId);
-    const source = (listScopes(snapshot) as any[]).find((item: any) => item.workspaceId === caller?.workspaceId);
-    const sourceState = source?.workspace?.metadata?.[METADATA_KEY];
-    if (!caller || !source || !Number.isInteger(sourceState?.epoch)) {
-      throw new Error("The requesting agent has no current factory scope authority");
-    }
-    requester = {
-      workspaceId: source.workspaceId,
-      scopeId: source.id,
-      epoch: sourceState.epoch,
-      agentId: caller.id,
-      aliases: [caller.labels?.[LABEL.scope], caller.labels?.[LABEL.repo]].filter(Boolean),
-    };
-  }
+  const requester = assignmentRequester(snapshot, input.callerId);
   const applied: any = await (assignScope as any)({
     client: paseo,
     discovery,

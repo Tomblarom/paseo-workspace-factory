@@ -1,8 +1,11 @@
-// Hub→scope assignment (S6). Preview first; --apply writes the scope checkpoint
+// Hub→scope assignment (S6). Preview first; apply writes the scope checkpoint
 // epoch-checked (same per-workspace lock as switches and checkpoints) and
 // delivers it to the active scope steer. A busy steer is allowed: unlike a
 // switch, an assignment changes neither the active steer nor the epoch, and
 // sending only queues a message.
+import { createHash, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { CHECKPOINT_KEY, checkpointRules, formatCheckpointBlock, steerStatus } from './steer.mjs';
 import { discoveredRepoPublic, liveSlotHolders } from './discovery.mjs';
 import { steerPrivacyAdmission } from './config.mjs';
@@ -11,6 +14,8 @@ import { withLock, workspaceLockName } from './lock.mjs';
 import { discoveryScopeAliases, guardScope } from './scope-guard.mjs';
 import { QUOTA_DEFAULTS, formatQuotaLine } from './quota.mjs';
 import { findingsPassage } from './findings.mjs';
+import { fileProgress, storeImmutableAuthorization } from './apply.mjs';
+import { runtime } from './runtime.mjs';
 
 export class AssignRefused extends Error {}
 
@@ -23,6 +28,44 @@ export class AssignRefused extends Error {}
 export const ASSIGNMENT_KEY = `${METADATA_KEY}.assignment`;
 
 const none = 'none recorded';
+
+const contentHash = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const assignmentDir = () => join(runtime().planDir, 'assignments');
+export const assignmentCheckpointHash = (metadata) => contentHash(metadata?.[CHECKPOINT_KEY] ?? null);
+
+export function saveAssignmentPreview(payload) {
+  const saved = { version: 1, id: randomUUID(), ...payload };
+  const hash = contentHash(saved).slice(0, 16);
+  storeImmutableAuthorization(assignmentDir(), { hash, ...saved }, () => false);
+  return hash;
+}
+
+export async function withAssignmentConfirmation({ hash, callerId, apply }) {
+  if (!/^[0-9a-f]{16}$/.test(hash)) throw new AssignRefused('Expected the 16-character assignment preview hash');
+  const dir = assignmentDir();
+  let authorization;
+  try {
+    authorization = JSON.parse(readFileSync(join(dir, `${hash}.json`), 'utf8'));
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw new AssignRefused('Saved assignment preview is unreadable; run a new preview');
+    throw new AssignRefused('Unknown assignment preview hash; run a new preview');
+  }
+  const { hash: storedHash, ...saved } = authorization ?? {};
+  if (storedHash !== hash || saved.version !== 1 || contentHash(saved).slice(0, 16) !== hash) {
+    throw new AssignRefused('Saved assignment does not match the confirmation hash; run a new preview');
+  }
+  if (saved.callerId !== callerId) throw new AssignRefused('Confirm the assignment from the same caller as the preview');
+  return withLock(`assignment-${hash}`, async (held) => {
+    const progress = fileProgress(join(dir, `${hash}.progress.json`));
+    if (progress.load() !== null) throw new AssignRefused('Assignment confirmation already used; check the target before making a new preview');
+    return apply(saved, () => {
+      // Send has no receipt here. Consume before the first write so a lost
+      // response or interruption can never make a retry send the packet twice.
+      held.verify();
+      progress.save({ started: true });
+    });
+  });
+}
 
 /** Deterministic assignment packet (pass the same `now` so preview == delivery). */
 export function buildAssignment(status, { slot, steerId, epoch, task, tests, blockers, next, workerModel = null, config = null, quotaSnapshot = null, quotaWarnPct = QUOTA_DEFAULTS.warnPct, zerosub = null, reportTo = null, promptOptions, now = Date.now() }) {
@@ -55,15 +98,22 @@ export function buildAssignment(status, { slot, steerId, epoch, task, tests, blo
  * --expect-epoch from the preview), write, read back, release; delivery
  * happens after the lock is released.
  */
-export async function assignScope({ client, discovery, task, tests = [], blockers = [], next = null, apply = false, send = true, expectEpoch, assignedBy = null, requester = null, reportTo = assignedBy, lock = withLock, now = () => new Date(), workerModel = null, config = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, zerosub = null, promptOptions, admitTarget = null }) {
+export async function assignScope({ client, discovery, task, tests = [], blockers = [], next = null, apply = false, send = true, expectEpoch, assignedBy = null, requester = null, reportTo = assignedBy, lock = withLock, now = () => new Date(), workerModel = null, config = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, zerosub = null, promptOptions, admitTarget = null, confirmation = null }) {
   const status = steerStatus(discovery);
   if (!status.workspace || !status.state) throw new AssignRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
+  if (confirmation && (confirmation.workspaceId !== status.workspace.id || confirmation.preview.scope !== status.repo ||
+      confirmation.preview.epoch !== expected.epoch || confirmation.preview.slot !== expected.activeSteer)) {
+    throw new AssignRefused('Assignment target changed since the preview; run a new preview');
+  }
   if (typeof task !== 'string' || !task.trim()) throw new AssignRefused('An assignment needs a task');
   const holders = liveSlotHolders(status.steers, expected.activeSteer);
   if (!holders.length) throw new AssignRefused(`No live Steer ${expected.activeSteer} to assign to for ${status.repo}; plan and apply one first`);
   if (holders.length > 1) throw new AssignRefused(`Steer ${expected.activeSteer} has several live agents (${holders.map((s) => s.id).join(', ')}); resolve the duplicate titles in Paseo, then rerun`);
   const target = holders[0];
+  if (confirmation && confirmation.preview.steerId !== target.id) {
+    throw new AssignRefused('Assignment target changed since the preview; run a new preview');
+  }
   if (target.parent) throw new AssignRefused(`Steer ${expected.activeSteer} has parent ${target.parent}; refusing to assign to a subagent`);
   if (target.workspaceId !== status.workspace.id) throw new AssignRefused(`Steer ${expected.activeSteer} is not in the main workspace`);
   if (expectEpoch !== undefined && expectEpoch !== expected.epoch) {
@@ -72,7 +122,7 @@ export async function assignScope({ client, discovery, task, tests = [], blocker
 
   const fields = { task: task.trim(), tests, blockers, next: next?.trim() || null };
   const report = typeof reportTo === 'string' && reportTo.trim() && reportTo.trim() !== target.id ? reportTo.trim() : null;
-  const packet = buildAssignment(status, { slot: target.slot, steerId: target.id, epoch: expected.epoch, workerModel, config, quotaSnapshot, quotaWarnPct, zerosub, reportTo: report, promptOptions, now: now().getTime(), ...fields });
+  const packet = confirmation?.preview.packet ?? buildAssignment(status, { slot: target.slot, steerId: target.id, epoch: expected.epoch, workerModel, config, quotaSnapshot, quotaWarnPct, zerosub, reportTo: report, promptOptions, now: now().getTime(), ...fields });
   const result = {
     scope: status.repo, epoch: expected.epoch, slot: target.slot, steerId: target.id,
     domain: status.domain ?? null, domainChildren: [...(status.domainChildren ?? [])],
@@ -83,13 +133,17 @@ export async function assignScope({ client, discovery, task, tests = [], blocker
 
   const workspace = client.workspaces.ref(status.workspace.id);
   const write = async (held) => {
-    const { state: fresh } = await guardScope({ client, held, workspaceId: status.workspace.id, scopeId: expected.scope?.id ?? status.repo, epoch: expected.epoch, agentId: target.id, slot: expected.activeSteer, aliases: discoveryScopeAliases(discovery), config });
+    const { state: fresh, metadata } = await guardScope({ client, held, workspaceId: status.workspace.id, scopeId: expected.scope?.id ?? status.repo, epoch: expected.epoch, agentId: target.id, slot: expected.activeSteer, aliases: discoveryScopeAliases(discovery), config });
     if (requester?.workspaceId === status.workspace.id) {
       await guardScope({ client, held, ...requester, config });
+    }
+    if (confirmation && assignmentCheckpointHash(metadata) !== confirmation.checkpointHash) {
+      throw new AssignRefused('Checkpoint changed since the assignment preview; run a new preview');
     }
     const stamp = now().toISOString();
     const checkpoint = { ...fields, epoch: fresh.epoch, updatedAt: stamp, source: 'assign', assignedBy, capturedAt: stamp, interrupted: null };
     held.verify(); // the lock file must still be the locked inode right before the write
+    confirmation?.consume();
     await workspace.setMetadata({ [CHECKPOINT_KEY]: checkpoint, [ASSIGNMENT_KEY]: report ? { by: report, ...(report === requester?.agentId ? { requesterWorkspaceId: requester.workspaceId } : {}), epoch: fresh.epoch, at: stamp, reportedAt: null } : null });
     const written = (await workspace.refresh())?.metadata?.[CHECKPOINT_KEY];
     if (written?.task !== checkpoint.task || written?.epoch !== checkpoint.epoch) throw new Error('Assignment checkpoint not verifiable after write');

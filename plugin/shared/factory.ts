@@ -754,7 +754,7 @@ const assignArgs = {
 
 export const factoryAssignPreview = defineRpc({
   name: "factory.assign.preview",
-  input: z.object(assignArgs),
+  input: z.object({ ...assignArgs, save: z.object({ send: z.boolean() }).optional() }),
   output: z.looseObject({
     scope: z.string(),
     epoch: z.number(),
@@ -764,7 +764,17 @@ export const factoryAssignPreview = defineRpc({
     packet: z.string(),
     packetChars: z.number(),
     fingerprint: z.string(),
+    confirmationHash: z.string().optional(),
   }),
+});
+
+const assignResult = z.looseObject({
+  scope: z.string(),
+  epoch: z.number(),
+  slot: z.string(),
+  steerId: z.string(),
+  applied: z.boolean(),
+  delivered: z.boolean(),
 });
 
 export const factoryAssign = defineRpc({
@@ -774,14 +784,16 @@ export const factoryAssign = defineRpc({
     fingerprint: z.string().min(1),
     send: z.boolean().optional(),
   }),
-  output: z.looseObject({
-    scope: z.string(),
-    epoch: z.number(),
-    slot: z.string(),
-    steerId: z.string(),
-    applied: z.boolean(),
-    delivered: z.boolean(),
+  output: assignResult,
+});
+
+export const factoryAssignConfirm = defineRpc({
+  name: "factory.assign.confirm",
+  input: z.strictObject({
+    hash: z.string().regex(/^[0-9a-f]{16}$/),
+    callerId: z.string().min(1).optional(),
   }),
+  output: assignResult,
 });
 
 const quotaPool = z.looseObject({

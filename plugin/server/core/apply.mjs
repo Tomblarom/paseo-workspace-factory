@@ -76,13 +76,29 @@ export async function reconcileAttempt({ op, pending, observed = {}, authorizati
   return { result: { ...confirmed, recovered: true, via: 'receipt' } };
 }
 
+const authorizationFs = { mkdirSync, writeFileSync, linkSync, unlinkSync, readFileSync };
+
 /**
  * Stores an authorization without ever replacing one: a new file is linked into
  * place atomically (link fails if the name exists). An existing authorization with
  * the same hash is kept unchanged (original createdAt) after a consistency check;
  * a damaged or different one aborts.
  */
-export function storeAuthorization(dir, authorization, config, fs = { mkdirSync, writeFileSync, linkSync, unlinkSync, readFileSync }) {
+export function storeAuthorization(dir, authorization, config, fs = authorizationFs) {
+  return storeImmutableAuthorization(dir, authorization, (existing) =>
+    // Retired K13 options (allowFork, retitle, renameProject) are ignored:
+    // old authorizations may carry them, new ones never do.
+    existing?.hash === authorization.hash
+      && planHash(existing.plans ?? [], config) === authorization.hash
+      && isDeepStrictEqual(existing.entries, authorization.entries)
+      && isDeepStrictEqual(existing.adopt, authorization.adopt)
+      && isDeepStrictEqual(existing.slots ?? null, authorization.slots ?? null)
+      && isDeepStrictEqual(existing.adoptWorker ?? {}, authorization.adoptWorker ?? {})
+      && (existing.detach ?? false) === (authorization.detach ?? false)
+      && Number.isFinite(Date.parse(existing.createdAt)), fs);
+}
+
+export function storeImmutableAuthorization(dir, authorization, matches, fs = authorizationFs) {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const target = join(dir, `${authorization.hash}.json`);
   const temporary = join(dir, `.${authorization.hash}.${process.pid}.${Date.now()}.tmp`);
@@ -98,17 +114,7 @@ export function storeAuthorization(dir, authorization, config, fs = { mkdirSync,
     } catch (parseError) {
       throw new ApplyRefused(`Stored authorization ${target} is unreadable (${parseError.message}); not replacing it`);
     }
-    // Retired K13 options (allowFork, retitle, renameProject) are ignored:
-    // old authorizations may carry them, new ones never do.
-    const same = existing?.hash === authorization.hash
-      && planHash(existing.plans ?? [], config) === authorization.hash
-      && isDeepStrictEqual(existing.entries, authorization.entries)
-      && isDeepStrictEqual(existing.adopt, authorization.adopt)
-      && isDeepStrictEqual(existing.slots ?? null, authorization.slots ?? null)
-      && isDeepStrictEqual(existing.adoptWorker ?? {}, authorization.adoptWorker ?? {})
-      && (existing.detach ?? false) === (authorization.detach ?? false)
-      && Number.isFinite(Date.parse(existing.createdAt));
-    if (!same) throw new ApplyRefused(`Stored authorization ${target} differs from this dry-run or is damaged; not replacing it`);
+    if (!matches(existing)) throw new ApplyRefused(`Stored authorization ${target} differs from this dry-run or is damaged; not replacing it`);
     return { status: 'kept', authorization: existing, file: target };
   } finally {
     fs.unlinkSync(temporary);
