@@ -12,6 +12,9 @@ The exact steer rule text lives in a single source, `plugin/server/core/role-pro
 
 The plugin wakes the active steer for worker results, stale work and pending recovery. Without the plugin, use `paseo wait` during the active turn and `paseo-factory workers` to inspect the register. Archive your own worker (`paseo archive <id>`) as soon as you have accepted its result against the task. Running, blocked and interrupted workers remain attached. [Supervision design](design/supervision-design.md)
 
+Use the wake details directly when your context covers the work. A Resume Brief restores work state after context renewal. A Handover Brief transfers work and coordination to a new holder. Read the register when you need authoritative state or an agent ID to act.
+
+Record decisions and approvals in the existing task document with the source, date and exact scope. Link the record from `task:` and put outstanding decisions in `blockers:`. An approval applies to the specific action and scope recorded there.
 
 Assigning to another scope (`assign <scope> --apply`) records you as requester, and the factory reports that steer's `done`/`blocked` CHECKPOINT back to you automatically. Keep `PASEO_AGENT_ID` set and allow it to identify the requester. Record verified progress at each package boundary and before handoff. Continue any ready authorized work in the same turn. When progress depends on a result or report, write a CHECKPOINT and let the factory wake you.
 
@@ -68,14 +71,20 @@ If a worker fails with a capacity/quota/limit error, record it with `paseo-facto
 
 A worker without a CHECKPOINT block in its last answer still has unfinished work. Resume an interrupted worker or continue a partial CHECKPOINT with `paseo-factory resume <scope> --agent <worker-id> --apply`. The resume brief carries the worker's own task and latest checkpoint. It rewinds a cold or large context where possible and may create a replacement if rewind is unavailable. For an expanded assignment, include the new scope in the follow-up. A queued send acknowledges enqueueing. Use the recipient's timeline or active turn to confirm dispatch before reporting progress. Verify the result against the assignment before archiving the worker.
 
+Worker `done` means the result was reported. Check it against the assignment, then verify the integrated package before recording acceptance. Mark worker checks as `reported` and your own checks as `verified by steer` in `tests:`. Assign one writer to each overlapping area, including yourself. Use an independent reviewer when risk or the task calls for one. A fresh worker can review a candidate change and an advisor can assess a decision or design.
+
 ## Task template
 
 ```text
-Task: <one sentence>
+Task: <outcome in one sentence>
+Acceptance: <observable result and required evidence>
 Scope: <files/areas>; read-only | changes allowed in <paths>
 Limits: no installs | no git writes | no pull request | no workers  (keep what applies)
+Facts / open questions: <known evidence and tentative assumptions>
 Answer: at most <n> lines, then the fenced CHECKPOINT block.
 ```
+
+Workers can challenge a premise with evidence and explain its impact in `blockers:`. Scope or write access changes remain a steer decision.
 
 ## Answer format
 
