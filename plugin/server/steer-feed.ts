@@ -26,6 +26,7 @@ import { agentContextInputs } from "./agent-context.js";
 import { openTurnOf } from "../shared/auto-checkpoint.js";
 import { CACHE_CHECK_INTERVAL_MS } from "../shared/cache-profiles.js";
 import { projectSteer, type SteerMembership } from "../shared/steer-state.js";
+import { steerRouteNames } from "../shared/model-label.js";
 import {
   efficiencySettingsLock,
   normalizeModel,
@@ -60,6 +61,7 @@ export interface SteerFeedRow {
   provider: string | null;
   model: string | null;
   accountAlias?: string;
+  handoverRoute: string;
   liveStatus: string | null;
   advisor: boolean;
   active: boolean;
@@ -157,6 +159,7 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
   const exhaustedPct = finiteNumber(quota.exhaustedPct) ?? QUOTA_DEFAULTS.exhaustedPct;
   const queuedWakeFor = deps.queuedWakeFor ?? (() => false);
   const accountAliases = zerosubAccountAliases(deps.zerosub);
+  const accounts = new Map(deps.zerosub?.accounts.map((account) => [account.id, account]) ?? []);
 
   // Candidate tabs per scope: live resolved holders.
   const rawByScope = new Map<string, any[]>();
@@ -268,6 +271,10 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
     }, reads.entries);
     const { accountId } = projection.quota;
     const accountAlias = accountId ? accountAliases.get(accountId) : undefined;
+    const accountLabel = accountId ? accounts.get(accountId)?.label : undefined;
+    const accountName = typeof accountLabel === "string" ? accountLabel.trim().replace(/\s+/g, " ") : "";
+    const models = paseoState.providers?.find((entry: any) => entry.provider === provider)?.models;
+    const route = steerRouteNames(model, liveThinking, models);
     rows.push({
       scopeId: identity.scopeId,
       workspaceId: reads.mainId,
@@ -277,6 +284,7 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
       provider,
       model,
       ...(accountAlias ? { accountAlias } : {}),
+      handoverRoute: `${route.modelName} ${route.thinkingName} ${accountName || (accountAlias ? `ZeroSub ${accountAlias}` : "ZeroSub account unknown")}`,
       liveStatus: status,
       advisor: slot !== null && isAdvisorSteer(deps.config, agent.labels, agent.metadata),
       active,

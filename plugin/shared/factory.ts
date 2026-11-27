@@ -995,6 +995,7 @@ const steerStateRow = z.looseObject({
   provider: z.unknown().optional(),
   model: z.unknown().optional(),
   accountAlias: z.string().optional(),
+  handoverRoute: z.string().optional(),
   liveStatus: z.unknown().optional(),
   advisor: z.boolean().optional(),
   active: z.boolean().optional(),

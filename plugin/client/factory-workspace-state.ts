@@ -1,7 +1,7 @@
 import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
 import type { factoryPlan, factoryStatus } from "../shared/factory.js";
 import { parseFactoryArgs } from "../shared/factory-args.js";
-import { modelDisplayName } from "../shared/model-label.js";
+import { steerRouteNames, type SteerModel } from "../shared/model-label.js";
 import { steerQuotaConfirmation, resetSteerBlock } from "./steer-menu.js";
 import type { SteerPillRow } from "./steer-pill.js";
 
@@ -49,35 +49,15 @@ export function steerName(row: SteerPillRow): string {
   return row.slot ? `Steer ${row.slot}` : label(row.title) ?? "Unnamed steer";
 }
 
-type SteerModel = {
-  id: string; label?: string | null; aliases?: readonly string[] | null;
-  thinkingOptions?: readonly { id: string; label?: string | null; isDefault?: boolean }[];
-  defaultThinkingOptionId?: string;
-};
-
-function findSteerModel(model: string | null, catalog: readonly SteerModel[]) {
-  if (!model) return {};
-  const find = (id: string) => catalog.find((entry) => entry.id === id || entry.aliases?.includes(id));
-  const bareId = /^[\w.-]+\/([\w.-]+)$/.exec(model)?.[1];
-  const direct = find(model);
-  const resolved = direct ?? (bareId ? find(bareId) : undefined);
-  return { id: direct || !resolved ? model : bareId, resolved };
-}
-
 export function steerModelName(model: string | null, catalog: readonly SteerModel[] = []) {
-  const { id, resolved } = findSteerModel(model, catalog);
-  return modelDisplayName(id, resolved?.label) ?? "Model unknown";
+  return steerRouteNames(model, null, catalog).modelName;
 }
 
 export function handoverRouteLabel(
   { model, thinking, accountAlias }: Pick<SteerPillRow, "model" | "thinking" | "accountAlias">,
   catalog: readonly SteerModel[] = [],
 ) {
-  const { id, resolved } = findSteerModel(model, catalog);
-  const modelName = modelDisplayName(id, resolved?.label) ?? "Model unknown";
-  const options = resolved?.thinkingOptions;
-  const thinkingId = thinking ?? resolved?.defaultThinkingOptionId ?? options?.find((option) => option.isDefault)?.id;
-  const thinkingName = options?.find((option) => option.id === thinkingId)?.label || thinkingId || "Default thinking";
+  const { modelName, thinkingName } = steerRouteNames(model, thinking, catalog);
   return `${modelName}, ${thinkingName}, ${accountAlias ? `ZeroSub ${accountAlias}` : "ZeroSub account unknown"}`;
 }
 

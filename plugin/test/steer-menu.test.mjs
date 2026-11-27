@@ -297,18 +297,20 @@ test("steerRowsOf parses permission and staged-brief flags", () => {
 test("the active steer menu lists direct handover targets in slot order with context states and icons", () => {
   const active = { ...self(), stagedBrief: true };
   const warmup = row("steer-b", { slot: "B", state: "running", warmth: "cooling" });
-  const recovery = row("steer-c", { slot: "C", state: "needs-resume", warmth: "cold", large: true });
+  const recovery = row("steer-c", { slot: "C", state: "needs-resume", warmth: "cold", large: true,
+    handoverRoute: "GPT-6.2 Sol High Work Codex" });
   const items = menu.describeSteerMenu(active, [active, recovery, warmup]);
   assert.deepEqual(items.map((entry) => entry.title ?? entry.kind), [
-    "Hand over to Steer B · cooling", "Hand over to Steer C · large", "Reset Steer", "separator", "Open Factory",
+    "Handover -> Steer B · cooling · GPT-6.2 Sol Default thinking ZeroSub account unknown",
+    "Handover -> Steer C · large · GPT-6.2 Sol High Work Codex", "Reset Steer", "separator", "Open Factory",
   ]);
   const [busy, eligible, reset] = items;
   assert.deepEqual(busy, {
-    kind: "handover", id: "handover-steer-b", title: "Hand over to Steer B · cooling",
+    kind: "handover", id: "handover-steer-b", title: "Handover -> Steer B · cooling · GPT-6.2 Sol Default thinking ZeroSub account unknown",
     icon: pill.faceFor(warmup).icon, disabled: true, target: { slot: "B", agentId: "steer-b" },
   });
   assert.deepEqual(eligible, {
-    kind: "handover", id: "handover-steer-c", title: "Hand over to Steer C · large",
+    kind: "handover", id: "handover-steer-c", title: "Handover -> Steer C · large · GPT-6.2 Sol High Work Codex",
     icon: pill.faceFor(recovery).icon, disabled: false, target: { slot: "C", agentId: "steer-c" },
   });
   assert.deepEqual(reset, { kind: "reset", id: "reset", title: "Reset Steer", disabled: false, icon: "ListRestart" });

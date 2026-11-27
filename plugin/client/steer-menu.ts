@@ -5,6 +5,7 @@ import type {
   factoryFresh, factoryFreshPreview, factorySteerActivate, factorySteerBrief, factorySwitch, factorySwitchPreview, QuotaConfirmation,
 } from "../shared/factory.js";
 import type { SteerFaceState } from "../shared/steer-state.js";
+import { steerRouteNames } from "../shared/model-label.js";
 import { steerContextFace, type SteerPillRow } from "./steer-pill.js";
 
 export function activationMenuBehavior(
@@ -99,6 +100,7 @@ export interface HandoffTarget {
   agentId: string;
   provider: string | null;
   model: string | null;
+  route: string;
   state: SteerFaceState;
   context: ReturnType<typeof steerContextFace>;
   eligible: boolean;
@@ -165,11 +167,13 @@ export function handoffTargets(
   return holders.map((row) => {
     const slot = row.slot as string;
     const verdict = handoverReason(row, { ambiguousSlot: (perSlot.get(slot) ?? 0) > 1, forActivation });
+    const { modelName, thinkingName } = steerRouteNames(row.model, row.thinking);
     return {
       slot,
       agentId: row.agentId,
       provider: row.provider,
       model: row.model,
+      route: row.handoverRoute ?? `${modelName} ${thinkingName} ${row.accountAlias ? `ZeroSub ${row.accountAlias}` : "ZeroSub account unknown"}`,
       state: row.state,
       context: steerContextFace(row),
       eligible: verdict.eligible,
@@ -287,9 +291,9 @@ export function describeSteerMenu(self: SteerPillRow, rows: SteerPillRow[]): Ste
       disabled: true, target: null,
     });
   }
-  for (const { slot, agentId, eligible, context } of destinations) {
+  for (const { slot, agentId, eligible, context, route } of destinations) {
     items.push({
-      kind: "handover", id: `handover-${agentId}`, title: `Hand over to Steer ${slot} · ${context.state}`,
+      kind: "handover", id: `handover-${agentId}`, title: `Handover -> Steer ${slot} · ${context.state} · ${route}`,
       icon: context.icon, disabled: !eligible, target: { slot, agentId },
     });
   }

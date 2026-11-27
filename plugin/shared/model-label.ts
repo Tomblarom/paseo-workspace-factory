@@ -20,3 +20,30 @@ export function modelDisplayName(id: string | null | undefined, catalogLabel?: s
   }
   return words.join(" ");
 }
+
+export type SteerModel = {
+  id: string;
+  label?: string | null;
+  aliases?: readonly string[] | null;
+  thinkingOptions?: readonly { id: string; label?: string | null; isDefault?: boolean }[];
+  defaultThinkingOptionId?: string;
+};
+
+function findSteerModel(model: string | null, catalog: readonly SteerModel[]) {
+  if (!model) return {};
+  const find = (id: string) => catalog.find((entry) => entry.id === id || entry.aliases?.includes(id));
+  const bareId = /^[\w.-]+\/([\w.-]+)$/.exec(model)?.[1];
+  const direct = find(model);
+  const resolved = direct ?? (bareId ? find(bareId) : undefined);
+  return { id: direct || !resolved ? model : bareId, resolved };
+}
+
+export function steerRouteNames(model: string | null, thinking: string | null, catalog: readonly SteerModel[] = []) {
+  const { id, resolved } = findSteerModel(model, catalog);
+  const options = resolved?.thinkingOptions;
+  const thinkingId = thinking ?? resolved?.defaultThinkingOptionId ?? options?.find((option) => option.isDefault)?.id;
+  return {
+    modelName: modelDisplayName(id, resolved?.label) ?? "Model unknown",
+    thinkingName: options?.find((option) => option.id === thinkingId)?.label || thinkingId || "Default thinking",
+  };
+}

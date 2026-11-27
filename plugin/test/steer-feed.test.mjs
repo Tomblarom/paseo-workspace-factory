@@ -73,7 +73,9 @@ test("the handover feed exposes only the live ZeroSub account alias while a move
   assert.doesNotMatch(JSON.stringify(rows), /destination-id|current-id|private@/);
 
   zerosub.pending = {};
-  assert.equal(feed(state, { zerosub })[0].accountAlias, "Subscription 2");
+  const [moved] = feed(state, { zerosub });
+  assert.equal(moved.accountAlias, "Subscription 2");
+  assert.match(moved.handoverRoute, / private@example\.com$/);
 });
 
 test("title labels use the injected writer and update only the selected snapshot agent", async () => {
@@ -119,6 +121,7 @@ test("a live steer projects a warm row with identity and flags", () => {
     title: "Steer A",
     provider: "codex",
     model: "gpt-6.2-sol",
+    handoverRoute: "GPT-6.2 Sol Default thinking ZeroSub account unknown",
     liveStatus: "idle",
     advisor: false,
     active: true,
