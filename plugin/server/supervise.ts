@@ -14,10 +14,13 @@ import { deliverSteer, dispatchAssignmentReport, finishSteerDelivery, isAutomati
 import { ASSIGNMENT_KEY } from "./core/assign.mjs";
 import { scopeHolder } from "./core/scope-guard.mjs";
 import { isAdvisorSteer } from "./core/config.mjs";
-import { liveSlotHolders, resolveSteerHolders } from "./core/discovery.mjs";
+import { liveSlotHolders, resolveSteerHolders, steerTitleSlot } from "./core/discovery.mjs";
+import * as managedSteerCore from "./core/managed-steer.mjs";
+import { resolveSteerAdd } from "./core/models.mjs";
+import { requestDigest } from "./core/steer-create.mjs";
 import { readCleanupAction, readEffectReceipt, readStagedSteerBrief, readSteerAction } from "./core/steer-action.mjs";
-import { quotaAdmission, readAdmissionSnapshot, readPrivacyAdmission } from "./steer-admission.js";
-import { readRoutingSnapshot, routingProjection, steerRouteCandidate, planSteerRoutes } from "./steer-routing.js";
+import { privacyAdmission, quotaAdmission, readAdmissionSnapshot, readPrivacyAdmission } from "./steer-admission.js";
+import { managedSteerRouteCandidate, noSuitableSteerPolicy, readRoutingSnapshot, routingProjection, steerRouteCandidate, planSteerRoutes, type ManagedCreation, type RoutingSnapshot } from "./steer-routing.js";
 import { hasActiveAgentWork } from "./agent-context.js";
 import { canMarkWorkerStale, filterStaleWorkerEvents } from "./worker-wakes.js";
 import { retryWorkerHandover } from "./core/workers.mjs";
@@ -39,6 +42,7 @@ const S = supervisionCore as unknown as Record<string, any>;
 const AS = agentStateCore as unknown as Record<string, any>;
 const ST = steerCore as unknown as Record<string, any>;
 const Q = quotaCore as unknown as Record<string, any>;
+const { findReusableSteer, reconcileManagedSteerCreation } = managedSteerCore as unknown as Record<string, any>;
 const { METADATA_KEY, readPaseoState } = P;
 const { listScopes, sameScopeId } = SC;
 const { withLock, workspaceLockName } = L;
@@ -96,6 +100,7 @@ import {
 } from "../shared/supervise.js";
 
 const CHECKPOINT_KEY = `${METADATA_KEY}.checkpoint`;
+const MANAGED_CREATION_KEY = `${METADATA_KEY}.managedSteerCreation`;
 const OWNER_KEY = "wsf.owner";
 const BUSY_STATUSES = ["running", "initializing"];
 const FACTORY_CMD = "paseo-factory";
@@ -125,6 +130,7 @@ export interface SuperviseDeps extends SettingsSource, ZerosubSource {
   failoverReason?: string;
   failingAgentId?: string | null;
   quotaTrigger?: { accountId?: string | null };
+  lookupSteerCreation?: typeof paseoCore.lookupCreationReceipt;
 }
 
 export interface WakeEvent {
@@ -1256,6 +1262,7 @@ export interface FailoverResult {
   logged?: boolean;
   /** Earliest resetsAt to retry at when the check waits for quota (`wait-reset`). */
   wakeAt?: string | null;
+  offer?: { kind: "create-steer"; scopeId: string; workspaceId: string };
 }
 
 /**
@@ -1322,6 +1329,239 @@ export async function recordTakeoverDelivery(
   return logged;
 }
 
+function sharesLimitedAccount(source: any, sourceQuota: ReturnType<typeof quotaAdmission> | null,
+  target: any, targetQuota: ReturnType<typeof quotaAdmission> | null) {
+  return sourceQuota?.reason === "provider limit" && sourceQuota.accountId && sourceQuota.accountId === targetQuota?.accountId &&
+    source?.provider === target?.provider && source?.model === target?.model;
+}
+
+function quotaLimitUnconfirmed(trigger: SuperviseDeps["quotaTrigger"], admission: ReturnType<typeof quotaAdmission> | null) {
+  return trigger && (!admission || admission.allowed || admission.pendingMove ||
+    (trigger.accountId && trigger.accountId !== admission.accountId));
+}
+
+function failoverRouteCandidates(chain: any[], state: any, routing: RoutingSnapshot,
+  rows: ReturnType<typeof steerRows>, mainId: string, holder: any, holderQuota: ReturnType<typeof quotaAdmission> | null) {
+  const byId = new Map<string, any>(state.agents.map((agent: any) => [agent.id, agent]));
+  const projections = routingProjection(state, routing);
+  return chain.map((target, preferenceRank) => {
+    const agent = byId.get(target.steerId);
+    const entries = state.workspaces.find((workspace: any) => workspace.id === agent?.workspaceId)?.metadata?.[AGENTS_KEY];
+    const entry = entries?.[agent?.id];
+    const admission = agent ? quotaAdmission(agent, entry, routing, entries) : null;
+    const sharesLimit = sharesLimitedAccount(holder, holderQuota, agent, admission);
+    const action = readSteerAction(entry);
+    const unavailableForSwitch = target.kind === "steer" && (
+      liveSlotHolders(rows, target.slot).length !== 1 || agent?.workspaceId !== mainId ||
+      P.parentOf(agent) || readStagedSteerBrief(entry) || readCleanupAction(entry) || (action && action.phase !== "done")
+    );
+    const eligible = !!agent && !agent.archivedAt && canWakeAgent(agent) &&
+      !hasActiveAgentWork(agent, entry) && !pendingSteerDelivery(entry) &&
+      admission?.allowed === true && !sharesLimit && !unavailableForSwitch;
+    return { ...steerRouteCandidate({ agent: agent ?? { id: target.steerId }, entry, entries,
+      row: projections.find((row) => row.agentId === target.steerId), snapshot: routing,
+      admission: admission ?? undefined, kind: "handover", eligible, preferenceRank,
+      reason: unavailableForSwitch ? "target unavailable for authority switch" :
+        sharesLimit ? "same limited account and model" : admission?.reason ?? "target ineligible" }),
+      target };
+  });
+}
+
+function takeoverReceiptWait(workspaces: any[], mainId: string, metadata: any, epoch: number,
+  slot: string | null, nowMs: number, answerMinutes: number): string | null {
+  for (const ws of workspaces) {
+    for (const entry of Object.values((ws.id === mainId ? metadata : ws.metadata)?.[AGENTS_KEY] ?? {})) {
+      const action = readSteerAction(entry);
+      if (action?.batch?.workspaceId !== mainId || action.batch.epoch !== epoch ||
+          action.batch.takeover?.activeSlot !== slot) continue;
+      if (pendingSteerDelivery(entry)) return "brief-pending";
+      if (action.phase === "done" && nowMs - Date.parse(action.observedAt ?? action.queuedAt) < answerMinutes * 60_000) {
+        return "takeover-answer-window";
+      }
+    }
+  }
+  return null;
+}
+
+async function prepareManagedFailover(
+  paseo: any, scope: any, expected: { epoch: number; slot: string | null; holder: string | null; recordedHolder: unknown; wake: string | null },
+  deps: SuperviseDeps,
+): Promise<FailoverResult | "replan" | null> {
+  const mainId = scope.workspaceId;
+  const workspace = paseo.workspaces.ref(mainId);
+  const lock = lockOf(deps);
+  const lookup = deps.lookupSteerCreation ?? paseoCore.lookupCreationReceipt;
+  const receiptFor = async (key: string) => {
+    try {
+      return await lookup("agent", key);
+    } catch {
+      return undefined;
+    }
+  };
+  const waiting = (reason: string, state?: ManagedCreation | null): FailoverResult => ({
+    action: "wait", reason: `managed-steer-${reason}`,
+    ...(reason === "backoff" && state?.backoffUntil ? { wakeAt: new Date(state.backoffUntil).toISOString() } : {}),
+  });
+  const step = (reconcileOnly = false) => lock(workspaceLockName(mainId), async (held): Promise<
+    FailoverResult | "replan" | { dispatched: Promise<void> } | null
+  > => {
+    const { nowIso, nowMs } = stampsOf(deps);
+    const metadata = (await workspace.refresh())?.metadata ?? {};
+    const state = metadata[MANAGED_CREATION_KEY];
+    const live = wsfOf(metadata);
+    if (!live || live.movedTo || live.epoch !== expected.epoch || live.activeSteer !== expected.slot || live.activeAgentId !== expected.recordedHolder ||
+        (live.scope?.id && !sameScopeId(live.scope.id, scope.id))) {
+      return { action: "abort", reason: "moved" };
+    }
+    const liveSettings = await (deps.getSettings?.() ?? resolveSettings(deps));
+    const quiet = await supervisionQuiet(paseo, [mainId], deps);
+    if (!liveSettings?.enabled || liveSettings.paused || quiet) return { action: "wait", reason: quiet ?? (liveSettings?.paused ? "paused" : "disabled") };
+    const delivery = deliveryDeps(deps);
+    const config = await (delivery.getConfig?.() ?? null);
+    const persist = async (next: ManagedCreation) => {
+      held.verify();
+      await workspace.setMetadata({ [MANAGED_CREATION_KEY]: next });
+      const written = (await workspace.refresh())?.metadata?.[MANAGED_CREATION_KEY];
+      if (written?.idempotencyKey !== next.idempotencyKey || written.phase !== next.phase) {
+        throw new Error("Managed steer creation metadata could not be verified");
+      }
+    };
+    const reconcile = async (pending: ManagedCreation, receipt: any): Promise<FailoverResult | "replan"> => {
+      const agent = receipt?.agentId ? (await paseo.agents.ref(receipt.agentId).refresh())?.agent ?? null : null;
+      const result = reconcileManagedSteerCreation({ state: pending, receipt, agent, now: nowMs, config });
+      if (result.state !== pending) await persist(result.state);
+      if (result.status === "completed") return "replan";
+      return waiting(result.status === "failed" ? result.state.exhausted ? "exhausted" : "backoff" : result.status, result.state);
+    };
+    if (state?.phase === "pending") return reconcile(state, await receiptFor(state.idempotencyKey));
+    if (reconcileOnly) return state?.phase === "completed" ? "replan" : waiting(state?.exhausted ? "exhausted" : "backoff", state);
+    if (noSuitableSteerPolicy(config) !== "create") return "replan";
+    if (!expected.slot || !Number.isInteger(expected.epoch)) return null;
+    const [agents, listedWorkspaces] = await Promise.all([P.readPaseoAgents(paseo), P.readPaseoWorkspaces(paseo)]);
+    const workspaces = listedWorkspaces.map((ws: any) => ws.id === mainId ? { ...ws, metadata } : ws);
+    let holder: any;
+    try {
+      holder = scopeHolder({ agents, workspaceId: mainId, scopeId: scope.id, slot: expected.slot, allowVacant: !expected.holder });
+    } catch {
+      return { action: "wait", reason: "holder-unresolved" };
+    }
+    if ((holder?.id ?? null) !== expected.holder) return { action: "abort", reason: "holder-changed" };
+    const entries = asRecord(metadata[AGENTS_KEY]) ?? {};
+    const holderEntry = holder ? entries[holder.id] : null;
+    const holderAction = readSteerAction(holderEntry);
+    if (live.workerHandover || hasActiveAgentWork(holder, holderEntry) || readCleanupAction(holderEntry) ||
+        readStagedSteerBrief(holderEntry)?.composerClaim ||
+        (holderAction && !["done", "staged"].includes(holderAction.phase) &&
+          (!(["reserved", "ready"].includes(holderAction.phase) &&
+            (holderAction.batch && !holderAction.batch.takeover || holderAction.assignment || holderAction.assignments?.length)) ||
+            holderAction.accountMove || readEffectReceipt(metadata, holderAction)))) {
+      return { action: "wait", reason: "brief-pending" };
+    }
+    const takeoverWait = takeoverReceiptWait(workspaces, mainId, metadata, expected.epoch, expected.slot, nowMs, liveSettings.answerMinutes);
+    if (takeoverWait) return { action: "wait", reason: takeoverWait };
+    const register = readWorkers(metadata);
+    if (deps.failingAgentId === null && !(await filterStaleWorkerEvents(paseo, metadata, collectPendingWakes(register))).length) {
+      return { action: "clear", reason: "no-events" };
+    }
+    if (!deps.force && expected.wake) {
+      const events = await filterStaleWorkerEvents(paseo, metadata,
+        workersReport(register).map((entry: any) => ({ ...entry, workerId: entry.id })));
+      if (scopeLastWakeAt(Object.fromEntries(events.map((entry: any) => [entry.id, entry]))) !== expected.wake ||
+          steerWakeResponse({ entry: asRecord(holderEntry), status: holder?.status, lastWakeAt: expected.wake }) === "answered") {
+        return { action: "abort", reason: "wake-changed" };
+      }
+    }
+    const routing = await readRoutingSnapshot({ ...delivery, paseo, getConfig: async () => config, now: () => nowIso }, workspaces, agents);
+    const holderQuota = holder ? quotaAdmission(holder, holderEntry, routing, entries) : null;
+    if (quotaLimitUnconfirmed(deps.quotaTrigger, holderQuota)) return { action: "wait", reason: "quota-limit-unconfirmed" };
+    if (holder) {
+      const followup = zerosubSwitchFollowup(findZerosubSwitch(await readTurnTail(paseo, holder.id, null)));
+      if (followup.decision === "suppress") return { action: "clear", reason: followup.reason };
+      const move = zerosubMoveDecision({ zerosub: routing.zerosub, agentId: holder.id, nowMs,
+        pendingSince: trackZerosubPending(holder.id, zerosubPendingTarget(routing.zerosub, holder.id), nowMs) });
+      if (move.decision === "wait-zerosub") return { action: "wait", reason: "wait-zerosub" };
+    }
+    const fresh = { agents, workspaces };
+    const steers = scopeSteers(fresh, scope.id);
+    const rows = steerRows(fresh, scope.id, entries, config);
+    const chain = S.failoverChain({ steers: rows, activeSlot: expected.slot, failingPool: deps.failingPool });
+    const local = failoverRouteCandidates(chain, fresh, routing, rows, mainId, holder, holderQuota);
+    const eligibleLiveSteerIds = local.filter((route) => route.eligible).map((route) => route.agentId);
+    // Existing recovery can reopen a closed handover target. P3's reusable
+    // standbys are live, so also honor those older recovery routes here.
+    if (findReusableSteer({ steers, eligibleLiveSteerIds, config }) || eligibleLiveSteerIds.length) return "replan";
+
+    if (typeof workspace.agents?.create !== "function") return null;
+    const occupied = new Set(agents.filter((agent: any) => agent.workspaceId === mainId && !P.parentOf(agent))
+      .map((agent: any) => steerTitleSlot(agent.title) ?? agent.labels?.[P.LABEL.slot]));
+    const slot = [..."ABCDEFGHIJKLMNOPQRSTUVWXYZ"].find((letter) => letter !== expected.slot && !occupied.has(letter));
+    if (!slot) return null;
+    const { entries: providers } = await paseo.providers.snapshot();
+    const accountEvidence = new Map<string, [string, string | null][]>();
+    const profiles = Object.fromEntries(Object.entries(config?.profiles ?? {}).filter(([name, profile]: [string, any]) => {
+      if (!privacyAdmission(profile, config, null).allowed) return false;
+      const accounts = Q.familyAccounts(routing.zerosub, Q.profileFamily(profile));
+      if (!accounts.length) {
+        return !holderQuota || holderQuota.allowed || holderQuota.accountId ||
+          profile.provider !== holder?.provider || profile.model !== holder?.model;
+      }
+      const prospective = { id: "", provider: profile.provider, model: profile.model };
+      const eligibleAccounts: [string, string | null][] = [];
+      for (const { id } of accounts) {
+        const quota = quotaAdmission(prospective, null, {
+          ...routing, zerosub: { ...routing.zerosub, agentAccount: { "": id } },
+        }, entries);
+        if (quota.allowed && !sharesLimitedAccount(holder, holderQuota, prospective, quota)) eligibleAccounts.push([id, quota.resetAt]);
+      }
+      accountEvidence.set(name, eligibleAccounts.sort(([a], [b]) => a.localeCompare(b)));
+      return eligibleAccounts.length > 0;
+    }));
+    const { profile, earliestReset } = resolveSteerAdd({ ...config, profiles }, providers, {
+      now: nowMs, zerosub: routing.zerosub, quotaSnapshot: routing.quota,
+      profileHealth: Q.readProfileHealth(metadata), liveProviderPrivacy: true,
+    });
+    if (!profile) return earliestReset ? { action: "wait", reason: "wait-reset", wakeAt: earliestReset } : null;
+    const cycleKey = requestDigest([mainId, expected.epoch, expected.holder, holderQuota?.accountId,
+      holderQuota?.reason, holderQuota?.resetAt, profile, accountEvidence.get(profile.name)]);
+    const option = managedSteerRouteCandidate(routing, {
+      state, cycleKey, now: nowMs, steers, eligibleLiveSteerIds,
+      create: { keyScope: scope.id, repo: live.fork ?? live.repo ?? scope.id, scopeId: scope.id, slot, workspaceId: mainId,
+        profile, keyParts: [mainId, `e${expected.epoch}`], metadata: { [P.LABEL.steerRole]: "coordinator" } },
+    }, config.steers?.priority?.indexOf(profile.name) ?? null);
+    if (!option) return "replan";
+    const { decision, candidate } = option;
+    if (decision.action === "wait") return waiting(decision.reason, decision.state);
+    if (decision.action === "reuse") return "replan";
+    if (decision.action === "reconcile") return reconcile(decision.state, await receiptFor(decision.state.idempotencyKey));
+    if (!candidate || !planSteerRoutes(routing, [candidate]).selected) return null;
+    const receipt = await receiptFor(decision.state.idempotencyKey);
+    if (receipt === undefined) return waiting("receipt-unavailable");
+    const finalQuiet = await supervisionQuiet(paseo, [mainId], deps);
+    if (finalQuiet) return { action: "wait", reason: finalQuiet };
+    await persist(decision.state);
+    if (receipt !== null) return reconcile(decision.state, receipt);
+    const { workspaceId: _workspaceId, ...request } = decision.state.request;
+    // Start the reserved effect under the lock and release it while Paseo runs.
+    const dispatched = (async () => {
+      try {
+        await workspace.agents.create({ ...request, idempotencyKey: decision.state.idempotencyKey });
+      } catch {
+        // Only the native receipt can settle a rejected or lost response.
+      }
+    })();
+    return { dispatched };
+  });
+  try {
+    const prepared = await step();
+    if (!prepared || typeof prepared === "string" || !("dispatched" in prepared)) return prepared;
+    await prepared.dispatched;
+    return await step(true) as FailoverResult | "replan" | null;
+  } catch (error) {
+    logOf(deps)(`[factory] supervise: managed creation for ${scope.id} deferred (${error instanceof Error ? error.message : String(error)})`);
+    return waiting("recheck");
+  }
+}
+
 /**
  * Compare the existing failover routes. A local successor gets authority and
  * a durable continuation in one switch. External escalation and persisted
@@ -1330,7 +1570,7 @@ export async function recordTakeoverDelivery(
 export async function runFailoverCheck(
   paseo: any,
   scope: any,
-  deps: SuperviseDeps & { state?: any; scopes?: any[] },
+  deps: SuperviseDeps & { state?: any; scopes?: any[]; managedReplanned?: boolean },
 ): Promise<FailoverResult> {
   if (await deps.delivery?.isFactoryPaused?.()) return { action: "wait", reason: "paused" };
   const settings = await resolveSettings(deps);
@@ -1482,60 +1722,45 @@ export async function runFailoverCheck(
       }
     }
   }
-  let asked = stored ? [...stored.asked] : [];
-  let next = chain.find((c: any) => c && !asked.includes(c.steerId)) ?? null;
-  if (!next) {
-    if (!chain.length) return waitReset() ?? { action: "none", reason: "no-candidates" };
-    asked = [];
-    next = chain[0];
-  }
   const byId = new Map<string, any>((paseoState.agents ?? []).map((a: any) => [a?.id, a]));
   const holderAgent = holder ? byId.get(holder) : null;
   const holderAdmission = holderAgent && holder ? quotaAdmission(holderAgent, agentState[holder], routing, agentState) : null;
-  const quotaTrigger = deps.quotaTrigger;
-  const limitUnconfirmed = (admission: typeof holderAdmission) => quotaTrigger &&
-    (!admission || admission.allowed || admission.pendingMove ||
-      (quotaTrigger.accountId && quotaTrigger.accountId !== admission.accountId));
-  const sameLimitedAccount = (source: any, sourceQuota: typeof holderAdmission, target: any, targetQuota: typeof holderAdmission) =>
-    sourceQuota?.reason === "provider limit" && sourceQuota.accountId && sourceQuota.accountId === targetQuota?.accountId &&
-    source?.provider === target?.provider && source?.model === target?.model;
-  // A quota-triggered wake can race an account change, reset or loss of telemetry.
-  // The second routing observation must still justify a takeover of this holder.
-  if (limitUnconfirmed(holderAdmission)) {
-    return { action: "wait", reason: "quota-limit-unconfirmed" };
+  if (quotaLimitUnconfirmed(deps.quotaTrigger, holderAdmission)) return { action: "wait", reason: "quota-limit-unconfirmed" };
+
+  const alternatives = failoverRouteCandidates(chain, routingState, routing, rows, mainId, holderAgent, holderAdmission);
+  const asked = new Set(stored?.asked ?? []);
+  const observation = { epoch: wsf.epoch, holderId: holder, accountId: holderAdmission?.accountId ?? null };
+  const select = (candidates: typeof alternatives) =>
+    planSteerRoutes(routing, candidates, { observation }).selected?.target ?? null;
+  const local = alternatives.filter(({ target }) => target.kind === "steer");
+  let next = select(local.filter(({ agentId }) => !asked.has(agentId))) ?? select(local);
+
+  const policy = noSuitableSteerPolicy(config);
+  const pendingCreation = asRecord(reMeta[MANAGED_CREATION_KEY])?.phase === "pending";
+  if (pendingCreation || (!next && policy === "create")) {
+    const managed = await prepareManagedFailover(paseo, scope, {
+      epoch: wsf.epoch, slot: activeSlot, holder, recordedHolder: wsf.activeAgentId, wake: currentWake,
+    }, deps);
+    if (managed === "replan") {
+      if (deps.managedReplanned) return { action: "wait", reason: "managed-steer-route-changed" };
+      return runFailoverCheck(paseo, scope, { ...deps, state: undefined, scopes: undefined, managedReplanned: true });
+    }
+    if (managed) return managed;
   }
-  const projections = routingProjection(routingState, routing);
-  const alternatives = chain.filter((item: any) => !asked.includes(item.steerId)).map((item: any, index: number) => {
-    const candidate = byId.get(item.steerId) ?? null;
-    const candidateWorkspace = routingState.workspaces?.find((workspace: any) => workspace.id === candidate?.workspaceId);
-    const candidateEntry = candidateWorkspace?.metadata?.[AGENTS_KEY]?.[candidate?.id];
-    const candidateAdmission = candidate ? quotaAdmission(candidate, candidateEntry, routing, candidateWorkspace?.metadata?.[AGENTS_KEY]) : null;
-    const sharesLimit = sameLimitedAccount(holderAgent, holderAdmission, candidate, candidateAdmission);
-    const action = readSteerAction(candidateEntry);
-    const unavailableForSwitch = item.kind === "steer" && (
-      liveSlotHolders(rows, item.slot).length !== 1 || candidate?.workspaceId !== mainId ||
-      P.parentOf(candidate) || readStagedSteerBrief(candidateEntry) || readCleanupAction(candidateEntry) ||
-      (action && action.phase !== "done")
-    );
-    const eligible = !!candidate && !candidate.archivedAt && candidate.background !== true && canWakeAgent(candidate) &&
-      !hasActiveAgentWork(candidate, candidateEntry) && !pendingSteerDelivery(candidateEntry) &&
-      candidateAdmission?.allowed && !sharesLimit && !unavailableForSwitch;
-    return { ...steerRouteCandidate({ agent: candidate ?? { id: item.steerId }, entry: candidateEntry,
-      entries: candidateWorkspace?.metadata?.[AGENTS_KEY], row: projections.find((row) => row.agentId === item.steerId),
-      snapshot: routing, admission: candidateAdmission ?? undefined, kind: "handover", eligible, preferenceRank: index,
-      reason: unavailableForSwitch ? "target unavailable for authority switch" :
-        sharesLimit ? "same limited account and model" : candidateAdmission?.reason ?? "target ineligible" }),
-      target: item, escalation: item.kind === "steer" ? 0 : item.kind === "domain" ? 1 : 2 };
-  });
-  // Domain and hub are escalation boundaries, not cheaper substitutes for an
-  // eligible scope member. Compare preparation within the first viable tier.
-  const tier = Math.min(...alternatives.filter((candidate: any) => candidate.eligible).map((candidate: any) => candidate.escalation));
-  const route = planSteerRoutes(routing, alternatives.map((candidate: any) => candidate.escalation === tier
-    ? candidate : { ...candidate, eligible: false, reason: candidate.reason === "eligible" ? "earlier escalation tier available" : candidate.reason }), {
-    observation: { epoch: wsf.epoch, holderId: holder, accountId: holderAdmission?.accountId ?? null },
-  });
-  next = route.selected?.target ?? null;
-  if (!next) return waitReset() ?? { action: "none", reason: "candidates-ineligible" };
+  if (!next && policy === "offer") {
+    return { action: "wait", reason: "offer-create-steer", offer: { kind: "create-steer", scopeId: scope.id, workspaceId: mainId } };
+  }
+  if (!next) {
+    const domain = alternatives.filter(({ target }) => target.kind === "domain");
+    const hub = alternatives.filter(({ target }) => target.kind === "hub");
+    next = select(domain.filter(({ agentId }) => !asked.has(agentId))) ??
+      select(hub.filter(({ agentId }) => !asked.has(agentId))) ?? select(domain) ?? select(hub);
+  }
+  if (!next) {
+    return waitReset() ?? (config?.routing?.noSuitableSteer === undefined
+      ? { action: "none", reason: chain.length ? "candidates-ineligible" : "no-candidates" }
+      : { action: "wait", reason: policy === "create" ? "managed-steer-unavailable" : "no-suitable-steer-wait" });
+  }
   const forkNote = zerosubForkWarning(holderRow);
   if (next.kind === "steer") {
     const delivery = deliveryDeps(deps);
@@ -1553,17 +1778,12 @@ export async function runFailoverCheck(
         activation: {
           agentId: next.steerId, epoch: wsf.epoch, failover: { holderId: holder, reason, note: forkNote },
           async check({ target, holder: outgoing, entries, metadata }: any) {
+            if (asRecord(metadata[MANAGED_CREATION_KEY])?.phase === "pending") {
+              throw new ST.SwitchRefused("A managed steer creation is awaiting reconciliation");
+            }
             const workspaces = await P.readPaseoWorkspaces(paseo);
-            for (const ws of workspaces) {
-              const liveMeta = ws.id === mainId ? metadata : ws.metadata;
-              for (const entry of Object.values(liveMeta?.[AGENTS_KEY] ?? {})) {
-                const action = readSteerAction(entry);
-                const batch = action?.batch;
-                if (batch?.workspaceId !== mainId || batch?.epoch !== wsf.epoch || batch?.takeover?.activeSlot !== activeSlot) continue;
-                if (pendingSteerDelivery(entry) || (action.phase === "done" && nowMs - Date.parse(action.observedAt ?? action.queuedAt) < settings.answerMinutes * 60_000)) {
-                  throw new ST.SwitchRefused("A takeover receipt is still awaiting reconciliation or an answer");
-                }
-              }
+            if (takeoverReceiptWait(workspaces, mainId, metadata, wsf.epoch, activeSlot, nowMs, settings.answerMinutes)) {
+              throw new ST.SwitchRefused("A takeover receipt is still awaiting reconciliation or an answer");
             }
             if (!deps.force && currentWake) {
               const freshEvents = await filterStaleWorkerEvents(paseo, metadata,
@@ -1593,8 +1813,8 @@ export async function runFailoverCheck(
             }
             const sourceQuota = liveHolder ? quotaAdmission(liveHolder, entries[liveHolder.id], observed, entries) : null;
             const targetQuota = quotaAdmission(liveTarget, entries[target.id], observed, entries);
-            if (limitUnconfirmed(sourceQuota)) throw new ST.SwitchRefused("The holder's quota limit is no longer confirmed");
-            if (!targetQuota.allowed || sameLimitedAccount(liveHolder, sourceQuota, liveTarget, targetQuota)) {
+            if (quotaLimitUnconfirmed(deps.quotaTrigger, sourceQuota)) throw new ST.SwitchRefused("The holder's quota limit is no longer confirmed");
+            if (!targetQuota.allowed || sharesLimitedAccount(liveHolder, sourceQuota, liveTarget, targetQuota)) {
               throw new ST.SwitchRefused("The successor's quota no longer permits failover");
             }
             const liveSettings = await (deps.getSettings?.() ?? resolveSettings(deps));

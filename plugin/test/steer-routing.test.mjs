@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
 register("./ts-resolve-hooks.mjs", import.meta.url);
-const { decideSteerDelivery, readRoutingSnapshot, steerRouteCandidate, planSteerRoutes } = await import("../server/steer-routing.ts");
+const { decideSteerDelivery, managedSteerRouteCandidate, noSuitableSteerPolicy, readRoutingSnapshot, steerRouteCandidate, planSteerRoutes } = await import("../server/steer-routing.ts");
 const { quotaAdmission, steerQuotaAdmission, readPrivacyAdmission } = await import("../server/steer-admission.ts");
 const { AGENTS_KEY } = await import("../server/core/agent-state.mjs");
 const { LABEL, METADATA_KEY } = await import("../server/core/paseo.mjs");
@@ -13,6 +13,88 @@ const NOW = Date.parse("2026-11-26T17:00:00Z");
 const agent = { id: "a", provider: "claude", model: "m" };
 const account = (id, usedPct) => ({ id, family: "claude", sampledAt: new Date(NOW).toISOString(),
   windows: [{ id: "5h", usedPct, resetsAt: new Date(NOW + 3600_000).toISOString() }] });
+
+const creationInput = () => ({
+  state: null, cycleKey: "scope:3", now: NOW, steers: [], eligibleLiveSteerIds: [],
+  create: { keyScope: "owner/repo", repo: "owner/repo", scopeId: "owner/repo", slot: "C", workspaceId: "ws",
+    profile: { provider: "codex", model: "m" }, metadata: {}, keyParts: ["ws", "e3"] },
+});
+
+test("the comparator ranks all five executable routes on their evidence", async () => {
+  const standby = { ...agent, id: "b" };
+  const snapshot = await readRoutingSnapshot({
+    getConfig: async () => ({ routing: { noSuitableSteer: "create" } }),
+    zerosub: { accounts: [account("limited", 100), account("open", 20)], agentAccount: { a: "limited", b: "open" }, pending: {} },
+    now: () => new Date(NOW).toISOString(),
+  }, []);
+  const option = managedSteerRouteCandidate(snapshot, creationInput(), 4);
+  assert.equal(option.candidate.id, option.decision.state.idempotencyKey);
+  const current = { ...agent, id: "current" };
+  const destination = quotaAdmission(standby, {}, snapshot);
+  const candidates = [
+    steerRouteCandidate({ agent: current, entry: {}, snapshot, preferenceRank: 3, evidence: { uncachedInputTokens: 300 } }),
+    steerRouteCandidate({ agent: standby, entry: {}, snapshot, kind: "handover", preferenceRank: 1, evidence: { uncachedInputTokens: 200 } }),
+    steerRouteCandidate({ agent, entry: {}, snapshot, kind: "move", preferenceRank: 2,
+      move: { supported: true, eligible: true, admission: destination }, evidence: { uncachedInputTokens: 100, preparationTurns: 1 } }),
+    steerRouteCandidate({ agent: current, entry: {}, snapshot, kind: "renewal", preferenceRank: 0,
+      renewal: { supported: true, eligible: true, preparation: "rewind" }, evidence: { uncachedInputTokens: 400 } }),
+    option.candidate,
+  ];
+  assert.equal(quotaAdmission(agent, {}, snapshot).allowed, false);
+  assert.deepEqual(planSteerRoutes(snapshot, candidates).ranked.map(({ kind }) => kind),
+    ["move", "handover", "continue", "renewal", "create"]);
+  for (const [strategy, kind] of [["balanced", "handover"], ["preference", "renewal"]]) {
+    snapshot.config.routing.strategy = strategy;
+    assert.equal(planSteerRoutes(snapshot, candidates).selected.kind, kind);
+  }
+  assert.equal(planSteerRoutes(snapshot, [option.candidate]).selected.kind, "create");
+});
+
+test("native routes require positive capability and eligibility evidence, plus quota on the execution account", async () => {
+  const snapshot = await readRoutingSnapshot({ zerosub: { accounts: [account("limited", 100), account("ready", 10)],
+    agentAccount: { a: "limited", open: "ready" } },
+    now: () => new Date(NOW).toISOString() }, []);
+  const target = { ...agent, id: "open" };
+  const args = { agent: target, entry: {}, snapshot, row: { warmth: "cold" } };
+  assert.equal(steerRouteCandidate(args).kind, "continue");
+  const admission = quotaAdmission(target, {}, snapshot);
+  for (const kind of ["move", "renewal"]) {
+    const evidence = { admission, preparation: "rewind" };
+    const make = (native) => steerRouteCandidate({ ...args, kind, [kind]: native });
+    assert.equal(make().eligible, false);
+    assert.equal(make({ ...evidence, supported: false, eligible: true }).eligible, false);
+    assert.equal(make({ ...evidence, supported: true, eligible: false }).eligible, false);
+    assert.equal(make({ ...evidence, supported: true, eligible: true }).eligible, true);
+  }
+  const depleted = steerRouteCandidate({ ...args, agent, kind: "renewal", renewal: { supported: true, eligible: true, preparation: "rewind" } });
+  assert.equal(depleted.eligible, false);
+  assert.equal(depleted.reason, "quota exhausted");
+  const move = steerRouteCandidate({ ...args, kind: "move", move: { supported: true, eligible: true, admission: depleted.admission } });
+  assert.equal(move.eligible, false);
+  assert.equal(steerRouteCandidate({ ...args, kind: "move",
+    move: { supported: true, eligible: true, admission: { ...admission, accountId: null } } }).eligible, false);
+});
+
+test("only create policy can reserve a comparator candidate, and reuse or reconciliation takes precedence", async () => {
+  const snapshot = await readRoutingSnapshot({}, []);
+  assert.equal(noSuitableSteerPolicy(snapshot.config), "wait");
+  for (const policy of ["wait", "offer", "create"]) {
+    snapshot.config = { routing: { noSuitableSteer: policy } };
+    assert.equal(noSuitableSteerPolicy(snapshot.config), policy);
+    assert.equal(!!managedSteerRouteCandidate(snapshot, creationInput())?.candidate, policy === "create");
+  }
+  const input = creationInput();
+  const reusable = { ...agent, title: "Steer B", status: "idle" };
+  const reused = managedSteerRouteCandidate(snapshot, { ...input, steers: [reusable], eligibleLiveSteerIds: [agent.id] });
+  assert.equal(reused.decision.action, "reuse");
+  assert.equal(reused.candidate, null);
+
+  const { decision: { state } } = managedSteerRouteCandidate(snapshot, input);
+  const pending = managedSteerRouteCandidate(snapshot, { ...input, state, steers: [reusable], eligibleLiveSteerIds: [agent.id] });
+  assert.equal(pending.decision.action, "reconcile");
+  assert.equal(pending.decision.state.idempotencyKey, state.idempotencyKey);
+  assert.equal(pending.candidate, null);
+});
 
 test("automatic delivery keeps the chat even when cold, large, or recovering", () => {
   for (const provider of ["claude", "claude-api", "codex", "unknown"]) {

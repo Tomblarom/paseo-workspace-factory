@@ -884,6 +884,252 @@ function failoverDeps(world, overrides = {}) {
   });
 }
 
+const MANAGED_CREATION_KEY = `${METADATA_KEY}.managedSteerCreation`;
+
+function managedFailoverWorld() {
+  const { world, ws, steers, worker } = unansweredWorld();
+  steers.B.archivedAt = steers.C.archivedAt = at(NOW);
+  const scope = { id: REPO, workspaceId: ws.id };
+  const paseo = fakeClient(world);
+  const catalog = { entries: [{ provider: "codex", enabled: true, status: "ready", models: [{ id: "m" }, { id: "m2" }] }] };
+  paseo.providers.snapshot = async () => catalog;
+  const receipts = new Map();
+  const requests = [];
+  const config = { routing: { noSuitableSteer: "create" }, steers: { priority: ["open"] },
+    profiles: { open: { provider: "codex", model: "m" } } };
+  let tail = Promise.resolve();
+  const deps = failoverDeps(world, {
+    getConfig: async () => config,
+    lookupSteerCreation: async (kind, key) => {
+      assert.equal(kind, "agent");
+      return receipts.get(key) ?? null;
+    },
+    lock: (name, operation) => {
+      const next = tail.then(() => noLock(name, operation));
+      tail = next.catch(() => {});
+      return next;
+    },
+  });
+  const receipt = (request, fields) => receipts.set(request.idempotencyKey, {
+    kind: "agent", idempotencyKey: request.idempotencyKey, workspaceId: ws.id, ...fields,
+  });
+  const complete = (request) => {
+    const [provider, model] = request.config.provider.split("/");
+    const agent = addAgent(world, { workspaceId: ws.id, title: request.title, labels: request.labels,
+      metadata: request.metadata, provider, model });
+    receipt(request, { phase: "completed", agentId: agent.id });
+    return agent;
+  };
+  const native = { create: async (request) => complete(request) };
+  const workspaceRef = paseo.workspaces.ref;
+  paseo.workspaces.ref = (id) => ({ ...workspaceRef(id), agents: { async create(request) {
+    assert.equal(id, ws.id);
+    const state = ws.metadata[MANAGED_CREATION_KEY];
+    assert.equal(state.phase, "pending");
+    assert.equal(state.idempotencyKey, request.idempotencyKey);
+    assert.equal(request.prompt, undefined);
+    assert.equal(request.parent, undefined);
+    assert.equal(request.metadata["zerosub.account"], undefined);
+    assert.equal(request.metadata["wsf.createdBy"], "factory");
+    requests.push(request);
+    return native.create(request);
+  } } });
+  const check = (minutes = 0, overrides = {}) => supervise.runFailoverCheck(paseo, scope, {
+    ...deps, nowMs: NOW + minutes * MIN, nowIso: at(NOW + minutes * MIN), ...overrides,
+  });
+  const addEscalations = () => {
+    ws.metadata[METADATA_KEY].scope.domain = "shop";
+    return ["shop", "hub"].map((scopeId) => {
+      const external = addWorkspace(world, { metadata: scopeMeta({ scopeId, kind: scopeId === "hub" ? "hub" : "dir" }) });
+      return addAgent(world, { title: "Steer A", workspaceId: external.id,
+        labels: { [LABEL.role]: "steer", [LABEL.slot]: "A", [LABEL.scope]: scopeId } });
+    });
+  };
+  return { world, ws, steers, worker, scope, deps, paseo, check, config, requests, receipt, complete, native, addEscalations };
+}
+
+test("wait and offer are distinct and leave the holder, work and creation state untouched", async () => {
+  const { world, ws, check, config, requests, addEscalations } = managedFailoverWorld();
+  const before = structuredClone(ws.metadata);
+  config.routing.noSuitableSteer = "wait";
+  assert.deepEqual(await check(), { action: "wait", reason: "no-suitable-steer-wait" });
+  config.routing.noSuitableSteer = "offer";
+  assert.deepEqual(await check(), { action: "wait", reason: "offer-create-steer",
+    offer: { kind: "create-steer", scopeId: REPO, workspaceId: ws.id } });
+  assert.deepEqual(ws.metadata, before);
+  const [domain] = addEscalations();
+  assert.equal((await check()).reason, "offer-create-steer");
+  assert.deepEqual(world.calls, []);
+  assert.deepEqual(requests, []);
+
+  config.routing.noSuitableSteer = "wait";
+  assert.equal((await check()).to.steerId, domain.id);
+  assert.equal(ws.metadata[METADATA_KEY].epoch, 3);
+});
+
+test("an eligible local standby wins over creation and a cheaper domain or hub", async () => {
+  const { world, ws, steers, check, requests, addEscalations, deps } = managedFailoverWorld();
+  const escalations = addEscalations();
+  steers.B.archivedAt = null;
+  steers.B.provider = "claude";
+  ws.metadata[AGENTS_KEY][steers.B.id] = { lastTurnEndedAt: at(NOW - 6 * MIN) };
+  let renewals = 0;
+  const result = await check(0, { delivery: { ...deps.delivery, runCleanupFn: async () => { renewals++; } } });
+  assert.equal(result.reason, "brief-pending");
+  assert.equal(ws.metadata[METADATA_KEY].activeAgentId, steers.B.id);
+  assert.equal(renewals, 1);
+  assert.equal(requests.length, 0);
+  assert.equal(ws.metadata[MANAGED_CREATION_KEY], undefined);
+  assert.deepEqual(escalations.flatMap((steer) => sendsTo(world, steer.id)), []);
+});
+
+test("the creation lock reuses a standby that arrived after planning", async () => {
+  const { world, ws, steers, check, requests, deps } = managedFailoverWorld();
+  let entered = false;
+  const lock = (name, operation) => deps.lock(name, async (held) => {
+    if (!entered) {
+      entered = true;
+      steers.B.archivedAt = null;
+    }
+    return operation(held);
+  });
+  assert.equal((await check(0, { lock })).to.steerId, steers.B.id);
+  assert.equal(sendsTo(world, steers.B.id).length, 1);
+  assert.equal(ws.metadata[MANAGED_CREATION_KEY], undefined);
+  assert.equal(requests.length, 0);
+});
+
+test("automatic creation precedes domain/hub and two checks create and activate at most once", async () => {
+  const { world, ws, steers, worker, check, requests, addEscalations, paseo, scope, deps } = managedFailoverWorld();
+  const escalations = addEscalations();
+  steers.A.archivedAt = at(NOW);
+  const queuedAt = at(NOW - MIN);
+  ws.metadata[WORKERS_KEY][worker.id].pendingWake = { state: "blocked", queuedAt };
+  const outcomes = await Promise.all([check(0, { force: true, failingAgentId: null }), check(0, { force: true, failingAgentId: null })]);
+  assert.equal(outcomes.filter(({ action }) => action === "failover").length, 1);
+  const state = ws.metadata[MANAGED_CREATION_KEY];
+  assert.equal(state.phase, "completed");
+  assert.equal(requests.length, 1);
+  assert.equal(ws.metadata[METADATA_KEY].epoch, 4);
+  assert.equal(ws.metadata[METADATA_KEY].activeAgentId, state.agentId);
+  assert.equal(ws.metadata[METADATA_KEY].activeSteer, "B");
+  assert.equal(sendsTo(world, state.agentId).length, 1);
+  assert.match(sendsTo(world, state.agentId)[0], /stuck task/);
+  assert.equal(ws.metadata[WORKERS_KEY][worker.id].pendingWake, null);
+  assert.deepEqual(escalations.flatMap((steer) => sendsTo(world, steer.id)), []);
+
+  supervise.resetSupervisionForTests();
+  assert.equal((await supervise.flushScope(paseo, scope, deps)).flushed, false);
+  assert.equal(sendsTo(world, state.agentId).length, 1);
+  assert.equal(requests.length, 1);
+});
+
+test("missing, unavailable and stale receipts preserve the reservation over restarts", async () => {
+  const { world, ws, check, requests, native, receipt, complete, config } = managedFailoverWorld();
+  native.create = async () => { throw new Error("lost creation response"); };
+  assert.equal((await check()).reason, "managed-steer-receipt-missing");
+  const [request] = requests;
+  const persisted = structuredClone(ws.metadata[MANAGED_CREATION_KEY]);
+
+  supervise.resetSupervisionForTests();
+  assert.equal((await check(60, { lookupSteerCreation: async () => { throw new Error("offline"); } })).reason, "managed-steer-receipt-unavailable");
+  receipt(request, { phase: "accepted" });
+  assert.equal((await check(61)).reason, "managed-steer-receipt-pending");
+  receipt(request, { phase: "failed", outcomeUnknown: true, failedStage: "agent" });
+  assert.equal((await check(62)).reason, "managed-steer-outcome-unknown");
+  receipt(request, { phase: "completed", agentId: "missing" });
+  assert.equal((await check(63)).reason, "managed-steer-agent-missing");
+  const target = complete(request);
+  target.model = "wrong";
+  assert.equal((await check(64)).reason, "managed-steer-agent-mismatch");
+  assert.deepEqual(ws.metadata[MANAGED_CREATION_KEY], persisted);
+  assert.equal(requests.length, 1);
+  assert.equal(sendsTo(world, target.id).length, 0);
+
+  target.model = "m";
+  config.routing.noSuitableSteer = "wait";
+  assert.equal((await check(65)).to.steerId, target.id);
+  assert.equal(ws.metadata[MANAGED_CREATION_KEY].phase, "completed");
+  assert.equal(requests.length, 1);
+  assert.equal(sendsTo(world, target.id).length, 1);
+});
+
+test("confirmed creation failures back off durably, exhaust the cycle and reopen on changed eligibility", async () => {
+  const { ws, check, requests, native, receipt, config, complete, addEscalations } = managedFailoverWorld();
+  addEscalations();
+  native.create = async (request) => {
+    receipt(request, { phase: "failed", outcomeUnknown: false, failedStage: "agent", error: "creation refused" });
+    throw new Error("creation refused");
+  };
+  assert.deepEqual(await check(), { action: "wait", reason: "managed-steer-backoff", wakeAt: at(NOW + MIN) });
+  supervise.resetSupervisionForTests();
+  assert.equal((await check(0.5)).reason, "managed-steer-backoff");
+  assert.equal(requests.length, 1);
+  assert.deepEqual(await check(1), { action: "wait", reason: "managed-steer-backoff", wakeAt: at(NOW + 3 * MIN) });
+  assert.equal((await check(2)).reason, "managed-steer-backoff");
+  assert.equal((await check(3)).reason, "managed-steer-exhausted");
+  assert.equal((await check(40)).reason, "managed-steer-exhausted");
+  assert.equal(requests.length, 3);
+  assert.equal(new Set(requests.map(({ idempotencyKey }) => idempotencyKey)).size, 3);
+  assert.equal(ws.metadata[MANAGED_CREATION_KEY].attempts, 3);
+  assert.equal(ws.metadata[METADATA_KEY].epoch, 3);
+
+  config.profiles.open.model = "m2";
+  native.create = async (request) => complete(request);
+  assert.equal((await check(41)).action, "failover");
+  assert.equal(requests.length, 4);
+  assert.equal(ws.metadata[MANAGED_CREATION_KEY].generation, 4);
+  assert.equal(ws.metadata[MANAGED_CREATION_KEY].attempts, 1);
+});
+
+test("creation falls through to domain only when no local creation route is available", async () => {
+  const { ws, check, config, requests, addEscalations } = managedFailoverWorld();
+  const [domain] = addEscalations();
+  config.profiles.open.model = "missing-from-catalog";
+  assert.equal((await check()).to.steerId, domain.id);
+  assert.equal(ws.metadata[MANAGED_CREATION_KEY], undefined);
+  assert.equal(requests.length, 0);
+});
+
+test("managed creation checks the actual model limit and keeps its budget across quota ranking changes", async () => {
+  const { ws, steers, check, native, requests, receipt } = managedFailoverWorld();
+  const holder = steers.A;
+  const resetAt = at(NOW + 30 * MIN);
+  ws.metadata[AGENTS_KEY][holder.id].quotaLimit = { accountId: "limited", provider: holder.provider, model: holder.model, at: at(NOW), resetAt };
+  const account = (id, usedPct) => ({ id, family: holder.provider, sampledAt: at(NOW - MIN),
+    windows: [{ id: "5h", usedPct, resetsAt: resetAt }] });
+  const route = (accounts) => ({ force: true, quotaTrigger: { accountId: "limited" },
+    zerosub: { accounts, agentAccount: { [holder.id]: "limited" }, pending: {} } });
+  const limited = account("limited", 0);
+  assert.equal((await check(0, route([limited]))).reason, "managed-steer-unavailable");
+  assert.equal(requests.length, 0);
+
+  native.create = async (request) => receipt(request, { phase: "failed", outcomeUnknown: false, failedStage: "agent" });
+  assert.equal((await check(0, route([limited, account("a", 10), account("b", 20)]))).reason, "managed-steer-backoff");
+  assert.equal((await check(0.5, route([limited, account("b", 10), account("a", 20)]))).reason, "managed-steer-backoff");
+  assert.equal(requests.length, 1);
+  assert.equal(ws.metadata[MANAGED_CREATION_KEY].attempts, 1);
+});
+
+test("automatic creation rechecks epoch, pause, pending permission and ZeroSub moves before reserving", async () => {
+  for (const reason of ["moved", "paused", "brief-pending", "wait-zerosub"]) {
+    const { ws, steers, check, deps, requests } = managedFailoverWorld();
+    let paused = false;
+    let zerosub = null;
+    const lock = (name, operation) => deps.lock(name, async (held) => {
+      if (reason === "moved") ws.metadata[METADATA_KEY].epoch++;
+      if (reason === "paused") paused = true;
+      if (reason === "brief-pending") steers.A.pendingPermissions.push({});
+      if (reason === "wait-zerosub") zerosub = { accounts: [], pending: { [steers.A.id]: "source" } };
+      return operation(held);
+    });
+    const result = await check(0, { lock, getZerosub: async () => zerosub, delivery: { ...deps.delivery, isFactoryPaused: async () => paused } });
+    assert.equal(result.reason, reason);
+    assert.equal(ws.metadata[MANAGED_CREATION_KEY], undefined);
+    assert.equal(requests.length, 0);
+  }
+});
+
 test("forced failover respects boot and drain without requiring a worker", async () => {
   for (const quiet of ["boot", "global", "marker"]) {
     const { world, ws, steers } = unansweredWorld();
