@@ -68,6 +68,10 @@ provider-configuration or capability layer. SLP is a pattern reference, not a te
   or handing over. Use separate commits for independent backend, UI, documentation
   and recovery changes. Keep tightly coupled changes and their tests together.
   Continue with the next authorized package when work is ready.
+- The owner's instruction on 2026-11-27 authorizes ongoing packaging and Git
+  pushes for accepted Workspace Factory work. Build the checked package with
+  `npm run build-snapshot`, then push its source commits to `origin/main` and
+  verify the remote commit before moving to the next package.
 - For suitable workers on this implementation, verify that the live Factory pick
   selects GPT-6.2 Sol with High reasoning before starting them.
 - Other commits, pushes, pull requests, forks, archives and deletions require
