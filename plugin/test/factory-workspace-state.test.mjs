@@ -132,6 +132,8 @@ test('setup reuses the existing plan routes from the workspace status hint', () 
   const statusError = (hint) => new Error(`Workspace "New" is not managed by the factory yet. To set it up, preview a plan: /factory plan ${hint}`);
   assert.deepEqual(enrollmentPlan(statusError('workspace:wks_main'), 'wks_main'), { repos: ['workspace:wks_main'] });
   assert.deepEqual(enrollmentPlan(statusError('--local "/a workspace"'), 'wks_main'), { local: ['/a workspace'] });
+  const rpcError = new Error(`Request failed: ${statusError('workspace:wks_main').message} requestType=plugin.rpc.invoke.request code=handler_error`);
+  assert.deepEqual(enrollmentPlan(rpcError, 'wks_main'), { repos: ['workspace:wks_main'] });
   assert.equal(enrollmentPlan(statusError('workspace:wks_other'), 'wks_main'), undefined);
   assert.equal(enrollmentPlan(statusError('--local'), 'wks_main'), undefined);
   assert.equal(enrollmentPlan(new Error('RPC disconnected'), 'wks_main'), undefined);

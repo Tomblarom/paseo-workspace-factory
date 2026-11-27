@@ -71,7 +71,8 @@ export function steerActionEligibility(row: SteerPillRow) {
 }
 
 export function enrollmentPlan(error: Error | null, workspaceId: string): RpcInput<typeof factoryPlan> | undefined {
-  const suggestion = error?.message.match(/ is not managed by the factory yet\. To set it up, preview a plan: \/factory (plan .+)$/)?.[1];
+  const message = error?.message.replace(/ requestType=plugin\.rpc\.invoke\.request code=handler_error$/, "");
+  const suggestion = message?.match(/ is not managed by the factory yet\. To set it up, preview a plan: \/factory (plan .+)$/)?.[1];
   if (!suggestion) return;
   try {
     const plan = parseFactoryArgs(suggestion);
