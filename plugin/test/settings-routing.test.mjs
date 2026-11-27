@@ -78,7 +78,7 @@ test("changing the Advisor flag moves an assigned profile between priorities and
 
   const invalid = validateFactorySettings(toggleAdvisor("first", true)(current));
   assert.ok(invalid.some((message) => message.includes('workerPriority profile "first" is tagged as advisor')));
-  assert.ok(invalid.some((message) => message.includes("initialActive A is an advisor slot")));
+  assert.ok(invalid.every((message) => !message.includes("initialActive")));
 });
 
 test("reorder moves the named profile one position relative to a newer revision", async () => {

@@ -6,7 +6,8 @@ register("./ts-resolve-hooks.mjs", import.meta.url);
 
 const { factoryConfigSettings, migrateFactoryConfig } = await import("../shared/settings.ts");
 const { configFromSettings, settingsFromConfig, validateFactorySettings } = await import("../shared/settings-validate.ts");
-const { isAdvisorSlot, isSensitiveProfile } = await import("../server/core/config.mjs");
+const { isAdvisorSlot, isAdvisorSteer, isSensitiveProfile, validateConfig } = await import("../server/core/config.mjs");
+const { LABEL } = await import("../server/core/paseo.mjs");
 const { buildSteerCreate } = await import("../server/core/steer-create.mjs");
 
 const profile = (overrides = {}) => ({
@@ -87,6 +88,23 @@ test("migration preserves legacy slot classification and creation request identi
     });
     assert.deepEqual(request(after), request(before));
   }
+});
+
+test("retagging presets preserves migrated steer roles and does not invalidate the deprecated initial slot", () => {
+  const source = legacy();
+  source.workerPriority = ["unused"];
+  const current = factoryConfigSettings.schema.parse(migrateFactoryConfig(source, 2));
+  current.profiles.original.advisor = true;
+  current.profiles.advisor.advisor = false;
+  current.advisorPriority = ["original"];
+  current.steerPriority.push("advisor");
+  const config = configFromSettings(current);
+  assert.deepEqual(validateFactorySettings(current), []);
+  assert.deepEqual(validateConfig(config), []);
+  assert.equal(isAdvisorSteer(config, { [LABEL.slot]: "B" }), false);
+  assert.equal(isAdvisorSteer(config, { [LABEL.slot]: "D" }), true);
+  assert.equal(isAdvisorSteer(config, { [LABEL.slot]: "D" }, { [LABEL.steerRole]: "coordinator" }), false);
+  assert.deepEqual(current.legacySnapshot.values, source);
 });
 
 test("explicit lists and strategy survive migration; current and future versions are unchanged", () => {

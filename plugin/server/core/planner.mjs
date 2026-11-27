@@ -227,6 +227,10 @@ export function planRepository(discovery, config, { adopt = {}, slots, adoptWork
     conflict('workspace.main', `No factory main workspace for ${checkoutPath ?? forkName}. ${enrollment}`);
   } else {
     const state = main.metadata?.[METADATA_KEY];
+    if (!state && !liveEnrollment && isAdvisorSlot(config, effectiveInitialActive)) {
+      conflict('workspace.main', `Legacy enrollment cannot promote advisor slot "${effectiveInitialActive}"`);
+      return complete();
+    }
     if (!state && effectiveInitialActive && (!currentEnrollment || activeAgentId)) {
       const summary = isWorktree
         ? `Adopt worktree workspace ${main.id} "${main.title ?? main.name}" as factory main workspace (no new project or workspace)`

@@ -257,6 +257,7 @@ export function missingHostSettings(values: Pick<FactorySettingsValues, "githubO
  */
 export function configFromSettings(settings: FactorySettingsValues): any {
   const derived = prioritiesFromSlots(settings.slots, settings.profiles);
+  const legacy = settings.legacySnapshot?.values;
   return {
     version: 1,
     github: {
@@ -273,9 +274,11 @@ export function configFromSettings(settings: FactorySettingsValues): any {
       initialActive: settings.initialActive,
       priority: [...(settings.steerPriority === undefined ? derived.steerPriority : settings.steerPriority)],
     },
-    legacyAdvisorSlots: Object.entries(settings.legacySnapshot?.values?.slots ?? {})
-      .filter(([, name]) => settings.legacySnapshot?.values.profiles?.[name]?.advisor === true)
-      .map(([slot]) => slot),
+    ...(legacy?.slots && legacy.profiles ? {
+      legacyAdvisorSlots: Object.entries(legacy.slots)
+        .filter(([, name]) => legacy.profiles?.[name]?.advisor === true)
+        .map(([slot]) => slot),
+    } : {}),
     advisors: { priority: [...(settings.advisorPriority === undefined ? derived.advisorPriority : settings.advisorPriority)] },
     workers: {
       priority: [...(settings.workerPriority ?? [])],
@@ -382,33 +385,35 @@ export function validateFactorySettings(values: FactorySettingsValues): string[]
       const flag: unknown = (p as Partial<FactoryProfileValue>)?.[key];
       if (flag !== undefined && typeof flag !== "boolean") errors.push(`profiles.${name}.${key} must be a boolean`);
     }
-    for (const key of ["steerPriority", "advisorPriority"] as const) {
-      const list = values[key];
-      if (list === undefined) continue;
-      if (!Array.isArray(list)) {
-        errors.push(`${key} must be a list of profiles`);
-        continue;
-      }
-      for (const name of list) {
-        if (typeof name !== "string" || !name || !profiles[name]) {
-          errors.push(`${key} references unknown profile ${JSON.stringify(name)}`);
-        } else if (typeof profiles[name].advisor === "boolean"
-          && profiles[name].advisor !== (key === "advisorPriority")) {
-          errors.push(`${key} profile ${JSON.stringify(name)} has an incompatible advisor classification`);
-        }
-      }
-      if (new Set(list).size !== list.length) errors.push(`${key} contains duplicates`);
-    }
-    if (values.routingStrategy !== undefined && !["efficiency", "balanced", "preference"].includes(values.routingStrategy)) {
-      errors.push("routingStrategy must be efficiency, balanced, or preference");
-    }
   }
-  const isAdvisorSlot = (slot: string) => profiles[slots[slot]]?.advisor === true;
-  if (Object.keys(slots).length && Object.keys(slots).every(isAdvisorSlot)) {
-    errors.push("at least one steer slot needs a non-advisor profile");
+  for (const key of ["steerPriority", "advisorPriority"] as const) {
+    const list = values[key];
+    if (list === undefined) continue;
+    if (!Array.isArray(list)) {
+      errors.push(`${key} must be a list of profiles`);
+      continue;
+    }
+    for (const name of list) {
+      if (typeof name !== "string" || !name || !profiles[name]) {
+        errors.push(`${key} references unknown profile ${JSON.stringify(name)}`);
+      } else if (typeof profiles[name].advisor === "boolean"
+        && profiles[name].advisor !== (key === "advisorPriority")) {
+        errors.push(`${key} profile ${JSON.stringify(name)} has an incompatible advisor classification`);
+      }
+    }
+    if (new Set(list).size !== list.length) errors.push(`${key} contains duplicates`);
   }
-  if (slots[values.initialActive] && isAdvisorSlot(values.initialActive)) {
-    errors.push(`initialActive ${values.initialActive} is an advisor slot; pick a coordinating steer`);
+  if (values.routingStrategy !== undefined && !["efficiency", "balanced", "preference"].includes(values.routingStrategy)) {
+    errors.push("routingStrategy must be efficiency, balanced, or preference");
+  }
+  if (values.steerPriority === undefined) {
+    const isAdvisorSlot = (slot: string) => profiles[slots[slot]]?.advisor === true;
+    if (Object.keys(slots).length && Object.keys(slots).every(isAdvisorSlot)) {
+      errors.push("at least one steer slot needs a non-advisor profile");
+    }
+    if (slots[values.initialActive] && isAdvisorSlot(values.initialActive)) {
+      errors.push(`initialActive ${values.initialActive} is an advisor slot; pick a coordinating steer`);
+    }
   }
   return errors;
 }

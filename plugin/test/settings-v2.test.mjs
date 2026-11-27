@@ -73,10 +73,13 @@ test("validation: worker priority and advisor rules", () => {
   assert.match(JSON.stringify(validateFactorySettings(adv)), /tagged as advisor/);
   const active = v2doc();
   active.profiles.codex.advisor = true;
+  assert.match(JSON.stringify(validateFactorySettings(active)), /incompatible advisor classification/);
+  delete active.steerPriority;
   assert.match(JSON.stringify(validateFactorySettings(active)), /initialActive A is an advisor slot/);
   const all = v2doc();
   all.profiles.codex.advisor = true;
   all.profiles.anti.advisor = true;
+  delete all.steerPriority;
   assert.match(JSON.stringify(validateFactorySettings(all)), /non-advisor/);
 });
 

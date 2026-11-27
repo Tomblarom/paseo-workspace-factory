@@ -67,7 +67,9 @@ export function isAdvisorSteer(config, labels, metadata = null) {
   const role = labels?.[LABEL.steerRole] ?? metadata?.[LABEL.steerRole];
   if (role !== undefined) return role !== 'coordinator';
   const slot = labels?.[LABEL.slot];
-  return isAdvisorSlot(config, slot) || config?.legacyAdvisorSlots?.includes(slot) === true;
+  return Array.isArray(config?.legacyAdvisorSlots)
+    ? config.legacyAdvisorSlots.includes(slot)
+    : isAdvisorSlot(config, slot);
 }
 
 /**
@@ -199,13 +201,15 @@ export function validateConfig(config) {
   if (new Set(prepare).size !== prepare.length) errors.push('steers.prepare contains duplicates');
   if (!prepare.includes(config.steers?.initialActive)) errors.push('steers.initialActive must be one of steers.prepare');
   if (config.steers?.activeMarker !== undefined && typeof config.steers.activeMarker !== 'string') errors.push('steers.activeMarker must be a string (empty disables the active-steer tab marker)');
-  const slotEntries = Object.entries(slots);
-  if (slotEntries.length && slotEntries.every(([, profile]) => profiles[profile]?.advisor === true)) {
-    errors.push('steers.slots needs at least one non-advisor slot (advisors never coordinate)');
-  }
-  const initialProfile = slots[config.steers?.initialActive];
-  if (initialProfile && profiles[initialProfile]?.advisor === true) {
-    errors.push(`steers.initialActive must not be advisor slot "${config.steers.initialActive}" (profile "${initialProfile}")`);
+  if (!Array.isArray(config.steers?.priority)) {
+    const slotEntries = Object.entries(slots);
+    if (slotEntries.length && slotEntries.every(([, profile]) => profiles[profile]?.advisor === true)) {
+      errors.push('steers.slots needs at least one non-advisor slot (advisors never coordinate)');
+    }
+    const initialProfile = slots[config.steers?.initialActive];
+    if (initialProfile && profiles[initialProfile]?.advisor === true) {
+      errors.push(`steers.initialActive must not be advisor slot "${config.steers.initialActive}" (profile "${initialProfile}")`);
+    }
   }
   if (config.handoffLanguage !== undefined && !['en', 'de'].includes(config.handoffLanguage)) errors.push('handoffLanguage must be "en" or "de"');
   const runtime = config.runtime ?? {};
@@ -272,13 +276,13 @@ export function configWarnings(config) {
       warnings.push(`profile "${name}" is both advisor and sensitive (advisors get sanitized context only)`);
     }
   }
-  const pools = new Set(Object.entries(config.steers?.slots ?? {})
-    .filter(([, name]) => profiles[name]?.advisor !== true)
-    .map(([, name]) => profilePool(profiles[name]))
-    .filter(Boolean));
-  const nonAdvisor = Object.entries(config.steers?.slots ?? {}).filter(([, name]) => profiles[name]?.advisor !== true);
-  if (nonAdvisor.length > 1 && pools.size === 1) {
-    warnings.push(`all non-advisor steer slots use quota pool "${[...pools][0]}"`);
+  const priorities = config.steers?.priority;
+  const names = Array.isArray(priorities) ? priorities : Object.values(config.steers?.slots ?? {});
+  const coordinators = names.filter((name) => profiles[name]?.advisor !== true);
+  const pools = new Set(coordinators.map((name) => profilePool(profiles[name])).filter(Boolean));
+  if (coordinators.length > 1 && pools.size === 1) {
+    const routes = Array.isArray(priorities) ? 'coordinator preferences' : 'non-advisor steer slots';
+    warnings.push(`all ${routes} use quota pool "${[...pools][0]}"`);
   }
   return warnings;
 }
