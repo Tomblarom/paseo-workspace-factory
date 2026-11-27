@@ -2,7 +2,7 @@
 
 New to the factory? Start with [Getting started](getting-started.md); this page is the detailed reference.
 
-Factory configuration lives in Paseo under Settings → Plugins → Factory. The host settings hold profiles, separate steer, advisor and worker priorities, quota thresholds, GitHub owner and checkout root. Workspace membership and authority come from the live agents and the scope's recorded holder and epoch. Older settings are kept for migration and recovery of saved plans.
+Factory configuration lives in Paseo under Settings → Plugins → Factory. The host settings hold profiles, separate steer, advisor and worker priorities, quota thresholds, GitHub owner and checkout root. Workspace membership and authority come from the live agents and the scope's recorded holder and epoch. The agent CLI reads those settings through the running plugin. The legacy Factory configuration file is ignored.
 
 ## Fields
 
@@ -16,9 +16,7 @@ Factory configuration lives in Paseo under Settings → Plugins → Factory. The
 | `profiles.<name>` | `provider`, `model`, `thinking` (or `null` for the provider default), `mode`, `advisor` (boolean, default `false`), `sensitive` (boolean, default `false`; `muse` profiles migrate to `true` unless set). Validated against the live provider catalog before a steer is planned. Advisor-tagged profiles are second-opinion candidates; they are never picked for workers or non-advisor slots (see [Advisors](#advisors) and [Managing models](#managing-models-from-the-cli)). Sensitive profiles only get sanitized technical tasks (see [Privacy](#privacy-sensitive-profiles)). |
 | `knownLimits` | Built-in catalog exceptions only (see below); not configurable. |
 | `steers.priority`, `advisors.priority` | Ordered profile names for coordinator and advisor creation. Live membership supplies the steer letters. |
-| `steers.slots` | Slot letter (A–Z) → profile name, in priority order: A first, then B, C, … (priority = slot order, 1=A, 2=B). Changing a slot's profile does not change an existing steer; the live model is authoritative. Default is a single steer `A`; add `B`, `C`, … with their profiles as needed. Steer slots never shift: `steer set` replaces the slot's profile, a number addresses an existing position (2 is B), and only a free letter within reach creates a slot — no new gaps. |
-| `steers.prepare` | Slots created on enrollment (default `["A"]`). Overridden per run with `plan --slots` (must be a subset of defined slots). Advisor slots are only planned when they are in `prepare`. |
-| `steers.initialActive` | Active steer after enrollment (must be in `prepare` and must not be an advisor slot; with `--slots` it falls back to the first slot when needed). At least one non-advisor slot is required. |
+| `steers.slots`, `steers.prepare`, `steers.initialActive` | Legacy slot presets retained for saved plans and older commands. Current enrollment reads live workspace membership. |
 | `steers.activeMarker` | Tab-title prefix on the active steer (`▷ Steer E`; default `"▷"`). `switch --apply` and resume-takeover move the marker between live tabs. Fresh gives the replacement the active marker; empty disables the marker. Title matching tolerates the prefix. |
 | `workers.priority` | Ordered profile-name list for workers, highest priority first. A missing `priority` reads as `[defaultProfile]`; writing sets `defaultProfile` to `priority[0]` for older readers. |
 | `workers.defaultProfile` | First entry of `workers.priority`, kept for backwards compatibility. Prefer `workers.priority`. |
@@ -31,11 +29,9 @@ Factory configuration lives in Paseo under Settings → Plugins → Factory. The
 | `runtime.paseo.bin` | `paseo` CLI (default `paseo` on PATH, override with `PASEO_FACTORY_PASEO_BIN`); its installation also provides the SDK. Not in the plugin settings. |
 | `runtime.paseo.passwordFile` | File with the daemon password, if the daemon requires one (override with `PASEO_PASSWORD_FILE` or `PASEO_PASSWORD`). Not in the plugin settings. |
 
-Per-run slot selection: `plan <repo> --slots D` (comma-separated, e.g. `--slots B,D`) plans only those slots instead of `steers.prepare`. `--adopt X=<agent-id>` accepts any slot defined in `steers.slots`; adopting a slot outside `prepare` plans only the adopted slot(s), not the rest of `prepare`.
+Enrollment creates Steer A in an empty workspace using an eligible profile from the steer priority. If several registered coordinators are available, `plan <scope> --slots D` selects one existing letter as the initial holder. An enrolled scope changes its holder through Handover or Activate Steer.
 
-If live steers already run in slots outside `prepare` (for example D and E while the config prepares A), `plan` refuses to create further steers and suggests a `--slots` list that includes the running ones; with that `--slots` they are acknowledged and the plan continues; when nothing needs creating, the running steers are only noted. A running slot that is not defined in `steers.slots` must be defined there or archived first.
-
-Existing agents can become steers. Unlabelled agents in the main workspace whose title looks like a steer are candidates for that slot: `Steer A`, in any letter case, optionally with a suffix in brackets or after a separator (`Steer A [kn]`, `Steer A (fp)`, `Steer A · fp`). The plan reports such a candidate as a conflict until you confirm it with `--adopt A=<agent-id>`, so no existing agent is taken over silently. Adoption only adds the labels; title and model stay as they are (point the slot at the live model with `steer set` if you want them to match). A title with a number (`Steer 3`) is never assigned to a slot automatically: `plan` lists it in the notes, and you adopt it explicitly with `--adopt C=<agent-id>`. Privacy rule: adopting an agent is a conflict when the agent's provider is sensitive (any same-provider profile with `"sensitive": true`; `muse` counts as sensitive unless set otherwise) and the repository is private or its visibility is unknown, even when its model matches the slot profile. A sensitive agent is only adopted for a repository that GitHub reports as public (see [Privacy](#privacy-sensitive-profiles)).
+Existing agents can become steers. Use `--adopt A=<agent-id>` to confirm the tab that holds Steer A in the main workspace. Adoption records membership and uses the agent's live model. A title with a number, such as `Steer 3`, requires an explicit letter. Sensitive agents require verified public repository visibility. [Privacy](#privacy-sensitive-profiles)
 
 ## Findings in prompts
 
@@ -96,7 +92,13 @@ An existing Paseo worktree workspace (`workspaceKind: worktree`, usually a Paseo
 /factory plan workspace:wks_0123456789abcdef
 ```
 
-The scope id is `--name`, else `<parent>@<branch>` — the parent from the owning project checkout (a github scope when its origin parses to `owner/repo`, else a dir scope for the project folder, else no parent) plus the worktree branch — else the worktree folder (detached or unreadable branch). `status`, `checkpoint`, `switch`, `fresh` and `workers` accept the scope id as well as the `local/<folder>` alias and the workspace id (`workspace:<id>` or the bare `wks_...` id). The plan sets the factory metadata including the scope on the existing worktree workspace (`workspace.main.adopt`, or the non-destructive `workspace.main.scope` repair when metadata without a scope exists) and plans the steer slots as usual (`Steer A` titles, `--adopt` for unlabelled candidates, `--slots` for a subset). New steers are labelled `wsf.scope=<id>` next to `wsf.repo`; steers labelled with the legacy `local/<folder>` name keep matching. Existing agents of the workspace are only listed in the plan notes for reuse by id; they are never renamed or archived. Discovery without a worktree match behaves exactly as before; when several directories or workspaces share a folder name, `local/<folder>` is a conflict and the full path, the scope id or the workspace id disambiguates.
+The scope id is `--name`, else `<parent>@<branch>` — the parent from the owning project checkout (a github scope when its origin parses to `owner/repo`, else a dir scope for the project folder, else no parent) plus the worktree branch — else the worktree folder (detached or unreadable branch). `status`, `checkpoint`, `switch`, `fresh` and `workers` accept the scope id as well as the `local/<folder>` alias and the workspace id (`workspace:<id>` or the bare `wks_...` id). The plan sets the factory metadata including the scope on the existing worktree workspace (`workspace.main.adopt`, or the non-destructive `workspace.main.scope` repair when metadata without a scope exists) and plans the steer slots as usual (`Steer A` titles, `--adopt` for unlabelled candidates, `--slots` to select one live initial coordinator). New steers are labelled `wsf.scope=<id>` next to `wsf.repo`; steers labelled with the legacy `local/<folder>` name keep matching. Existing agents of the workspace are only listed in the plan notes for reuse by id; they are never renamed or archived. Discovery without a worktree match behaves exactly as before; when several directories or workspaces share a folder name, `local/<folder>` is a conflict and the full path, the scope id or the workspace id disambiguates.
+
+Archive frees the canonical scope ID. A new worktree of the same branch can use
+the same `<parent>@<branch>` ID even when Paseo adds a number to its directory.
+An old folder-based name can return nearby live worktree scopes as suggestions.
+Use the exact ID, the workspace address or `plan --name` during enrollment when
+a branch ID is unavailable.
 
 ## Workspace titles
 
@@ -156,11 +158,20 @@ The idle cleanup can execute its `fresh-recommended` hint the same way for Codex
 
 ## Steer menu
 
-Every steer tab carries a persistent Factory pill (for example `A · warm`); hovering shows tokens and quota on a second line. Opening it shows nothing but the action menu: **Create steer…**, **Hand over to…** (submenu of holders A, B, C …; unavailable holders are disabled with the short reason in the title), **Resume… / Refresh context…**, **Change settings…** (model, thinking and speed from the live provider catalog, same provider), and **Open Factory**. Every write previews first, confirms, then applies through the same operations as `/factory steer add`, `/factory switch`, `/factory resume` and `/factory fresh`; an expired preview is re-requested for review. Handover and replacement send exactly one brief to the destination and no prompt to the outgoing tab. Manual **Resume… / Refresh context…** previews a brief in the existing chat, a native Claude clear, a rewind, or a replacement agent. A settings change applies in place on a small cold context and otherwise refreshes first (bound rewind, then apply and verify); under Maximum efficiency a warm, cooling or running steer greys the change out. Native Paseo setting edits cannot be disabled, so an external change shows `C · settings changed` with **Revert settings** and **Continue with fresh context…**.
+Every steer tab carries a Factory pill with its context state. The active
+steer's menu lists its Handover destinations with context, model, thinking
+and ZeroSub profile. A standby can use **Activate Steer**. **Reset Steer** opens
+a confirmation in the Factory panel and uses a rewind in the same tab when
+one is available. The confirmation explains the action when quota is unknown
+or depleted. **Open Factory** opens the workspace panel, including its Pause
+or Resume control and the current checkpoint.
+
+Change a steer’s own settings with Paseo’s native agent controls. The profile
+priorities in the Factory settings apply to future route selection.
 
 Settings → Plugins → Factory → Steer menu:
 
-- **Initialize new steer** (`initializeNewSteer` in the `factory-steer-menu` settings document): how a new or replaced steer's brief is delivered — send the brief at once, place the brief in the Paseo composer (default; goes out with the next own prompt, falls back to sending when no composer tab is open), or leave the composer empty and initialize later from the steer menu.
+- **Initialize new steer** (`initializeNewSteer` in the `factory-steer-menu` settings document): how a new or replaced steer's brief is delivered — send the brief at once, place the brief in the Paseo composer (default), or leave the composer empty and initialize later from the Factory panel. When the composer is unavailable, the brief remains staged.
 - **Keep chat history** (`keepChatHistory`, default off) preserves steer chats during automatic delivery and idle cleanup. For cold or large contexts, automatic delivery first uses native compaction when supported. Manual refresh remains available through its preview.
 
 ## Advisors
@@ -195,7 +206,12 @@ Use `/factory steer add [slot] [profile|provider/model]` to create a steer in th
 
 Model lists are ordered by priority, highest first. `worker set <n> <model>` inserts the model at position n; the entries from n onwards move down by one, and an existing copy of the same model is removed, so every model appears once. `worker rm <n>` removes an entry and closes the gap. Steer slots never shift: `steer set <n|slot>` replaces the slot's profile (`steer set 2 X` is `steer set B X`); a number past the end is refused, a free letter within reach creates the slot without opening a gap. `set` creates or updates a profile (named by `--profile`, otherwise the slot's/entry's current profile, or `<provider>-<model>` for a new entry) after validating against the live catalog including the built-in exceptions. Omitted `--thinking`/`--mode` keep the stored value (new profiles default to `"thinking": null` and no mode); use `--thinking null` for the provider default. A temporarily unavailable model is still stored, but with a warning — a fallback list may hold such entries; an unknown provider/model syntax is an error. When a model is not available in the live catalog, the next entry that is available and allowed for the role and repository (advisor and sensitive rules) is used. `rm` keeps the profile; `steer rm` also repairs `prepare`/`initialActive`. Writes act directly (reversible, no hash), like saving in Settings; plan and apply only concern agents. `--dry-run` shows the change instead of saving it. `/factory worker|steer|model …` saves in the host settings document, which is the effective source.
 
-Resolution with availability fallback: the factory picks the first list entry that passes the catalog check and matches the role. Workers use `workers.priority` and always skip advisor profiles; sensitive profiles for workers and steers are skipped unless the scope is provably public. Steer slot S uses `[slots[S], then the profiles of the following slots, then the previous ones]`; a non-advisor slot takes only non-advisor profiles, an advisor slot only advisor profiles, and a fallback never picks a profile a living steer of the same scope already uses (no duplicates). Skipped profiles appear as notes (`B: muse not available → copilot-sonnet`); when nothing is available, steers get a plan conflict and workers an error listing the reasons. The preference fallback applies to `plan` and `worker pick`. Fresh keeps the live route by default and requires an explicit model selection for a different route. The plugin caches the catalog for 60 s.
+Profile selection reads the priority for the requested role and checks
+availability, quota and repository visibility. Workers and coordinating
+steers skip advisor profiles. Enrollment and `steer add` use the current
+steer priority when no explicit profile is selected. The `steer set` and
+`steer rm` commands still edit the legacy slot presets. Fresh keeps the live
+route unless a different model is explicitly selected.
 
 `worker pick` prints the chosen profile plus the matching `paseo run` flags (`--provider … --model … [--thinking …] [--mode …]`). Steers start workers with that model (see [steer instructions](steer-instructions.md#worker-instructions)); the resume brief carries it as `Worker model: …`.
 
