@@ -153,7 +153,7 @@ Use the absolute binary path when `paseo-factory` is not on the hook's `PATH`; i
 
 ## Same-tab refresh (rewind)
 
-**Reset Steer** rewinds the live tab to a usable user message through Paseo. The agent keeps its ID, title, labels and runtime settings. Factory records the rewind in `wsf.agents` and sends or stages the continuation brief. A separate `/factory fresh [--slot E | --worker <id>]` preview can request replacement when rewind is unavailable. Use `--keep-chat-history` to request replacement directly and `--model <provider/model>` to choose another route. The replacement confirmation explicitly approves archiving the outgoing agent. Factory lists only live agents.
+**Reset Steer** rewinds the live tab to a usable user message through Paseo when **Keep chat history** is off. Rewind removes later messages from the tab. The agent keeps its ID, title, labels and runtime settings. Factory records the rewind in `wsf.agents` and sends or stages the continuation brief. A separate `/factory fresh [--slot E | --worker <id>]` preview can request replacement when rewind is unavailable. Use `--keep-chat-history` to request replacement directly and `--model <provider/model>` to choose another route. The replacement confirmation explicitly approves archiving the outgoing agent. Factory lists only live agents.
 
 
 The idle cleanup can execute its `fresh-recommended` hint the same way for Codex chats (no native `/clear`): Settings → Plugins → Factory → Idle agents → “Rewind ‘fresh’ Codex chats in place” (default off; Claude chats always keep their native `/clear`). Details: [cold context design](design/cold-context-resume.md#same-tab-refresh-via-rewind).
@@ -164,8 +164,8 @@ Every steer tab carries a Factory pill with its context state. The active
 steer's menu lists its Handover destinations with context, model, thinking
 and ZeroSub profile. A standby can use **Activate Steer**. **Reset Steer** opens
 a confirmation in the Factory panel and uses a rewind in the same tab when
-one is available. The confirmation explains the action when quota is unknown
-or depleted. **Open Factory** opens the workspace panel, including its Pause
+one is available and **Keep chat history** is off. The confirmation explains
+the action when quota is unknown or depleted. **Open Factory** opens the workspace panel, including its Pause
 or Resume control and the current checkpoint.
 
 Change a steer’s own settings with Paseo’s native agent controls. The profile
@@ -174,7 +174,7 @@ priorities in the Factory settings apply to future route selection.
 Settings → Plugins → Factory → Steer menu:
 
 - **Initialize new steer** (`initializeNewSteer` in the `factory-steer-menu` settings document): how a new or replaced steer's brief is delivered — send the brief at once, place the brief in the Paseo composer (default), or leave the composer empty and initialize later from the Factory panel. When the composer is unavailable, the brief remains staged.
-- **Keep chat history** (`keepChatHistory`, default off) preserves steer chats during automatic delivery and idle cleanup. For cold or large contexts, automatic delivery first uses native compaction when supported. Manual refresh remains available through its preview.
+- **Keep chat history** (`keepChatHistory`, default off) preserves steer chats during automatic delivery and idle cleanup. For cold or large contexts, automatic delivery first uses native compaction when supported. It also blocks **Reset Steer** until Paseo supports opening a fresh provider session while retaining the timeline in the same tab.
 
 ## Advisors
 
