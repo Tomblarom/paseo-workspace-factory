@@ -1,11 +1,5 @@
-// P1 boot check: marks factory turns that died with a daemon restart.
-// A restart kills running agents mid-turn without agent.turn.after, so the
-// open-turn tracking from turn.before (wsf.agents openTurnId/turnStartedAt)
-// is the only trace. At plugin start, every open turn whose start predates
-// the daemon start becomes an interrupted record with reason "daemon-restart"
-// (C2 shape plus reason) and clears the open fields, so a second plugin start
-// finds nothing to mark. Never throws out of ensureBootChecked.
-import { actionEntry, readEffectReceipt, readSteerAction } from "./core/steer-action.mjs";
+// Reconcile pre-restart turn markers and unfinished native preparations.
+import { actionEntry, readCleanupAction, readEffectReceipt, readSteerAction } from "./core/steer-action.mjs";
 import { execFileSync } from "node:child_process";
 import { METADATA_KEY, paseoBinary, readPaseoState } from "./core/paseo.mjs";
 import { listScopes } from "./core/scope.mjs";
@@ -19,6 +13,7 @@ import {
 import { isAdvisorSteer } from "./core/config.mjs";
 import { factoryIdentity } from "../shared/auto-checkpoint.js";
 import { RESUME_CLEAR_DEFAULTS, bootResumeReason } from "../shared/idle-cleanup.js";
+import { workerIdentityFromMetadata } from "../shared/supervise.js";
 import { continuedFromId, resolveFactoryLabels, resolveContinuations } from "./core/zerosub.mjs";
 
 const CHECKPOINT_KEY = `${METADATA_KEY}.checkpoint`;
@@ -56,6 +51,26 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+function restartAction(entry: unknown, metadata: Record<string, unknown>, daemonStartedAt: string) {
+  const action = readSteerAction(entry);
+  if (!action || readEffectReceipt(metadata, action)) return null;
+  const cleanup = readCleanupAction(entry);
+  if (!(Date.parse(cleanup?.at ?? action.rewindAttempt?.at ?? action.queuedAt) < Date.parse(daemonStartedAt))) return null;
+  if (action.phase === "rewinding") {
+    return { ...action, phase: "uncertain", lastError: "Paseo restarted before the rewind outcome was confirmed. Inspect the agent before recovery." };
+  }
+  // Confirmed sends and exact send replays belong to the delivery reconciler.
+  if (action.kind === "fresh-delivery" ||
+      !(action.phase === "renewing" || (action.phase === "blocked" && cleanup && !cleanup.uncertain))) return null;
+  const detail = cleanup || action.kind === "cleanup"
+    ? "Paseo restarted before cleanup was confirmed. Inspect the agent before recovery."
+    : "Paseo restarted before context renewal was confirmed. Retry recovery or use Fresh.";
+  return {
+    ...action, phase: "blocked", lastError: detail,
+    ...(cleanup ? { cleanup: { ...cleanup, uncertain: true, error: cleanup.error ?? detail } } : {}),
+  };
 }
 
 /**
@@ -230,7 +245,7 @@ export async function runBootCheck({
     entry: Record<string, unknown> | null;
     role: string;
     open: boolean;
-    reason: string | null;
+    resumeWhenClosed: boolean;
   };
   const grouped = new Map<string, { scope: any; agents: Candidate[]; stale: string[]; renewals: string[] }>();
   const groupOf = (scope: any) => {
@@ -245,48 +260,48 @@ export async function runBootCheck({
   for (const agent of state.agents ?? []) {
     if (agent?.archivedAt || superseded.has(agent.id)) continue;
     const labels = resolveFactoryLabels(agent, state.agents);
-    const identity = factoryIdentity(labels);
+    const identity = factoryIdentity(labels) ?? workerIdentityFromMetadata(agent);
     if (!identity) continue;
     const scope = byId.get(identity.scopeId) ?? null;
     if (!scope) continue;
     const scopeMeta = asRecord(scope.workspace?.metadata?.[METADATA_KEY]);
     const entries = asRecord(scope.workspace?.metadata?.[AGENTS_KEY]) ?? {};
     const entry = asRecord(entries[agent.id]);
-    const openCheck = entry
+    const preRestart = entry
       ? (isOpenTurnBeforeRestart as unknown as (e: unknown, d: string) => boolean)(
           entry,
           daemonStartedAt,
         )
       : false;
-    let reason: string | null = null;
+    const alreadyEnded = !!entry?.openTurnId && entry.openTurnId === entry.lastTurnId;
+    let resumeWhenClosed = false;
     if (identity.role === "steer") {
       if (!identity.slot) continue;
       const advisor = configFailed
         ? true
         : isAdvisorSteer(config, labels, agent.metadata);
-      reason = (bootResumeReason as unknown as (a: unknown) => string | null)({
-        openTurn: openCheck,
+      const reason = (bootResumeReason as unknown as (a: unknown) => string | null)({
+        openTurn: preRestart && !alreadyEnded,
         active: scopeMeta?.activeSteer === identity.slot,
         advisor,
         lastTurnEndedAt: typeof entry?.lastTurnEndedAt === "string" ? entry.lastTurnEndedAt : null,
         daemonStartedAt,
         recentHours,
       });
-      if (!reason) continue;
-      qualified.add(agent.id);
-      reasonCounts[reason as "open-turn" | "active-recent" | "recent"] += 1;
-    } else if (!openCheck) {
+      if (reason) {
+        resumeWhenClosed = reason !== "open-turn";
+        qualified.add(agent.id);
+        reasonCounts[reason as "open-turn" | "active-recent" | "recent"] += 1;
+      } else if (!preRestart) continue;
+    } else if (!preRestart) {
       continue;
     }
-    groupOf(scope).agents.push({ agentId: agent.id, entry, role: identity.role, open: openCheck, reason });
+    groupOf(scope).agents.push({ agentId: agent.id, entry, role: identity.role, open: preRestart, resumeWhenClosed });
   }
   for (const scope of scopes) {
     const entries = asRecord(scope.workspace?.metadata?.[AGENTS_KEY]) ?? {};
     for (const [agentId, raw] of Object.entries(entries)) {
-      const action = readSteerAction(raw);
-      const stale = action && !readEffectReceipt(scope.workspace?.metadata ?? {}, action) && Date.parse(action.queuedAt) < Date.parse(daemonStartedAt) &&
-        ((action.phase === "renewing" && action.kind !== "fresh-delivery") || action.phase === "rewinding");
-      if (stale) {
+      if (restartAction(raw, scope.workspace?.metadata ?? {}, daemonStartedAt)) {
         groupOf(scope).renewals.push(agentId);
       }
       const reason = asRecord(asRecord(raw)?.needsResume)?.reason;
@@ -315,7 +330,9 @@ export async function runBootCheck({
       agentId: string;
       role: string;
       open: boolean;
+      resumeWhenClosed: boolean;
       openTurnId: string | null;
+      turnStartedAt: unknown;
       excerpt: string | null;
       git: { branch: string; sha: string; changes: number } | null;
     }[] = [];
@@ -324,7 +341,7 @@ export async function runBootCheck({
         typeof candidate.entry?.openTurnId === "string" ? candidate.entry.openTurnId : null;
       let excerpt: string | null = null;
       let git: { branch: string; sha: string; changes: number } | null = null;
-      if (candidate.open) {
+      if (candidate.open && (!openTurnId || openTurnId !== candidate.entry?.lastTurnId)) {
         try {
           excerpt = await excerptOf(paseo, candidate.agentId, openTurnId);
         } catch {
@@ -336,7 +353,8 @@ export async function runBootCheck({
           git = null;
         }
       }
-      prepared.push({ agentId: candidate.agentId, role: candidate.role, open: candidate.open, openTurnId, excerpt, git });
+      prepared.push({ agentId: candidate.agentId, role: candidate.role, open: candidate.open,
+        resumeWhenClosed: candidate.resumeWhenClosed, openTurnId, turnStartedAt: candidate.entry?.turnStartedAt, excerpt, git });
     }
     const at = nowFn();
     await retryOnLockBusy(() => takeLock(mainId, async (held: any) => {
@@ -344,12 +362,12 @@ export async function runBootCheck({
       const freshSnap: any = await paseo.workspaces.ref(mainId).refresh().catch(() => null);
       const freshMeta = freshSnap?.metadata ?? {};
       const freshAgents = asRecord(freshMeta[AGENTS_KEY]) ?? {};
-      const freshCheckpoint =
-        asRecord(freshMeta[CHECKPOINT_KEY]);
+      const freshCheckpoint = asRecord(freshMeta[CHECKPOINT_KEY]);
       const nextAgents: Record<string, unknown> = { ...freshAgents };
       let firstMarked: string | null = null;
       let resumeMarked = 0;
       let staleRemoved = 0;
+      let terminalMarkersCleared = 0;
       // An existing flag (e.g. limit from before the restart) wins over the
       // generic daemon-restart: only flag steers without needsResume.
       const flagResume = (agentId: string, role: string): void => {
@@ -373,7 +391,14 @@ export async function runBootCheck({
           freshEntry,
           daemonStartedAt,
         );
-        if (!stillOpen || !freshEntry) continue;
+        if (!stillOpen || !freshEntry || (freshEntry.openTurnId ?? null) !== item.openTurnId ||
+            freshEntry.turnStartedAt !== item.turnStartedAt) continue;
+        if (item.openTurnId && freshEntry.lastTurnId === item.openTurnId) {
+          nextAgents[item.agentId] = { ...freshEntry, openTurnId: null, turnStartedAt: null };
+          terminalMarkersCleared += 1;
+          if (item.resumeWhenClosed) flagResume(item.agentId, item.role);
+          continue;
+        }
         const interrupted = (buildRestartInterrupted as unknown as (args: {
           at: string;
           reason: string;
@@ -418,21 +443,13 @@ export async function runBootCheck({
       let renewalsInterrupted = 0;
       for (const agentId of group.renewals) {
         const entry = asRecord(nextAgents[agentId]);
-        const action = readSteerAction(entry);
-        if (!action || readEffectReceipt(freshMeta, action) || !(Date.parse(action.queuedAt) < Date.parse(daemonStartedAt))) continue;
-        if (action.phase === "rewinding") {
-          nextAgents[agentId] = actionEntry(entry,
-            { ...action, phase: "uncertain", lastError: "Paseo restarted before the rewind outcome was confirmed. Inspect the agent before recovery." });
-        } else if (action.phase === "renewing" && action.kind !== "fresh-delivery") {
-          const detail = action.kind === "cleanup"
-            ? "Paseo restarted before cleanup was confirmed. Inspect the agent before recovery."
-            : "Paseo restarted before context renewal was confirmed. Retry recovery or use Fresh.";
-          nextAgents[agentId] = actionEntry(entry, { ...action, phase: "blocked", lastError: detail });
-        } else continue;
+        const action = restartAction(entry, freshMeta, daemonStartedAt);
+        if (!action) continue;
+        nextAgents[agentId] = actionEntry(entry, action);
         renewalsInterrupted += 1;
       }
       staleTotal += staleRemoved;
-      if (!firstMarked && !resumeMarked && !staleRemoved && !renewalsInterrupted) return;
+      if (!firstMarked && !resumeMarked && !staleRemoved && !renewalsInterrupted && !terminalMarkersCleared) return;
       const patch: Record<string, unknown> = { [AGENTS_KEY]: nextAgents };
       if (
         firstMarked &&

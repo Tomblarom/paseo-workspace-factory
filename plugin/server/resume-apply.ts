@@ -1,11 +1,12 @@
 // Manual /factory resume validates the preview and captures a checkpoint before delivery.
+import { isDeepStrictEqual } from "node:util";
 import { AGENTS_KEY } from "./core/agent-state.mjs";
 import { readCleanupAction, readEffectReceipt, readSteerAction } from "./core/steer-action.mjs";
 import { actionFact } from "./core/action-facts.mjs";
 import { withLock, workspaceLockName } from "./core/lock.mjs";
 import { METADATA_KEY, readPaseoState } from "./core/paseo.mjs";
 import { listScopes, sameScopeId } from "./core/scope.mjs";
-import { guardScope, scopeHolder } from "./core/scope-guard.mjs";
+import { guardScope, ScopeGuardError, scopeHolder } from "./core/scope-guard.mjs";
 import { lastAssistantText, parseCheckpointBlock, requireFreshPrivacy, SwitchRefused } from "./core/steer.mjs";
 import { WORKERS_KEY } from "./core/supervision.mjs";
 import { CLEANUP_DEFAULTS, cleanupIdentity, formatResumeMessage, type ResumeClearSettings } from "../shared/idle-cleanup.js";
@@ -16,7 +17,7 @@ import { agentContextInputs, hasActiveAgentWork } from "./agent-context.js";
 import { projectAgentContext } from "../shared/steer-state.js";
 import { resolveZerosub } from "./zerosub-runtime.js";
 import { workerIdentityFromMetadata } from "../shared/supervise.js";
-import type { CheckpointBlock } from "../shared/auto-checkpoint.js";
+import { openTurnOf, type CheckpointBlock } from "../shared/auto-checkpoint.js";
 
 const CHECKPOINT_KEY = `${METADATA_KEY}.checkpoint`;
 
@@ -46,7 +47,23 @@ async function resumeRecordedDelivery(paseo: any, workspaceId: string, agentId: 
   return result ? { agentId, ...result } : null;
 }
 
-async function applyWorkerResume(paseo: any, mainId: string, agentId: string, scopeId: string, deps: ResumeApplyDeps, lock: NonNullable<ResumeApplyDeps["lock"]>): Promise<ResumeApplyResult> {
+function resumeActionBarrier(entry: unknown, agentId: string, role: "worker" | "steer"): ResumeApplyResult | null {
+  const cleanup = readCleanupAction(entry);
+  if (cleanup?.uncertain) {
+    return { agentId, status: "blocked", cleared: false,
+      detail: `The ${cleanup.kind ?? "cleanup"} outcome for this ${role} is uncertain (${cleanup.error ?? "unknown error"}). Inspect its tab before recovery.` };
+  }
+  const action = readSteerAction(entry);
+  if ((role === "worker" && cleanup) || (action && action.phase !== "done" && action.phase !== "staged" &&
+      (action.kind === "rewind" || role === "worker"))) {
+    return { agentId, status: "blocked", cleared: false,
+      detail: action?.lastError ?? `An existing ${role} action needs reconciliation before resume.` };
+  }
+  return null;
+}
+
+async function applyWorkerResume(paseo: any, mainId: string, agentId: string, scopeId: string, deps: ResumeApplyDeps,
+  lock: NonNullable<ResumeApplyDeps["lock"]>, checkScope: () => Promise<{ metadata: any }>): Promise<ResumeApplyResult> {
   return lock(`worker-resume-${agentId}`, async () => {
     const ref = paseo.agents.ref(agentId);
     const [workspace, snapshot, cleanup, routes] = await Promise.all([
@@ -61,15 +78,18 @@ async function applyWorkerResume(paseo: any, mainId: string, agentId: string, sc
     const worker = meta[WORKERS_KEY]?.[agentId];
 
     const partial = worker?.state === "partial";
-    const pendingFresh = readSteerAction(entry)?.kind === "fresh-delivery" && readSteerAction(entry)?.phase !== "done";
+    const action = readSteerAction(entry);
+    const pendingFresh = action?.kind === "fresh-delivery" && action.phase !== "done";
     if (identity?.role !== "worker" || !sameScopeId(identity.scopeId, scopeId) || agent.archivedAt || agent.background === true || (!entry?.interrupted && worker?.state !== "interrupted" && !partial && !pendingFresh)) {
       throw new Error("/factory resume is available for steers and workers with interrupted or partial work.");
     }
-    if (readCleanupAction(entry) || hasActiveAgentWork(agent, entry)) {
+    if (hasActiveAgentWork(agent, entry) || (partial && openTurnOf(entry))) {
       return { agentId, status: "blocked", cleared: false, detail: "The worker is busy. Try again after the current operation." };
     }
     const recorded = await resumeRecordedDelivery(paseo, mainId, agentId, meta, { ...deps, lock });
     if (recorded) return recorded;
+    const barrier = resumeActionBarrier(entry, agentId, "worker");
+    if (barrier) return barrier;
     const context = agentContextInputs(agent, entry, cleanup ?? CLEANUP_DEFAULTS, routes, deps.now ? Date.parse(deps.now()) : Date.now());
     const { warmth, large } = projectAgentContext(context);
     const replacementMessageId = !context.lastTurnEndedAt && typeof entry?.workerResumeMessageId === "string" ? entry.workerResumeMessageId : null;
@@ -81,8 +101,46 @@ async function applyWorkerResume(paseo: any, mainId: string, agentId: string, sc
     if (!partial && alreadyRenewed && asRecord(actionFact(entry, "refreshed"))?.briefMessageId) {
       return { agentId, status: "sent", cleared: false, renewed: true, detail: "The renewed worker already received its brief." };
     }
+    const interruptedAt = asRecord(entry?.interrupted)?.at;
+    const lastEnd = context.lastTurnEndedAt;
+    // The turn hook can journal an interruption before supervision updates the register.
+    const interruptedMs = typeof interruptedAt === "string" ? Date.parse(interruptedAt) : NaN;
+    const currentInterruption = Number.isFinite(interruptedMs) && (!lastEnd || interruptedMs >= Date.parse(lastEnd));
+    const wake = worker?.pendingWake;
+    const partialWakeAt = wake?.state === "partial" ? wake.queuedAt : null;
+    const at = partial
+      ? (currentInterruption ? interruptedAt : null) ?? entry?.lastTurnId ?? lastEnd ?? partialWakeAt
+      : interruptedAt ?? wake?.queuedAt ?? lastEnd;
+    const missingPartialEvidence: ResumeApplyResult = {
+      agentId, status: "blocked", cleared: false, detail: "The partial worker checkpoint is unavailable or changed during resume.",
+    };
+    const recheckPartial = async () => {
+      try {
+        const [{ metadata }, live] = await Promise.all([checkScope(), ref.refresh()]);
+        const latestWorker = metadata?.[WORKERS_KEY]?.[agentId];
+        const latestEntry = metadata?.[AGENTS_KEY]?.[agentId];
+        const liveIdentity = cleanupIdentity(live?.agent?.labels) ?? workerIdentityFromMetadata(live?.agent);
+        return metadata?.[METADATA_KEY]?.epoch === scope.epoch &&
+          latestWorker?.state === "partial" && latestWorker.task === worker.task &&
+          latestWorker.startedBy === worker.startedBy && latestWorker.epoch === worker.epoch &&
+          latestWorker.startedAt === worker.startedAt &&
+          (!partialWakeAt || at !== partialWakeAt || isDeepStrictEqual(latestWorker.pendingWake, wake)) &&
+          latestEntry?.lastTurnId === entry?.lastTurnId && latestEntry?.lastTurnEndedAt === entry?.lastTurnEndedAt &&
+          latestEntry?.noteAt === entry?.noteAt && latestEntry?.note === entry?.note &&
+          isDeepStrictEqual(latestEntry?.interrupted, entry?.interrupted) &&
+          !resumeActionBarrier(latestEntry, agentId, "worker") &&
+          liveIdentity?.role === "worker" && sameScopeId(liveIdentity.scopeId, scopeId) &&
+          !live.agent.archivedAt && !live.agent.background && !openTurnOf(latestEntry) &&
+          !hasActiveAgentWork(live.agent, latestEntry);
+      } catch (error) {
+        if (error instanceof ScopeGuardError) return false;
+        throw error;
+      }
+    };
+    if (partial && !replacementMessageId && (typeof at !== "string" || !at)) return missingPartialEvidence;
     const mode = decideSteerDelivery({ warmth: warmth.warmth, large, recovery: true, settings: null, keepChatHistory: false });
     if (!alreadyRenewed && mode !== "send") {
+      if (partial && !await recheckPartial()) return missingPartialEvidence;
       if (!deps.refreshWorker) throw new Error("Worker context renewal is unavailable. Use fresh --worker for this worker.");
       const refreshed = await deps.refreshWorker(mainId, agentId);
       return {
@@ -97,24 +155,6 @@ async function applyWorkerResume(paseo: any, mainId: string, agentId: string, sc
     }
     const brief = await deps.buildBrief?.(paseo, mainId, agentId);
     if (!brief) throw new Error("No worker resume brief is available.");
-    const at = partial ? entry?.lastTurnId ?? context.lastTurnEndedAt ?? entry?.noteAt ?? worker?.pendingWake?.queuedAt
-      : asRecord(entry?.interrupted)?.at ?? worker?.pendingWake?.queuedAt ?? context.lastTurnEndedAt;
-    if (partial) {
-      const [latest, live] = await Promise.all([paseo.workspaces.ref(mainId).refresh(), ref.refresh()]);
-      const metadata = latest?.metadata;
-      const latestWorker = metadata?.[WORKERS_KEY]?.[agentId];
-      const latestEntry = metadata?.[AGENTS_KEY]?.[agentId];
-      const liveIdentity = cleanupIdentity(live?.agent?.labels) ?? workerIdentityFromMetadata(live?.agent);
-      if (!at || metadata?.[METADATA_KEY]?.epoch !== scope.epoch ||
-          latestWorker?.state !== "partial" || latestWorker.task !== worker.task ||
-          latestWorker.startedBy !== worker.startedBy || latestWorker.epoch !== worker.epoch ||
-          latestEntry?.lastTurnId !== entry?.lastTurnId || latestEntry?.lastTurnEndedAt !== entry?.lastTurnEndedAt ||
-          latestEntry?.noteAt !== entry?.noteAt || readCleanupAction(latestEntry) ||
-          liveIdentity?.role !== "worker" || !sameScopeId(liveIdentity.scopeId, scopeId) ||
-          live.agent.archivedAt || live.agent.background || hasActiveAgentWork(live.agent, latestEntry)) {
-        return { agentId, status: "blocked", cleared: false, detail: "The partial worker checkpoint is unavailable or changed during resume." };
-      }
-    }
     const messageId = replacementMessageId ?? (typeof at === "string" ? `wsf-worker-resume-${agentId}-${at}` : null);
     try {
       await requireFreshPrivacy({ client: paseo, workspaceId: mainId, scopeId, epoch: scope.epoch, agentId,
@@ -124,6 +164,7 @@ async function applyWorkerResume(paseo: any, mainId: string, agentId: string, sc
       if (error instanceof SwitchRefused) return { agentId, status: "blocked", cleared: false, detail: error.message };
       throw error;
     }
+    if (partial && !await recheckPartial()) return missingPartialEvidence;
     if (messageId) await ref.send(formatResumeMessage(brief), { messageId });
     else await ref.send(formatResumeMessage(brief));
     return { agentId, status: "sent", cleared: false, detail: "Worker resume brief sent." };
@@ -248,8 +289,6 @@ export async function applyResume(
   const wsf = asRecord(meta[METADATA_KEY]);
   if (!wsf) throw new Error(`Workspace ${mainId} has no scope state`);
   const config = deps.getConfig ? await deps.getConfig() : null;
-  const entries = asRecord(meta[AGENTS_KEY]) ?? {};
-  const entry = asRecord(entries[agentId]);
   const checkpoint =
     asRecord(meta[CHECKPOINT_KEY]);
   if (typeof input.fingerprint === "string" && input.fingerprint) {
@@ -268,27 +307,22 @@ export async function applyResume(
     }
   }
   const activeHolder = (scopeHolder as any)({ agents: state.agents, workspaceId: mainId, scopeId: identity.scopeId, slot: wsf.activeSteer });
-  await lock(workspaceLockName(mainId), async (held: { verify: () => void }) => {
-    await (guardScope as any)({ client: paseo, held, workspaceId: mainId, scopeId: identity.scopeId, epoch: wsf.epoch, agentId: activeHolder.id, config });
-  });
-  if (identity.role === "worker") return applyWorkerResume(paseo, mainId, agentId, identity.scopeId, deps, lock);
-  const recorded = await resumeRecordedDelivery(paseo, mainId, agentId, meta, { ...deps, lock });
+  const checkScope = () => lock(workspaceLockName(mainId), (held: { verify: () => void }) =>
+    (guardScope as any)({ client: paseo, held, workspaceId: mainId, scopeId: identity.scopeId, epoch: wsf.epoch, agentId: activeHolder.id, config }));
+  const { metadata: guardedMeta } = await checkScope();
+  if (identity.role === "worker") return applyWorkerResume(paseo, mainId, agentId, identity.scopeId, deps, lock, checkScope);
+  const entry = asRecord(guardedMeta[AGENTS_KEY]?.[agentId]);
+  const recorded = await resumeRecordedDelivery(paseo, mainId, agentId, guardedMeta, { ...deps, lock });
   if (recorded) return recorded;
   const liveAgent = (await paseo.agents.ref(agentId).refresh())?.agent;
   if (!liveAgent || liveAgent.archivedAt) return { agentId, status: "blocked", cleared: false, detail: "The steer is unavailable." };
   const privacy = await readPrivacyAdmission(liveAgent, { ...deps, paseo }, mainId);
   if (!privacy.allowed) return { agentId, status: "blocked", cleared: false, detail: `Resume refused: ${privacy.reason}.` };
+  const barrier = resumeActionBarrier(entry, agentId, "steer");
+  if (barrier) return barrier;
   const cleanup = readCleanupAction(entry);
   if (cleanup) {
     const record = asRecord(cleanup);
-    if (record?.uncertain === true) {
-      return {
-        agentId,
-        status: "blocked",
-        cleared: false,
-        detail: `The ${record.kind ?? "cleanup"} outcome for this steer is uncertain (${record.error ?? "unknown error"}). Inspect its tab before recovery.`,
-      };
-    }
     return {
       agentId,
       status: "pending",

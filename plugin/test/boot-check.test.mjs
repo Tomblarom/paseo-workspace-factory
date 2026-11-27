@@ -1,11 +1,14 @@
-// Static regression test for P1 wiring: server files import the synced core
-// through `.js` specifiers (Bundler maps them to `.ts` at compile time), so
-// plain node:test cannot import them. Instead the wiring is pinned here and
-// the decision logic is covered by test/boot-restart.test.mjs plus the
-// auto-checkpoint clearing test.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { register } from "node:module";
+import { LABEL, METADATA_KEY } from "../server/core/paseo.mjs";
+import { AGENTS_KEY, CHECKPOINT_AGENTS_KEY } from "../server/core/agent-state.mjs";
+import { effectReceiptKey } from "../server/core/steer-action.mjs";
+import { WORKERS_KEY } from "../server/core/supervision.mjs";
+
+register("./ts-resolve-hooks.mjs", import.meta.url);
+const { runBootCheck, readDaemonStartedAtViaCli } = await import("../server/boot-check.ts");
 
 const bootCheck = readFileSync(new URL("../server/boot-check.ts", import.meta.url), "utf8");
 const serverEntry = readFileSync(new URL("../index.server.ts", import.meta.url), "utf8");
@@ -52,43 +55,152 @@ test("daemon status runs without --host (host view has no startedAt) and logs er
   assert.ok(bootCheck.includes("daemon status failed"), "errors are logged, not swallowed");
 });
 
-// Behavioural tests: extract the parse/read functions (core imports use .js
-// specifiers and cannot load under plain node:test) by transpiling the slice.
-import { createRequire } from "node:module";
-const require = createRequire(import.meta.url);
-async function loadReader() {
-  const ts = require("typescript");
-  const start = bootCheck.indexOf("export function parseDaemonStartedAt");
-  const end = bootCheck.indexOf("async function defaultReadExcerpt");
-  const src = "const execFileSync = () => { throw new Error('no real exec'); };\nconst paseoBinary = () => '/bin/paseo';\n" +
-    bootCheck.slice(start, end);
-  const js = ts.transpileModule(src, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
-  return import("data:text/javascript;base64," + Buffer.from(js).toString("base64"));
-}
-
 // Recorded key shapes of `paseo daemon status --json` (Paseo 0.16.2, keys only).
 const LOCAL = JSON.stringify({ home: "h", pid: 1, startedAt: "2026-01-01T00:00:00.000Z", listen: "x", daemonVersion: "0.16.2" });
 const HOST = JSON.stringify({ host: "h:1", serverId: "s", daemonVersion: "0.16.2", connectedDaemon: {} });
 
-test("reads startedAt from the local status shape and never passes --host", async () => {
-  const { readDaemonStartedAtViaCli } = await loadReader();
+test("reads startedAt from the local status shape and never passes --host", () => {
   const calls = [];
   const got = readDaemonStartedAtViaCli((bin, args) => { calls.push([bin, args]); return LOCAL; }, () => {}, "paseo");
   assert.equal(got, "2026-01-01T00:00:00.000Z");
   assert.deepEqual(calls, [["paseo", ["daemon", "status", "--json"]]]);
 });
 
-test("host-view shape (the former bug) yields null with a log line", async () => {
-  const { readDaemonStartedAtViaCli } = await loadReader();
+test("host-view shape (the former bug) yields null with a log line", () => {
   const logs = [];
   assert.equal(readDaemonStartedAtViaCli(() => HOST, (m) => logs.push(m), "paseo"), null);
   assert.match(logs[0], /no startedAt/);
 });
 
-test("runner errors are logged and return null", async () => {
-  const { readDaemonStartedAtViaCli } = await loadReader();
+test("runner errors are logged and return null", () => {
   const logs = [];
   const got = readDaemonStartedAtViaCli(() => { throw new Error("spawn paseo ENOENT"); }, (m) => logs.push(m), "paseo");
   assert.equal(got, null);
   assert.match(logs[0], /daemon status failed \(spawn paseo ENOENT\)/);
+});
+
+const SCOPE = "owner/repo";
+const START = "2026-11-27T09:00:00.000Z";
+const END = "2026-11-27T09:05:00.000Z";
+const RESTART = "2026-11-27T09:10:00.000Z";
+const NOW = "2026-11-27T09:15:00.000Z";
+
+function recoveryWorld(entries, receipts = {}) {
+  const workspace = {
+    id: "workspace-1",
+    workspaceDirectory: "/repo",
+    metadata: {
+      [METADATA_KEY]: { main: true, activeSteer: "A", epoch: 3, scope: { id: SCOPE, kind: "github", locator: SCOPE } },
+      [AGENTS_KEY]: structuredClone(entries),
+      [CHECKPOINT_AGENTS_KEY]: { task: "Steer task" },
+      [WORKERS_KEY]: { worker: { task: "Worker task", state: "partial" } },
+      ...receipts,
+    },
+  };
+  const agents = [
+    { id: "steer", workspaceId: workspace.id, status: "closed", labels: { [LABEL.scope]: SCOPE, [LABEL.role]: "steer", [LABEL.slot]: "A" } },
+    { id: "worker", workspaceId: workspace.id, status: "closed", metadata: { "wsf.worker": { scopeId: SCOPE, task: "Worker task" } } },
+  ];
+  const writes = [];
+  const paseo = {
+    projects: { list: async () => ({ projects: [] }) },
+    workspaces: {
+      list: async () => ({ entries: [structuredClone(workspace)] }),
+      ref: () => ({
+        refresh: async () => structuredClone(workspace),
+        setMetadata: async (patch) => {
+          writes.push(structuredClone(patch));
+          Object.assign(workspace.metadata, structuredClone(patch));
+        },
+      }),
+    },
+    agents: { list: async () => ({ entries: agents }) },
+    providers: { snapshot: async () => ({ entries: [] }) },
+  };
+  const boot = (overrides) => runBootCheck({
+    paseo, getDaemonStartedAt: () => RESTART, now: () => NOW, log: () => {},
+    lock: (_id, fn) => fn({ verify() {} }), readExcerpt: async () => "partial output", readGit: () => null,
+    ...overrides,
+  });
+  return { boot, workspace, writes };
+}
+
+test("boot clears stale open markers for recorded terminal turns and preserves their outcomes", async () => {
+  for (const outcome of ["completed", "failed", "canceled"]) {
+    const terminal = { lastTurnId: "same-turn", lastTurnEndedAt: END, outcome,
+      interrupted: outcome === "completed" ? null : { at: END, outcome, error: "Original outcome" } };
+    const entry = { ...terminal, openTurnId: "same-turn", turnStartedAt: START };
+    const { boot, workspace, writes } = recoveryWorld({ worker: entry });
+    let excerpts = 0;
+    const marks = await boot({ readExcerpt: async () => { excerpts++; return null; } });
+    assert.deepEqual(marks, []);
+    assert.equal(excerpts, 0);
+    assert.deepEqual(workspace.metadata[AGENTS_KEY].worker, { ...terminal, openTurnId: null, turnStartedAt: null });
+    assert.deepEqual(workspace.metadata[CHECKPOINT_AGENTS_KEY], { task: "Steer task" });
+    assert.equal(workspace.metadata[WORKERS_KEY].worker.state, "partial");
+    assert.deepEqual(await boot(), []);
+    assert.equal(writes.length, 1);
+  }
+});
+
+test("boot marks a metadata-identified worker with a genuinely unrecorded terminal outcome", async () => {
+  const { boot, workspace, writes } = recoveryWorld({
+    worker: { lastTurnId: "earlier-turn", lastTurnEndedAt: START, openTurnId: "open-turn", turnStartedAt: END },
+  });
+  const [mark] = await boot();
+  assert.equal(mark.agentId, "worker");
+  assert.equal(mark.cause, "interrupted");
+  const entry = workspace.metadata[AGENTS_KEY].worker;
+  assert.equal(entry.lastTurnId, "open-turn");
+  assert.equal(entry.interrupted.reason, "daemon-restart");
+  assert.equal(entry.interrupted.excerpt, "partial output");
+  assert.equal(entry.openTurnId, null);
+  assert.deepEqual(await boot(), []);
+  assert.equal(writes.length, 1);
+});
+
+test("boot rechecks the turn generation under the lock before applying an excerpt", async () => {
+  const { boot, workspace, writes } = recoveryWorld({ worker: { openTurnId: "first", turnStartedAt: START } });
+  const marks = await boot({
+    readExcerpt: async () => {
+      workspace.metadata[AGENTS_KEY].worker = { openTurnId: "other", turnStartedAt: END };
+      return "first turn excerpt";
+    },
+  });
+  assert.deepEqual(marks, []);
+  assert.deepEqual(writes, []);
+  assert.equal(workspace.metadata[AGENTS_KEY].worker.openTurnId, "other");
+});
+
+test("boot parks real standalone cleanup intents and preserves receipt-bearing actions", async () => {
+  const cleanup = { kind: "cleanup", wakeId: "cleanup", phase: "renewing",
+    cleanup: { kind: "clear", at: START, messageId: "cleanup" } };
+  const rewind = { kind: "rewind", wakeId: "rewind", phase: "rewinding", queuedAt: START, packet: "exact brief" };
+  const send = { kind: "delivery", wakeId: "send", phase: "uncertain", queuedAt: START, attemptedAt: START, packet: "exact wake" };
+  const sent = { ...send, wakeId: "sent", phase: "sent", observedAt: END };
+  const recentRewind = { kind: "delivery", wakeId: "recent-rewind", phase: "renewing", queuedAt: START,
+    rewindAttempt: { at: NOW, phase: "uncertain" } };
+  const receipts = { [effectReceiptKey("rewind")]: { kind: "rewind", at: END }, [effectReceiptKey("send")]: { kind: "send", at: END } };
+  const { boot, workspace, writes } = recoveryWorld({
+    steer: { action: cleanup },
+    rewind: { action: rewind },
+    send: { action: send },
+    sent: { action: sent },
+    recent: { action: recentRewind },
+    protected: { action: { ...rewind, wakeId: "unconfirmed-rewind" } },
+  }, receipts);
+  await boot();
+  const entries = workspace.metadata[AGENTS_KEY];
+  assert.equal(entries.steer.action.phase, "blocked");
+  assert.equal(entries.steer.action.cleanup.uncertain, true);
+  assert.equal(entries.steer.action.cleanup.messageId, cleanup.cleanup.messageId);
+  assert.match(entries.steer.action.cleanup.error, /restarted before cleanup was confirmed/);
+  assert.deepEqual(entries.rewind.action, rewind);
+  assert.deepEqual(entries.send.action, send);
+  assert.deepEqual(entries.sent.action, sent);
+  assert.deepEqual(entries.recent.action, recentRewind);
+  assert.equal(entries.protected.action.phase, "uncertain");
+  for (const [key, receipt] of Object.entries(receipts)) assert.deepEqual(workspace.metadata[key], receipt);
+  await boot();
+  assert.equal(writes.length, 1);
 });

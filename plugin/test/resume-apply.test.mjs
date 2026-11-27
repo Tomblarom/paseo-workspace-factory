@@ -10,7 +10,7 @@ register("./ts-resolve-hooks.mjs", import.meta.url);
 
 const resumeApply = await import("../server/resume-apply.ts");
 const sweep = await import("../server/cold-sweep.ts");
-const { deliverSteer } = await import("../server/steer-delivery.ts");
+const { deliverSteer, finishSteerDelivery } = await import("../server/steer-delivery.ts");
 const { collectSteerStates } = await import("../server/steer-feed.ts");
 const {
   CLEAR_COMMAND,
@@ -29,6 +29,7 @@ const { factoryResumeSettings } = await import("../shared/settings.ts");
 import { factoryCold, factoryResumeApply } from "../shared/factory.ts";
 import { LABEL, METADATA_KEY, readPaseoState } from "../server/core/paseo.mjs";
 import { AGENTS_KEY } from "../server/core/agent-state.mjs";
+import { effectReceiptKey } from "../server/core/steer-action.mjs";
 import { CHECKPOINT_KEY, buildResumeBrief, freshSteer, steerStatus, workerResumeAnswer } from "../server/core/steer.mjs";
 import { WORKERS_KEY } from "../server/core/supervision.mjs";
 
@@ -407,14 +408,19 @@ test("resume preserves a denied Fresh receipt and replays the exact request when
 });
 
 test("explicit resume of a partial worker uses its checkpoint and rechecks it before sending", async () => {
-  const { world, ws, worker, paseo } = interruptedWorker({ minutes: 1 });
+  const { world, ws, worker, discovery, paseo } = interruptedWorker({ minutes: 1 });
   const record = ws.metadata[WORKERS_KEY][worker.id];
   record.state = "partial";
   const entry = ws.metadata[AGENTS_KEY][worker.id];
   delete entry.interrupted;
   entry.lastTurnId = "partial-turn";
   const input = { workspaceId: ws.id, agentId: worker.id };
-  const deps = { lock: noLock, now: () => at(NOW), buildBrief: async () => "Finish PWM checks." };
+  world.timelines[worker.id][0].item.text = CHECKPOINT_TEXT("Finish PWM checks.").replace("- next:", "- status: partial\n- next:");
+  const deps = { lock: noLock, now: () => at(NOW), buildBrief: async () => {
+    const status = steerStatus(discovery());
+    return buildResumeBrief(status, { agentId: worker.id, agentState: ws.metadata[AGENTS_KEY],
+      workerLastAnswer: await workerResumeAnswer(paseo, status, worker.id) });
+  } };
   assert.equal((await resumeApply.applyResume(paseo, input, deps)).status, "sent");
   assert.match(sendsTo(world, worker.id)[0], /Finish PWM checks/);
   const result = await resumeApply.applyResume(paseo, input, {
@@ -422,6 +428,169 @@ test("explicit resume of a partial worker uses its checkpoint and rechecks it be
   });
   assert.equal(result.status, "blocked");
   assert.equal(sendsTo(world, worker.id).length, 1);
+});
+
+test("partial and interrupted register states use the same key for the latest journaled interruption", async () => {
+  const { world, ws, worker, paseo } = interruptedWorker({ minutes: 1 });
+  const record = ws.metadata[WORKERS_KEY][worker.id];
+  record.state = "partial";
+  const entry = ws.metadata[AGENTS_KEY][worker.id];
+  entry.lastTurnId = "interrupted-turn";
+  const input = { workspaceId: ws.id, agentId: worker.id };
+  const deps = { lock: noLock, now: () => at(NOW), buildBrief: async () => "Finish PWM checks." };
+  assert.equal((await resumeApply.applyResume(paseo, input, deps)).status, "sent");
+  record.state = "interrupted";
+  assert.equal((await resumeApply.applyResume(paseo, input, deps)).status, "sent");
+  const [before, after] = world.calls.filter(([call]) => call === "agent.send");
+  assert.deepEqual(before, after);
+  assert.equal(before[3].messageId, `wsf-worker-resume-${worker.id}-${entry.interrupted.at}`);
+  record.state = "partial";
+  entry.lastTurnId = "newer-completed-turn";
+  entry.lastTurnEndedAt = at(NOW);
+  assert.equal((await resumeApply.applyResume(paseo, input, deps)).status, "sent");
+  assert.equal(world.calls.at(-1)[3].messageId, `wsf-worker-resume-${worker.id}-newer-completed-turn`);
+});
+
+test("a partial worker with a genuinely open turn waits for boot even when closed", async () => {
+  const { world, ws, worker, paseo } = interruptedWorker({ minutes: 1 });
+  ws.metadata[WORKERS_KEY][worker.id].state = "partial";
+  const entry = ws.metadata[AGENTS_KEY][worker.id];
+  entry.lastTurnId = "old-turn";
+  entry.openTurnId = "new-turn";
+  worker.status = "closed";
+  const input = { workspaceId: ws.id, agentId: worker.id };
+  const deps = { lock: noLock, now: () => at(NOW), buildBrief: async () => assert.fail("worker still has an open turn") };
+  assert.match((await resumeApply.applyResume(paseo, input, deps)).detail, /busy/);
+  assert.deepEqual(sendsTo(world, worker.id), []);
+  entry.openTurnId = entry.lastTurnId;
+  assert.equal((await resumeApply.applyResume(paseo, input, { ...deps, buildBrief: async () => "Resume recorded turn" })).status, "sent");
+});
+
+test("a partial register without current turn evidence cannot reuse a stale note or interrupted wake", async () => {
+  const { world, ws, worker, paseo } = interruptedWorker();
+  const record = ws.metadata[WORKERS_KEY][worker.id];
+  record.state = "partial";
+  ws.metadata[AGENTS_KEY][worker.id] = { note: "old checkpoint", noteAt: at(NOW - HOUR) };
+  const input = { workspaceId: ws.id, agentId: worker.id };
+  const deps = { lock: noLock, now: () => at(NOW),
+    buildBrief: async () => assert.fail("no current worker turn"), refreshWorker: async () => assert.fail("no current worker turn") };
+  const result = await resumeApply.applyResume(paseo, input, deps);
+  assert.equal(result.status, "blocked");
+  assert.match(result.detail, /partial worker checkpoint is unavailable/);
+  assert.deepEqual(sendsTo(world, worker.id), []);
+});
+
+test("a journaled partial turn can continue from its assignment without a checkpoint block", async () => {
+  const { world, ws, worker, discovery, paseo } = interruptedWorker({ minutes: 1 });
+  ws.metadata[WORKERS_KEY][worker.id].state = "partial";
+  delete ws.metadata[AGENTS_KEY][worker.id].interrupted;
+  world.timelines[worker.id] = [];
+  const result = await resumeApply.applyResume(paseo, { workspaceId: ws.id, agentId: worker.id }, {
+    lock: noLock, now: () => at(NOW), buildBrief: async () => {
+      const status = steerStatus(discovery());
+      return buildResumeBrief(status, { agentId: worker.id, agentState: ws.metadata[AGENTS_KEY] });
+    },
+  });
+  assert.equal(result.status, "sent");
+  assert.match(sendsTo(world, worker.id)[0], /Task: Repair PWM[\s\S]*Worker CHECKPOINT: none recorded/);
+});
+
+test("partial worker resume blocks same-epoch holder, checkpoint and native action changes during preparation", async () => {
+  for (const change of ["holder", "epoch", "note", "interruption", "action", "wake"]) {
+    const { world, ws, worker, paseo } = interruptedWorker({ minutes: 1 });
+    const record = ws.metadata[WORKERS_KEY][worker.id];
+    record.state = "partial";
+    record.pendingWake.state = "partial";
+    const entry = ws.metadata[AGENTS_KEY][worker.id];
+    if (change === "wake") {
+      ws.metadata[AGENTS_KEY][worker.id] = { action: { phase: "done", facts: { cleared: { at: at(NOW) } } } };
+    }
+    const input = { workspaceId: ws.id, agentId: worker.id };
+    const deps = {
+      lock: noLock, now: () => at(NOW),
+      buildBrief: async () => {
+        if (change === "holder") world.agents.find((agent) => agent.id !== worker.id).archivedAt = at(NOW);
+        if (change === "epoch") ws.metadata[METADATA_KEY].epoch++;
+        if (change === "note") entry.note = "Changed checkpoint";
+        if (change === "interruption") entry.interrupted.excerpt = "Changed excerpt";
+        if (change === "action") entry.action = { kind: "rewind", phase: "uncertain", wakeId: "rewind" };
+        if (change === "wake") record.pendingWake.queuedAt = at(NOW);
+        return "Stale brief";
+      },
+    };
+    const result = await resumeApply.applyResume(paseo, input, deps);
+    assert.equal(result.status, "blocked", change);
+    assert.deepEqual(sendsTo(world, worker.id), [], change);
+  }
+});
+
+test("resume leaves an uncertain rewind in place for either role until its effect receipt exists", async () => {
+  for (const role of ["worker", "steer"]) {
+    const { world, ws, worker, paseo } = interruptedWorker({ minutes: 1 });
+    const agent = role === "worker" ? worker : world.agents.find((candidate) => candidate !== worker);
+    ws.metadata[WORKERS_KEY][worker.id].state = "partial";
+    const action = { kind: "rewind", phase: "uncertain", wakeId: "rewind", epoch: 3,
+      lastError: "Rewind outcome is uncertain. Inspect the agent before recovery." };
+    ws.metadata[AGENTS_KEY][agent.id] = { ...ws.metadata[AGENTS_KEY][agent.id], action };
+    const input = { workspaceId: ws.id, agentId: agent.id };
+    const deps = { lock: noLock, buildBrief: async () => assert.fail("existing action must be reconciled") };
+    const blocked = await resumeApply.applyResume(paseo, input, deps);
+    assert.equal(blocked.status, "blocked");
+    assert.match(blocked.detail, /uncertain.*Inspect/);
+    assert.deepEqual(ws.metadata[AGENTS_KEY][agent.id].action, action);
+    ws.metadata[effectReceiptKey(action.wakeId)] = { kind: "rewind", at: at(NOW), messageId: "anchor", briefMessageId: "brief" };
+    assert.equal((await resumeApply.applyResume(paseo, input, deps)).status, "sent");
+    assert.equal(ws.metadata[AGENTS_KEY][agent.id].action.phase, "done");
+    assert.deepEqual(sendsTo(world, agent.id), []);
+  }
+});
+
+test("a send effect receipt settles a K7 wake after a failed turn without resending", async () => {
+  const { world, ws, worker, paseo } = interruptedWorker({ minutes: 1 });
+  const steer = world.agents.find((agent) => agent !== worker);
+  const wake = ws.metadata[WORKERS_KEY][worker.id].pendingWake;
+  const action = { kind: "delivery", phase: "uncertain", wakeId: "k7-wake", epoch: 3,
+    renewal: "send", packet: "Original worker results", queuedAt: wake.queuedAt, attemptedAt: wake.queuedAt,
+    batch: { workspaceId: ws.id, epoch: 3, events: [{ workerId: worker.id, ...wake }] } };
+  const failure = { at: at(NOW), outcome: "failed", error: "Provider stopped" };
+  ws.metadata[AGENTS_KEY][steer.id] = { action, lastTurnId: "failed-turn", lastTurnEndedAt: at(NOW),
+    outcome: "failed", interrupted: failure };
+  ws.metadata[effectReceiptKey(action.wakeId)] = { kind: "send", at: wake.queuedAt };
+  const input = { workspaceId: ws.id, agentId: steer.id };
+  const deps = { lock: noLock, buildBrief: async () => assert.fail("use the original delivery receipt") };
+  assert.equal((await resumeApply.applyResume(paseo, input, deps)).status, "sent");
+  assert.equal(ws.metadata[AGENTS_KEY][steer.id].action.phase, "done");
+  assert.deepEqual(ws.metadata[AGENTS_KEY][steer.id].interrupted, failure);
+  assert.equal(ws.metadata[WORKERS_KEY][worker.id].pendingWake, null);
+  assert.equal(ws.metadata[WORKERS_KEY][worker.id].lastWakeAt, wake.queuedAt);
+  assert.deepEqual(sendsTo(world, steer.id), []);
+});
+
+test("an uncertain send without a receipt stays queued through pause and cannot replay after the epoch changes", async () => {
+  const { world, ws, worker, paseo } = interruptedWorker({ minutes: 1 });
+  const steer = world.agents.find((agent) => agent !== worker);
+  const wake = ws.metadata[WORKERS_KEY][worker.id].pendingWake;
+  const action = { kind: "delivery", phase: "uncertain", wakeId: "k7-wake", epoch: 3,
+    renewal: "send", packet: "Original worker results", queuedAt: wake.queuedAt, attemptedAt: wake.queuedAt,
+    authority: { scopeId: REPO, agentId: steer.id },
+    batch: { workspaceId: ws.id, epoch: 3, events: [{ workerId: worker.id, ...wake }] } };
+  ws.metadata[AGENTS_KEY][steer.id] = { action, lastTurnId: "unrelated-turn", lastTurnEndedAt: at(NOW), outcome: "failed" };
+  const input = { workspaceId: ws.id, agentId: steer.id };
+  const deps = { lock: noLock, automatic: true, buildBrief: async () => assert.fail("the original packet is pinned") };
+  const paused = await finishSteerDelivery(paseo, input, { ...deps, isFactoryPaused: () => true });
+  assert.equal(paused.status, "pending");
+  assert.match(paused.detail, /paused/);
+  assert.deepEqual(ws.metadata[AGENTS_KEY][steer.id].action, action);
+  ws.metadata[METADATA_KEY].epoch++;
+  const moved = await finishSteerDelivery(paseo, input, deps);
+  assert.equal(moved.status, "blocked");
+  assert.match(moved.detail, /Scope authority changed/);
+  const parked = ws.metadata[AGENTS_KEY][steer.id].action;
+  assert.equal(parked.wakeId, action.wakeId);
+  assert.equal(parked.packet, action.packet);
+  assert.deepEqual(parked.batch, action.batch);
+  assert.deepEqual(ws.metadata[WORKERS_KEY][worker.id].pendingWake, wake);
+  assert.deepEqual(sendsTo(world, steer.id), []);
 });
 
 test("cold and large interrupted workers use fresh --worker before receiving their brief", async () => {
