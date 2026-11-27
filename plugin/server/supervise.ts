@@ -67,7 +67,7 @@ const {
 } = S;
 const { AGENTS_KEY } = AS;
 const { lastAssistantText, parseCheckpointBlock } = ST;
-const { QUOTA_DEFAULTS, accountForAgent, formatQuotaLine, liveAgentPool, quotaExhausted } = Q;
+const { QUOTA_DEFAULTS, accountForAgent, liveAgentPool, quotaExhausted } = Q;
 import { factoryIdentity, openTurnOf } from "../shared/auto-checkpoint.js";
 import {
   findZerosubSwitch,
@@ -82,7 +82,6 @@ import {
   DRAIN_METADATA_KEY,
   WORKER_METADATA_KEY,
   buildWorkerMetadata,
-  escalationHintLine,
   firstUserText,
   formatScopeTakeover,
   formatSteerTakeover,
@@ -92,9 +91,7 @@ import {
   workerIdentityFromMetadata,
   maxStampMs,
   scopeLastWakeAt,
-  selectDoneIds,
   steerWakeResponse,
-  withArchiveHint,
   type SupervisionSettings,
 } from "../shared/supervise.js";
 
@@ -569,7 +566,6 @@ interface ScopeWakeInput {
   /** Combined restart events. Regular wakes are read from the live queue. */
   events?: WakeEvent[];
   state?: any;
-  factoryCmd?: string;
   zerosubNote?: string | null;
   zerosub?: ZerosubSource["zerosub"];
 }
@@ -661,31 +657,12 @@ async function deliverScopeWake(paseo: any, args: ScopeWakeInput, deps: Supervis
     log(`[factory] supervise: wake for ${scope.id} waits for quota reset at ${waitWakeAt}`);
     return { sent: false, reason: "wait-reset", target, wakeAt: waitWakeAt };
   }
-  const maxAutoResumes = settings?.maxAutoResumes ?? 2;
-  const overContinued = openWorkers(register)
-    .filter((entry: any) => Number.isInteger(entry?.resumes) && (entry.resumes as number) >= maxAutoResumes)
-    .map((entry: any) => ({ id: entry.id as string, resumes: entry.resumes as number }));
-  let text = withArchiveHint(
-    formatWakeMessage({
-      scopeId: scope.id,
-      epoch: freshWsf.epoch ?? null,
-      events,
-      factoryCmd: args.factoryCmd ?? deps.factoryCmd ?? FACTORY_CMD,
-      metadata: freshMeta,
-    }) ?? "",
-    selectDoneIds(register).filter((id) => !register[id]?.pendingWake || events.some((event) => event.workerId === id)),
-  );
-  const quotaLine = formatQuotaLine(config, wakeRouting.quota, {
-    agent: targetAgent,
-    warnPct: config?.quota?.warnPct ?? settings?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct,
-    zerosub: wakeRouting.zerosub,
-    now: wakeRouting.nowMs,
+  let text = formatWakeMessage({
+    events, metadata: freshMeta, maxAutoResumes: settings?.maxAutoResumes ?? 2,
+    workerNames: Object.fromEntries(paseoState.agents.map((agent: any) => [agent.id, agent.title])),
   });
-  if (quotaLine) text = `${text}\n${quotaLine}`;
-  if (args.zerosubNote) text = `${text}\n${args.zerosubNote}`;
-  const escalation = escalationHintLine(overContinued);
-  if (escalation) text = `${text}\n${escalation}`;
   if (!text) return { sent: false, reason: "no-text", target };
+  if (args.zerosubNote) text = `${text}\n${args.zerosubNote}`;
   const delivery = await deliverSteer(paseo, {
     workspaceId: mainId,
     agentId: target,

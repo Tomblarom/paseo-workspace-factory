@@ -412,7 +412,7 @@ test("worker wake says when the assignment and an executable next step are missi
   ws.metadata[CHECKPOINT_KEY].next = "Nutzerangabe abwarten";
   assert.equal((await wake()).sent, true);
   const [text] = sendsTo(world, steer.id);
-  assert.match(text, /worker worker-1 done \(missing assignment\)/);
+  assert.match(text, /Worker: result reported.*Assignment missing/);
   assert.match(text, /user decision needed/i);
   assert.doesNotMatch(text, /and continue/);
 });
@@ -448,7 +448,9 @@ test("wake and resume briefs distinguish completed, incomplete, actionable and u
     assert.match(packet.split("\n").find((line) => line.startsWith("- Nächster Schritt:")), de);
     assert.ok(packet.length <= 1000);
     const wake = formatWakeMessage({ scopeId: REPO, epoch: 3, events: [{ workerId, state: "done" }], metadata: { [CHECKPOINT_KEY]: status.checkpoint } });
-    assert.match(wake, en.test(fields.next ?? "") ? /and continue/ : en);
+    assert.match(wake, /result reported/);
+    if (en.test("Derive the next step") || en.test("User decision needed")) assert.match(wake, en);
+    assert.doesNotMatch(wake, /resume`|workers`|Ignore if your epoch/);
   }
 });
 
@@ -459,7 +461,7 @@ for (const [label, minutesIdle] of [["warm", 1], ["cooling", 4.5], ["unknown", n
     const sends = sendsTo(world, steer.id);
     assert.equal(sends.length, 1);
     assert.match(sends[0], /^\[factory\]/);
-    assert.match(sends[0], /worker worker-1 done/);
+    assert.match(sends[0], /Worker \(task\): result reported/);
   });
 }
 
@@ -488,7 +490,7 @@ test("a cold Claude wake waits for a verified clear even when the hook runs duri
   await hook();
   await recheck();
   assert.equal(sendsTo(world, steer.id).length, 2);
-  assert.match(sendsTo(world, steer.id)[1], /\[Factory resume\]\nCompact checkpoint\n\n.*worker worker-1 done/s);
+  assert.match(sendsTo(world, steer.id)[1], /\[Factory resume\]\nCompact checkpoint\n\n.*Worker \(task\): result reported/s);
   assert.ok(ws.metadata[WORKERS_KEY][workerId].lastWakeAt);
   assert.equal(ws.metadata[WORKERS_KEY][workerId].pendingWake, null);
 });
@@ -578,7 +580,7 @@ test("a warm steer below the floor gets the queued wake after its turn without r
   steer.activeTurn = null;
   assert.equal((await run()).flushed, true);
   assert.equal(sendsTo(world, steer.id).length, 1);
-  assert.match(sendsTo(world, steer.id)[0], /worker worker-1 done/);
+  assert.match(sendsTo(world, steer.id)[0], /Worker \(task\): result reported/);
   assert.equal(ws.metadata[AGENTS_KEY][steer.id].action.cleanup, undefined);
 });
 
@@ -686,7 +688,7 @@ for (const [name, provider, minutesIdle, tokens] of [
     assert.equal(result.resumed, true);
     const [rewind, send] = world.calls.filter(([kind]) => kind === "rewind" || kind === "agent.send");
     assert.deepEqual(rewind, ["rewind", steer.id, "brief-anchor", "conversation"]);
-    assert.match(send[2], /\[Factory resume\]\nCompact checkpoint\n\n.*worker worker-1 done/s);
+    assert.match(send[2], /\[Factory resume\]\nCompact checkpoint\n\n.*Worker \(task\): result reported/s);
     assert.ok(send[3].messageId);
     assert.equal(ws.metadata[AGENTS_KEY][steer.id].action.facts.refreshed.briefMessageId, send[3].messageId);
     assert.equal(ws.metadata[WORKERS_KEY][workerId].pendingWake, null);
@@ -716,7 +718,7 @@ for (const [provider, minutesIdle, tokens, outcome] of [
       { paseo: client }, { lock: noLock, log: () => {}, delivery });
     const sends = sendsTo(world, steer.id);
     assert.equal(sends.length, 2);
-    assert.match(sends[1], /^\[factory\].*worker worker-1 done/s);
+    assert.match(sends[1], /^\[factory\].*Worker \(task\): result reported/s);
     assert.equal(ws.metadata[WORKERS_KEY][workerId].pendingWake, null);
   });
 }
@@ -731,7 +733,7 @@ test("a Codex wake waits for out-of-band native compaction without a turn hook",
   assert.deepEqual(sendsTo(world, steer.id), ["/compact"]);
   world.onTimeline({ agentId: steer.id, event: { type: "timeline", item: { type: "compaction", status: "completed", trigger: "manual" } } });
   assert.equal((await deliver).sent, true);
-  assert.match(sendsTo(world, steer.id)[1], /^\[factory\].*worker worker-1 done/s);
+  assert.match(sendsTo(world, steer.id)[1], /^\[factory\].*Worker \(task\): result reported/s);
   assert.equal(ws.metadata[AGENTS_KEY][steer.id].action.cleanup, null);
   assert.equal(world.onTimeline, null);
 });
@@ -741,7 +743,7 @@ test("recovery delivers directly when Keep chat history is on and the provider c
   world.commands = [{ name: "compact", kind: "skill" }];
   ws.metadata[AGENTS_KEY][steer.id].needsResume = { reason: "daemon-restart", at: at(NOW - MIN) };
   assert.equal((await wake({ keepChatHistory: async () => true, rewindClient: async () => assert.fail("must not rewind") })).sent, true);
-  assert.match(sendsTo(world, steer.id)[0], /^\[factory\].*worker worker-1 done/s);
+  assert.match(sendsTo(world, steer.id)[0], /^\[factory\].*Worker \(task\): result reported/s);
   assert.equal(sendsTo(world, steer.id).length, 1);
 });
 

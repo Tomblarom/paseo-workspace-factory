@@ -118,7 +118,7 @@ const markWorker = updateWorkerEntry as unknown as (args: {
 }) => Promise<any>;
 const markSent = markWakeSent as unknown as (worker: any, options: { at: string; clearPending: boolean }) => any;
 const formatWorkerWake = formatWakeMessage as unknown as (args: {
-  scopeId: string; epoch: number | null; events: WakeEvent[]; metadata: Record<string, unknown>;
+  events: WakeEvent[]; metadata: Record<string, unknown>;
 }) => string | null;
 const reconcileSend = reconcileSteerSend as unknown as (args: {
   client: any; workspaceId: string; agentId: string; actionId: string; lock: Lock;
@@ -797,9 +797,7 @@ export async function finishSteerDelivery(
           const { packet: _packet, ...unpinned } = pending;
           const next = {
             ...unpinned, batch: { ...batch, events },
-            note: formatWorkerWake({
-              scopeId: cleanupIdentity(snapshot.labels)?.scopeId ?? batch.workspaceId, epoch: batch.epoch, events, metadata: source,
-            }) ?? "",
+            note: formatWorkerWake({ events, metadata: source }) ?? "",
           };
           if (!await replacePending(paseo, input, lock, pending, { action: next })) {
             return deferred("Steer state changed while checking deferred worker events.");

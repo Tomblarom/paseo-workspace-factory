@@ -658,7 +658,7 @@ test("sendScopeWake auto-resumes a flagged steer instead of the wake text", asyn
   assert.equal(resumed.length, 1);
   assert.equal(resumed[0].workspaceId, ws.id);
   assert.equal(resumed[0].agentId, steerA.id);
-  assert.match(resumed[0].note, new RegExp(`worker ${workerId} done`));
+  assert.match(resumed[0].note, /Worker \(do it\): result reported/);
   assert.equal(sendsTo(world, steerA.id).length, 0, "no plain wake text on auto-resume");
   const entry = world.workspaces[0].metadata[WORKERS_KEY][workerId];
   assert.equal(entry.lastWakeAt, null, "not delivered until the brief succeeds");
@@ -666,7 +666,7 @@ test("sendScopeWake auto-resumes a flagged steer instead of the wake text", asyn
   const pending = world.workspaces[0].metadata[AGENTS_KEY][steerA.id].action;
   assert.ok(pending?.wakeId, "pending wake brief staged");
   assert.equal(pending.batch.events.length, 1);
-  assert.match(pending.note, new RegExp(`worker ${workerId} done`));
+  assert.match(pending.note, /Worker \(do it\): result reported/);
 
   const immediate = await supervise.sendScopeWake(
     fakeClient(world),

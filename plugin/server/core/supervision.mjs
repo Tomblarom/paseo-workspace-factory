@@ -376,18 +376,25 @@ export const CHECKPOINT_NEXT_TEXT = {
 };
 
 /** Wake text from the design; null without events (nothing to say). */
-export function formatWakeMessage({ scopeId, epoch, events, factoryCmd = 'paseo-factory', metadata = null } = {}) {
+export function formatWakeMessage({ events, metadata = null, workerNames = {}, maxAutoResumes = 2 } = {}) {
   if (!events?.length) return null;
-  const parts = events.map(({ workerId, state }) => {
-    const missing = metadata && !clipTask(metadata[WORKERS_KEY]?.[workerId]?.task);
-    return `worker ${workerId} ${state}${missing ? ' (missing assignment)' : ''}`;
-  }).join('; ');
+  const lines = events.map(({ workerId, state }) => {
+    const worker = metadata?.[WORKERS_KEY]?.[workerId];
+    const name = clipTask(workerNames[workerId]).slice(0, 100) || 'Worker';
+    const task = clipTask(worker?.task).slice(0, 120);
+    const subject = task && task !== name ? `${name} (${task})` : name;
+    const stateText = state === 'done' ? 'result reported' : state;
+    let followup = '';
+    if (state === 'done') followup = ' Review the result.';
+    else if (worker?.resumes >= maxAutoResumes) followup = ' Seek an independent assessment before continuing.';
+    else if (state === 'interrupted') followup = ' Check whether the worker can continue.';
+    else if (state === 'blocked' || state === 'partial') followup = ' Review the checkpoint.';
+    else if (state === 'stale') followup = ' Check worker progress.';
+    return `[factory] ${subject}: ${stateText}.${followup}${metadata && !task ? ' Assignment missing.' : ''}`;
+  });
   const step = checkpointNextStep(metadata?.[`${METADATA_KEY}.checkpoint`]);
-  const resume = `Run \`${factoryCmd} resume\``;
-  const next = step === 'missing' ? `${resume}. ${CHECKPOINT_NEXT_TEXT.en.missing}.` :
-    step === 'user' || step === 'done' ? `${CHECKPOINT_NEXT_TEXT.en[step]}. ${resume} to review the worker results.` :
-      `${resume} (or \`workers\`) and continue.`;
-  return `[factory] Scope ${scopeId}, epoch ${epoch}: ${parts}.\n${next} Ignore if your epoch is newer.`;
+  if (step === 'missing' || step === 'user') lines.push(`${CHECKPOINT_NEXT_TEXT.en[step]}.`);
+  return lines.join('\n');
 }
 
 /** A steer ignores a wake whose epoch is older than the current one. */

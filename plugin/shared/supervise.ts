@@ -113,61 +113,6 @@ export function firstUserText(entries: unknown): string | null {
   return null;
 }
 
-/** Register ids in state `done`, sorted for deterministic wake text. */
-export function selectDoneIds(
-  register: Record<string, { state?: unknown } | null | undefined> | null | undefined,
-): string[] {
-  if (!register || typeof register !== "object") return [];
-  return Object.keys(register)
-    .filter((id) => register[id]?.state === "done")
-    .sort();
-}
-
-/**
- * The "archive accepted workers" line for wake text (null when no worker is
- * done). The steer archives; the plugin never calls archive itself, per the
- * standing rule in AGENTS.md.
- */
-export function archiveHintLine(doneIds: readonly string[]): string | null {
-  if (!doneIds.length) return null;
-  const shown = [...doneIds].sort().slice(0, WAKE_LIST_MAX).join(", ");
-  const more = doneIds.length > WAKE_LIST_MAX ? ` (+${doneIds.length - WAKE_LIST_MAX} more)` : "";
-  return (
-    `Archive accepted workers with \`paseo archive <id>\` once you have checked each result ` +
-    `against the task (done now: ${shown}${more}); never archive running, blocked or interrupted workers.`
-  );
-}
-
-/** Appends the archive hint to a wake text when workers are done. */
-export function withArchiveHint(base: string, doneIds: readonly string[]): string {
-  const line = archiveHintLine(doneIds);
-  return line ? `${base}\n${line}` : base;
-}
-
-export interface OverContinuedWorker {
-  id: string;
-  resumes: number;
-}
-
-/**
- * Advisor hint for workers continued past maxAutoResumes without progress
- * (null when none). The steer owns the escalation itself; the wake only
- * points at the next step.
- */
-export function escalationHintLine(over: readonly OverContinuedWorker[]): string | null {
-  if (!over.length) return null;
-  const sorted = [...over].sort((a, b) => a.id.localeCompare(b.id));
-  const shown = sorted
-    .slice(0, WAKE_LIST_MAX)
-    .map((w) => `${w.id} (x${w.resumes})`)
-    .join(", ");
-  const more = sorted.length > WAKE_LIST_MAX ? ` (+${sorted.length - WAKE_LIST_MAX} more)` : "";
-  return (
-    `Continued without progress (${shown}${more}): consult an advisor (paseo-advisor skill), ` +
-    `then escalate with domain:/hub: blockers (user: only as the last step).`
-  );
-}
-
 export interface OpenWorkerSummary {
   id: string;
   state: string;

@@ -328,13 +328,15 @@ test('wake target resolves at send time from the scope state', () => {
   assert.equal(resolveWakeTarget(null, steers), null);
 });
 
-test('wake text matches the design; empty events say nothing', () => {
+test('wake text identifies workers and separates reporting from acceptance', () => {
   assert.equal(
-    formatWakeMessage({ scopeId: REPO, epoch: 4, events: [{ workerId: 'w-1', state: 'blocked' }, { workerId: 'w-2', state: 'done' }] }),
-    `[factory] Scope ${REPO}, epoch 4: worker w-1 blocked; worker w-2 done.\nRun \`paseo-factory resume\` (or \`workers\`) and continue. Ignore if your epoch is newer.`,
+    formatWakeMessage({
+      events: [{ workerId: 'w-1', state: 'blocked' }, { workerId: 'w-2', state: 'done' }],
+      workerNames: { 'w-1': 'Integration checks', 'w-2': 'Documentation' },
+    }),
+    '[factory] Integration checks: blocked. Review the checkpoint.\n[factory] Documentation: result reported. Review the result.',
   );
-  assert.match(formatWakeMessage({ scopeId: REPO, epoch: 1, events: [{ workerId: 'w-1', state: 'done' }], factoryCmd: 'wf' }), /Run `wf resume`/);
-  assert.equal(formatWakeMessage({ scopeId: REPO, epoch: 1, events: [] }), null);
+  assert.equal(formatWakeMessage({ events: [] }), null);
 });
 
 test('stale-epoch wakes are ignored', () => {

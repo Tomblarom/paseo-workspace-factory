@@ -18,9 +18,7 @@ const {
   DRAIN_METADATA_KEY,
   SUPERVISION_SETTINGS_DEFAULTS,
   WORKER_METADATA_KEY,
-  archiveHintLine,
   buildWorkerMetadata,
-  escalationHintLine,
   firstUserText,
   formatScopeTakeover,
   formatSteerTakeover,
@@ -29,9 +27,7 @@ const {
   isWorkerMetadata,
   maxStampMs,
   scopeLastWakeAt,
-  selectDoneIds,
   steerWakeResponse,
-  withArchiveHint,
 } = await import("../shared/supervise.ts");
 const { factorySupervisionSettings } = await import("../shared/settings.ts");
 import { LABEL, METADATA_KEY, readPaseoState } from "../server/core/paseo.mjs";
@@ -230,29 +226,6 @@ test("worker metadata builds, validates, and clips the excerpt", () => {
   assert.equal(isWorkerMetadata({ scopeId: REPO }), false);
   assert.equal(isWorkerMetadata(null), false);
   assert.equal(isWorkerMetadata("x"), false);
-});
-
-test("archive hint lists done workers and caps the list", () => {
-  assert.equal(archiveHintLine([]), null);
-  const line = archiveHintLine(["w-2", "w-1"]);
-  assert.match(line, /w-1, w-2/);
-  assert.match(line, /`paseo archive <id>`/);
-  assert.match(line, /never archive running, blocked or interrupted/);
-  const many = archiveHintLine(["w-1", "w-2", "w-3", "w-4", "w-5", "w-6", "w-7"]);
-  assert.match(many, /\(\+2 more\)/);
-  assert.equal(withArchiveHint("base", []), "base");
-  assert.equal(withArchiveHint("base", ["w-1"]), `base\n${archiveHintLine(["w-1"])}`);
-  assert.deepEqual(selectDoneIds({ "w-b": entry("done"), "w-a": entry("running"), "w-c": entry("done"), "w-d": null }), ["w-b", "w-c"]);
-  assert.deepEqual(selectDoneIds(null), []);
-});
-
-test("escalation hint points past-maxAutoResumes workers at an advisor", () => {
-  assert.equal(escalationHintLine([]), null);
-  const line = escalationHintLine([{ id: "w-2", resumes: 3 }, { id: "w-1", resumes: 2 }]);
-  assert.match(line, /w-1 \(x2\), w-2 \(x3\)/);
-  assert.match(line, /paseo-advisor skill/);
-  assert.match(line, /domain:\/hub: blockers/);
-  assert.match(line, /user: only as the last step/);
 });
 
 test("steer takeover text carries the epoch-checked switch", () => {
@@ -536,7 +509,7 @@ test("a legacy composer stage does not block a worker wake or lose its packet", 
   assert.equal(outcome.action, "sent");
   assert.equal(ws.metadata[WORKERS_KEY][worker.id].pendingWake, null);
   const [wake] = sendsTo(world, steer.id);
-  assert.match(wake, new RegExp(worker.id));
+  assert.match(wake, /Worker \(t\): result reported/);
   assert.doesNotMatch(wake, /USER DRAFT/);
   const sentAction = ws.metadata[AGENTS_KEY][steer.id].action;
 
@@ -572,10 +545,9 @@ test("all actionable outcomes wake immediately; simultaneous events debounce", a
   assert.equal(deferred.action, "deferred");
   const texts = sendsTo(world, steers.A.id);
   assert.equal(texts.length, 1);
-  assert.match(texts[0], new RegExp(`worker ${done.id} done`));
-  assert.match(texts[0], /Run `paseo-factory resume`/);
-  assert.match(texts[0], /Archive accepted workers/);
-  assert.ok(!texts[0].includes(blocked.id));
+  assert.match(texts[0], /Worker \(done task\): result reported/);
+  assert.doesNotMatch(texts[0], /paseo-factory resume|Ignore if your epoch|Archive accepted|agent-\d/);
+  assert.ok(!texts[0].includes("blocked task"));
   const pending = world.workspaces[0].metadata[WORKERS_KEY][partial.id].pendingWake;
   assert.deepEqual(pending, { state: "partial", queuedAt: at(NOW) });
 });
@@ -591,7 +563,7 @@ test("wake goes to the steer active at send time, never the parent", async () =>
   assert.equal(result.action, "sent");
   assert.equal(result.target, steers.B.id);
   assert.equal(sendsTo(world, steers.A.id).length, 0);
-  assert.match(sendsTo(world, steers.B.id)[0], /epoch 4/);
+  assert.match(sendsTo(world, steers.B.id)[0], /parented by A.*blocked/);
 });
 
 test("quiet periods queue instead of sending; flush sends after the window", async () => {
@@ -616,8 +588,8 @@ test("quiet periods queue instead of sending; flush sends after the window", asy
   assert.equal(flushed.filter((f) => f.flushed).length, 1);
   const texts = sendsTo(world, steers.A.id);
   assert.equal(texts.length, 1);
-  assert.match(texts[0], new RegExp(`worker ${duringBoot.id} blocked`));
-  assert.match(texts[0], new RegExp(`worker ${duringDrain.id} done`));
+  assert.match(texts[0], /boot task.*blocked/);
+  assert.match(texts[0], /drain task.*result reported/);
 });
 
 test("drain marker quiets wakes like the drain flag; stale markers are ignored", async () => {
@@ -734,9 +706,8 @@ test("wakes hint at an advisor past maxAutoResumes", async () => {
   const result = await turnedOut(world, stuck, { assistant: checkpointOf("s", "blocked") });
   assert.equal(result.action, "sent");
   const texts = sendsTo(world, steers.A.id);
-  assert.match(texts[0], new RegExp(`Continued without progress \\(${stuck.id} \\(x2\\)\\)`));
-  assert.match(texts[0], /paseo-advisor skill/);
-  assert.ok(!texts[0].includes(fresh.id), "workers below the threshold stay out of the hint");
+  assert.match(texts[0], /stuck.*Seek an independent assessment/);
+  assert.ok(!texts[0].includes("(fresh)"), "workers below the threshold stay out of the hint");
 });
 
 test("immediate wakes piggyback queued batches", async () => {
@@ -752,8 +723,8 @@ test("immediate wakes piggyback queued batches", async () => {
   assert.equal(result.action, "sent");
   const texts = sendsTo(world, steers.A.id);
   assert.equal(texts.length, 1);
-  assert.match(texts[0], new RegExp(`worker ${calm.id} done`));
-  assert.match(texts[0], new RegExp(`worker ${urgent.id} blocked`));
+  assert.match(texts[0], /calm.*result reported/);
+  assert.match(texts[0], /urgent.*blocked/);
   assert.equal(world.workspaces[0].metadata[WORKERS_KEY][calm.id].pendingWake, null);
 });
 
@@ -811,9 +782,9 @@ test("boot finished interrupts marked workers and sends one combined wake", asyn
   assert.equal(result.wakes[0].sent, true);
   const texts = sendsTo(world, steers.A.id);
   assert.equal(texts.length, 1);
-  assert.match(texts[0], new RegExp(`worker ${w1.id} interrupted`));
-  assert.match(texts[0], new RegExp(`worker ${w3.id} interrupted`));
-  assert.ok(!texts[0].includes(w2.id), "blocked workers are not in the interrupted wake");
+  assert.match(texts[0], /\(one\): interrupted/);
+  assert.match(texts[0], /\(three\): interrupted/);
+  assert.ok(!texts[0].includes("(two)"), "blocked workers are not in the interrupted wake");
 });
 
 test("boot finished backfills unregistered workers and queues while draining", async () => {
@@ -1001,8 +972,8 @@ test("an unresolved old-epoch receipt holds only its own worker event", async ()
   const result = await supervise.flushScope(fakeClient(world), { id: REPO, workspaceId: ws.id }, depsOf());
   assert.equal(result.flushed, true);
   const [wake] = sendsTo(world, steers.A.id);
-  assert.ok(wake.includes(current.id));
-  assert.ok(!wake.includes(old.id));
+  assert.ok(wake.includes("new result"));
+  assert.ok(!wake.includes("previous result"));
   assert.equal(sendsTo(world, steers.B.id).length, 0);
   assert.equal(ws.metadata[AGENTS_KEY][steers.B.id].action.wakeId, "previous-send");
   assert.deepEqual(ws.metadata[WORKERS_KEY][old.id].pendingWake, pendingWake);
@@ -1350,7 +1321,7 @@ test("supervise.ts reuses the core and never archives or wakes blindly", () => {
     "updateWorkerEntry", "registerWorker", "removeWorker", "collectPendingWakes", "queuePendingWake",
     "shouldMarkStale", "openWorkers", "eventForRestartReason", "readWorkers",
     "steerWakeResponse", "hasAdvisorRequest", "formatSteerTakeover", "formatScopeTakeover",
-    "escalationHintLine", "isDrainMarkerActive",
+    "isDrainMarkerActive",
   ]) {
     assert.ok(superviseServer.includes(name), `supervise.ts uses ${name}`);
   }
@@ -1364,7 +1335,6 @@ test("supervise.ts reuses the core and never archives or wakes blindly", () => {
   const sharedServer = readFileSync(new URL("../shared/supervise.ts", import.meta.url), "utf8");
   assert.ok(sharedServer.includes("Take over with"), "takeover request text defined");
   assert.ok(sharedServer.includes("--to ${args.candidateSlot} --apply"), "takeover text carries the switch");
-  assert.ok(sharedServer.includes("Archive accepted workers"), "archive hint text defined");
 });
 
 test("cold sweep feeds the register state into the C5 skip rule", () => {
@@ -1553,7 +1523,7 @@ test("all accounts exhausted holds the wake until the earliest reset", async () 
   assert.equal(sendsTo(world, steers.A.id).length, 1);
 });
 
-test("wake text uses the live holder's bound account after the slot's provider changed", async () => {
+test("wake text keeps the actionable fork note and omits routine quota", async () => {
   const world = makeWorld();
   const { ws, steers } = provisioned(world);
   steers.A.provider = "claude";
@@ -1580,7 +1550,7 @@ test("wake text uses the live holder's bound account after the slot's provider c
   assert.equal(result.action, "sent");
   const texts = sendsTo(world, steers.A.id);
   assert.equal(texts.length, 1);
-  assert.match(texts[0], /Quota: claude \(acc-live\) 80% used — prefer acc-new/);
+  assert.doesNotMatch(texts[0], /^Quota:/m);
   assert.match(texts[0], /fork to other provider/);
 });
 
