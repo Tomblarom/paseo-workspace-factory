@@ -442,7 +442,8 @@ export function FactoryWorkspaceStatus({
             <View style={card}>
               <CardHeading theme={theme} icon="Factory">Set up this workspace</CardHeading>
               <Text style={styles.label}>Connect this workspace to Factory to coordinate its steers and workers.</Text>
-              <Action theme={theme} icon="Plus" title="Set up Factory" disabled={setupBusy || offline} onPress={() => setup(setupPlan)} />
+              <Action theme={theme} icon="Plus" title="Register workspace" emphasized
+                disabled={setupBusy || offline || statusFetching} onPress={() => setup(setupPlan)} />
             </View>
           ) : (
             <>
@@ -532,7 +533,7 @@ export function FactoryWorkspaceStatus({
             </View>
             <Action theme={theme} icon="Plus" title="Create Steer" emphasized
               disabled={stale || !status}
-              hint={setupPlan ? "Set up Factory in Overview" : undefined} onPress={() => setOperation({ kind: "create" })} />
+              hint={setupPlan ? "Register workspace in Overview" : undefined} onPress={() => setOperation({ kind: "create" })} />
           </View>
           {stale ? <Text accessibilityRole="alert" style={styles.conflict}>
             {offline ? steers.length ? "Host disconnected. Showing the last steer snapshot." : "Host disconnected. Steers unavailable."

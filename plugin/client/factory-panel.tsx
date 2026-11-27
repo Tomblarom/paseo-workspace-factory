@@ -253,7 +253,14 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
     onError: fail,
   });
   const planMutation = useMutation({
-    mutationFn: (input: RpcInput<typeof factoryPlan>) => callPlan(input),
+    mutationFn: async ({ registerWorkspaceId, ...input }: RpcInput<typeof factoryPlan> & { registerWorkspaceId?: string }) => {
+      const plan = await callPlan(input);
+      if (registerWorkspaceId && plan.plans.some((entry) => entry.ops.length > 0 &&
+        record(record(entry.observed)?.mainWorkspace)?.id !== registerWorkspaceId)) {
+        throw new Error("Registration resolved to a different workspace. Open Factory in the project's Main workspace.");
+      }
+      return plan;
+    },
     onSuccess: (plan, input) =>
       setFactoryResult({
         kind: "plan",
@@ -671,7 +678,7 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
           statusFetching={workspaceStatus.isFetching}
           offline={offline}
           refresh={() => { void workspaceStatus.refetch(); }}
-          setup={planMutation.mutate}
+          setup={(input) => planMutation.mutate({ ...input, registerWorkspaceId: workspaceId })}
           setupBusy={busy}
           openView={openView}
           focusedSteerId={focusedSteerId}
