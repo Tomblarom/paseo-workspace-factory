@@ -5,9 +5,13 @@ on:
 jobs:
   offline:
     runs-on: ubuntu-latest
+    env:
+      PASEO_FACTORY_PASEO_BIN: /bin/false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - run: npm ci --prefix plugin
+      - run: npm run typecheck --prefix plugin
       - run: npm test
