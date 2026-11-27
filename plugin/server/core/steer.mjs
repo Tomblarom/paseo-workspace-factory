@@ -23,7 +23,7 @@ import { createExecutors } from './apply.mjs';
 import { resolveScope, scopeToEntry, sameScopeId, domainOfScope } from './scope.mjs';
 import { STEER_TITLE, activeMarker, discoveredRepoPublic, liveSlotHolders, markSteerTitle, stripActiveMarker } from './discovery.mjs';
 import { AGENTS_KEY, currentFreshHint, updateAgentEntry } from './agent-state.mjs';
-import { WORKERS_KEY, clipTask, collectPendingWakes, nextStepNeedsUser, openWorkers as openRegisterWorkers, readWorkers } from './supervision.mjs';
+import { CHECKPOINT_NEXT_TEXT, WORKERS_KEY, checkpointNextStep, clipTask, collectPendingWakes, openWorkers as openRegisterWorkers, readWorkers } from './supervision.mjs';
 import { QUOTA_DEFAULTS, formatQuotaLine } from './quota.mjs';
 import { readRewindPoint, rewindAndBrief } from './rewind.mjs';
 import { findingsPassage } from './findings.mjs';
@@ -260,7 +260,7 @@ const TEXT = {
     noCheckpoint: 'Aufgaben-Checkpoint: KEINER DOKUMENTIERT. Aktuellen Auftrag nicht aus dem Verlauf ableiten, sondern beim Nutzer bestätigen.',
     checkpoint: (cp, stale) => `Aufgaben-Checkpoint (Epoch ${cp.epoch ?? '?'}, ${cp.updatedAt ?? 'ohne Zeit'}${stale ? ', NICHT aus der aktuellen Epoch – auf Aktualität prüfen' : ''}):`,
     task: 'Auftrag', tests: 'Tests', blockers: 'Offene Blocker', next: 'Nächster Schritt', none: 'keine dokumentiert',
-    noNext: 'Nutzerentscheidung erforderlich',
+    nextText: CHECKPOINT_NEXT_TEXT.de,
     noAssignment: 'Auftrag fehlt – mit dem Owner klären.',
     workers: 'Worker (per Agent-ID weiterverwenden, nicht neu anlegen):', noWorkers: 'Worker: keine.', parent: 'Parent Steer',
     hint: (slot) => `Unverifizierter Hinweis – letzte Antwort von Steer ${slot}, gekürzt, keine Auftragsquelle:`,
@@ -285,7 +285,7 @@ const TEXT = {
     noCheckpoint: 'Task checkpoint: NONE RECORDED. Do not infer the current task from history; confirm it with the user.',
     checkpoint: (cp, stale) => `Task checkpoint (epoch ${cp.epoch ?? '?'}, ${cp.updatedAt ?? 'no time'}${stale ? ', NOT from the current epoch – check whether it is still valid' : ''}):`,
     task: 'Task', tests: 'Tests', blockers: 'Open blockers', next: 'Next step', none: 'none recorded',
-    noNext: 'User decision needed',
+    nextText: CHECKPOINT_NEXT_TEXT.en,
     noAssignment: 'Missing assignment. Confirm it with the owner.',
     workers: 'Workers (reuse by agent id, do not recreate):', noWorkers: 'Workers: none.', parent: 'parent Steer',
     hint: (slot) => `Unverified hint – last answer of Steer ${slot}, shortened, not a task source:`,
@@ -360,7 +360,7 @@ function packetCheckpoint(lines, cp, epoch, t) {
   const fields = { task: cp.task, tests: cp.tests?.join('; ') ?? '', blockers: cp.blockers?.join('; ') ?? '', next: cp.next ?? '' };
   const bounded = Object.fromEntries(Object.entries(fields).map(([key, value]) => [key, clip(value, key === 'task' ? 500 : 300)]));
   lines.push(t.checkpoint(cp, cp.epoch != null && cp.epoch !== epoch));
-  lines.push(`- ${t.task}: ${bounded.task}`, `- ${t.tests}: ${bounded.tests || t.none}`, `- ${t.blockers}: ${bounded.blockers || t.none}`, `- ${t.next}: ${nextStepNeedsUser(cp.next) ? t.noNext : bounded.next}`);
+  lines.push(`- ${t.task}: ${bounded.task}`, `- ${t.tests}: ${bounded.tests || t.none}`, `- ${t.blockers}: ${bounded.blockers || t.none}`, `- ${t.next}: ${t.nextText[checkpointNextStep(cp)] ?? bounded.next}`);
   if (cp.source === 'failover' && cp.failover) lines.push(clip(`- Failover: takeover from ${cp.failover.previousSteer ?? '?'} (${cp.failover.reason ?? 'no reason recorded'})`, 240));
   lines.push(formatCheckpointBlock({ ...bounded, tests: bounded.tests ? [bounded.tests] : [], blockers: bounded.blockers ? [bounded.blockers] : [], status: cp.status }));
   return Object.keys(fields).some((key) => fields[key].trim().length > (key === 'task' ? 500 : 300));
@@ -658,7 +658,7 @@ export function buildResumeBrief(status, { agentId = null, agentState = null, wo
     lines.push(`- Task: ${clip(cp.task, 500)}`);
     lines.push(`- Tests: ${cp.tests?.length ? clip(cp.tests.join('; '), 300) : 'none recorded'}`);
     lines.push(`- Open blockers: ${cp.blockers?.length ? clip(cp.blockers.join('; '), 300) : 'none recorded'}`);
-    lines.push(`- Next step: ${nextStepNeedsUser(cp.next) ? TEXT.en.noNext : clip(cp.next, Math.max(300, Math.min(2000, budget - 1500)))}`);
+    lines.push(`- Next step: ${TEXT.en.nextText[checkpointNextStep(cp)] ?? clip(cp.next, Math.max(300, Math.min(2000, budget - 1500)))}`);
     if (cp.source === 'failover' && cp.failover) lines.push(`Failover from ${cp.failover.previousSteer ?? '?'}: ${cp.failover.reason ?? 'no reason recorded'}`);
     if (cp.epoch !== null && cp.epoch !== undefined && status.state?.epoch !== null && status.state?.epoch !== undefined && cp.epoch !== status.state.epoch) {
       lines.push(`! Checkpoint is stale: from epoch ${cp.epoch}, scope is at epoch ${status.state.epoch} — verify before continuing.`);

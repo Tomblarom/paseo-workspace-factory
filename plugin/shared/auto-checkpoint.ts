@@ -62,6 +62,7 @@ export interface CheckpointBlock {
   tests: string[];
   blockers: string[];
   next: string | null;
+  status?: string;
 }
 
 export function serializeNote(block: CheckpointBlock): string {
@@ -271,6 +272,7 @@ export function decideTurnUpdate(input: TurnDecisionInput): TurnDecision {
           tests: input.block.tests,
           blockers: input.block.blockers,
           next: input.block.next,
+          ...(input.block.status ? { status: input.block.status } : {}),
           epoch: input.epoch,
           updatedAt: at,
           source: "agent",

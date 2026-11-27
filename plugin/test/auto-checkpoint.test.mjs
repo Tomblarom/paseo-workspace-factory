@@ -103,6 +103,12 @@ test("completed block of the active steer writes the scope checkpoint", () => {
   assert.equal(d.patchInterrupted, undefined);
 });
 
+test("the scope checkpoint retains the steer’s explicit completion status", () => {
+  const decision = decideTurnUpdate(input({ block: { ...BLOCK, next: null, status: "done" } }));
+  assert.equal(decision.checkpoint.status, "done");
+  assert.equal(decision.checkpoint.next, null);
+});
+
 test("every turn.after clears the open-turn tracking from turn.before", () => {
   const completed = decideTurnUpdate(input({ block: BLOCK }));
   assert.equal(completed.entryUpdate.openTurnId, null);

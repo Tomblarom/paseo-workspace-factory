@@ -577,7 +577,7 @@ test("applyResume saves a newer CHECKPOINT block, keeps a newer scope checkpoint
   world.workspaces[0].metadata[AGENTS_KEY] = { [steer.id]: { lastTurnEndedAt: at(NOW - HOUR) } };
   world.timelines[steer.id] = [
     { turnId: "t1", item: { type: "user_message", text: "do it" } },
-    { turnId: "t1", item: { type: "assistant_message", text: `done\n${CHECKPOINT_TEXT("new task")}` } },
+    { turnId: "t1", item: { type: "assistant_message", text: "done\n```text\nCHECKPOINT\ntask: new task\nnext: none\nstatus: done\n```" } },
   ];
   const result = await resumeApply.applyResume(
     fakeClient(world),
@@ -589,6 +589,7 @@ test("applyResume saves a newer CHECKPOINT block, keeps a newer scope checkpoint
   const written = world.workspaces[0].metadata[CHECKPOINT_KEY];
   assert.equal(written.task, "new task");
   assert.equal(written.source, "resume");
+  assert.equal(written.status, "done");
 
   // Same block, but the scope checkpoint is newer: keep it.
   const world2 = makeWorld();

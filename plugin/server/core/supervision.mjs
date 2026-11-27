@@ -349,13 +349,31 @@ export function resolveWakeTarget(scopeState, steers) {
   return holders.length === 1 ? (holders[0].id ?? null) : null;
 }
 
-/** Empty steps and steps that only wait for the user provide no work to execute. */
-export function nextStepNeedsUser(next) {
-  const text = typeof next === 'string' ? next.trim().replace(/[.!]+$/, '').replace(/\s+/g, ' ') : '';
-  return /^(?:none|keine?|n\/a|-)?$/i.test(text) ||
-    /^(?:wait(?:ing)?|await(?:ing)?)(?: for)? (?:the )?user(?:['’]s)?(?: (?:input|decision|response|reply|confirmation|approval|instructions))?$/i.test(text) ||
-    /^(?:auf )?(?:nutzerangabe|nutzereingabe|nutzerentscheidung|nutzerantwort|nutzerfreigabe|(?:antwort|rückmeldung|freigabe|entscheidung)(?: (?:des nutzers|vom nutzer))?|den nutzer) (?:ab)?warten$/i.test(text);
+export function checkpointNextStep(checkpoint) {
+  if (typeof checkpoint?.task !== 'string' || !checkpoint.task.trim()) return null;
+  const next = typeof checkpoint.next === 'string' ? checkpoint.next.trim().replace(/[.!]+$/, '').replace(/\s+/g, ' ') : '';
+  if (checkpoint.status === 'done' || /^(?:done|nothing left(?: to do)?|erledigt|nichts mehr(?: zu tun)?)$/i.test(next)) return 'done';
+  if (/^(?:wait(?:ing)?|await(?:ing)?)(?: for)? (?:the )?user(?:['’]s)?(?: (?:input|decision|response|reply|confirmation|approval|instructions))?$/i.test(next) ||
+    /^(?:wait(?:ing)? for|await(?:ing)?) (?:the )?(?:input|decision|response|reply|confirmation|approval|instructions) from (?:the )?user$/i.test(next) ||
+    /^(?:auf )?(?:die )?(?:nutzerangabe|nutzereingabe|nutzerentscheidung|nutzerantwort|nutzerfreigabe|(?:antwort|rückmeldung|freigabe|entscheidung)(?: (?:des nutzers|vom nutzer))?|den nutzer) (?:ab)?warten$/i.test(next)) return 'user';
+  if (/^(?:none|keine?|n\/a|-)?$/i.test(next)) {
+    return checkpoint.blockers?.some((blocker) => /(?:^|;)\s*(?:[-*]\s+)?user\s*:/i.test(blocker)) ? 'user' : 'missing';
+  }
+  return 'action';
 }
+
+export const CHECKPOINT_NEXT_TEXT = {
+  en: {
+    user: 'User decision needed',
+    done: 'Work complete',
+    missing: 'Derive the next step from the task, blockers and tests and record it in the checkpoint',
+  },
+  de: {
+    user: 'Nutzerentscheidung erforderlich',
+    done: 'Arbeit abgeschlossen',
+    missing: 'Leite den nächsten Schritt aus Aufgabe, Blockern und Tests ab und halte ihn im Checkpoint fest',
+  },
+};
 
 /** Wake text from the design; null without events (nothing to say). */
 export function formatWakeMessage({ scopeId, epoch, events, factoryCmd = 'paseo-factory', metadata = null } = {}) {
@@ -364,8 +382,11 @@ export function formatWakeMessage({ scopeId, epoch, events, factoryCmd = 'paseo-
     const missing = metadata && !clipTask(metadata[WORKERS_KEY]?.[workerId]?.task);
     return `worker ${workerId} ${state}${missing ? ' (missing assignment)' : ''}`;
   }).join('; ');
-  const needsUser = metadata && nextStepNeedsUser(metadata[`${METADATA_KEY}.checkpoint`]?.next);
-  const next = needsUser ? `User decision needed. Run \`${factoryCmd} resume\`.` : `Run \`${factoryCmd} resume\` (or \`workers\`) and continue.`;
+  const step = checkpointNextStep(metadata?.[`${METADATA_KEY}.checkpoint`]);
+  const resume = `Run \`${factoryCmd} resume\``;
+  const next = step === 'missing' ? `${resume}. ${CHECKPOINT_NEXT_TEXT.en.missing}.` :
+    step === 'user' || step === 'done' ? `${CHECKPOINT_NEXT_TEXT.en[step]}. ${resume} to review the worker results.` :
+      `${resume} (or \`workers\`) and continue.`;
   return `[factory] Scope ${scopeId}, epoch ${epoch}: ${parts}.\n${next} Ignore if your epoch is newer.`;
 }
 

@@ -16,16 +16,12 @@ import { agentContextInputs, hasActiveAgentWork } from "./agent-context.js";
 import { projectAgentContext } from "../shared/steer-state.js";
 import { resolveZerosub } from "./zerosub-runtime.js";
 import { workerIdentityFromMetadata } from "../shared/supervise.js";
+import type { CheckpointBlock } from "../shared/auto-checkpoint.js";
 
 const CHECKPOINT_KEY = `${METADATA_KEY}.checkpoint`;
 
 const asLastAnswer = lastAssistantText as unknown as (payload: unknown) => string | null;
-const asParseBlock = parseCheckpointBlock as unknown as (text: string | null) => {
-  task: string;
-  tests: string[];
-  blockers: string[];
-  next: string | null;
-} | null;
+const asParseBlock = parseCheckpointBlock as (text: string | null) => CheckpointBlock | null;
 
 export interface ResumeApplyInput {
   workspaceId: string;
@@ -205,7 +201,7 @@ async function saveResumeCheckpoint(
   slot: string | null,
   scopeId: string,
   config: unknown,
-  block: { task: string; tests: string[]; blockers: string[]; next: string | null },
+  block: CheckpointBlock,
   lock: (name: string, fn: (held: { verify: () => void }) => Promise<any>) => Promise<any>,
 ): Promise<boolean> {
   return lock(workspaceLockName(mainId), async (held: { verify: () => void }) => {
@@ -219,6 +215,7 @@ async function saveResumeCheckpoint(
         tests: block.tests,
         blockers: block.blockers,
         next: block.next,
+        ...(block.status ? { status: block.status } : {}),
         epoch: freshWsf.epoch ?? null,
         updatedAt: at,
         source: "resume",
@@ -313,8 +310,7 @@ export async function applyResume(
       detail: "Resume is already running for this steer; the brief arrives in the timeline after the clear.",
     };
   }
-  let block: { task: string; tests: string[]; blockers: string[]; next: string | null } | null =
-    null;
+  let block: CheckpointBlock | null = null;
   try {
     const page: any = await paseo.agents.ref(agentId).timeline.refetch({
       direction: "tail",

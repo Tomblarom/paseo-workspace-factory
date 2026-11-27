@@ -16,8 +16,8 @@ const { LockBusy } = await import("../server/core/lock.mjs");
 import { LABEL, METADATA_KEY } from "../server/core/paseo.mjs";
 import { AGENTS_KEY } from "../server/core/agent-state.mjs";
 import { ASSIGNMENT_KEY } from "../server/core/assign.mjs";
-import { WORKERS_KEY } from "../server/core/supervision.mjs";
-import { buildResumeBrief, CHECKPOINT_KEY } from "../server/core/steer.mjs";
+import { formatWakeMessage, WORKERS_KEY } from "../server/core/supervision.mjs";
+import { buildRefreshPacket, buildResumeBrief, CHECKPOINT_KEY } from "../server/core/steer.mjs";
 
 const REPO = "example-owner/example-repo";
 const NOW = new Date("2026-11-24T12:00:00.000Z").getTime();
@@ -417,24 +417,39 @@ test("worker wake says when the assignment and an executable next step are missi
   assert.doesNotMatch(text, /and continue/);
 });
 
-test("resume brief replaces empty or waiting-only steps and names missing worker assignments", () => {
+test("wake and resume briefs distinguish completed, incomplete, actionable and user-blocked checkpoints", () => {
   const { steer, workerId } = deliveryFixture();
   const status = {
     repo: REPO, state: { activeSteer: "A", epoch: 3 }, steers: [{ ...steer, slot: "A" }],
     workers: [{ id: workerId, title: "Worker", status: "idle" }],
     openWorkers: [{ id: "stale-worker", task: "", state: "stale" }],
-    checkpoint: { task: "Test handover", next: null },
+    workspace: { id: "workspace", directory: "/repo" },
   };
-  for (const next of [null, " ", "Wait for user", "Nutzerangabe abwarten", "Auf Rückmeldung des Nutzers warten."]) {
-    status.checkpoint.next = next;
+  const cases = [
+    [{ status: "done", next: null }, /Work complete/, /Arbeit abgeschlossen/],
+    [{ next: "Nothing left to do." }, /Work complete/, /Arbeit abgeschlossen/],
+    [{ status: "partial", next: null }, /Derive the next step from the task, blockers and tests/, /Leite den nächsten Schritt aus Aufgabe, Blockern und Tests ab/],
+    [{ next: "none", blockers: ["hub: other work"] }, /Derive the next step/, /Leite den nächsten Schritt/],
+    [{ next: "Run npm test." }, /Run npm test/, /Run npm test/],
+    [{ next: "Wait for user approval, then run npm test." }, /Wait for user approval, then run npm test/, /Wait for user approval, then run npm test/],
+    [{ next: null, blockers: ["hub: deployment; user: approve release"] }, /User decision needed/, /Nutzerentscheidung erforderlich/],
+    [{ next: "Run npm test", blockers: ["user: approve release"] }, /Run npm test/, /Run npm test/],
+    ...["Wait for user", "Nutzerangabe abwarten", "Auf Rückmeldung des Nutzers warten."].map((next) =>
+      [{ next }, /User decision needed/, /Nutzerentscheidung erforderlich/]),
+  ];
+  for (const [fields, en, de] of cases) {
+    status.checkpoint = { task: "Test handover", ...fields };
     const brief = buildResumeBrief(status, { agentId: steer.id, budget: 650 });
-    assert.match(brief, /Next step: User decision needed/);
+    assert.match(brief.split("\n").find((line) => line.startsWith("- Next step:")), en);
     assert.match(brief, new RegExp(workerId + ".*missing assignment"));
     assert.match(brief, /stale-worker.*missing assignment/);
     assert.ok(brief.length <= 650);
+    const packet = buildRefreshPacket(status, { kind: "steer", slot: "A", from: steer, to: steer, epoch: 3, rewound: true, language: "de", budget: 1000 });
+    assert.match(packet.split("\n").find((line) => line.startsWith("- Nächster Schritt:")), de);
+    assert.ok(packet.length <= 1000);
+    const wake = formatWakeMessage({ scopeId: REPO, epoch: 3, events: [{ workerId, state: "done" }], metadata: { [CHECKPOINT_KEY]: status.checkpoint } });
+    assert.match(wake, en.test(fields.next ?? "") ? /and continue/ : en);
   }
-  status.checkpoint.next = "Wait for user approval, then run npm test.";
-  assert.match(buildResumeBrief(status, { agentId: steer.id }), /Next step: Wait for user approval, then run npm test/);
 });
 
 for (const [label, minutesIdle] of [["warm", 1], ["cooling", 4.5], ["unknown", null]]) {
