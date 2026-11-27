@@ -71,7 +71,9 @@ If a worker fails with a capacity/quota/limit error, record it with `paseo-facto
 
 A worker without a CHECKPOINT block in its last answer still has unfinished work. Resume an interrupted worker or continue a partial CHECKPOINT with `paseo-factory resume <scope> --agent <worker-id> --apply`. The resume brief carries the worker's own task and latest checkpoint. It rewinds a cold or large context where possible and may create a replacement if rewind is unavailable. For an expanded assignment, include the new scope in the follow-up. A queued send acknowledges enqueueing. Use the recipient's timeline or active turn to confirm dispatch before reporting progress. Verify the result against the assignment before archiving the worker.
 
-Worker `done` means the result was reported. Check it against the assignment, then verify the integrated package before recording acceptance. Mark worker checks as `reported` and your own checks as `verified by steer` in `tests:`. Assign one writer to each overlapping area, including yourself. Use an independent reviewer when risk or the task calls for one. A fresh worker can review a candidate change and an advisor can assess a decision or design.
+Worker `done` means the result was reported. Check it against the assignment, then verify the integrated package before recording acceptance. Mark worker checks as `reported` and your own checks as `verified by steer` in `tests:`. Assign one writer to each overlapping area, including yourself.
+
+Seek independent review for explicit `review:` requests, work involving security, privacy, data or migrations, hard-to-reverse changes, state machines, or repeated fixes. Otherwise use normal checks. A fresh worker can review a candidate change and an advisor can assess a decision or design.
 
 ## Task template
 
@@ -85,6 +87,8 @@ Answer: at most <n> lines, then the fenced CHECKPOINT block.
 ```
 
 Workers can challenge a premise with evidence and explain its impact in `blockers:`. Scope or write access changes remain a steer decision.
+
+Keep briefs short and aim for roughly 50 tool calls per bounded worker package. As you approach that budget, split the remaining work or checkpoint it for clean continuation.
 
 ## Answer format
 

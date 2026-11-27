@@ -89,6 +89,15 @@ test('role texts are static and name the real CLI', () => {
   assert.match(WORKER_ROLE_PROMPT, /CHECKPOINT/);
 });
 
+test('steer review guidance lists the triggers and fits the static prompt budget', () => {
+  const reviewLine = STEER_ROLE_PROMPT.split('\n').find((line) => line.includes('Seek independent review')) ?? '';
+  for (const trigger of ['`review:` requests', 'security/privacy/data/migration', 'hard-to-reverse changes', 'state machines', 'repeated fixes']) {
+    assert.ok(reviewLine.includes(trigger), `missing review trigger: ${trigger}`);
+  }
+  assert.match(reviewLine, /Otherwise use normal checks\./);
+  assert.ok(STEER_ROLE_PROMPT.length <= 4675, `steer prompt exceeds 4675 characters (${STEER_ROLE_PROMPT.length})`);
+});
+
 function setup() {
   const workspaceId = 'wks_roleprompt0001';
   const scope = 'example/project';
@@ -133,8 +142,8 @@ test('CLI name renders once per host: installed plugin CLI when known, else pase
 });
 
 test('steer and advisor texts end with the stable role-rules identifier', () => {
-  assert.equal(ROLE_RULES_ID, 'wsf-role-6');
-  assert.ok(STEER_ROLE_PROMPT.includes('Factory role rules: wsf-role-6'));
+  assert.equal(ROLE_RULES_ID, 'wsf-role-7');
+  assert.ok(STEER_ROLE_PROMPT.includes('Factory role rules: wsf-role-7'));
   for (const text of [STEER_ROLE_PROMPT, ADVISOR_ROLE_PROMPT]) {
     assert.equal(text.split(`Factory role rules: ${ROLE_RULES_ID}`).length - 1, 1);
     assert.ok(text.endsWith(`Factory role rules: ${ROLE_RULES_ID}`));
