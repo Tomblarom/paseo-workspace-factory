@@ -119,6 +119,7 @@ import { withWorkspaceLock } from "./core/lock.mjs";
 import { readZerosubStateSafe, resolveZerosub, type ZerosubSource } from "./zerosub-runtime.js";
 import { readZerosubState } from "./core/zerosub.mjs";
 import { workerIdentityFromMetadata } from "../shared/supervise.js";
+import { RESET_KEEP_HISTORY_UNAVAILABLE } from "../shared/settings.js";
 import { filterStaleWorkerEvents } from "./worker-wakes.js";
 import { loadCatalog } from "./models-rpc.js";
 import { applySteerSettings, previewSteerSettings, revertSteerSettings } from "./steer-settings.js";
@@ -418,7 +419,16 @@ function freshPrivacyReader(paseo: any, loader: ConfigLoader, deps?: SteerDelive
 }
 
 type FreshInput = RpcInput<typeof factoryFreshPreview>;
-type FreshDeps = SteerDeliveryDeps & { lookupFreshReceipt?: typeof lookupCreationReceipt };
+type FreshDeps = SteerDeliveryDeps & {
+  lookupFreshReceipt?: typeof lookupCreationReceipt;
+  readResetHistorySetting?: () => Promise<boolean>;
+};
+
+async function requireResetHistoryPermission(input: FreshInput, deps?: FreshDeps) {
+  if (input.resetQuota === undefined) return;
+  if (!deps?.readResetHistorySetting) throw new Error("Reset Steer could not read the chat history setting.");
+  if (await deps.readResetHistorySetting()) throw new Error(RESET_KEEP_HISTORY_UNAVAILABLE);
+}
 
 async function freshPolicy(paseo: any, loader: ConfigLoader, deps: FreshDeps | undefined, discovery: any, config?: any) {
   const [snapshot, providers, workspace] = await Promise.all([
@@ -436,6 +446,7 @@ async function freshPolicy(paseo: any, loader: ConfigLoader, deps: FreshDeps | u
 }
 
 async function freshRpcOptions(input: FreshInput, paseo: any, loader: ConfigLoader, deps?: FreshDeps) {
+  await requireResetHistoryPermission(input, deps);
   const found = await discoverOne(paseo, loader, input.repo, input.workspaceId, input.workerId);
   const { config, discovery } = found;
   if (input.resetQuota !== undefined && (!input.slot || input.workerId)) {
@@ -573,7 +584,11 @@ export async function applyFresh(
     throw new Error("For a replacement worker, confirm delivery to the new agent.");
   }
   const applyOptions: any = {
-    ...dryOptions, apply: true, confirmPreview,
+    ...dryOptions, apply: true,
+    confirmPreview: input.resetQuota === undefined ? confirmPreview : async (candidate: any) => {
+      confirmPreview(candidate);
+      await requireResetHistoryPermission(input, deps);
+    },
     send: !stage,
     stageRewind: stage,
     ...(stage ? { stageReplacement: (args: { workspaceId: string; agentId: string; packet: string; epoch: number }) =>

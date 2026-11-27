@@ -194,7 +194,10 @@ export const factoryResumeSettings = defineSettings({
   }),
 });
 
-// Brief delivery for a new steer and history preservation for automatic actions.
+export const RESET_KEEP_HISTORY_UNAVAILABLE =
+  "This version of Paseo cannot reset a steer in place while keeping its chat history.";
+
+// Brief delivery for a new steer and steer chat history preservation.
 export const factorySteerMenuSettings = defineSettings({
   id: "factory-steer-menu",
   scope: "host",

@@ -215,10 +215,18 @@ export default function contribute(server: PluginServerContext) {
     bootOnce(ctx.paseo);
     return getResume(input, ctx, loader, { getZerosub });
   });
-  server.handle(factoryFreshPreview, (input, ctx) => previewFresh(input, ctx, loader, delivery));
+  const freshDeps = {
+    ...delivery,
+    readResetHistorySetting: async () => {
+      const settings = await steerMenuSettings.read();
+      if (settings.status !== "ready") throw new Error("Reset Steer could not read the chat history setting.");
+      return settings.values.keepChatHistory;
+    },
+  };
+  server.handle(factoryFreshPreview, (input, ctx) => previewFresh(input, ctx, loader, freshDeps));
   server.handle(factoryFresh, (input, ctx) => {
     bootOnce(ctx.paseo);
-    return applyFresh(input, ctx, loader, delivery);
+    return applyFresh(input, ctx, loader, freshDeps);
   });
   server.handle(factoryHistoryOpen, openHistory);
   server.handle(factoryWorkers, (input, ctx) => getWorkers(input, ctx, loader));

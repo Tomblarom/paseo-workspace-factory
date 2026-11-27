@@ -1229,7 +1229,7 @@ async function tryActiveRewind({ client, discovery, status, expected, slot, from
     const current = await identity(point, true);
     if (!current.rewindSupported) throw new SwitchRefused('This provider no longer supports conversation rewind for this session.');
     if (!routeMatchesIntent(current.routeBinding.live, intent)) throw new SwitchRefused('Requested rewind route changed');
-    confirmPreview?.(current);
+    await confirmPreview?.(current);
   };
   if (!apply) {
     const point = await previewRewindPoint(from.id, rewindClient, previousBriefId);
@@ -1731,7 +1731,7 @@ async function tryTabRewind({ client, discovery, status, expected, from, kind, p
     const current = await identity(point, true);
     if (!current.rewindSupported) throw new SwitchRefused('This provider no longer supports conversation rewind for this session.');
     if (!routeMatchesIntent(current.routeBinding.live, intent)) throw new SwitchRefused('Requested rewind route changed');
-    confirmPreview?.(current);
+    await confirmPreview?.(current);
   };
   const packetOf = async () => buildRefreshPacket(status, {
     kind, from, to: { id: from.id }, epoch: expected.epoch, git: gitSnapshot,

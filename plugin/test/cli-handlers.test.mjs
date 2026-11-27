@@ -1406,6 +1406,7 @@ test("Reset Steer rewinds the live proxy tuple in place and stages the brief at 
       maxUsedPct: resetQuota === "depleted" ? 100 : null };
     const deps = {
       zerosub: { accounts: [account], agentAccount: { [active.id]: account.id } },
+      readResetHistorySetting: async () => false,
       lookupFreshReceipt: async () => assert.fail("Reset Steer must not look up a replacement"),
       rewindClient: async () => ({
         fetchAgentTimeline: async () => ({ entries: [{ item: { type: "user_message", messageId: "start" } }] }),
@@ -1443,11 +1444,59 @@ test("Reset Steer rewinds the live proxy tuple in place and stages the brief at 
   }
 });
 
+test("Reset Steer refuses to rewind when the live setting keeps chat history", async () => {
+  const { world, workspace, active, paseo } = activationWorld();
+  active.capabilities = { supportsRewindConversation: true };
+  const context = { paseo };
+  const input = { workspaceId: workspace.id, slot: "A", resetQuota: "unknown" };
+  const metadata = structuredClone(workspace.metadata);
+  let keepHistory = true;
+  let enableOnLastTimelineRead = false;
+  const deps = {
+    zerosub: null,
+    readResetHistorySetting: async () => keepHistory,
+    lookupFreshReceipt: async () => assert.fail("Reset Steer must not request a replacement"),
+    rewindClient: async () => {
+      assert.equal(keepHistory, false, "a protected reset must stop before timeline lookup");
+      return {
+        fetchAgentTimeline: async () => {
+          if (enableOnLastTimelineRead && workspace.metadata[AGENTS_KEY]?.[active.id]?.action?.phase === "rewinding") {
+            keepHistory = true;
+          }
+          return { entries: [{ item: { type: "user_message", messageId: "start" } }] };
+        },
+        rewindAgent: async () => assert.fail("the old chat must remain intact"),
+      };
+    },
+  };
+  const denied = /cannot reset a steer in place while keeping its chat history/;
+  await assert.rejects(handlers.previewFresh(input, context, loader, deps), denied);
+  await assert.rejects(handlers.previewFresh(input, context, loader, {
+    ...deps, readResetHistorySetting: undefined,
+  }), /could not read the chat history setting/);
+  keepHistory = false;
+  const preview = await handlers.previewFresh(input, context, loader, deps);
+  assert.equal(preview.refreshMode, "rewind");
+  const confirmation = { ...input, fingerprint: preview.fingerprint };
+  keepHistory = true;
+  await assert.rejects(handlers.applyFresh(confirmation, context, loader, deps), denied);
+  assert.deepEqual(workspace.metadata, metadata);
+  keepHistory = false;
+  enableOnLastTimelineRead = true;
+  await assert.rejects(handlers.applyFresh(confirmation, context, loader, deps), denied);
+  assert.equal(keepHistory, true);
+  assert.deepEqual(workspace.metadata[METADATA_KEY], metadata[METADATA_KEY]);
+  assert.equal(workspace.metadata[AGENTS_KEY]?.[active.id]?.action, null);
+  assert.equal(world.agents.length, 4);
+  assert.deepEqual(world.sent, []);
+});
+
 test("Reset without a rewind route requires a separate Fresh confirmation even with an existing replacement fingerprint", async () => {
   const { world, workspace, active, paseo } = activationWorld();
   active.capabilities = { supportsRewindConversation: false };
   const deps = {
     zerosub: null,
+    readResetHistorySetting: async () => false,
     rewindClient: async () => assert.fail("the live capability rejects rewind before timeline lookup"),
     lookupFreshReceipt: async () => assert.fail("neither preview nor Reset may start a replacement"),
   };
