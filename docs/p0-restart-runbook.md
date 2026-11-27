@@ -27,20 +27,26 @@ Proceed only when exit code is `0` (`Busy agents: 0 []`).
 ```bash
 SCRATCH_DIR=$(mktemp -d /tmp/wsf-restart-accept-XXXXXX)
 git -C "$SCRATCH_DIR" init -q && echo "restart-check" > "$SCRATCH_DIR/README.md" && git -C "$SCRATCH_DIR" add README.md && git -C "$SCRATCH_DIR" commit -qm init
-paseo workspace create "$SCRATCH_DIR" --title "Main" --background
+(cd "$SCRATCH_DIR" && paseo workspace create --isolation local --title "Main" --background)
 ```
 
-Note the printed `WS_ID`, then enroll + create 1 steer + 1 completed worker with a queued wake (or pause supervision before the worker finishes, then restart while `pendingWake` is queued):
+Note the printed `WS_ID`, then enroll the scratch workspace via the plugin RPC (`factory.plan` + `factory.apply`):
 
 ```bash
 export WS_ID="<wks_...>"
 export SCRATCH_DIR="<dir>"
-paseo-factory plan --local "$SCRATCH_DIR"
-paseo-factory apply --local "$SCRATCH_DIR"
+node -e '
+import("/home/code/projects/paseo-workspace-factory/plugin/server/core/paseo.mjs").then(async ({ connectPluginRpc }) => {
+  const rpc = await connectPluginRpc();
+  const plan = await rpc.invokePluginRpc("workspace-factory", "factory.plan", { local: [process.env.SCRATCH_DIR] });
+  await rpc.invokePluginRpc("workspace-factory", "factory.apply", { local: [process.env.SCRATCH_DIR], hash: plan.hash });
+  rpc.close?.();
+});
+'
 ```
 
 Record before restart:
-- `paseo-factory status` (active steer ID, epoch, open workers)
+- `node /home/code/projects/paseo-workspace-factory/plugin/cli.mjs status` (active steer ID, epoch, open workers)
 - `paseo plugin logs workspace-factory | tail -n 20`
 
 ## 3. External daemon restart
