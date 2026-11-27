@@ -890,6 +890,22 @@ test("sweepOnce skips the compact when the provider quota is unknown (fail close
   assert.deepEqual(sendsTo(world, agent.id), []);
 });
 
+test("an eligible idle cleanup is suppressed while the Factory is paused", async () => {
+  const { world, agent, nowMs } = sweepWorld({ workers: { "worker-1": { state: "running" } } });
+  const results = await sweep.sweepOnce({
+    paseo: fakeClient(world),
+    settings: { ...CLEANUP_DEFAULTS, mode: "compact-warm" },
+    nowMs,
+    zerosub: subscriptionRoute(agent.id, 40),
+    quotaSnapshot: { claude: { sessionPct: 40 } },
+    isFactoryPaused: async () => true,
+    lock: noLock,
+    log: () => {},
+  });
+  assert.deepEqual(results, []);
+  assert.deepEqual(sendsTo(world, agent.id), []);
+});
+
 test("sweepOnce compacts an eligible agent when quota shows headroom", async () => {
   const { world, agent, nowMs } = sweepWorld({ workers: { "worker-1": { state: "running" } } });
   const results = await sweep.sweepOnce({

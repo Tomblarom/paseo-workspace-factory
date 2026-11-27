@@ -199,9 +199,9 @@ test("face title covers limited, awaiting and percent quota states", () => {
   const limited = pill.faceFor(
     row("b", { slot: "B", active: false, state: "limited", tokens: null, limited: true }),
   );
-  assert.equal(limited.label, "B · limited");
+  assert.equal(limited.label, "B · warm");
   assert.equal(limited.title, "Steer B · Standby · limited");
-  assert.equal(limited.icon, "Gauge");
+  assert.equal(limited.icon, "Flame");
   assert.equal(
     pill.faceFor(row("c", { awaitingUpdate: true, tokens: null })).title,
     "Steer A · Active · warm\nAwaiting quota update",
@@ -225,20 +225,20 @@ test("face title covers limited, awaiting and percent quota states", () => {
 });
 
 test("face falls back for missing slot and unknown state", () => {
-  const face = pill.faceFor(row("x", { slot: null, state: "unknown", tokens: null }));
+  const face = pill.faceFor(row("x", { slot: null, state: "unknown", warmth: "unknown", tokens: null }));
   assert.equal(face.label, "? · unknown");
   assert.equal(face.title, "Steer ? · Active · unknown");
   assert.equal(face.icon, "CircleHelp");
-  assert.equal(pill.sameFace(face, pill.faceFor(row("x", { slot: null, state: "unknown", tokens: null }))), true);
+  assert.equal(pill.sameFace(face, pill.faceFor(row("x", { slot: null, state: "unknown", warmth: "unknown", tokens: null }))), true);
   assert.equal(pill.sameFace(face, pill.faceFor(row("x"))), false);
 });
 
-test("the needs-resume pill uses its recovery icon and keeps the slot label", () => {
+test("the recovery state stays in the tooltip while the pill keeps the context label and icon", () => {
   const face = pill.faceFor(row("c", { slot: "C", state: "needs-resume" }));
-  assert.equal(face.label, "C");
-  assert.equal(face.title, "Steer C · Active\n5,000 tokens");
-  assert.equal(face.icon, "RotateCcw");
-  assert.equal(face.accessibilityLabel, "Steer C · Active · 5,000 tokens");
+  assert.equal(face.label, "C · warm");
+  assert.equal(face.title, "Steer C · Active · needs resume\n5,000 tokens");
+  assert.equal(face.icon, "Flame");
+  assert.equal(face.accessibilityLabel, "Steer C · Active · needs resume · 5,000 tokens");
 });
 
 test("face icons pin one Lucide name per state-table row", () => {
@@ -627,7 +627,7 @@ test("the Reset popover is keyboard/screen-reader labelled and theme driven", ()
     'accessibilityRole="checkbox"',
     "accessibilityState={{ checked: clearChatHistory",
     "theme.colors.",
-    "compact",
+    "quotaConfirmationText",
   ]) {
     assert.ok(menuSource.includes(token), `steer-menu-content.tsx contains ${token}`);
   }

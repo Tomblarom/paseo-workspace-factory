@@ -27,6 +27,7 @@ export const WAKE_LIST_MAX = 5;
 
 export interface SupervisionSettings {
   enabled: boolean;
+  paused?: boolean;
   batchMinutes: number;
   wakeDebounceSeconds: number;
   watchdogMinutes: number;
@@ -43,6 +44,7 @@ export interface SupervisionSettings {
  */
 export const SUPERVISION_SETTINGS_DEFAULTS: SupervisionSettings = {
   enabled: true,
+  paused: false,
   batchMinutes: 0,
   wakeDebounceSeconds: 20,
   watchdogMinutes: 15,

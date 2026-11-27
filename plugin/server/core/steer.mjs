@@ -506,7 +506,7 @@ export async function reconcileFreshDelivery({ client, workspaceId, agentId, act
   let result;
   try {
     result = await reconcileSteerSend({ client, workspaceId, agentId, actionId, lock, beforeSend,
-      validate: async (action) => { await beforeSend(action); return true; } });
+      validate: async (action) => (await beforeSend(action))?.allowed !== false });
   } catch (error) {
     if (error instanceof SwitchRefused) return { status: 'blocked', detail: error.message };
     throw error;
@@ -933,7 +933,7 @@ async function waitForSwitchDelivery(workspace, agentId, deliveryId, epoch, dead
  * re-read, check the expected epoch and active steer, write, read back, release;
  * the handoff is delivered after the lock is released.
  */
-export async function switchSteer({ client, discovery, toSlot, apply = false, send = true, wait = false, waitTimeoutMs = 600_000, notifyPrevious = false, language = runtime().handoffLanguage, git, lock = withLock, now = () => new Date(), config = null, workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, zerosub = null, callerId = null, paseoCli = null, promptOptions, deliverSteer = null, stage = false, admitTarget = null, activation = null }) {
+export async function switchSteer({ client, discovery, toSlot, apply = false, send = true, wait = false, waitTimeoutMs = 600_000, notifyPrevious = false, language = runtime().handoffLanguage, git, lock = withLock, now = () => new Date(), config = null, workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, zerosub = null, callerId = null, paseoCli = null, promptOptions, deliverSteer = null, stage = false, admitTarget = null, activation = null, checkSelfTakeover = null }) {
   const status = steerStatus(discovery, { config });
   if (!status.workspace || !status.state) throw new SwitchRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
@@ -1028,6 +1028,7 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
       if (stage) switchAction.stageKind = 'switch';
       if (targetEntry?.stagedBrief) targetEntry = { ...targetEntry, stagedBrief: null };
     }
+    if (selfTakeover) await checkSelfTakeover?.();
     held.verify(); // commit authority and delivery intent together
     await workspace.setMetadata({ [METADATA_KEY]: next, ...(switchAction ? { [AGENTS_KEY]: { ...entries, [to.id]: actionEntry(targetEntry, switchAction) } } : {}) });
     const writtenMeta = (await workspace.refresh())?.metadata;
@@ -1602,7 +1603,7 @@ async function replacementFresh({ client, discovery, config, status, expected, k
  * key under the workspace lock. Only active replacement advances the epoch.
  * `send: false` leaves the brief for the caller to stage or deliver.
  */
-export async function freshSteer({ client, discovery, config, apply = false, send = true, stageRewind = false, notifyPrevious = true, slot: slotArg = null, workerId = null, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, now = () => new Date(), workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, quotaExhaustedPct = config?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct, zerosub = null, paseoCli = null, rewindClient = null, requireRefreshMode = null, promptOptions, callerId = null, admitTarget = null, provider = null, model = null, confirmPreview = null, readPolicy = null, repoPublic = discoveredRepoPublic(discovery) }) {
+export async function freshSteer({ client, discovery, config, apply = false, send = true, stageRewind = false, notifyPrevious = true, slot: slotArg = null, workerId = null, language = runtime().handoffLanguage, git, lock = withLock, lookupReceipt, execute, now = () => new Date(), workerModel = null, quotaSnapshot = null, quotaWarnPct = config?.quota?.warnPct ?? QUOTA_DEFAULTS.warnPct, quotaExhaustedPct = config?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct, zerosub = null, paseoCli = null, rewindClient = null, requireRefreshMode = null, promptOptions, callerId = null, admitTarget = null, provider = null, model = null, confirmPreview = null, readPolicy = null, repoPublic = discoveredRepoPublic(discovery), allowDepletedReset = false }) {
   const status = steerStatus(discovery, { config });
   if (!status.workspace || !status.state) throw new SwitchRefused('No factory main workspace with steer state; run the factory first');
   const expected = status.state;
@@ -1617,7 +1618,7 @@ export async function freshSteer({ client, discovery, config, apply = false, sen
   if (Boolean(provider) !== Boolean(model)) throw new SwitchRefused('Explicit Fresh needs both provider and model');
   const intent = provider ? { mode: 'explicit', provider, model } : { mode: 'automatic' };
   const policy = { config, providers: discovery.providers, repoPublic,
-    quotaSnapshot, quotaExhaustedPct, zerosub };
+    quotaSnapshot, quotaExhaustedPct, zerosub, allowDepletedReset };
   const replacement = (options) => replacementFresh({ client, discovery, config, status, expected, apply,
     lookupReceipt, execute, lock, now, callerId, policy, intent, confirmPreview, readPolicy, ...options });
   const hasPending = (sources, kind, slot = null) =>

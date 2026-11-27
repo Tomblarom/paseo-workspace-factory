@@ -24,7 +24,7 @@ import {
   type FactorySteerFeed,
   type WorkspaceStatus,
 } from "./factory-workspace-state.js";
-import { describeSteerMenu, handoffTargets, isExpiredPreviewError, normalizeInitializeNewSteer, type HandoffTarget } from "./steer-menu.js";
+import { describeSteerMenu, handoffTargets, isExpiredPreviewError, normalizeInitializeNewSteer, quotaConfirmationText, steerQuotaConfirmation, type HandoffTarget } from "./steer-menu.js";
 import { FactorySteerOperation } from "./factory-steer-operation.js";
 import type { SteerPillRow } from "./steer-pill.js";
 
@@ -144,12 +144,14 @@ function ResetOrResumeSteer({ kind, steer, liveSteer, workspaceId, host, theme, 
   const [renewedPreview, setRenewedPreview] = useState(false);
   const applying = useRef(false);
   const blocked = liveSteer ? steerActionEligibility(liveSteer)[kind] : "This steer is no longer available.";
+  const quota = liveSteer ? steerQuotaConfirmation(liveSteer) : null;
+  const resetQuota = quota ?? "available";
   const preview = useQuery({
-    queryKey: ["workspace-factory", "steer-action", host.id, workspaceId, agentId, kind],
+    queryKey: ["workspace-factory", "steer-action", host.id, workspaceId, agentId, kind, resetQuota],
     queryFn: async () => {
       if (blocked || !liveSteer || !slot) throw new Error(blocked ?? "Steer slot is unavailable.");
       if (kind === "reset") {
-        const details = await callFreshPreview({ workspaceId, slot });
+        const details = await callFreshPreview({ workspaceId, slot, resetQuota });
         if (details.workspaceId !== workspaceId || details.from !== agentId || details.slot !== slot) {
           throw new Error("The steer changed. Open Reset Steer again for the current holder.");
         }
@@ -191,7 +193,7 @@ function ResetOrResumeSteer({ kind, steer, liveSteer, workspaceId, host, theme, 
       const { details } = preview.data;
       const initialize = normalizeInitializeNewSteer(menuSettings.status === "ready" ? menuSettings.values.initializeNewSteer : undefined);
       const result = await callFresh({ workspaceId, slot: details.slot, fingerprint: details.fingerprint,
-        deliver: initialize === "send" ? "send" : "stage", notifyPrevious: false });
+        resetQuota, deliver: !quota && initialize === "send" ? "send" : "stage", notifyPrevious: false });
       const error = label(result.deliveryError) ?? label(result.stagingError);
       if (!result.applied && result.idempotent !== true) throw new Error(error ?? "Factory could not confirm the reset.");
       const completed = result.idempotent ? "This reset was already applied."
@@ -227,6 +229,7 @@ function ResetOrResumeSteer({ kind, steer, liveSteer, workspaceId, host, theme, 
           {renewedPreview && !preview.isFetching && !preview.error ? <Text style={styles.conflict}>The preview expired. Review the new preview.</Text> : null}
           {details?.kind === "reset" ? (
             <>
+              {quota ? <Text style={styles.conflict}>{quotaConfirmationText(quota, liveSteer)} The continuation brief will be prepared for manual delivery.</Text> : null}
               <Text style={styles.body}>{replacement ? "A new agent takes this slot. The previous tab keeps its chat."
                 : "This rewinds the conversation and removes later messages from this tab."}</Text>
               <Text style={styles.label}>{details.details.packetChars.toLocaleString()} characters in the continuation brief
@@ -259,11 +262,12 @@ export function FactoryWorkspaceStatus({
 }: Props) {
   const observation = useSyncExternalStore(feed.subscribe, feed.getSnapshot, feed.getSnapshot);
   const [expired, setExpired] = useState<typeof observation | null>(null);
-  const [showCheckpoint, setShowCheckpoint] = useState(false);
   const [operation, setOperation] = useState<Operation | null>(null);
   const focusedRow = useRef<View>(null);
-  const checkpointButton = useRef<View>(null);
+  const checkpointDetails = useRef<View>(null);
   const paseo = usePaseo();
+  const activationSteer = operation?.kind === "activate" ? operation.steer : undefined;
+  const activationQuota = activationSteer ? steerQuotaConfirmation(activationSteer) : null;
   const catalog = useQuery({
     queryKey: ["workspace-factory", "provider-labels", host.id],
     queryFn: () => paseo.providers.snapshot(),
@@ -473,16 +477,7 @@ export function FactoryWorkspaceStatus({
                 ))}
               </View>
               <View style={card}>
-                <View style={between}>
-                  <CardHeading theme={theme} icon="ListTodo">Current work</CardHeading>
-                  {checkpoint ? (
-                    <Pressable ref={checkpointButton} collapsable={false} accessibilityRole="button" accessibilityState={{ expanded: showCheckpoint }}
-                      onPress={() => setShowCheckpoint(!showCheckpoint)} style={{ ...inline, minHeight: 38, paddingHorizontal: 6 }}>
-                      <Text style={styles.label}>Checkpoint details</Text>
-                      <Icon name={showCheckpoint ? "ChevronUp" : "ChevronDown"} color={theme.colors.foregroundMuted} size={15} />
-                    </Pressable>
-                  ) : null}
-                </View>
+                <CardHeading theme={theme} icon="ListTodo">Current work</CardHeading>
                 <Text style={[styles.body, { fontSize: layout.compact ? 15 : 17, lineHeight: 23 }]}>
                   {task ?? (status ? "No checkpoint recorded." : statusFetching ? "Loading workspace status…" : "Current work unavailable.")}
                 </Text>
@@ -490,8 +485,9 @@ export function FactoryWorkspaceStatus({
                 {pending.workerRunning ? (
                   <Signal theme={theme} icon="Activity" tone="foreground">Workers in progress ({pending.workerRunning})</Signal>
                 ) : null}
-                {checkpoint && showCheckpoint ? (
-                  <View style={[divider, { gap: 5 }]}>
+                {checkpoint ? (
+                  <View ref={checkpointDetails} collapsable={false} accessible={layout.platform !== "web"}
+                    {...(layout.platform === "web" ? { tabIndex: -1 as const } : {})} style={[divider, { gap: 5 }]}>
                     <Text style={styles.label}>{checkpointConfidence}</Text>
                     {tests.map((test, index) => <Signal key={index} theme={theme} icon="ListChecks">{test}</Signal>)}
                     {blockers.map((blocker, index) => (
@@ -505,8 +501,7 @@ export function FactoryWorkspaceStatus({
                 {blockers.length ? (
                   <AttentionLink theme={theme} icon="ClipboardList" detail={`Checkpoint blockers (${blockers.length})`}
                     onPress={() => {
-                      setShowCheckpoint(true);
-                      if (checkpointButton.current) focusContent(checkpointButton.current);
+                      if (checkpointDetails.current) focusContent(checkpointDetails.current);
                     }} />
                 ) : null}
                 {pending.steerItems.map(({ kind, detail, steer }) => (
@@ -565,7 +560,8 @@ export function FactoryWorkspaceStatus({
           <Modal.Content contentContainerStyle={{ gap: 8, paddingHorizontal: 12, paddingBottom: 12 }}>
             {currentOperation.kind === "activate" ? (
               <ActivateSteer workspaceId={workspaceId} agentId={currentOperation.steer.agentId}
-                theme={theme} close={closeOperation} epoch={currentOperation.epoch} alternatives={currentOperation.alternatives} />
+                theme={theme} close={closeOperation} epoch={currentOperation.epoch} alternatives={currentOperation.alternatives}
+                quota={activationQuota ? { condition: activationQuota, text: quotaConfirmationText(activationQuota, activationSteer) } : undefined} />
             ) : currentOperation.kind === "reset" || currentOperation.kind === "resume" ? (
               <ResetOrResumeSteer kind={currentOperation.kind} steer={currentOperation.steer}
                 liveSteer={steers.find(({ agentId }) => agentId === currentOperation.steer.agentId)}

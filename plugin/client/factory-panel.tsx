@@ -38,6 +38,8 @@ import type {
 import { record, type FactorySteerFeed } from "./factory-workspace-state.js";
 import { FactoryWorkspaceActivity } from "./factory-workspace-activity.js";
 import { FactoryWorkspaceResources } from "./factory-workspace-resources.js";
+import { factorySupervisionSettings } from "../shared/settings.js";
+import { useAutosave } from "./settings-autosave.js";
 import { FactoryWorkspaceStatus } from "./factory-workspace-status.js";
 
 const factoryViews = [
@@ -82,6 +84,9 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
   composers: PluginClientContext["composers"];
 }) {
   const { theme, layout, workspaceId, host, steerFeed, results } = props;
+  const { state: supervision, change: changeSupervision, errors: supervisionErrors } = useAutosave(factorySupervisionSettings);
+  const paused = supervision.status === "ready" ? supervision.values.paused : undefined;
+  const pauseAction = useMutation({ mutationFn: (next: boolean) => changeSupervision("pause")((current) => ({ ...current, paused: next })) });
   const connection = useHosts().find(({ serverId }) => serverId === host.id)?.status;
   const offline = connection !== undefined && connection !== "online";
   const callStatus = useRpc(factoryStatus);
@@ -602,14 +607,27 @@ export function FactoryPanel(props: PluginWorkspacePanelProps & {
           <Icon name="Factory" size={18} color={theme.colors.foregroundMuted} />
           <Text style={[styles.body, { fontWeight: "600" }]}>Workspace Factory</Text>
         </View>
-        <Pressable accessibilityRole="button" accessibilityLabel="Diagnostics" aria-expanded={view === "Diagnostics"}
-          style={({ pressed }) => [{ flexDirection: "row", alignItems: "center", gap: 6, minHeight: 38,
-            borderRadius: 6, paddingHorizontal: 8 }, (pressed || view === "Diagnostics") && { backgroundColor: theme.colors.surface2 }]}
-          onPress={() => selectView(view === "Diagnostics" ? "Overview" : "Diagnostics")}>
-          <Icon name="Terminal" size={15} color={theme.colors.foregroundMuted} />
-          {!layout.compact ? <Text style={styles.label}>Diagnostics</Text> : null}
-        </Pressable>
+        <View style={styles.row}>
+          <Pressable accessibilityRole="button" accessibilityLabel={paused ? "Resume Factory" : "Pause Factory"}
+            disabled={offline || paused === undefined || pauseAction.isPending}
+            accessibilityState={{ disabled: offline || paused === undefined || pauseAction.isPending, busy: pauseAction.isPending }}
+            onPress={() => pauseAction.mutate(!paused)}
+            style={({ pressed }) => [{ flexDirection: "row", alignItems: "center", gap: 6, minHeight: 38,
+              paddingHorizontal: 8, borderRadius: 6, opacity: offline || paused === undefined ? 0.6 : 1 },
+              (pressed || paused) && { backgroundColor: theme.colors.surface2 }]}>
+            <Icon name={paused ? "Play" : "Pause"} size={15} color={theme.colors.foregroundMuted} />
+            <Text style={styles.label}>{paused ? "Resume Factory" : "Pause Factory"}</Text>
+          </Pressable>
+          <Pressable accessibilityRole="button" accessibilityLabel="Diagnostics" aria-expanded={view === "Diagnostics"}
+            style={({ pressed }) => [{ flexDirection: "row", alignItems: "center", gap: 6, minHeight: 38,
+              borderRadius: 6, paddingHorizontal: 8 }, (pressed || view === "Diagnostics") && { backgroundColor: theme.colors.surface2 }]}
+            onPress={() => selectView(view === "Diagnostics" ? "Overview" : "Diagnostics")}>
+            <Icon name="Terminal" size={15} color={theme.colors.foregroundMuted} />
+            {!layout.compact ? <Text style={styles.label}>Diagnostics</Text> : null}
+          </Pressable>
+        </View>
       </View>
+      {supervisionErrors.pause ? <Text accessibilityRole="alert" style={styles.error}>{supervisionErrors.pause}</Text> : null}
       <View accessibilityRole="tablist" style={styles.navigation}>
         {factoryViews.map(({ name, icon }, index) => (
           <Pressable

@@ -21,7 +21,7 @@ export function freshLiveRoute(agent) {
   };
 }
 
-export function freshCreationRoute({ config, providers, from, role, slot, steers, repoPublic, quotaSnapshot, quotaExhaustedPct, zerosub, metadata, now, intent }) {
+export function freshCreationRoute({ config, providers, from, role, slot, steers, repoPublic, quotaSnapshot, quotaExhaustedPct, zerosub, metadata, now, intent, allowDepletedReset = false }) {
   const live = freshLiveRoute(from);
   const profiles = config?.profiles ?? {};
   const worker = role === 'worker';
@@ -44,7 +44,8 @@ export function freshCreationRoute({ config, providers, from, role, slot, steers
     const model = providers?.find((entry) => entry.provider === pair.provider)?.models?.find((entry) => entry.id === pair.model);
     if (model?.isSelectable === false) return { ...base, reason: 'model is unavailable for new agents' };
     const candidateConfig = name === key ? { ...config, profiles: { ...profiles, [key]: { ...profile, sensitive } } } : config;
-    const result = resolveProfile(candidateConfig, providers, [name], catalog);
+    const result = resolveProfile(candidateConfig, providers, [name], { ...catalog,
+      ignoreQuotaExhaustion: allowDepletedReset && source === "live" });
     return result.profile ? { ...base, route: result.profile, account: result.zerosubAccount } :
       { ...base, reason: result.skipped[0]?.reason ?? 'not startable' };
   };

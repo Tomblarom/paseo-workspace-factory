@@ -7,20 +7,21 @@ import { factoryFresh, factoryFreshPreview } from "../shared/factory.js";
 import { factorySteerMenuSettings } from "../shared/settings.js";
 import type { FactorySteerFeed } from "./factory-workspace-state.js";
 import { useAutosave } from "./settings-autosave.js";
-import { resetSteer, resetSteerBlock, STEER_MENU_LABELS } from "./steer-menu.js";
+import { quotaConfirmationText, resetSteer, resetSteerBlock, steerQuotaConfirmation } from "./steer-menu.js";
 
 type ResetSteerPopoverProps = Extract<PluginButtonContentProps, { context: "agent" }> & {
   feed: FactorySteerFeed;
   onReset: (source: { workspaceId: string; agentId: string }, outcome: Awaited<ReturnType<typeof resetSteer>>) => Promise<void>;
 };
 
-export function ResetSteerPopover({ agentId, workspaceId, theme, layout, close, feed, onReset }: ResetSteerPopoverProps) {
+export function ResetSteerPopover({ agentId, workspaceId, theme, close, feed, onReset }: ResetSteerPopoverProps) {
   const { state, change } = useAutosave(factorySteerMenuSettings);
   const preview = useRpc(factoryFreshPreview);
   const apply = useRpc(factoryFresh);
   const { rows, disconnected } = useSyncExternalStore(feed.subscribe, feed.getSnapshot, feed.getSnapshot);
   const row = disconnected ? undefined : rows?.find((entry) => entry.agentId === agentId && entry.workspaceId === workspaceId);
   const blocked = row ? resetSteerBlock(row) : "This steer is no longer available.";
+  const quota = row ? steerQuotaConfirmation(row) : null;
   const [choice, setChoice] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -45,7 +46,7 @@ export function ResetSteerPopover({ agentId, workspaceId, theme, layout, close, 
           throw new Error(saved.status === "superseded" ? "The history setting could not be saved." : saved.error);
         }
         return saved.values.initializeNewSteer;
-      }, preview, apply);
+      }, preview, apply, quota ?? "available");
       if (!outcome.result.applied && !outcome.result.idempotent) {
         throw new Error(String(outcome.result.deliveryError ?? "Factory could not confirm the reset."));
       }
@@ -60,9 +61,10 @@ export function ResetSteerPopover({ agentId, workspaceId, theme, layout, close, 
   }
 
   return (
-    <View style={{ padding: layout.compact ? 12 : 16, gap: 8, width: 320, maxWidth: "100%" }}>
-      <Text accessibilityRole="header" style={[foreground, { fontWeight: "600" }]}>{STEER_MENU_LABELS.reset}</Text>
-      <Text style={foreground}>The steer starts with fresh context and keeps its task through the continuation brief.</Text>
+    <View style={{ gap: 4, width: 260, maxWidth: "100%" }}>
+      {quota ? <Text style={{ color: theme.colors.statusWarning }}>
+        {quotaConfirmationText(quota, row)} The continuation brief will be prepared for manual delivery.
+      </Text> : null}
       <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: clearChatHistory, disabled: !canReset }}
         disabled={!canReset} onPress={() => setChoice(!clearChatHistory)}
         style={{ flexDirection: "row", alignItems: "center", gap: 8, minHeight: 36 }}>

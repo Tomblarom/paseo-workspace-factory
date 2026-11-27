@@ -179,9 +179,14 @@ function activationWorld() {
   world.agents.push(alternative);
   const localLoader = { ...loader, loadEffectiveConfig: async () => ({ ...CONFIG, steers: { ...CONFIG.steers, activeMarker: "" } }) };
   const paseo = fakePaseo(world);
-  const deps = { getZerosub: async () => null };
-  const activate = (agentId = target.id, epoch = 3, workspaceId = workspace.id, extra = {}) =>
-    handlers.activateSteer({ workspaceId, agentId, epoch }, { paseo }, localLoader, { ...deps, ...extra });
+  const activate = (agentId = target.id, epoch = 3, workspaceId = workspace.id, { confirmQuota, ...extra } = {}) =>
+    handlers.activateSteer({ workspaceId, agentId, epoch, confirmQuota }, { paseo }, localLoader, {
+      getZerosub: async () => ({
+        agentAccount: { [target.id]: "b", [alternative.id]: "b" },
+        accounts: [{ id: "b", sampledAt: extra.now?.() ?? new Date(Date.now()).toISOString(), maxUsedPct: 10 }],
+      }),
+      ...extra,
+    });
   return { world, workspace, active, target, worker, alternative, paseo, activate };
 }
 
@@ -450,6 +455,40 @@ test("activation refuses a limited target and pending permissions before changin
   await assert.rejects(activate(), /permission request/);
   target.labels[LABEL.steerRole] = "advisor";
   await assert.rejects(activate(), /Only a live coordinator steer/);
+  assert.equal(workspace.metadata[METADATA_KEY].epoch, 3);
+  assert.deepEqual(world.sent, []);
+});
+
+test("activation only admits an unknown or depleted route with matching confirmation", async () => {
+  for (const quota of ["unknown", "depleted"]) {
+    const { world, workspace, target, activate } = activationWorld();
+    const getZerosub = async () => null;
+    if (quota === "depleted") {
+      workspace.metadata[AGENTS_KEY] = { [target.id]: { quotaLimit: { provider: target.provider, model: target.model } } };
+    }
+    await assert.rejects(activate(target.id, 3, workspace.id, { getZerosub }), /cannot be activated/);
+    await assert.rejects(activate(target.id, 3, workspace.id, {
+      getZerosub, confirmQuota: quota === "depleted" ? "unknown" : "depleted",
+    }), /cannot be activated/);
+    assert.equal(workspace.metadata[METADATA_KEY].epoch, 3);
+    assert.deepEqual(world.sent, []);
+    const result = await activate(target.id, 3, workspace.id, {
+      getZerosub, confirmQuota: quota, isFactoryPaused: async () => true,
+      runCleanupFn: async () => assert.fail("do not spend a turn on context cleanup"),
+    });
+    assert.equal(result.status, "sent", result.detail);
+    assert.equal(workspace.metadata[METADATA_KEY].activeAgentId, target.id);
+    assert.deepEqual(world.sent.map(([id]) => id), [target.id]);
+  }
+});
+
+test("a paused Factory refuses a standby taking control from a running takeover turn", async () => {
+  const { world, workspace, target, paseo } = activationWorld();
+  target.status = "running";
+  const input = { workspaceId: workspace.id, to: "B", callerId: target.id };
+  const preview = await handlers.previewSwitch(input, { paseo }, loader);
+  await assert.rejects(handlers.applySwitch({ ...input, fingerprint: preview.fingerprint }, { paseo }, loader,
+    { isFactoryPaused: async () => true }), /Factory is paused/);
   assert.equal(workspace.metadata[METADATA_KEY].epoch, 3);
   assert.deepEqual(world.sent, []);
 });
@@ -1142,6 +1181,44 @@ test("Fresh RPC binds the requested route and rechecks live options before creat
   assert.equal(world.agents.length, 3);
   assert.equal(world.workspaces[0].metadata[METADATA_KEY].epoch, 3);
   assert.equal(world.workspaces[0].metadata[AGENTS_KEY], undefined);
+});
+
+test("confirmed Reset Steer stages the brief even when the live route has no quota", async () => {
+  for (const resetQuota of ["unknown", "depleted"]) {
+    const world = makeWorld();
+    const [workspace] = world.workspaces;
+    const target = world.agents[1];
+    target.status = "idle";
+    const paseo = fakePaseo(world);
+    world.createAgent = async (workspaceId, request) => {
+      const [provider, model] = request.config.provider.split("/");
+      const agent = { ...target, id: "steer-replacement", workspaceId, title: request.title,
+        provider, model, labels: request.labels, metadata: request.metadata };
+      world.agents.push(agent);
+      return { refresh: async () => ({ agent }) };
+    };
+    const account = { id: "b", family: target.provider, sampledAt: new Date().toISOString(), maxUsedPct: 100 };
+    const deps = {
+      ...(resetQuota === "depleted" ? { zerosub: { accounts: [account], agentAccount: { [target.id]: "b" } } } : {}),
+      lookupFreshReceipt: async () => null,
+      freshPaseoCli: () => "",
+      rewindClient: () => assert.fail("preserving chat explicitly skips rewind"),
+      isFactoryPaused: async () => true,
+    };
+    const input = { workspaceId: MAIN, slot: "B", keepChatHistory: true };
+    await assert.rejects(handlers.previewFresh({ ...input, resetQuota: "available" }, { paseo }, loader, deps),
+      /changed since the Reset Steer confirmation|accounts exhausted/);
+    const preview = await handlers.previewFresh({ ...input, resetQuota }, { paseo }, loader, deps);
+    assert.equal(preview.provider, target.provider);
+    assert.equal(preview.model, target.model);
+    const result = await handlers.applyFresh({ ...input, resetQuota, deliver: "send", fingerprint: preview.fingerprint },
+      { paseo }, loader, deps);
+    assert.equal(result.applied, true);
+    assert.equal(result.staged, true);
+    assert.equal(result.delivered, false);
+    assert.equal(workspace.metadata[METADATA_KEY].epoch, 3);
+    assert.deepEqual(world.sent, []);
+  }
 });
 
 test("Fresh RPC can keep chat history by replacing a steer whose tab supports rewind", async () => {

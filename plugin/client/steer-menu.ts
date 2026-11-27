@@ -2,7 +2,7 @@
 import type { PluginRpcContract, RpcInput, RpcOutput } from "@getpaseo/plugin";
 import type { PluginButtonBehavior, PluginComposer } from "@getpaseo/plugin/client";
 import type {
-  factoryFresh, factoryFreshPreview, factorySteerActivate, factorySteerBrief, factorySwitch, factorySwitchPreview,
+  factoryFresh, factoryFreshPreview, factorySteerActivate, factorySteerBrief, factorySwitch, factorySwitchPreview, QuotaConfirmation,
 } from "../shared/factory.js";
 import type { SteerFaceState } from "../shared/steer-state.js";
 import type { SteerPillRow } from "./steer-pill.js";
@@ -106,16 +106,20 @@ export interface HandoffTarget {
   needsRecovery: boolean;
 }
 
+function unresolvedSteerStatus(row: SteerPillRow): boolean {
+  return row.state === "unknown" && (row.detail !== "Not enough data" || !row.liveStatus);
+}
+
 function handoverReason(
   row: SteerPillRow,
-  opts: { ambiguousSlot: boolean },
+  opts: { ambiguousSlot: boolean; forActivation?: boolean },
 ): { eligible: boolean; reason: string | null; needsRecovery: boolean } {
-  if (row.active) return { eligible: false, reason: "Already active", needsRecovery: false };
+  if (row.active && !opts.forActivation) return { eligible: false, reason: "Already active", needsRecovery: false };
   if (row.advisor) {
     return { eligible: false, reason: "Advisor steers never coordinate", needsRecovery: false };
   }
   if (row.state === "retired") return { eligible: false, reason: "retired", needsRecovery: false };
-  if (opts.ambiguousSlot || row.state === "unknown") {
+  if (opts.ambiguousSlot || unresolvedSteerStatus(row)) {
     const detail = row.detail && row.detail !== "Not enough data" ? ` (${row.detail})` : "";
     return { eligible: false, reason: `Ambiguous membership${detail}`, needsRecovery: false };
   }
@@ -123,13 +127,13 @@ function handoverReason(
   if (row.state === "running" || live === "running" || live === "initializing") {
     return { eligible: false, reason: "Busy (turn running)", needsRecovery: false };
   }
-  if (row.state === "waiting") {
+  if (row.state === "waiting" && !(opts.forActivation && row.active)) {
     return { eligible: false, reason: `Busy (${row.detail})`, needsRecovery: false };
   }
   if (row.permissionNeeded) {
     return { eligible: false, reason: "Permission request pending", needsRecovery: false };
   }
-  if (row.state === "limited" || row.limited) {
+  if (!opts.forActivation && steerQuotaConfirmation(row) === "depleted") {
     const reset = row.resetUnknown || !row.resetAt ? "reset unknown" : "waiting for reset";
     return { eligible: false, reason: `Quota depleted (${reset})`, needsRecovery: false };
   }
@@ -144,6 +148,7 @@ function handoverReason(
 export function handoffTargets(
   rows: SteerPillRow[],
   selfAgentId: string,
+  forActivation = false,
 ): HandoffTarget[] {
   const self = rows.find((row) => row.agentId === selfAgentId) ?? null;
   if (!self || !self.scopeId) return [];
@@ -159,7 +164,7 @@ export function handoffTargets(
   }
   return holders.map((row) => {
     const slot = row.slot as string;
-    const verdict = handoverReason(row, { ambiguousSlot: (perSlot.get(slot) ?? 0) > 1 });
+    const verdict = handoverReason(row, { ambiguousSlot: (perSlot.get(slot) ?? 0) > 1, forActivation });
     return {
       slot,
       agentId: row.agentId,
@@ -177,6 +182,17 @@ export function handoffTargets(
 // Reset eligibility and stale previews
 // ---------------------------------------------------------------------------
 
+export function steerQuotaConfirmation(row: SteerPillRow): QuotaConfirmation | null {
+  if (row.quotaConfirmation !== undefined) return row.quotaConfirmation;
+  return row.limited || row.state === "limited" ? "depleted" : null;
+}
+
+export function quotaConfirmationText(quota: QuotaConfirmation, row?: Pick<SteerPillRow, "resetAt" | "resetUnknown">): string {
+  if (quota === "unknown") return "Quota is unknown. The provider may reject a new turn.";
+  if (!row?.resetAt || row.resetUnknown) return "Quota is depleted. The reset time is unknown.";
+  return `Quota is depleted. Reported reset: ${new Date(row.resetAt).toLocaleString()}.`;
+}
+
 export function resetSteerBlock(row: SteerPillRow): string | null {
   const live = (row.liveStatus ?? "").trim().toLowerCase();
   if (row.state === "running" || live === "running" || live === "initializing") {
@@ -185,8 +201,7 @@ export function resetSteerBlock(row: SteerPillRow): string | null {
   if (row.permissionNeeded) return "A permission request is waiting. Answer it first.";
   if (row.state === "waiting") return `Busy (${row.detail}). Try again after it finishes.`;
   if (row.state === "retired") return "This tab was replaced. Open the current holder instead.";
-  if (row.state === "unknown") return `Steer status is unknown: ${row.detail}.`;
-  if (row.state === "limited" || row.limited) return "Quota depleted";
+  if (unresolvedSteerStatus(row)) return `Steer status is unknown: ${row.detail}.`;
   if (!row.scopeId || !row.slot) return "Steer membership is unavailable";
   return null;
 }
@@ -230,6 +245,7 @@ export type SteerMenuEntryDescriptor =
     icon: string;
     disabled: boolean;
     activationEpoch: number;
+    quotaConfirmation: QuotaConfirmation | null;
     activationAlternatives: { agentId: string; slot: string }[];
   }
   | {
@@ -246,12 +262,14 @@ export function describeSteerMenu(self: SteerPillRow, rows: SteerPillRow[]): Ste
   const items: SteerMenuEntryDescriptor[] = [];
   const targets = handoffTargets(rows, self.agentId);
   if (self.slot && self.scopeId && !self.advisor && self.state !== "retired" && self.activationEpoch != null) {
-    const target = targets.find((entry) => entry.agentId === self.agentId);
-    const disabled = !self.active && target?.eligible !== true;
+    const target = handoffTargets(rows, self.agentId, true).find((entry) => entry.agentId === self.agentId);
+    const disabled = target?.eligible !== true;
+    const quotaConfirmation = steerQuotaConfirmation(self);
     const label = self.active ? STEER_MENU_LABELS.retryActivation : STEER_MENU_LABELS.activate;
     items.push({
       kind: "activate", id: "activate", icon: "ArrowRight", disabled, activationEpoch: self.activationEpoch,
       title: disabled ? `${label} (${target?.reason ?? "unavailable"})` : label,
+      quotaConfirmation,
       activationAlternatives: targets.filter((entry) => entry.eligible && entry.agentId !== self.agentId)
         .map(({ agentId, slot }) => ({ agentId, slot })),
     });
@@ -261,8 +279,8 @@ export function describeSteerMenu(self: SteerPillRow, rows: SteerPillRow[]): Ste
   items.push({
     kind: "handover", id: "handover", title: STEER_MENU_LABELS.handover, icon: "ArrowRightLeft",
     disabled: destinations.length === 0,
-    targets: destinations.map(({ slot, agentId, eligible }) => ({
-      id: `handover-${agentId}`, title: `Steer ${slot}`,
+    targets: destinations.map(({ slot, agentId, eligible, reason }) => ({
+      id: `handover-${agentId}`, title: `Steer ${slot} · ${reason ?? "Standby"}`,
       disabled: !eligible, slot, agentId,
     })),
   });
@@ -299,16 +317,17 @@ export async function resetSteer(
   saveHistory: (keepChatHistory: boolean) => Promise<InitializeNewSteer>,
   preview: Call<typeof factoryFreshPreview>,
   apply: Call<typeof factoryFresh>,
+  resetQuota?: RpcInput<typeof factoryFresh>["resetQuota"],
 ): Promise<{ result: RpcOutput<typeof factoryFresh>; initialize: InitializeNewSteer }> {
   const keepChatHistory = !clearChatHistory;
-  const input = { workspaceId, slot, keepChatHistory };
+  const input = { workspaceId, slot, keepChatHistory, ...(resetQuota ? { resetQuota } : {}) };
   const plan = await preview(input);
   if (plan.workspaceId !== workspaceId || plan.from !== agentId || plan.slot !== slot) {
     throw new Error("The steer changed. Open Reset Steer again for the current holder.");
   }
   const initialize = await saveHistory(keepChatHistory);
   const result = await apply({ ...input, fingerprint: plan.fingerprint,
-    deliver: initialize === "send" ? "send" : "stage", notifyPrevious: false });
+    deliver: initialize === "send" && (!resetQuota || resetQuota === "available") ? "send" : "stage", notifyPrevious: false });
   return { result, initialize };
 }
 

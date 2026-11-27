@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { register } from 'node:module';
 import test from 'node:test';
 
@@ -97,7 +98,7 @@ test('reset and recovery can both be available while preserving the menu guards'
   assert.match(permission.reset, /permission/);
   assert.equal(permission.resume, permission.reset);
   assert.deepEqual(steerActionEligibility(steer('b', { ...recovery, limited: true })), {
-    reset: 'Quota depleted', resume: 'Quota depleted',
+    reset: null, resume: 'Quota depleted',
   });
 });
 
@@ -138,4 +139,11 @@ test('a result goes to its originating workspace and host registration', () => {
   assert.equal(firstHost('two').getResult(), null);
   assert.equal(secondHost('one').getResult(), null);
   assert.equal(notifications, 1);
+});
+
+
+test('the overview shows checkpoint tests and blockers without expanding a control', () => {
+  const source = readFileSync(new URL('../client/factory-workspace-status.tsx', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /Checkpoint details|showCheckpoint/);
+  assert.match(source, /\{checkpoint \? \([\s\S]*?checkpointConfidence[\s\S]*?tests\.map[\s\S]*?blockers\.map/);
 });

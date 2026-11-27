@@ -129,11 +129,16 @@ export default function contribute(server: PluginServerContext) {
   const loader = createConfigLoader(hostSettings, registerPromptSettings(server, displaySettings));
   const readSettings = () => readCleanupSettings(cleanupSettings);
   const readSupervision = () => readSupervisionSettings(supervisionSettings);
+  const isFactoryPaused = async () => {
+    const settings = await readSupervision();
+    return !settings || settings.paused === true;
+  };
   const readQuotaSettings = () => readSupervisionSettings(supervisionSettings);
   const readResume = () => readResumeSettings(resumeSettings);
   const getZerosub = () => readZerosubStateSafe();
   const buildResumeBrief = createResumeBriefBuilder(loader, { getZerosub });
   const delivery: SteerDeliveryDeps = {
+    isFactoryPaused,
     getConfig: () => loader.loadEffectiveConfig(),
     assignmentQuiet: (paseo, sourceIds, targetId) => supervisionQuiet(paseo, [...sourceIds, targetId]),
     onQuotaBlocked: (paseo, workspaceId, agentId, reason, pool) =>
@@ -152,6 +157,7 @@ export default function contribute(server: PluginServerContext) {
       return settings.status === "ready" && settings.values?.keepChatHistory === true;
     },
   };
+  const automaticDelivery = { ...delivery, automatic: true };
   // P1 boot check: the server entry receives no PaseoApi of its own, so the
   // once-per-process check runs on the first available handle (first turn,
   // RPC, or subscription) — effectively at plugin start, before any new turn
@@ -162,7 +168,7 @@ export default function contribute(server: PluginServerContext) {
     getConfig: () => loader.loadEffectiveConfig(),
     normalizeContinuation: (paseo: any, agent: any) => adoptContinuation(paseo, agent),
     reportContinuation: (paseo: any, agent: any, scope: any, config: unknown) =>
-      reportContinuationAssignment(paseo, agent, scope, config, { delivery }),
+      reportContinuationAssignment(paseo, agent, scope, config, { delivery: automaticDelivery }),
   };
   let bootChained = false;
   // Fail-soft ZeroSub state for supervision wakes, failover, and the turn-end
@@ -275,7 +281,7 @@ export default function contribute(server: PluginServerContext) {
     bootOnce(context.paseo);
     await handleTurnAfter(payload, context, {
       getResumeBrief: buildResumeBrief,
-      delivery,
+      delivery: automaticDelivery,
       getConfig: () => loader.loadEffectiveConfig(),
       getSupervisionSettings: readSupervision,
       getZerosub,
@@ -357,7 +363,7 @@ export default function contribute(server: PluginServerContext) {
     console.log(`[factory] role prompt ${ROLE_RULES_ID as unknown as string} appended: agent ${shortId}, reason ${request.reason}, role ${isAdvisor ? "advisor" : "steer"}`);
     return { ...request, appendSystemPrompt: [...(request.appendSystemPrompt ?? []), rendered] };
   });
-  const stopCleanupTimer = startCleanupTimer({ readSettings, getZerosub, getQuotaSettings: readQuotaSettings, keepChatHistory: delivery.keepChatHistory });
+  const stopCleanupTimer = startCleanupTimer({ isFactoryPaused, readSettings, getZerosub, getQuotaSettings: readQuotaSettings, keepChatHistory: delivery.keepChatHistory });
   const stopSupervisionTimer = startSupervisionTimer({ ensureBoot: bootOnce, getSettings: readSupervision, getConfig: () => loader.loadEffectiveConfig(), delivery, getZerosub, buildBrief: buildResumeBrief });
   const stopQuotaTimer = startQuotaTimer({ getSettings: readQuotaSettings });
   return () => {

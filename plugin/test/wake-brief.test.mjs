@@ -775,6 +775,26 @@ test("recovery sends a brief from a previously blocked rewind without attempting
   assert.deepEqual(sendsTo(world, steer.id), ["[Factory resume]\nCheckpoint\n\nworker finished"]);
 });
 
+test("automatic delivery observes a pause that happens while preparing its brief", async () => {
+  const { ws, steer, world, client } = deliveryFixture();
+  let paused = false;
+  const delivery = {
+    automatic: true, isFactoryPaused: async () => paused, lock: noLock,
+    buildBrief: async () => { paused = true; return "Checkpoint"; },
+  };
+  ws.metadata[AGENTS_KEY][steer.id].action = {
+    kind: "delivery", wakeId: "before-pause", epoch: 3, phase: "ready", renewal: "send", queuedAt: at(NOW),
+    note: "Worker finished",
+  };
+  const input = { workspaceId: ws.id, agentId: steer.id };
+  assert.equal((await finishSteerDelivery(client, input, delivery)).status, "pending");
+  assert.deepEqual(sendsTo(world, steer.id), []);
+  assert.equal(ws.metadata[AGENTS_KEY][steer.id].action.phase, "ready");
+  paused = false;
+  assert.equal((await finishSteerDelivery(client, input, delivery)).status, "sent");
+  assert.equal(sendsTo(world, steer.id).length, 1);
+});
+
 test("recovery releases an expired optional compact and does not restore its cleanup record", async () => {
   const { ws, steer, world, client } = deliveryFixture({ minutesIdle: 6 });
   ws.metadata[AGENTS_KEY][steer.id].action = {
@@ -782,7 +802,7 @@ test("recovery releases an expired optional compact and does not restore its cle
     note: "Continue as active steer", cleanup: { kind: "compact", reason: "resume", at: at(Date.now() - 2 * MIN) },
   };
   const result = await finishSteerDelivery(client, { workspaceId: ws.id, agentId: steer.id }, {
-    lock: noLock, keepChatHistory: async () => true, buildBrief: async () => "Checkpoint",
+    lock: noLock, keepChatHistory: async () => true, buildBrief: async () => "Checkpoint", confirmActivationQuota: "unknown",
   });
   assert.equal(result.status, "sent");
   assert.deepEqual(sendsTo(world, steer.id), ["[Factory resume]\nCheckpoint\n\nContinue as active steer"]);

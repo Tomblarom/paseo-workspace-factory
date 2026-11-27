@@ -15,6 +15,8 @@ import {
   type SteerFaceState,
   type SteerPrimaryAction,
 } from "../shared/steer-state.js";
+import type { QuotaConfirmation } from "../shared/factory.js";
+
 /** Pill id prefixes; each family owns its prefix so pills coexist. */
 export const STEER_PILL_ID_PREFIX = "factory-steer-";
 export const ATTENTION_PILL_ID_PREFIX = "factory-attention-";
@@ -64,6 +66,7 @@ export interface SteerPillRow {
   tokens: number | null;
   large: boolean;
   limited: boolean;
+  quotaConfirmation?: QuotaConfirmation | null;
   resetAt: string | null;
   resetUnknown: boolean;
   awaitingUpdate: boolean;
@@ -151,6 +154,8 @@ export function steerRowsOf(event: unknown): SteerPillRow[] {
       tokens: finiteOrNull(row.tokens),
       large: row.large === true,
       limited: row.limited === true,
+      quotaConfirmation: row.quotaConfirmation === "unknown" || row.quotaConfirmation === "depleted"
+        ? row.quotaConfirmation : row.quotaConfirmation === null ? null : undefined,
       resetAt: textOrNull(row.resetAt),
       resetUnknown: row.resetUnknown === true,
       awaitingUpdate: row.awaitingUpdate === true,
@@ -248,14 +253,14 @@ function secondTitleLine(row: SteerPillRow): string {
 
 export function faceFor(row: SteerPillRow): SteerPillFace {
   const slot = row.slot ?? "?";
-  const word = row.state === "needs-resume" ? null : pillStateWord(row.state);
-  const first = [`Steer ${slot}`, steerRole(row), word].filter(Boolean).join(" · ");
+  const context = row.large ? "large" : row.warmth === "warm" || row.warmth === "cooling" || row.warmth === "cold" ? row.warmth : "unknown";
+  const first = [`Steer ${slot}`, steerRole(row), pillStateWord(row.state)].join(" · ");
   const second = secondTitleLine(row);
   const title = second ? `${first}\n${second}` : first;
   return {
-    label: word ? `${slot} · ${word}` : slot,
+    label: `${slot} · ${context}`,
     title,
-    icon: STEER_PILL_ICONS[row.state] ?? "CircleHelp",
+    icon: STEER_PILL_ICONS[context],
     accessibilityLabel: second ? `${first} · ${second}` : first,
   };
 }

@@ -287,6 +287,7 @@ async function readTurnTail(paseo: any, agentId: string, turnId: string | null):
 function deliveryDeps(deps: SuperviseDeps): SteerDeliveryDeps {
   return {
     ...deps.delivery,
+    automatic: true,
     lock: lockOf(deps),
     now: () => stampsOf(deps).nowIso,
     getConfig: deps.delivery?.getConfig ?? deps.getConfig,
@@ -301,6 +302,7 @@ function deliveryDeps(deps: SuperviseDeps): SteerDeliveryDeps {
 }
 
 export async function supervisionQuiet(paseo: any, workspaceIds: string[], deps: SuperviseDeps = {}): Promise<string | null> {
+  if (await deps.delivery?.isFactoryPaused?.()) return "paused";
   if (!(deps.bootCheckDone ?? isBootCheckDone())) return "boot";
   if (deps.draining ?? isDraining()) return "drain";
   const { nowMs } = stampsOf(deps);
@@ -314,6 +316,7 @@ export async function supervisionQuiet(paseo: any, workspaceIds: string[], deps:
 export async function requestQuotaFailover(
   paseo: any, workspaceId: string, agentId: string, reason: string, pool: string, deps: SuperviseDeps,
 ): Promise<void> {
+  if (await deps.delivery?.isFactoryPaused?.()) return;
   const state = await readPaseoState(paseo);
   const scope = listScopes(state).find((candidate: any) => candidate.workspaceId === workspaceId);
   const wsf = scope?.workspace?.metadata?.[METADATA_KEY];
@@ -572,6 +575,7 @@ interface ScopeWakeInput {
 
 /** Sends queued events to the live active steer, with one delivery in flight per scope. */
 export async function sendScopeWake(paseo: any, args: ScopeWakeInput, deps: SuperviseDeps): Promise<SendWakeResult> {
+  if (await deps.delivery?.isFactoryPaused?.()) return { sent: false, reason: "paused" };
   const workspaceId = args.scope.workspaceId;
   if (sendingScopeWakes.has(workspaceId)) return { sent: false, reason: "wake-in-flight" };
   sendingScopeWakes.add(workspaceId);
@@ -978,6 +982,7 @@ export async function retryPendingWakeBrief(
   scope: any,
   deps: SuperviseDeps & { state?: any; allowBatches?: boolean },
 ): Promise<RetryWakeBriefResult> {
+  if (await deps.delivery?.isFactoryPaused?.()) return { attempted: false, delivered: false, reason: "paused" };
   const mainId: string = scope.workspaceId;
   const meta = await refreshWorkspaceMeta(paseo, mainId);
   const wsf = wsfOf(meta);
@@ -1028,6 +1033,7 @@ export async function flushScope(
   scope: any,
   deps: SuperviseDeps & { state?: any },
 ): Promise<FlushResult> {
+  if (await deps.delivery?.isFactoryPaused?.()) return { flushed: false, reason: "paused" };
   const settings = await resolveSettings(deps);
   if (!settings?.enabled && !deps.delivery) return { flushed: false, reason: "disabled" };
   const { nowMs } = stampsOf(deps);
@@ -1064,6 +1070,7 @@ export async function flushScope(
 }
 
 export async function flushAllScopes(paseo: any, deps: SuperviseDeps & { state?: any; onFlush?: (scopeId: string, result: FlushResult) => void }): Promise<FlushResult[]> {
+  if (await deps.delivery?.isFactoryPaused?.()) return [];
   const settings = await resolveSettings(deps);
   if (!settings?.enabled && !deps.delivery) return [];
   const paseoState = deps.state ?? ((await readPaseoState(paseo)) as any);
@@ -1167,7 +1174,8 @@ export async function runBootFinished(
   for (const scope of scopes) {
     try {
       const bootMeta = await refreshWorkspaceMeta(paseo, scope.workspaceId);
-      const quiet = drainingFlag || isDrainMarkerActive(bootMeta[DRAIN_METADATA_KEY], nowMs);
+      let quiet = await deps.delivery?.isFactoryPaused?.() ? "paused"
+        : drainingFlag || isDrainMarkerActive(bootMeta[DRAIN_METADATA_KEY], nowMs) ? "drain" : null;
       if (!quiet) {
         const retry = await retryPendingWakeBrief(paseo, scope, deps);
         if (retry.delivered) {
@@ -1182,7 +1190,8 @@ export async function runBootFinished(
           }
           continue;
         }
-        if (retry.reason !== "none" && retry.reason !== "no-wsf" && retry.reason !== "target-gone" && retry.reason !== "epoch-moved") {
+        if (retry.reason === "paused") quiet = "paused";
+        else if (retry.reason !== "none" && retry.reason !== "no-wsf" && retry.reason !== "target-gone" && retry.reason !== "epoch-moved") {
           wakes.push({ scopeId: scope.id, sent: false, reason: retry.reason ?? "brief-pending" });
           continue;
         }
@@ -1197,16 +1206,16 @@ export async function runBootFinished(
           const current = register[event.workerId];
           if (current) await queueWake(paseo, scope.workspaceId, event.workerId, current, event.state, deps);
         }
-        wakes.push({ scopeId: scope.id, sent: false, reason: "drain" });
+        wakes.push({ scopeId: scope.id, sent: false, reason: quiet });
         continue;
       }
       const sent = await sendScopeWake(paseo, { scope, events, state: paseoState }, deps);
-      if (!sent.sent && sent.reason === "wait-reset") {
+      if (!sent.sent && (sent.reason === "wait-reset" || sent.reason === "paused" || await deps.delivery?.isFactoryPaused?.())) {
         for (const event of events) {
           const current = register[event.workerId];
           if (current) await queueWake(paseo, scope.workspaceId, event.workerId, current, event.state, deps);
         }
-        wakes.push({ scopeId: scope.id, sent: false, reason: "wait-reset" });
+        wakes.push({ scopeId: scope.id, sent: false, reason: sent.reason === "wait-reset" ? "wait-reset" : "paused" });
         continue;
       }
       wakes.push({ scopeId: scope.id, sent: sent.sent, reason: sent.sent ? undefined : (sent.reason ?? "send-failed") });
@@ -1323,6 +1332,7 @@ export async function runFailoverCheck(
   scope: any,
   deps: SuperviseDeps & { state?: any; scopes?: any[] },
 ): Promise<FailoverResult> {
+  if (await deps.delivery?.isFactoryPaused?.()) return { action: "wait", reason: "paused" };
   const settings = await resolveSettings(deps);
   if (!settings || !settings.enabled) return { action: "clear", reason: "disabled" };
   const log = logOf(deps);
@@ -1735,7 +1745,7 @@ export function startSupervisionTimer({
     void (async () => {
       try {
         const settings = await getSettings();
-        if (!settings?.enabled && !delivery) return;
+        if (await delivery?.isFactoryPaused?.() || (!settings?.enabled && !delivery)) return;
         const nowMs = Date.now();
         const deps: SuperviseDeps = {
           settings,

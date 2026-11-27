@@ -172,7 +172,7 @@ test("a destination that needs recovery stays eligible with a recovery flag", ()
 // Reset eligibility
 // ---------------------------------------------------------------------------
 
-test("reset blocks busy tabs, incomplete membership and exhausted quota", () => {
+test("reset blocks busy tabs and incomplete membership", () => {
   for (const [state, reason] of [
     [{ state: "running" }, /running/],
     [{ liveStatus: "initializing" }, /running/],
@@ -180,7 +180,6 @@ test("reset blocks busy tabs, incomplete membership and exhausted quota", () => 
     [{ permissionNeeded: true }, /permission/],
     [{ state: "retired" }, /replaced/],
     [{ state: "unknown", detail: "Membership ambiguous" }, /Membership ambiguous/],
-    [{ state: "limited" }, /Quota depleted/],
     [{ scopeId: null }, /membership/],
   ]) {
     assert.match(menu.resetSteerBlock(row("a", state)), reason);
@@ -316,8 +315,8 @@ test("the active steer menu lists actions and leaf-only handover targets", () =>
   const [handover, reset] = items;
   assert.equal(handover.disabled, false);
   assert.deepEqual(handover.targets, [
-    { id: "handover-steer-b", title: "Steer B", slot: "B", agentId: "steer-b", disabled: true },
-    { id: "handover-steer-c", title: "Steer C", slot: "C", agentId: "steer-c", disabled: false },
+    { id: "handover-steer-b", title: "Steer B · Busy (turn running)", slot: "B", agentId: "steer-b", disabled: true },
+    { id: "handover-steer-c", title: "Steer C · Standby", slot: "C", agentId: "steer-c", disabled: false },
   ]);
   assert.deepEqual(reset, { kind: "reset", id: "reset", title: "Reset Steer", disabled: false, icon: "ListRestart" });
 });
@@ -337,7 +336,7 @@ test("activation offers the own standby at its observed epoch, and an active rec
   const standby = row("steer-b", { slot: "B", activationEpoch: 3 });
   const activation = (own, others = []) => menu.describeSteerMenu(own, [own, ...others]).find((entry) => entry.kind === "activate");
   assert.deepEqual(activation(standby, [self()]), {
-    kind: "activate", id: "activate", title: "Activate Steer", icon: "ArrowRight", disabled: false, activationEpoch: 3, activationAlternatives: [],
+    kind: "activate", id: "activate", title: "Activate Steer", icon: "ArrowRight", disabled: false, activationEpoch: 3, quotaConfirmation: null, activationAlternatives: [],
   });
   assert.equal(activation(self(), [standby]), undefined);
   assert.equal(activation({ ...standby, advisor: true }), undefined);
@@ -349,6 +348,19 @@ test("activation offers the own standby at its observed epoch, and an active rec
   assert.deepEqual(activation(standby, [self(), row("steer-c", { slot: "C" })]).activationAlternatives, [
     { agentId: "steer-c", slot: "C" },
   ]);
+});
+
+test("depleted and unknown quota both leave Reset and Activate reachable with the right confirmation", () => {
+  for (const quotaConfirmation of ["depleted", "unknown"]) {
+    const own = row("steer-b", { slot: "B", active: false, activationEpoch: 3, quotaConfirmation,
+      state: quotaConfirmation === "depleted" ? "limited" : "unknown", detail: "Not enough data" });
+    const entries = menu.describeSteerMenu(own, [self(), own]);
+    const activate = entries.find(({ kind }) => kind === "activate");
+    assert.equal(activate.disabled, false);
+    assert.equal(activate.quotaConfirmation, quotaConfirmation);
+    assert.equal(entries.find(({ kind }) => kind === "reset").disabled, false);
+    assert.match(menu.quotaConfirmationText(quotaConfirmation, own), new RegExp(`Quota is ${quotaConfirmation}`));
+  }
 });
 
 test("unrelated target state changes do not rebuild the open menu", () => {

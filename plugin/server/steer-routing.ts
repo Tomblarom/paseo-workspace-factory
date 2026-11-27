@@ -61,10 +61,11 @@ export function decideSteerDelivery({
 export function steerRouteCandidate(args: {
   agent: any; entry: any; entries?: Record<string, any>; row?: SteerFeedRow;
   snapshot: RoutingSnapshot; kind?: "continue" | "handover"; manual?: boolean;
+  admission?: ReturnType<typeof quotaAdmission>;
   retry?: boolean; eligible?: boolean; reason?: string; preferenceRank?: number;
 }) {
   const { agent, entry, entries, row, snapshot } = args;
-  const admission = quotaAdmission(agent, entry, snapshot, entries);
+  const admission = args.admission ?? quotaAdmission(agent, entry, snapshot, entries);
   const privacy = snapshot.privacyDecisions?.[agent.id] ?? privacyAdmission(agent, snapshot.config, snapshot.privacyScopes?.[agent.workspaceId] ?? null);
   const preparation = decideSteerDelivery({ warmth: row?.warmth, large: row?.large,
     provider: String(agent.provider ?? "").trim().toLowerCase(), manual: args.manual,

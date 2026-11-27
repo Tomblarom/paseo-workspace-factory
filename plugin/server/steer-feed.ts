@@ -11,6 +11,8 @@ import { scopeHolder } from "./core/scope-guard.mjs";
 import { METADATA_KEY, parentOf, readPaseoState } from "./core/paseo.mjs";
 import { QUOTA_DEFAULTS } from "./core/quota.mjs";
 import { listScopes } from "./core/scope.mjs";
+import { quotaAdmission } from "./steer-admission.js";
+import type { QuotaConfirmation } from "../shared/factory.js";
 import { getQuotaSampledAt, getQuotaSnapshot } from "./quota.js";
 import { resolveZerosub, type ZerosubState } from "./zerosub-runtime.js";
 import { applySteerTitleLabels } from "./steer-title-labels.js";
@@ -70,6 +72,7 @@ export interface SteerFeedRow {
   tokens: number | null;
   large: boolean;
   limited: boolean;
+  quotaConfirmation: QuotaConfirmation | null;
   resetAt: string | null;
   resetUnknown: boolean;
   awaitingUpdate: boolean;
@@ -265,6 +268,10 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
         activationEpoch = reads.epoch - 1;
       }
     }
+    const admission = quotaAdmission(agent, entry, {
+      config: deps.config, zerosub: deps.zerosub, nowMs, quota: deps.quotaSnapshot,
+      quotaSampledAt: deps.poolSampledAtMs ?? null, workspaces: paseoState.workspaces,
+    }, reads.entries);
     rows.push({
       scopeId: identity.scopeId,
       workspaceId: reads.mainId,
@@ -284,7 +291,8 @@ export function collectSteerStates(paseoState: any, deps: SteerFeedDeps): SteerF
       warmth: projection.warmth,
       tokens: projection.tokens,
       large: projection.large,
-      limited: projection.quota.limited,
+      limited: admission.confirmation === "depleted",
+      quotaConfirmation: admission.confirmation,
       resetAt: projection.quota.resetAt,
       resetUnknown: projection.quota.resetUnknown,
       awaitingUpdate: projection.quota.awaitingUpdate,

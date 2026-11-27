@@ -216,6 +216,7 @@ export const factorySupervisionSettings = defineSettings({
   version: 1,
   schema: z.object({
     enabled: z.boolean().default(true),
+    paused: z.boolean().default(false),
     // Kept for config compatibility; immediate wakes use wakeDebounceSeconds.
     batchMinutes: z.number().int().min(0).default(0),
     wakeDebounceSeconds: z.number().int().min(0).default(20),

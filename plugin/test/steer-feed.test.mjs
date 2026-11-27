@@ -115,6 +115,7 @@ test("a live steer projects a warm row with identity and flags", () => {
     resetUnknown: false,
     awaitingUpdate: false,
     quotaRows: [],
+    quotaConfirmation: "unknown",
     headerFacts: ["Estimated"],
     primaryAction: "focus",
     detail: "Cache warm · cooling in 20m",
@@ -206,6 +207,7 @@ test("pool quota and ZeroSub routes feed the Limited and Waiting faces", () => {
     },
   );
   assert.equal(limited[0].state, "limited");
+  assert.equal(limited[0].quotaConfirmation, "depleted");
   assert.equal(limited[0].resetUnknown, false);
   const waiting = feed(
     paseoState([agent("steer-a")], { entries: { "steer-a": { ...TURN } } }),

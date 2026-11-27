@@ -18,7 +18,7 @@ import { runCleanup } from "./cold-sweep.js";
 import { AgentBusyError, hasActiveAgentWork } from "./agent-context.js";
 import { filterStaleWorkerEvents } from "./worker-wakes.js";
 import { type ZerosubSource } from "./zerosub-runtime.js";
-import { steerQuotaAdmission as quotaOnlyAdmission, quotaAdmission, movedAccountAdmission, readAdmissionSnapshot, readPrivacyAdmission, type AdmissionDeps } from "./steer-admission.js";
+import { steerQuotaAdmission as quotaOnlyAdmission, activationQuotaAdmission, quotaAdmission, movedAccountAdmission, readAdmissionSnapshot, readPrivacyAdmission, type AdmissionDeps } from "./steer-admission.js";
 import { routeMatchesIntent } from "./core/routing.mjs";
 import { readRoutingSnapshot, routingProjection, steerRouteCandidate, planSteerRoutes, type RoutingIntent } from "./steer-routing.js";
 export { decideSteerDelivery } from "./steer-routing.js";
@@ -26,6 +26,8 @@ import {
   cleanupIdentity, formatResumeMessage, isClaudeProvider, RESUME_PENDING_REASON,
   type CleanupSettings, type ResumeClearSettings,
 } from "../shared/idle-cleanup.js";
+
+import type { QuotaConfirmation } from "../shared/factory.js";
 
 type Lock = (name: string, fn: (held: { verify: () => void }) => Promise<any>) => Promise<any>;
 type Renewal = "clear" | "rewind" | "send";
@@ -35,6 +37,9 @@ type AssignmentRef = { workspaceId: string; actionId: string; text?: string };
 type AssignmentTarget = { workspaceId: string; agentId: string; epoch: number; scopeId: string; deliveryId?: string; unreserved?: boolean };
 
 export interface SteerDeliveryDeps extends ZerosubSource, AdmissionDeps {
+  isFactoryPaused?: () => Promise<boolean>;
+  automatic?: boolean;
+  confirmActivationQuota?: QuotaConfirmation;
   getCleanupSettings?: () => Promise<CleanupSettings | null>;
   getResumeSettings?: () => Promise<ResumeClearSettings | null>;
   keepChatHistory?: () => Promise<boolean>;
@@ -131,7 +136,7 @@ function scopeState(meta: any) {
 }
 
 /** A queued explicit request keeps its target tuple across renewal/restart. */
-async function steerQuotaAdmission(agent: any, entry: any, deps: AdmissionDeps, entries: Record<string, any> = {}) {
+async function steerQuotaAdmission(agent: any, entry: any, deps: SteerDeliveryDeps, entries: Record<string, any> = {}) {
   const privacy = await readPrivacyAdmission(agent, deps);
   if (!privacy.allowed) return { ...privacy, privacyBlocked: true, pendingMove: false, pool: "", accountId: null, resetAt: null };
   const move = readSteerAction(entry)?.accountMove;
@@ -148,7 +153,9 @@ async function steerQuotaAdmission(agent: any, entry: any, deps: AdmissionDeps, 
     return !intent || routeMatchesIntent({ ...agent, agentId: agent.id }, intent) ? admission.admission :
       { ...admission.admission, allowed: false, reason: "explicit steer/model selection changed" };
   }
-  const admission = await quotaOnlyAdmission(agent, entry, deps, entries);
+  const quota = await quotaOnlyAdmission(agent, entry, deps, entries);
+  const admission = action?.kind === "activate" && action.phase !== "done"
+    ? activationQuotaAdmission(quota, deps.confirmActivationQuota) : quota;
   const intent = readSteerAction(entry)?.routing?.intent;
   return !intent || routeMatchesIntent({ ...agent, agentId: agent.id }, intent) ? admission :
     { ...admission, allowed: false, reason: "explicit steer/model selection changed" };
@@ -243,6 +250,12 @@ function blocked(detail: string, cleared = false): DeliveryResult {
 const STEER_BUSY = "The steer is busy. Delivery waits until the current turn ends.";
 const CLEAR_UNCONFIRMED = "Claude context clear could not be confirmed. Retry recovery or use Fresh.";
 const COMPACTION_WAIT_MS = 60_000;
+
+const FACTORY_PAUSED = "Factory is paused. The delivery remains queued.";
+
+async function automationPaused(deps: SteerDeliveryDeps): Promise<boolean> {
+  return deps.automatic === true && await deps.isFactoryPaused?.() === true;
+}
 
 function deferred(detail: string = STEER_BUSY): DeliveryResult {
   return { status: "pending", cleared: false, detail };
@@ -553,6 +566,7 @@ export async function reserveAssignmentDelivery(
 export async function dispatchAssignmentReport(
   paseo: any, sourceWorkspaceId: string, deps: SteerDeliveryDeps = {},
 ): Promise<DeliveryResult | null> {
+  if (await automationPaused(deps)) return deferred(FACTORY_PAUSED);
   const lock = deps.lock ?? productionLock;
   let assignment: any = null;
   let target: AssignmentTarget | null = null;
@@ -653,6 +667,7 @@ export async function finishSteerDelivery(
   paseo: any, input: DeliveryInput, deps: SteerDeliveryDeps = {},
   compactBeforeSend = false,
 ): Promise<DeliveryResult | null> {
+  if (await automationPaused(deps)) return deferred(FACTORY_PAUSED);
   const key = `${input.workspaceId}/${input.agentId}`;
   if (finishing.has(key)) return { status: "pending", cleared: false, detail: "The steer brief is being delivered." };
   finishing.add(key);
@@ -685,10 +700,14 @@ export async function finishSteerDelivery(
       if (receipt.phase !== "sent" && effect?.kind !== "send" &&
           hasActiveAgentWork((await paseo.agents.ref(input.agentId).refresh())?.agent, entry)) return deferred();
       const result = await reconcileFreshDelivery({ client: paseo, ...input, actionId: receipt.wakeId, lock,
-        checkPrivacy: (agentId: string, epoch: number) => requireFreshPrivacy({
-          client: paseo, workspaceId: input.workspaceId, scopeId: scopeState(meta)?.scope?.id, agentId, epoch,
-          admitTarget: (agent: any) => readPrivacyAdmission(agent, { ...deps, paseo }, input.workspaceId),
-        }),
+        checkPrivacy: async (agentId: string, epoch: number) => {
+          if (await automationPaused(deps)) return { allowed: false, reason: FACTORY_PAUSED };
+          await requireFreshPrivacy({
+            client: paseo, workspaceId: input.workspaceId, scopeId: scopeState(meta)?.scope?.id, agentId, epoch,
+            admitTarget: (agent: any) => readPrivacyAdmission(agent, { ...deps, paseo }, input.workspaceId),
+          });
+          if (await automationPaused(deps)) return { allowed: false, reason: FACTORY_PAUSED };
+        },
       });
       return { status: result.status === "sent" ? "sent" : result.status === "blocked" || result.status === "missing" ? "blocked" : "pending",
         cleared: false, renewed: true, recordingError: result.recordingError,
@@ -723,6 +742,7 @@ export async function finishSteerDelivery(
     }
     if (unsettledAccountMove(pending)) {
       if (await assignmentIsQuiet(paseo, pending, input.workspaceId, deps)) return deferred("Assignment report waits for boot or drain.");
+      if (await automationPaused(deps)) return deferred(FACTORY_PAUSED);
       const recovered = await recoverAccountMove(paseo, input, pending, deps, lock);
       if (recovered.status !== "ready") {
         return { status: recovered.status === "blocked" ? "blocked" : "pending", cleared,
@@ -824,7 +844,7 @@ export async function finishSteerDelivery(
             !await assignmentIsQuiet(paseo, pending, input.workspaceId, deps) &&
             await staleBatchStillValid(paseo, pending?.batch) &&
             (await steerQuotaAdmission(live, currentEntry, { ...deps, paseo }, current[AGENTS_KEY])).allowed &&
-            (await readPrivacyAdmission(live, { ...deps, paseo }, input.workspaceId)).allowed;
+            (await readPrivacyAdmission(live, { ...deps, paseo }, input.workspaceId)).allowed && !await automationPaused(deps);
         };
         const claude = isClaudeProvider(snapshot.provider);
         const commands = claude ? null : await agent.commands?.().catch(() => null);
@@ -930,9 +950,11 @@ ${pending.note}` : brief;
             if (live?.id !== input.agentId || live.workspaceId !== input.workspaceId || live.archivedAt || live.background === true) {
               return { allowed: false, reason: "The delivery target is unavailable; its action remains recorded." };
             }
-            return readPrivacyAdmission(live, { ...deps, paseo }, input.workspaceId);
+            const privacy = await readPrivacyAdmission(live, { ...deps, paseo }, input.workspaceId);
+            return await automationPaused(deps) ? { allowed: false, reason: FACTORY_PAUSED } : privacy;
           },
           validate: async (_action: any, latestMeta: any) => {
+            if (await automationPaused(deps)) return false;
             const currentAgent = (await agent.refresh())?.agent;
             if (!currentAgent || currentAgent.archivedAt || hasActiveAgentWork(currentAgent, latestMeta[AGENTS_KEY]?.[input.agentId])) return false;
             if (await assignmentIsQuiet(paseo, _action, input.workspaceId, deps)) return false;
@@ -1007,6 +1029,7 @@ ${pending.note}` : brief;
 export async function deliverSteer(
   paseo: any, input: DeliveryInput, deps: SteerDeliveryDeps = {},
 ): Promise<DeliveryResult> {
+  if (await automationPaused(deps)) return deferred(FACTORY_PAUSED);
   const lock = deps.lock ?? productionLock;
   const [state, fresh, snapshot] = await Promise.all([
     input.state ?? readPaseoState(paseo),
@@ -1041,9 +1064,11 @@ export async function deliverSteer(
     agents: [...state.agents.filter((a: any) => a.id !== input.agentId), agent],
     workspaces: state.workspaces.map((ws: any) => ws.id === input.workspaceId ? { ...ws, metadata: meta } : ws) };
   const routing = await readRoutingSnapshot({ ...deps, paseo }, observationState.workspaces, observationState.agents);
+  const rawAdmission = quotaAdmission(agent, entry, routing, meta[AGENTS_KEY]);
+  const routeAdmission = pendingMove?.kind === "activate"
+    ? activationQuotaAdmission(rawAdmission, deps.confirmActivationQuota) : rawAdmission;
   const admission = pendingMove?.accountMove?.phase === "settled"
-    ? await steerQuotaAdmission(agent, entry, { ...deps, paseo }, meta[AGENTS_KEY])
-    : quotaAdmission(agent, entry, routing, meta[AGENTS_KEY]);
+    ? await steerQuotaAdmission(agent, entry, { ...deps, paseo }, meta[AGENTS_KEY]) : routeAdmission;
   if (!admission.allowed) return deferred(`Delivery waits: ${admission.reason}.`);
   if (hasActiveAgentWork(agent, entry)) return deferred();
   if (input.batch?.takeover && await deps.assignmentQuiet?.(paseo, [input.batch.workspaceId], input.workspaceId)) return deferred("Takeover waits for boot or drain.");
@@ -1084,8 +1109,12 @@ export async function deliverSteer(
   const at = deps.now?.() ?? new Date().toISOString();
   const needsResumeAt = existing?.wakeId === input.actionId && existing?.phase === "reserved" && existing.needsResumeAt !== undefined
     ? existing.needsResumeAt : entry?.needsResume?.at ?? null;
+  const keepLiveContext = (activation && deps.confirmActivationQuota !== undefined) ||
+    ((activation || input.manual) && await deps.isFactoryPaused?.());
   const route = planSteerRoutes(routing, [steerRouteCandidate({ agent, entry, entries: meta[AGENTS_KEY],
-    row: projected, snapshot: routing, manual: input.manual, retry: existing?.phase === "blocked" })], {
+    row: projected, snapshot: keepLiveContext ? { ...routing, keepChatHistory: true } : routing,
+    admission: routeAdmission,
+    manual: input.manual && !keepLiveContext, retry: existing?.phase === "blocked" })], {
     intent: existing?.routing?.intent ?? input.intent ?? (input.manual ? { mode: "explicit", agentId: input.agentId } : { mode: "automatic" }),
     observation: { epoch: scope.epoch, holderId: input.agentId, accountId: admission.accountId },
   });
@@ -1155,7 +1184,7 @@ export async function deliverSteer(
     });
     if (!reserved) return deferred("A steer operation is already queued.");
     return (await finishSteerDelivery(paseo, input, deps,
-      routing.keepChatHistory && !input.manual && (projected?.warmth === "cold" || projected?.large === true))) ?? deferred();
+      routing.keepChatHistory && !keepLiveContext && !input.manual && (projected?.warmth === "cold" || projected?.large === true))) ?? deferred();
   }
   const original = existing?.epoch === (scope.epoch ?? null) ? existing : null;
   const eventBatch = input.batch ?? original?.batch;
@@ -1237,7 +1266,8 @@ export async function deliverSteer(
         (!readSteerAction(agentEntry)?.accountMove || await moveSourcesValid(paseo, readSteerAction(agentEntry), input)) &&
         !await assignmentIsQuiet(paseo, readSteerAction(agentEntry), input.workspaceId, deps) &&
         (await steerQuotaAdmission(latest, agentEntry, { ...deps, paseo }, current[AGENTS_KEY])).allowed &&
-        scopeState(current)?.epoch === scope.epoch && readSteerAction(agentEntry)?.wakeId === pending.wakeId;
+        scopeState(current)?.epoch === scope.epoch && readSteerAction(agentEntry)?.wakeId === pending.wakeId &&
+        !await automationPaused(deps);
     };
     if (!await stillIdle()) throw new AgentBusyError(STEER_BUSY);
     if (mode === "clear") {

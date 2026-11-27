@@ -189,6 +189,7 @@ export interface SweepDeps {
   /** Fail-soft ZeroSub supplier for the per-account compact check. */
   getZerosub?: () => Promise<ZerosubState>;
   keepChatHistory?: () => Promise<boolean>;
+  isFactoryPaused?: () => Promise<boolean>;
   /** Exhaustion threshold for the compact check; the quota default applies. */
   exhaustedPct?: number;
   /** Lock for the entry write; tests only (defaults to the real one). */
@@ -264,11 +265,12 @@ export async function sweepOnce({
   lock,
   rewindFn,
   keepChatHistory,
+  isFactoryPaused,
 }: SweepDeps): Promise<SweepResult[]> {
   // A mode change re-probes after an effect failure.
   if (lastMode !== null && lastMode !== settings.mode) effectBlock = null;
   lastMode = settings.mode;
-  if (settings.mode === "off" || effectBlock) return [];
+  if (settings.mode === "off" || effectBlock || await isFactoryPaused?.()) return [];
   const results: SweepResult[] = [];
   let state: any;
   try {
@@ -292,7 +294,7 @@ export async function sweepOnce({
   const quotaCtx = { zerosub, exhaustedPct };
   for (const agent of state.agents ?? []) {
     try {
-      const result = await sweepAgent(paseo, agent, state, lookup, liveIds, settings, nowMs, log, quota, quotaCtx, lock, rewindFn, keepChatHistory);
+      const result = await sweepAgent(paseo, agent, state, lookup, liveIds, settings, nowMs, log, quota, quotaCtx, lock, rewindFn, keepChatHistory, isFactoryPaused);
       if (result) results.push(result);
     } catch (error) {
       log(
@@ -338,6 +340,7 @@ async function sweepAgent(
   lock?: (name: string, fn: (held: { verify: () => void }) => Promise<any>) => Promise<any>,
   rewindFn?: SweepRewind,
   keepChatHistory?: SweepDeps["keepChatHistory"],
+  isFactoryPaused?: SweepDeps["isFactoryPaused"],
 ): Promise<SweepResult | null> {
   const scope = scopeForAgent(agent, lookup);
   const reads = scope ? scopeReads(scope) : null;
@@ -474,7 +477,7 @@ async function sweepAgent(
         beforeRewind: async () => {
           if (await preserveChat()) return false;
           const latest = (await paseo.agents.ref(agent.id).refresh().catch(() => null))?.agent;
-          return !!latest && !latest.archivedAt && latest.status === "idle" && !hasActiveAgentWork(latest);
+          return !!latest && !latest.archivedAt && latest.status === "idle" && !hasActiveAgentWork(latest) && !await isFactoryPaused?.();
         },
       });
     } catch (error) {
@@ -554,7 +557,7 @@ async function sweepAgent(
       workspaceId: reads.mainId,
       liveIds,
       sessionId,
-      ...(kind === "clear" ? { beforeSend: async () => !await preserveChat() } : {}),
+      beforeSend: async () => (kind !== "clear" || !await preserveChat()) && !await isFactoryPaused?.(),
       ...(lock ? { lock } : {}),
     });
   } catch (error) {
@@ -664,11 +667,11 @@ export async function runCleanup(
   }
   let dispatched = false;
   try {
-    if (opts.beforeSend && !await opts.beforeSend()) throw new AgentBusyError("The wake changed while preparing cleanup.");
     const latest = (await ref.refresh())?.agent;
     if (!latest || latest.archivedAt || hasActiveAgentWork(latest) || latest.persistence?.sessionId !== current) {
       throw new AgentBusyError("The agent changed while preparing cleanup.");
     }
+    if (opts.beforeSend && !await opts.beforeSend()) throw new AgentBusyError("The wake changed while preparing cleanup.");
     dispatched = true;
     await sendCleanupCommand(paseo, agentId, kind === "clear" ? CLEAR_COMMAND : opts.compactCommand ?? COMPACT_COMMAND, messageId);
   } catch (error) {
@@ -699,6 +702,7 @@ export interface TimerDeps {
   /** Quota settings supplier for the exhaustion threshold (defaults apply). */
   getQuotaSettings?: () => Promise<any>;
   keepChatHistory?: SweepDeps["keepChatHistory"];
+  isFactoryPaused?: SweepDeps["isFactoryPaused"];
 }
 
 /** Fail-soft exhaustion threshold from the quota settings, else the default. */
@@ -723,6 +727,7 @@ export function startCleanupTimer({
   getZerosub,
   getQuotaSettings,
   keepChatHistory,
+  isFactoryPaused,
 }: TimerDeps): () => void {
   let stopped = false;
   let sweeping = false;
@@ -740,6 +745,7 @@ export function startCleanupTimer({
           settings,
           log,
           keepChatHistory,
+          isFactoryPaused,
           ...(getZerosub ? { getZerosub } : {}),
           ...(exhaustedPct !== undefined ? { exhaustedPct } : {}),
         });

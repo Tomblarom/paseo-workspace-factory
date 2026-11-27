@@ -648,6 +648,32 @@ test("boot finished queues post-boot wakes while the drain marker is live", asyn
   assert.ok(world.workspaces[0].metadata[WORKERS_KEY][worker.id].pendingWake, "interrupted news queued");
 });
 
+test("a paused host records boot interrupts and keeps quota failover and wake retries quiet until resumed", async () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world);
+  const worker = addWorker(world, ws);
+  ws.metadata[WORKERS_KEY] = { [worker.id]: entry("running", "boot task") };
+  const paseo = fakeClient(world);
+  const scope = { id: REPO, workspaceId: ws.id };
+  let stored = factorySupervisionSettings.schema.parse({ paused: true });
+  const handle = { read: async () => ({ status: "ready", values: structuredClone(stored) }) };
+  const deps = depsOf({ delivery: { isFactoryPaused: async () => (await supervise.readSupervisionSettings(handle)).paused } });
+
+  const boot = await supervise.runBootFinished(paseo, [{ agentId: worker.id, scopeId: REPO }], deps);
+  assert.deepEqual(boot.marked, [worker.id]);
+  assert.equal(boot.wakes[0].reason, "paused");
+  assert.equal(ws.metadata[WORKERS_KEY][worker.id].pendingWake.state, "interrupted");
+  await supervise.requestQuotaFailover(paseo, ws.id, steers.A.id, "quota exhausted", "codex", deps);
+  assert.equal((await supervise.runFailoverCheck(paseo, scope, { ...deps, force: true })).reason, "paused");
+  assert.equal((await supervise.retryPendingWakeBrief(paseo, scope, deps)).reason, "paused");
+  assert.equal((await supervise.flushScope(paseo, scope, deps)).reason, "paused");
+  assert.equal(sendsTo(world, steers.A.id).length + sendsTo(world, steers.B.id).length, 0);
+
+  stored = { ...stored, paused: false };
+  assert.equal((await supervise.flushScope(paseo, scope, deps)).flushed, true);
+  assert.match(sendsTo(world, steers.A.id)[0], /boot task/);
+});
+
 test("watchdog skips failover while the drain marker is live", async () => {
   const { world, steers } = unansweredWorld();
   world.workspaces[0].metadata[DRAIN_METADATA_KEY] = drainMarker(at(NOW + 10 * MIN));

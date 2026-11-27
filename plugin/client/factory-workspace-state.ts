@@ -2,7 +2,7 @@ import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
 import type { factoryPlan, factoryStatus } from "../shared/factory.js";
 import { parseFactoryArgs } from "../shared/factory-args.js";
 import { modelDisplayName } from "../shared/model-label.js";
-import { resetSteerBlock } from "./steer-menu.js";
+import { steerQuotaConfirmation, resetSteerBlock } from "./steer-menu.js";
 import type { SteerPillRow } from "./steer-pill.js";
 
 export type WorkspaceStatus = RpcOutput<typeof factoryStatus>;
@@ -64,7 +64,8 @@ export function steerActionEligibility(row: SteerPillRow) {
   const reason = resetSteerBlock(row);
   return {
     reset: reason,
-    resume: reason ?? (row.state === "needs-resume" ? null : "No recovery pending"),
+    resume: reason ?? (steerQuotaConfirmation(row) === "depleted" ? "Quota depleted"
+      : row.state === "needs-resume" ? null : "No recovery pending"),
   };
 }
 

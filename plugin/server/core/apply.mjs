@@ -343,7 +343,7 @@ export async function applyPlans({ authorization, config, confirm, runPlans, exe
 }
 
 /** Real executors. Every write is guarded by a fresh precondition and verified afterwards. */
-export function createExecutors({ client, paseoCli, getZerosub = /** @type {(() => Promise<any>) | null} */ (null), lookupReceipt = /** @type {((kind: string, key: string) => Promise<any>) | null} */ (null), lock = withLock, beforeSteerCreate = null }) {
+export function createExecutors({ client, paseoCli, getZerosub = /** @type {(() => Promise<any>) | null} */ (null), lookupReceipt = /** @type {((kind: string, key: string) => Promise<any>) | null} */ (null), lock = withLock, beforeSteerCreate = null, allowDepletedSteerCreate = null }) {
   function verifyWorktree(workspace, workspaceId, expectation) {
     if (!expectation) return;
     if (!isWorktreeWorkspace(workspace)) throw new Error(`Workspace ${workspaceId} is no longer a worktree workspace; run a new dry-run`);
@@ -406,7 +406,8 @@ export function createExecutors({ client, paseoCli, getZerosub = /** @type {(() 
     const provider = slash < 0 ? spec : spec.slice(0, slash);
     const model = slash < 0 ? null : spec.slice(slash + 1);
     const family = profileFamily({ provider });
-    if (familyExhausted(state, family, { model, exhaustedPct: config?.quota?.exhaustedPct })) {
+    const confirmedReset = steerRole && provider === allowDepletedSteerCreate?.provider && model === allowDepletedSteerCreate?.model;
+    if (!confirmedReset && familyExhausted(state, family, { model, exhaustedPct: config?.quota?.exhaustedPct })) {
       throw new Error(`All ${family} accounts are exhausted for ${model ?? 'this model'}; retry after quota becomes available`);
     }
     if (requireEmptyWorkspace) {

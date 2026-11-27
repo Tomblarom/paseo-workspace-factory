@@ -127,7 +127,7 @@ export function usedProfilesByLiveSteers(config, steers) {
  * the actual account when opening the agent.
  * Accounts and pools use the same `quotaExhaustedPct`.
  */
-export function resolveProfile(config, providerEntries, list, { role = 'worker', advisorSlot = false, usedProfiles = [], repoPublic = /** @type {boolean | null} */ (null), quotaSnapshot = null, quotaExhaustedPct = config?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct, profileHealth = null, now = Date.now(), zerosub = null, liveProviderPrivacy = false, onSkip = /** @type {((index: number, code: string) => void) | null} */ (null) } = {}) {
+export function resolveProfile(config, providerEntries, list, { role = 'worker', advisorSlot = false, usedProfiles = [], repoPublic = /** @type {boolean | null} */ (null), quotaSnapshot = null, quotaExhaustedPct = config?.quota?.exhaustedPct ?? QUOTA_DEFAULTS.exhaustedPct, profileHealth = null, now = Date.now(), zerosub = null, liveProviderPrivacy = false, ignoreQuotaExhaustion = false, onSkip = /** @type {((index: number, code: string) => void) | null} */ (null) } = {}) {
   const skipped = [];
   const used = new Set(usedProfiles ?? []);
   const names = Array.isArray(list) ? list : [];
@@ -150,14 +150,14 @@ export function resolveProfile(config, providerEntries, list, { role = 'worker',
     const family = profileFamily(config.profiles[name]);
     if (zerosub && familyAccounts(zerosub, family).length) {
       const model = config.profiles[name].model ?? null;
-      if (familyExhausted(zerosub, family, { exhaustedPct: quotaExhaustedPct, now, model })) {
+      if (!ignoreQuotaExhaustion && familyExhausted(zerosub, family, { exhaustedPct: quotaExhaustedPct, now, model })) {
         const reset = earliestFamilyReset(zerosub, family, { now, model });
         skip('accounts-exhausted', reset ? `accounts exhausted, earliest reset ${reset}` : 'accounts exhausted');
         continue;
       }
     } else {
       const pool = profilePool(config.profiles[name]);
-      if (quotaExhausted(quotaSnapshot, pool, quotaExhaustedPct, now)) {
+      if (!ignoreQuotaExhaustion && quotaExhausted(quotaSnapshot, pool, quotaExhaustedPct, now)) {
         skip('pool-exhausted', 'pool exhausted');
         continue;
       }

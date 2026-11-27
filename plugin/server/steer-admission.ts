@@ -1,4 +1,4 @@
-import { accountForAgent, earliestResetOf, freshMaxUsedPct, liveAgentPool, QUOTA_DEFAULTS, quotaEntry, quotaExhausted } from "./core/quota.mjs";
+import { accountForAgent, earliestResetOf, freshMaxUsedPct, liveAgentPool, QUOTA_DEFAULTS, quotaEntry, quotaExhausted, quotaPct } from "./core/quota.mjs";
 import { AGENTS_KEY } from "./core/agent-state.mjs";
 import { unsettledAccountMove } from "./core/steer-action.mjs";
 import { LABEL, METADATA_KEY, readPaseoAgents, readPaseoWorkspaces } from "./core/paseo.mjs";
@@ -6,6 +6,7 @@ import { advisorBriefAdmission, isAdvisorSteer, providerIsSensitive, steerPrivac
 import { continuationOrigin, continuedFromId, resolveFactoryLabels } from "./core/zerosub.mjs";
 import { discoveredRepoPublic, steerTitleSlot } from "./core/discovery.mjs";
 import { createGh, getRepo, parseRepoInput } from "./core/github.mjs";
+import type { QuotaConfirmation } from "../shared/factory.js";
 import { getQuotaSampledAt, getQuotaSnapshot } from "./quota.js";
 import { resolveZerosub, type ZerosubSource } from "./zerosub-runtime.js";
 
@@ -102,7 +103,7 @@ export function quotaAdmission(agent: any, entry: any, observed: AdmissionSnapsh
   const model = agent.model ?? null;
   const pool = liveAgentPool(agent, config);
   if (unsettledAccountMove(entry?.action)) {
-    return { allowed: false, pendingMove: true, reason: "account move needs reconciliation",
+    return { allowed: false, pendingMove: true, confirmation: null, reason: "account move needs reconciliation",
       pool, accountId: entry.action.accountMove.fromAccountId ?? null, resetAt: null };
   }
   const pendingRuntimeAccount = zerosub?.pending?.[agent.id];
@@ -110,7 +111,7 @@ export function quotaAdmission(agent: any, entry: any, observed: AdmissionSnapsh
     // ZeroSub's accountId is the destination during a move. The live session
     // still uses pendingAccountId until the reload lands.
     return {
-      allowed: false, pendingMove: true, reason: "account move pending",
+      allowed: false, pendingMove: true, confirmation: null, reason: "account move pending",
       pool, accountId: pendingRuntimeAccount, resetAt: null,
     };
   }
@@ -131,11 +132,11 @@ export function quotaAdmission(agent: any, entry: any, observed: AdmissionSnapsh
   const ownLimit = entry?.quotaLimit ?? (entry?.needsResume?.reason === "limit" ? entry.needsResume : null);
   const limits = [
     ...(ownLimit ? [ownLimit] : []),
-    ...Object.values(entries).map((other: any) => other?.quotaLimit)
-      .filter((limit) => limit && limit !== ownLimit && limit.accountId && limit.accountId === accountId),
-    ...workspaces.flatMap((workspace: any) => Object.values(workspace?.metadata?.[AGENTS_KEY] ?? {}))
+    ...(accountId ? Object.values(entries).map((other: any) => other?.quotaLimit)
+      .filter((limit) => limit && limit !== ownLimit && limit.accountId === accountId) : []),
+    ...(accountId ? workspaces.flatMap((workspace: any) => Object.values(workspace?.metadata?.[AGENTS_KEY] ?? {}))
       .map((other: any) => other?.quotaLimit)
-      .filter((limit: any) => accountId && limit?.accountId === accountId && limit?.provider && limit?.model),
+      .filter((limit: any) => limit?.accountId === accountId && limit?.provider && limit?.model) : []),
   ];
   const hardLimit = limits.some((limit) => {
     let applies = true;
@@ -152,13 +153,25 @@ export function quotaAdmission(agent: any, entry: any, observed: AdmissionSnapsh
     if (healthy && sampledAt && Number.isFinite(failedAt) && sampledAt > failedAt) applies = false;
     return applies;
   });
+  const poolEntry = quotaEntry(snapshot, pool);
+  const known = accountId ? accountPct !== null : quotaPct(poolEntry) !== null ||
+    Number.isFinite(poolEntry?.weeklyPct) || poolEntry?.unlimited === true;
+  const confirmation: QuotaConfirmation | null = exhausted || hardLimit ? "depleted" : known ? null : "unknown";
   return {
+    confirmation,
     allowed: !exhausted && !hardLimit,
     pendingMove: false,
     reason: hardLimit ? "provider limit" : exhausted ? "quota exhausted" : null,
     pool, accountId,
     resetAt: earliestResetOf(account ? [account] : [], { now, model }),
   };
+}
+
+/** Activation needs consent for the currently observed quota condition. */
+export function activationQuotaAdmission(admission: ReturnType<typeof quotaAdmission>, confirmed?: QuotaConfirmation) {
+  if (admission.pendingMove || !admission.confirmation) return admission;
+  if (admission.confirmation === confirmed) return { ...admission, allowed: true, reason: null };
+  return { ...admission, allowed: false, reason: admission.reason ?? "quota is unknown and needs confirmation" };
 }
 
 /** Standalone effect-time admission deliberately never reuses a planning snapshot. */

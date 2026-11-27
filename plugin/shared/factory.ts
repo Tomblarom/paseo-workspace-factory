@@ -200,12 +200,16 @@ export const factorySwitch = defineRpc({
   }),
 });
 
+export const quotaConfirmation = z.enum(["unknown", "depleted"]);
+export type QuotaConfirmation = z.infer<typeof quotaConfirmation>;
+
 export const factorySteerActivate = defineRpc({
   name: "factory.steer.activate",
   input: z.object({
     workspaceId: z.string().min(1),
     agentId: z.string().min(1),
     epoch: z.number().int().nonnegative(),
+    confirmQuota: quotaConfirmation.optional(),
   }).strict(),
   output: z.object({
     status: z.enum(["sent", "pending", "blocked"]),
@@ -354,6 +358,7 @@ export const factoryFreshPreview = defineRpc({
     workspaceId: z.string().min(1).optional(),
     /** Skip in-place rewind and leave the original chat intact. */
     keepChatHistory: z.boolean().optional(),
+    resetQuota: z.enum(["available", "unknown", "depleted"]).optional(),
   }),
   output: z.looseObject({
     repo: z.string(),
@@ -390,6 +395,7 @@ export const factoryFresh = defineRpc({
     workspaceId: z.string().min(1).optional(),
     /** Skip in-place rewind and leave the original chat intact. */
     keepChatHistory: z.boolean().optional(),
+    resetQuota: z.enum(["available", "unknown", "depleted"]).optional(),
     fingerprint: z.string().min(1),
     /** "stage" applies without sending; the packet is staged for later delivery. */
     deliver: z.enum(["send", "stage"]).optional(),
@@ -835,6 +841,7 @@ const resourceQuota = z.object({
   providerLabel: z.string(),
   alias: z.string(),
   limited: z.boolean(),
+  quotaConfirmation: quotaConfirmation.nullable().optional(),
   limitedUntil: z.string().nullable(),
   sampledAt: z.string().nullable(),
   quotaKind: z.enum(["api", "subscription", "reported", "unknown"]),

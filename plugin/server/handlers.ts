@@ -94,7 +94,7 @@ import {
 import { daemonHost, runtime } from "./core/runtime.mjs";
 import { applyResume } from "./resume-apply.js";
 import { deliverSteer, finishSteerDelivery, type SteerDeliveryDeps } from "./steer-delivery.js";
-import { readAdmissionSnapshot, readPrivacyAdmission, scopePublic, steerQuotaAdmission } from "./steer-admission.js";
+import { activationQuotaAdmission, readAdmissionSnapshot, readPrivacyAdmission, scopePublic, steerQuotaAdmission } from "./steer-admission.js";
 import { hasActiveAgentWork } from "./agent-context.js";
 import { defaultPickAddress, listScopes, scopeToEntry } from "./core/scope.mjs";
 import { AGENTS_KEY } from "./core/agent-state.mjs";
@@ -426,6 +426,10 @@ async function freshPolicy(paseo: any, loader: ConfigLoader, deps: FreshDeps | u
 async function freshRpcOptions(input: FreshInput, paseo: any, loader: ConfigLoader, deps?: FreshDeps) {
   const found = await discoverOne(paseo, loader, input.repo, input.workspaceId, input.workerId);
   const { config, discovery } = found;
+  if (input.resetQuota !== undefined && (!input.slot || input.workerId)) {
+    throw new Error("Reset Steer requires a steer slot.");
+  }
+  const allowDepletedReset = input.resetQuota === "depleted";
   const policy = await freshPolicy(paseo, loader, deps, discovery, config);
   const options: any = {
     client: paseo, discovery, config, slot: input.slot ?? null, workerId: input.workerId ?? null,
@@ -433,12 +437,27 @@ async function freshRpcOptions(input: FreshInput, paseo: any, loader: ConfigLoad
     ...(input.keepChatHistory === true ? { requireRefreshMode: "new-agent" } : {}),
     git: createGit(), rewindClient: deps?.rewindClient ?? defaultCreateRewindClient,
     promptOptions: await loader.loadPromptOptions(paseo), admitTarget: freshPrivacyReader(paseo, loader, deps),
-    quotaSnapshot: policy.quotaSnapshot, zerosub: policy.zerosub, repoPublic: policy.repoPublic,
-    readPolicy: () => freshPolicy(paseo, loader, deps, discovery),
+    quotaSnapshot: policy.quotaSnapshot, zerosub: policy.zerosub, repoPublic: policy.repoPublic, allowDepletedReset,
+    readPolicy: async () => ({ ...await freshPolicy(paseo, loader, deps, discovery), allowDepletedReset }),
     lookupReceipt: deps?.lookupFreshReceipt ?? lookupCreationReceipt,
     ...(deps?.lock ? { lock: deps.lock } : {}),
   };
   return { ...found, options };
+}
+
+async function confirmResetQuota(
+  input: FreshInput, sourceId: unknown, found: Awaited<ReturnType<typeof freshRpcOptions>>, paseo: any, deps?: FreshDeps,
+) {
+  if (input.resetQuota === undefined) return null;
+  const source = found.snapshot.agents.find((agent: any) => agent.id === sourceId);
+  if (!source) throw new Error("Reset Steer source is unavailable.");
+  const entries = found.discovery.mainWorkspace.metadata?.[AGENTS_KEY] ?? {};
+  const quota = await steerQuotaAdmission(source, entries[source.id], { ...deps, paseo, getConfig: async () => found.config }, entries);
+  if (quota.pendingMove) throw new Error("Reset Steer waits for the account move to settle.");
+  if ((quota.confirmation ?? "available") !== input.resetQuota) {
+    throw new Error("Something changed since the Reset Steer confirmation. Review the current quota and confirm again.");
+  }
+  return source;
 }
 
 export async function previewFresh(
@@ -447,8 +466,10 @@ export async function previewFresh(
   loader: ConfigLoader,
   deps?: FreshDeps,
 ): Promise<any> {
-  const { scope, deprecatedAlias, options } = await freshRpcOptions(input, paseo, loader, deps);
-  const dry: any = await freshSteer(options);
+  const found = await freshRpcOptions(input, paseo, loader, deps);
+  const dry: any = await freshSteer(found.options);
+  await confirmResetQuota(input, dry.from, found, paseo, deps);
+  const { scope, deprecatedAlias } = found;
   return {
     repo: dry.repo,
     workspaceId: dry.workspaceId,
@@ -519,7 +540,8 @@ export async function applyFresh(
   loader: ConfigLoader,
   deps?: FreshDeps,
 ): Promise<any> {
-  const { discovery, options: dryOptions } = await freshRpcOptions(input, paseo, loader, deps);
+  const found = await freshRpcOptions(input, paseo, loader, deps);
+  const { discovery, options: dryOptions } = found;
   const confirmPreview = (candidate: any) => {
     if (freshFingerprint(freshIdentityOf(candidate)) !== input.fingerprint) {
       throw new Error("Something changed since the Fresh preview. Open the preview again and confirm the new route.");
@@ -527,16 +549,21 @@ export async function applyFresh(
   };
   const dry: any = await freshSteer(dryOptions);
   confirmPreview(dry);
+  const resetSource = await confirmResetQuota(input, dry.from, found, paseo, deps);
+  const allowDepletedSteerCreate = input.resetQuota === "depleted" && resetSource?.provider === dry.provider &&
+    resetSource?.model === dry.model ? { provider: dry.provider, model: dry.model } : null;
   const lookupReceipt = deps?.lookupFreshReceipt ?? lookupCreationReceipt;
   // CLI resolution is lazy for rewind, which never retires a tab.
   const paseoCli: ReturnType<typeof createPaseoCli> = deps?.freshPaseoCli ?? ((args) => createPaseoCli()(args));
+  const stage = input.deliver === "stage" || input.resetQuota === "unknown" || input.resetQuota === "depleted";
   const applyOptions: any = {
     ...dryOptions, apply: true, confirmPreview,
-    send: input.deliver !== "stage",
-    stageRewind: input.deliver === "stage",
-    notifyPrevious: input.notifyPrevious !== false,
+    send: !stage,
+    stageRewind: stage,
+    notifyPrevious: input.notifyPrevious !== false && (!input.resetQuota || input.resetQuota === "available"),
     lookupReceipt, paseoCli,
-    execute: (createExecutors as any)({ client: paseo, paseoCli, getZerosub: () => resolveZerosub(deps ?? {}), lookupReceipt }),
+    execute: (createExecutors as any)({ client: paseo, paseoCli, getZerosub: () => resolveZerosub(deps ?? {}),
+      lookupReceipt, allowDepletedSteerCreate }),
     requireRefreshMode: dry.refreshMode,
   };
   let applied: any;
@@ -568,7 +595,7 @@ export async function applyFresh(
       packet: applied.packet,
       kind: "fresh",
       epoch: applied.epoch,
-      deliver: input.deliver,
+      deliver: stage ? "stage" : input.deliver,
       deliveryError: applied.deliveryError,
     }, deps);
   // Keep the packet in Factory state if the destination changed during Fresh.
@@ -883,7 +910,7 @@ export function activateSteer(
   loader: ConfigLoader,
   delivery?: SteerDeliveryDeps,
 ): Promise<ActivationResult> {
-  const key = JSON.stringify([input.workspaceId, input.agentId, input.epoch]);
+  const key = JSON.stringify([input.workspaceId, input.agentId, input.epoch, input.confirmQuota]);
   const pending = pendingActivations.get(key);
   if (pending) return pending;
   // A pill can remount while activation is in progress. Both callers should
@@ -912,7 +939,7 @@ async function applySteerActivation(
   if (live.id !== agentId || live.background || isAdvisorSteer(config, live.labels, live.metadata)) {
     throw new Error("Only a live coordinator steer can be activated in its own tab.");
   }
-  const deps = { ...delivery, getConfig: () => loader.loadEffectiveConfig(),
+  const deps = { ...delivery, confirmActivationQuota: input.confirmQuota, getConfig: () => loader.loadEffectiveConfig(),
     buildBrief: delivery?.buildBrief ?? createResumeBriefBuilder(loader, delivery) };
   const entries = discovery.mainWorkspace.metadata?.[AGENTS_KEY] ?? {};
   const receipt = readSteerAction(entries[agentId]);
@@ -935,7 +962,8 @@ async function applySteerActivation(
         if (holder && hasActiveAgentWork(holder, entries[holder.id])) {
           throw new Error("The active steer is busy. Resolve any permission request or stop its turn before activating this steer.");
         }
-        const quota = await steerQuotaAdmission(target, entries[target.id], { ...deps, paseo }, entries);
+        const observed = await steerQuotaAdmission(target, entries[target.id], { ...deps, paseo }, entries);
+        const quota = activationQuotaAdmission(observed, input.confirmQuota);
         if (!quota.allowed) throw new Error(`This steer cannot be activated: ${quota.reason}.`);
       },
     },
@@ -1019,6 +1047,9 @@ export async function applySwitch(
     notifyPrevious: input.notifyPrevious === true,
     wait: input.wait === true,
     callerId,
+    checkSelfTakeover: async () => {
+      if (await delivery?.isFactoryPaused?.()) throw new Error("Factory is paused. Activate this steer from its tab.");
+    },
     language,
     workerModel,
     git,

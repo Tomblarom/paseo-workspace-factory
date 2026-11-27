@@ -431,7 +431,7 @@ async function runTurnHook(payload: TurnPayload, paseo: any, deps: TurnHookDeps)
   // handled after the write, once the brief is sent): a failed steer turn
   // flags, a completed turn clears. Cleanup turns of our own never flag.
   let needsResumePatch: Record<string, unknown> | null = null;
-  if (!isCleanupTurn && kind === "completed" && previous?.needsResume) {
+  if (!isCleanupTurn && kind === "completed" && (previous?.needsResume || previous?.quotaLimit)) {
     needsResumePatch = { needsResume: null, quotaLimit: null };
   } else if (!isCleanupTurn && kind === "failed") {
     const flagged = needsResumeForFailedTurn({

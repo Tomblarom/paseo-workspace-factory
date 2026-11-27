@@ -26,12 +26,14 @@ import { FactorySidebarItem } from "./client/factory-sidebar-item.js";
 import { submitFactoryCommand } from "./client/factory-submit.js";
 import { dismissFactoryResultPill, showFactoryResultPill } from "./client/result-pill.js";
 import { FactorySettings } from "./client/settings-factory.js";
+import { ActivateSteer } from "./client/activate-steer.js";
 import { ResetSteerPopover } from "./client/steer-menu-content.js";
 import {
   activationMenuBehavior,
   describeSteerMenu,
   handoverSteer,
   menuKeyFor,
+  quotaConfirmationText,
   transferStagedBrief,
   type InitializeNewSteer,
 } from "./client/steer-menu.js";
@@ -77,8 +79,14 @@ function buildSteerMenuBehavior(
     if (entry.kind === "separator") return entry;
     const item = { kind: "item" as const, id: entry.id, title: entry.title, icon: entry.icon, disabled: entry.disabled };
     switch (entry.kind) {
-      case "activate":
-        return { ...item, behavior: activationMenuBehavior(row, entry.activationEpoch, actions.activate) };
+      case "activate": {
+        const condition = entry.quotaConfirmation;
+        if (!condition) return { ...item, behavior: activationMenuBehavior(row, entry.activationEpoch, actions.activate) };
+        return { ...item, behavior: { kind: "popover", Content: (props) => props.context === "agent" && (
+          <ActivateSteer {...props} epoch={entry.activationEpoch} alternatives={entry.activationAlternatives}
+            quota={{ condition, text: quotaConfirmationText(condition, row) }} />
+        ) } };
+      }
       case "handover":
         return { ...item, behavior: entry.disabled ? { kind: "action", onPress: () => {} } : {
           kind: "menu",
