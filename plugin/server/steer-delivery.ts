@@ -1155,7 +1155,7 @@ export async function deliverSteer(
     if (!activation && !text) return blocked("The steer delivery has no message.");
     if (!await staleBatchStillValid(paseo, input.batch)) return deferred("Worker events changed while preparing delivery.");
     let batch = input.batch;
-    if (batch && !(existing?.phase === "reserved" && existing.accountMove)) {
+    if (batch && !(existing?.phase === "reserved" && (existing.accountMove || isAutomaticActivation(existing)))) {
       const source = (await paseo.workspaces.ref(batch.workspaceId).refresh())?.metadata ?? {};
       batch = { ...batch, events: batch.events.map((event) => ({ ...event, queuedAt: source[WORKERS_KEY]?.[event.workerId]?.pendingWake?.queuedAt ?? null })) };
     }
@@ -1201,6 +1201,7 @@ export async function deliverSteer(
   }
   const original = existing?.epoch === (scope.epoch ?? null) ? existing : null;
   const eventBatch = input.batch ?? original?.batch;
+  const renewalNote = input.renewalNote ?? input.text ?? original?.note ?? "";
   const pending: PendingSteerDelivery = {
     wakeId: input.actionId ?? randomUUID(),
     ...(activation ? { kind: "activate" } : {}),
@@ -1209,8 +1210,8 @@ export async function deliverSteer(
     phase: "renewing",
     queuedAt: existing?.phase === "reserved" ? existing.queuedAt : at,
     epoch: typeof scope.epoch === "number" ? scope.epoch : null,
-    note: existing?.assignment ? (existing.phase === "reserved" ? existing.packet ?? "" : input.renewalNote ?? input.text ?? original?.note ?? "") :
-      (input.renewalNote ?? input.text ?? original?.note ?? "").slice(0, 1500),
+    note: existing?.assignment && existing.phase === "reserved" ? existing.packet ?? "" :
+      existing?.assignment || (activation && eventBatch) ? renewalNote : renewalNote.slice(0, 1500),
     ...(eventBatch ? { batch: eventBatch } : {}),
     needsResumeAt,
     ...(input.sendOptions ? { sendOptions: input.sendOptions } : {}),
@@ -1253,7 +1254,7 @@ export async function deliverSteer(
   // yet. Persist those events in the register before starting renewal.
   const batch = pending.batch;
   try {
-    if (batch && !batch.takeover && !pending.accountMove) {
+    if (batch && !batch.takeover && !pending.accountMove && !isAutomaticActivation(pending)) {
       for (const event of batch.events) {
         await markWorker({
           client: paseo, workspaceId: batch.workspaceId, workerId: event.workerId, lock,
@@ -1263,7 +1264,7 @@ export async function deliverSteer(
         });
       }
     }
-    if (batch && !pending.accountMove) {
+    if (batch && !pending.accountMove && !isAutomaticActivation(pending)) {
       const source = (await paseo.workspaces.ref(batch.workspaceId).refresh())?.metadata ?? {};
       pending.batch = { ...batch, events: batch.events.map((event) => ({ ...event, queuedAt: source[WORKERS_KEY]?.[event.workerId]?.pendingWake?.queuedAt ?? null })) };
       if (!await replacePending(paseo, input, lock, pending, { action: pending })) return deferred("Steer state changed while recording worker events.");

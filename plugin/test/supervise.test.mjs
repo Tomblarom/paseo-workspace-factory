@@ -943,10 +943,12 @@ test("a due worker wake activates a standby when the active slot is vacant", asy
   assert.equal(ws.metadata[METADATA_KEY].activeAgentId, steers.B.id);
   assert.equal(ws.metadata[METADATA_KEY].epoch, 4);
   assert.equal(worker.labels[PARENT_LABEL], steers.B.id);
-  assert.deepEqual(ws.metadata[WORKERS_KEY][worker.id].pendingWake, pendingWake);
+  assert.equal(ws.metadata[WORKERS_KEY][worker.id].pendingWake, null);
   assert.equal(sendsTo(world, steers.A.id).length, 0);
   assert.equal(sendsTo(world, steers.B.id).length, 1);
+  assert.match(sendsTo(world, steers.B.id)[0], /deliver result\): result reported/);
   assert.equal((await supervise.retryPendingWakeBrief(paseo, scope, deps)).delivered, false);
+  assert.equal((await supervise.sendScopeWake(paseo, { scope }, deps)).reason, "no-events");
 });
 
 test("a vacant-slot wake leaves authority and the report intact when membership or due work changes", async () => {
@@ -971,6 +973,28 @@ test("a vacant-slot wake leaves authority and the report intact when membership 
     assert.equal(ws.metadata[METADATA_KEY].epoch, 3, race);
     assert.equal(world.calls.length, 0, race);
   }
+});
+
+test("vacant-slot continuation preserves a newer worker event during acknowledgement", async () => {
+  const { world, ws, steers, worker } = unansweredWorld();
+  steers.A.archivedAt = at(NOW - MIN);
+  const pendingWake = { state: "done", queuedAt: at(NOW - MIN) };
+  const newer = { ...pendingWake, queuedAt: at(NOW + MIN) };
+  ws.metadata[WORKERS_KEY][worker.id] = entry("done", "deliver result", { pendingWake });
+  const scope = { id: REPO, workspaceId: ws.id };
+  const paseo = fakeClient(world);
+  const ref = paseo.agents.ref;
+  paseo.agents.ref = (id) => {
+    const handle = ref(id);
+    return { ...handle, async send(text) {
+      await handle.send(text);
+      ws.metadata[WORKERS_KEY][worker.id].pendingWake = newer;
+    } };
+  };
+  const first = await supervise.sendScopeWake(paseo, { scope }, failoverDeps(world));
+  assert.equal(first.sent, true);
+  assert.equal(sendsTo(world, steers.B.id).length, 1);
+  assert.deepEqual(ws.metadata[WORKERS_KEY][worker.id].pendingWake, newer);
 });
 
 test("a cold successor holds authority during renewal and receives its continuation once", async () => {

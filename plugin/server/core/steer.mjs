@@ -980,7 +980,7 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
     const liveTarget = scopeHolder({ agents, workspaceId: status.workspace.id, scopeId: expected.scope?.id ?? status.repo, slot: toSlot, aliases: discoveryScopeAliases(discovery) });
     if (isAdvisorSteer(config, liveTarget.labels, liveTarget.metadata)) throw new SwitchRefused(`Steer ${toSlot} is an advisor and cannot coordinate`);
     if (liveTarget.id !== to.id || (!selfTakeover && (BUSY.has(liveTarget.status) || liveTarget.activeTurn))) throw new SwitchRefused(`Steer ${toSlot} changed or is running; rerun the switch`);
-    if (activation) await activation.check({ target: liveTarget, holder, entries, metadata });
+    const wake = await activation?.check({ target: liveTarget, holder, entries, metadata });
     const admission = admitTarget ? await admitTarget(liveTarget) : steerPrivacyAdmission(config, liveTarget, discoveredRepoPublic(discovery));
     if (!admission.allowed) throw new SwitchRefused(`Steer ${toSlot} cannot receive a handoff: ${admission.reason}.`);
     if (callerId && !selfTakeover) {
@@ -1000,8 +1000,10 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
         throw new SwitchRefused('Target has a pending steer delivery; finish it before switching');
       }
       switchAction = newSteerAction({ kind: activation ? 'activate' : stage ? 'stage' : 'switch', epoch: next.epoch, at: next.switchedAt,
-        text: activation ? undefined : packet, note: `Handoff from Steer ${fromInfo.slot} to Steer ${toSlot} in round ${next.epoch}.` +
-          (failover?.note ? `\n${failover.note}` : ''), phase: stage ? 'staged' : 'reserved' });
+        text: activation ? undefined : packet,
+        note: [`Handoff from Steer ${fromInfo.slot} to Steer ${toSlot} in round ${next.epoch}.`, failover?.note, wake?.note].filter(Boolean).join('\n'),
+        ...(wake ? { batch: { workspaceId: status.workspace.id, epoch: next.epoch, events: wake.events } } : {}),
+        phase: stage ? 'staged' : 'reserved' });
       if (activation) switchAction.routing = { intent: failover ? { mode: 'automatic' } : { mode: 'explicit', agentId: to.id,
         provider: liveTarget.provider, model: liveTarget.model ?? undefined } };
       switchAction.needsResumeAt = targetEntry?.needsResume?.at ?? null;
@@ -1057,7 +1059,7 @@ export async function switchSteer({ client, discovery, toSlot, apply = false, se
       if (deliverSteer) {
         const outcome = await deliverSteer({
           workspaceId: status.workspace.id, agentId: to.id, epoch: result.epoch, text: packet, actionId: switchAction.wakeId,
-          renewalNote: switchAction.note,
+          renewalNote: switchAction.note, ...(switchAction.batch ? { batch: switchAction.batch } : {}),
         });
         result.delivered = outcome.status === 'sent';
         deliveryId = outcome.deliveryId ?? null;

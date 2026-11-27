@@ -1573,10 +1573,6 @@ export async function runFailoverCheck(
                 throw new ST.SwitchRefused("The unanswered wake changed before failover");
               }
             }
-            if (deps.failingAgentId === null &&
-                !(await filterStaleWorkerEvents(paseo, metadata, collectPendingWakes(readWorkers(metadata)))).length) {
-              throw new ST.SwitchRefused("No worker wake remains due");
-            }
             const [observed, liveTarget, liveHolder] = await Promise.all([
               readAdmissionSnapshot(admissionDeps, workspaces),
               refreshAgent(paseo, target.id),
@@ -1605,6 +1601,12 @@ export async function runFailoverCheck(
             if (!liveSettings?.enabled || liveSettings.paused || await supervisionQuiet(paseo, [mainId], deps)) {
               throw new ST.SwitchRefused("Supervision is disabled or quiet");
             }
+            if (deps.failingAgentId !== null) return;
+            const events = await filterStaleWorkerEvents<WakeEvent>(paseo, metadata, collectPendingWakes(readWorkers(metadata)));
+            if (!events.length) throw new ST.SwitchRefused("No worker wake remains due");
+            const workerNames = Object.fromEntries(paseoState.agents.map((agent: any) => [agent.id, agent.title]));
+            const note = formatWakeMessage({ events, metadata, workerNames, maxAutoResumes: liveSettings.maxAutoResumes });
+            return { events, note };
           },
         },
         deliverSteer: (input: Parameters<typeof deliverSteer>[1]) => deliverSteer(paseo, input, delivery),
