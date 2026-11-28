@@ -189,7 +189,7 @@ test('scope-only Steer E in a PR worktree is discovered and receives handover is
   assert.deepEqual(prStatus.steers.map((s) => `${s.slot}:${s.id}`), [`A:${prA.id}`, `E:${prE.id}`]);
 
   const mainTarget = resolveTargetEntry('mqb_contitool', paseoState);
-  assert.deepEqual(mainTarget.entry, { local: mainWs.workspaceDirectory });
+  assert.deepEqual(mainTarget.entry, { local: mainWs.workspaceDirectory, workspaceId: mainWs.id });
   const mainDiscovery = discoverRepository(mainTarget.entry, {
     config: CONFIG, gh: null, git: null, checkouts: [], paseo: paseoState, realpath: (p) => p, existsDir: () => true,
   });

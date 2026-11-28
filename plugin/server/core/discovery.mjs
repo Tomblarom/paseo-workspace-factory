@@ -734,7 +734,7 @@ function discoverLocal(normalized, { config, checkouts, paseo, realpath, existsD
   }
   const input = normalized.local ?? normalized.repo;
   const parentDir = normalized.parentDir;
-  const workspaceAt = (path) => paseo.workspaces.filter((w) => !isWorktreeWorkspace(w) && real(w.workspaceDirectory, realpath) === path);
+  const workspaceAt = (path) => paseo.workspaces.filter((w) => !isWorktreeWorkspace(w) && w.metadata?.[METADATA_KEY]?.scope?.kind !== 'workspace' && real(w.workspaceDirectory, realpath) === path);
   const isMain = (w) => w.metadata?.[METADATA_KEY]?.main === true || MAIN_TITLE.test((w.title ?? w.name ?? '').trim());
 
   let localPath = normalized.local ?? null;
@@ -903,7 +903,7 @@ export function discoverRepository(entry, { config, gh, git, checkouts, paseo, r
   const repoName = forkName ? forkName.split('/')[1] : null;
   const expectedPath = repoName ? join(parentDir, repoName) : null;
 
-  const workspaceAt = (path) => paseo.workspaces.filter((w) => !isWorktreeWorkspace(w) && real(w.workspaceDirectory, realpath) === path);
+  const workspaceAt = (path) => paseo.workspaces.filter((w) => !isWorktreeWorkspace(w) && w.metadata?.[METADATA_KEY]?.scope?.kind !== 'workspace' && real(w.workspaceDirectory, realpath) === path);
   const { exact, related } = classifyCheckouts(checkouts, { fork: forkName, upstream: github.upstream?.fullName, source: github.source?.fullName });
 
   const isMain = (w) => w.metadata?.[METADATA_KEY]?.main === true || MAIN_TITLE.test((w.title ?? w.name ?? '').trim());

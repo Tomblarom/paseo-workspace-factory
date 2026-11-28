@@ -139,9 +139,9 @@ function looksLikePath(raw) {
 export function keyOfAddress(address) {
   if (typeof address === 'string') return address;
   if (address && typeof address === 'object') {
-    if (typeof address.local === 'string') return address.local;
     if (typeof address.workspace === 'string') return `workspace:${address.workspace}`;
     if (typeof address.workspaceId === 'string') return `workspace:${address.workspaceId}`;
+    if (typeof address.local === 'string') return address.local;
     if (typeof address.repo === 'string') return address.repo;
   }
   return null;
@@ -215,7 +215,7 @@ export function resolveScope(address, paseoState) {
  */
 export function scopeToEntry(scope) {
   if (scope.kind === 'github') return scope.locator;
-  if (scope.kind === 'dir') return { local: scope.directory ?? scope.locator };
+  if (scope.kind === 'dir') return { local: scope.directory ?? scope.locator, ...(scope.workspaceId ? { workspaceId: scope.workspaceId } : {}) };
   if (scope.kind === 'workspace') return { workspace: scope.workspaceId ?? scope.locator };
   const locator = scope.directory ?? scope.locator ?? scope.workspaceId;
   return /^wks_[A-Za-z0-9]+$/.test(String(locator ?? '')) ? { workspace: locator } : { local: locator };

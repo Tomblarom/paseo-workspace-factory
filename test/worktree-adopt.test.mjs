@@ -418,6 +418,13 @@ test('unknown workspace ids conflict, while local non-worktree workspaces enroll
   assert.ok(planned.ops.some((op) => op.params?.agentId === 'steer-kamera-c'));
   assert.ok(!planned.ops.some((op) => op.params?.agentId === 'steer-main-a'));
   assert.equal(ghCalls(world).length, 0);
+
+  // Once enrolled, resolving the sibling dir scope by scope id stays unambiguous and isolated.
+  shared.metadata[METADATA_KEY] = adoptOp.params.metadata[METADATA_KEY];
+  const [mainDiscovered] = await runnerFor(world).discoverAll(['caddy2k-archive']);
+  const [sharedDiscovered] = await runnerFor(world).discoverAll(['kamera-recherche']);
+  assert.equal(mainDiscovered.mainWorkspace?.id, mainWs.id);
+  assert.equal(sharedDiscovered.mainWorkspace?.id, shared.id);
 });
 
 test('apply adopts the worktree with fakes and creates no project or workspace', async () => {
