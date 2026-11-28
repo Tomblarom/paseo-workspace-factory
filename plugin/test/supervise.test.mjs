@@ -1312,6 +1312,25 @@ test("concurrent automatic plans from one epoch commit a single controller and c
   assert.equal(sendsTo(world, steers.B.id).length, 1);
 });
 
+test("local failover triggered by pendingWake delivers the wake in the handoff and clears pendingWake", async () => {
+  const { world, ws, steers, worker } = unansweredWorld();
+  const queuedAt = at(NOW - MIN);
+  ws.metadata[WORKERS_KEY][worker.id].pendingWake = { state: "done", queuedAt };
+  ws.metadata[AGENTS_KEY][steers.A.id].quotaLimit = { at: at(NOW - MIN), provider: "codex", model: "m" };
+  const result = await supervise.runFailoverCheck(fakeClient(world), { id: REPO, workspaceId: ws.id }, failoverDeps(world, {
+    force: true,
+    failingAgentId: steers.A.id,
+    quotaTrigger: {},
+    failoverReason: "provider limit for pool (codex)",
+  }));
+  assert.equal(result.action, "failover");
+  assert.equal(ws.metadata[METADATA_KEY].activeAgentId, steers.B.id);
+  assert.equal(sendsTo(world, steers.A.id).length, 0);
+  assert.equal(sendsTo(world, steers.B.id).length, 1);
+  assert.match(sendsTo(world, steers.B.id)[0], /result reported/i);
+  assert.equal(ws.metadata[WORKERS_KEY][worker.id].pendingWake, null);
+});
+
 test("local failover selects an executable route and preserves pending target operations", async () => {
   for (const unavailable of ["staged brief", "cleanup", "duplicate slot"]) {
     const { world, ws, steers } = unansweredWorld();

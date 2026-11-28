@@ -1821,9 +1821,11 @@ export async function runFailoverCheck(
             if (!liveSettings?.enabled || liveSettings.paused || await supervisionQuiet(paseo, [mainId], deps)) {
               throw new ST.SwitchRefused("Supervision is disabled or quiet");
             }
-            if (deps.failingAgentId !== null) return;
             const events = await filterStaleWorkerEvents<WakeEvent>(paseo, metadata, collectPendingWakes(readWorkers(metadata)));
-            if (!events.length) throw new ST.SwitchRefused("No worker wake remains due");
+            if (!events.length) {
+              if (deps.failingAgentId === null) throw new ST.SwitchRefused("No worker wake remains due");
+              return;
+            }
             const workerNames = Object.fromEntries(paseoState.agents.map((agent: any) => [agent.id, agent.title]));
             const note = formatWakeMessage({ events, metadata, workerNames, maxAutoResumes: liveSettings.maxAutoResumes });
             return { events, note };
