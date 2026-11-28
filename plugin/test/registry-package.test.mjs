@@ -239,3 +239,28 @@ for (const [definition, values] of [
   test(`${definition.id} v1 retains user values when reopened after an update`, (t) =>
     verifyStoredSettings(t, definition, 1, 1, values, values));
 }
+
+test("bundled plugin TypeScript sources avoid static @getpaseo/client imports", async () => {
+  const roots = [
+    join(pluginDir, "index.server.ts"),
+    join(pluginDir, "index.client.tsx"),
+    join(pluginDir, "server"),
+    join(pluginDir, "client"),
+    join(pluginDir, "shared"),
+  ];
+  const offenders = [];
+  const visit = async (entry) => {
+    const info = await stat(entry);
+    if (info.isDirectory()) {
+      for (const name of await readdir(entry)) await visit(join(entry, name));
+      return;
+    }
+    if (!/\.(ts|tsx)$/.test(entry)) return;
+    const text = await readFile(entry, "utf8");
+    if (/^\s*import\b[^;\n]*["']@getpaseo\/client(?:\/[^"']*)?["']/m.test(text)) {
+      offenders.push(entry);
+    }
+  };
+  for (const root of roots) await visit(root);
+  assert.deepEqual(offenders, []);
+});

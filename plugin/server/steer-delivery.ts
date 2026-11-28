@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as wait } from "node:timers/promises";
-import type { PaseoAgentTimelineHandle, PaseoAgentTimelineSubscription } from "@getpaseo/client";
 import { AGENTS_KEY } from "./core/agent-state.mjs";
 import { readSteerAction, readCleanupAction, readEffectReceipt, effectReceiptKey, unsettledAccountMove, admittedAccountMoveReplan, actionEntry, newSteerAction, reconcileSteerSend } from "./core/steer-action.mjs";
 import { reconcileSteerAccountMove } from "./core/steer-account-move.mjs";
@@ -30,6 +29,8 @@ import {
 import type { QuotaConfirmation } from "../shared/factory.js";
 
 type Lock = (name: string, fn: (held: { verify: () => void }) => Promise<any>) => Promise<any>;
+type AgentTimelineSubscription = (() => void) & { ready: Promise<void> };
+type AgentTimelineHandle = { subscribe: (listener: (payload: { event: any }) => void) => AgentTimelineSubscription };
 type Renewal = "clear" | "rewind" | "send";
 type Phase = "renewing" | "ready" | "blocked" | "sent" | "uncertain" | "reserved";
 type WakeEvent = { workerId: string; state: string; queuedAt?: string | null };
@@ -865,10 +866,10 @@ export async function finishSteerDelivery(
           let complete: () => void = () => {};
           const observed = new Promise<void>((resolve) => { complete = resolve; });
           let dispatched = false;
-          let subscription: PaseoAgentTimelineSubscription | null = null;
+          let subscription: AgentTimelineSubscription | null = null;
           try {
             if (!claude) {
-              const timeline: PaseoAgentTimelineHandle = agent.timeline;
+              const timeline: AgentTimelineHandle = agent.timeline;
               subscription = timeline.subscribe(({ event }) => {
                 if (dispatched && event.type === "timeline" && event.item.type === "compaction" &&
                     event.item.status === "completed" && event.item.trigger !== "auto") complete();
