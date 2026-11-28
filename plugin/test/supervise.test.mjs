@@ -1320,6 +1320,7 @@ test("local failover triggered by pendingWake delivers the wake in the handoff a
   const result = await supervise.runFailoverCheck(fakeClient(world), { id: REPO, workspaceId: ws.id }, failoverDeps(world, {
     force: true,
     failingAgentId: steers.A.id,
+    includePendingWakes: true,
     quotaTrigger: {},
     failoverReason: "provider limit for pool (codex)",
   }));

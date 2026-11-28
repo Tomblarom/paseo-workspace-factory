@@ -129,6 +129,7 @@ export interface SuperviseDeps extends SettingsSource, ZerosubSource {
   failingPool?: string | null;
   failoverReason?: string;
   failingAgentId?: string | null;
+  includePendingWakes?: boolean;
   quotaTrigger?: { accountId?: string | null };
   lookupSteerCreation?: typeof paseoCore.lookupCreationReceipt;
 }
@@ -650,6 +651,7 @@ async function deliverScopeWake(paseo: any, args: ScopeWakeInput, deps: Supervis
       quotaTrigger: !activeRow?.advisor && privacy.allowed ? { accountId: admission.accountId } : undefined,
       failingPool: admission.pool,
       failingAgentId: target,
+      includePendingWakes: true,
       failoverReason: activeRow?.advisor === true ? "active steer is advisor-flagged" : privacy.reason ?? `${admission.reason} for ${admission.accountId ? "bound account" : "pool"} (${admission.pool})`,
     });
     if (takeover.action === "failover") {
@@ -1821,6 +1823,7 @@ export async function runFailoverCheck(
             if (!liveSettings?.enabled || liveSettings.paused || await supervisionQuiet(paseo, [mainId], deps)) {
               throw new ST.SwitchRefused("Supervision is disabled or quiet");
             }
+            if (deps.failingAgentId !== null && !deps.includePendingWakes) return;
             const events = await filterStaleWorkerEvents<WakeEvent>(paseo, metadata, collectPendingWakes(readWorkers(metadata)));
             if (!events.length) {
               if (deps.failingAgentId === null) throw new ST.SwitchRefused("No worker wake remains due");
