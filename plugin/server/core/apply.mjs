@@ -13,7 +13,7 @@ import { enrollmentAdoptionProblem, enrollmentHolder, enrollmentRole, enrollment
 import { checkedCreationReceipt, confirmCreationReceipt, lookupCreation, verifySteerPlacement } from './steer-create.mjs';
 import { LABEL, METADATA_KEY, parentOf, readPaseoAgents } from './paseo.mjs';
 import { validScope } from './scope.mjs';
-import { isWorktreeWorkspace, steerTitleSlot } from './discovery.mjs';
+import { activeMarker, isWorktreeWorkspace, markSteerTitle, steerTitleSlot } from './discovery.mjs';
 import { scopeHolder } from './scope-guard.mjs';
 import { familyExhausted, profileFamily } from './quota.mjs';
 import { ACCOUNT_METADATA_KEY, resolveFactoryLabels } from './zerosub.mjs';
@@ -430,6 +430,7 @@ export function createExecutors({ client, paseoCli, getZerosub = /** @type {(() 
     async 'paseo.workspace.metadata'(op, config) {
       const handle = client.workspaces.ref(op.params.workspaceId);
       const initial = op.params.metadata[METADATA_KEY];
+      let activeHolder = null;
       const enroll = async (held) => {
         const before = await handle.refresh();
         if (before?.metadata?.[METADATA_KEY]) throw new Error(`Workspace ${op.params.workspaceId} already carries factory metadata`);
@@ -447,6 +448,7 @@ export function createExecutors({ client, paseoCli, getZerosub = /** @type {(() 
               (providerIsSensitive(config, holder.provider) && op.params.repoPublic !== true)) {
             throw new Error('Initial coordinating holder changed; run a new dry-run');
           }
+          activeHolder = holder;
         }
         held?.verify();
         await handle.setMetadata(op.params.metadata);
@@ -454,7 +456,21 @@ export function createExecutors({ client, paseoCli, getZerosub = /** @type {(() 
         if (after?.main !== true || (initial.activeAgentId && !isDeepStrictEqual(after, initial))) throw new Error('Workspace metadata not verifiable');
         return { workspaceId: op.params.workspaceId };
       };
-      return op.params.holderScopeId ? lock(workspaceLockName(op.params.workspaceId), enroll) : enroll();
+      const result = await (op.params.holderScopeId ? lock(workspaceLockName(op.params.workspaceId), enroll) : enroll());
+      const marker = activeMarker(config);
+      if (paseoCli && marker && initial?.activeSteer && (activeHolder?.id || initial.activeAgentId)) {
+        const id = activeHolder?.id ?? initial.activeAgentId;
+        const currentTitle = activeHolder?.title ?? (await client.agents.ref(id).refresh().catch(() => null))?.agent?.title ?? `Steer ${initial.activeSteer}`;
+        const want = markSteerTitle(currentTitle, marker);
+        if (currentTitle.trim() !== want) {
+          try {
+            paseoCli(['agent', 'update', id, '--name', want]);
+          } catch (error) {
+            result.renameError = error.message;
+          }
+        }
+      }
+      return result;
     },
 
     async 'paseo.workspace.scope'(op) {

@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { validateConfig } from '../plugin/server/core/config.mjs';
 import { STEER_TITLE, STEER_DIGIT_TITLE, ACTIVE_STEER_MARKER, activeMarker, stripActiveMarker, markSteerTitle } from '../plugin/server/core/discovery.mjs';
 import { switchSteer, freshSteer, applyActiveMarker } from '../plugin/server/core/steer.mjs';
+import { createExecutors } from '../plugin/server/core/apply.mjs';
 import { withLock } from '../plugin/server/core/lock.mjs';
 import { LABEL, METADATA_KEY } from '../plugin/server/core/paseo.mjs';
 
@@ -255,4 +256,49 @@ test('marker: applyActiveMarker never throws and skips same-agent pairs', () => 
     mark: { id: 'a', title: 'Steer A', slot: 'A' }, unmark: { id: 'a', title: 'Steer A', slot: 'A' },
   });
   assert.equal(err, 'boom');
+});
+
+// ---------------------------------------------------------------- enrollment
+
+test('marker: workspace enrollment marks the initial active steer tab and stays best-effort on CLI errors', async () => {
+  const world = makeWorld();
+  const ws = { id: 'wks_enroll', projectId: 'prj_1', workspaceDirectory: '/p/demo', workspaceKind: 'local_checkout', title: 'Kamera Recherche', name: 'Kamera Recherche', metadata: {}, createdAt: new Date().toISOString() };
+  const steerC = { id: 'agent-c', status: 'idle', archivedAt: null, title: 'Steer C', provider: 'codex', model: 'gpt-6.2-sol', workspaceId: ws.id, labels: { [LABEL.scope]: 'kamera-recherche', [LABEL.role]: 'steer', [LABEL.slot]: 'C', [LABEL.steerRole]: 'coordinator' } };
+  world.workspaces.push(ws);
+  world.agents.push(steerC);
+
+  const execute = createExecutors({ client: fakeClient(world), paseoCli: fakePaseoCli(world), lock: testLock });
+  const result = await execute({
+    kind: 'paseo.workspace.metadata',
+    params: {
+      workspaceId: ws.id,
+      holderScopeId: 'kamera-recherche',
+      liveHolder: true,
+      repoPublic: false,
+      metadata: { [METADATA_KEY]: { main: true, activeSteer: 'C', activeAgentId: steerC.id, epoch: 1, scope: { id: 'kamera-recherche', kind: 'workspace', locator: ws.id } } },
+    },
+  }, CONFIG);
+  assert.equal(result.workspaceId, ws.id);
+  assert.equal(result.renameError, undefined);
+  assert.deepEqual(world.cli, [['agent', 'update', steerC.id, '--name', '▷ Steer C']]);
+
+  // Best-effort: a failing rename does not fail enrollment.
+  const world2 = makeWorld();
+  const ws2 = { ...structuredClone(ws), id: 'wks_enroll2', metadata: {} };
+  const steerC2 = { ...structuredClone(steerC), id: 'agent-c2', title: 'Steer C', workspaceId: ws2.id };
+  world2.workspaces.push(ws2);
+  world2.agents.push(steerC2);
+  const executeFail = createExecutors({ client: fakeClient(world2), paseoCli: fakePaseoCli(world2, { fail: true }), lock: testLock });
+  const res2 = await executeFail({
+    kind: 'paseo.workspace.metadata',
+    params: {
+      workspaceId: ws2.id,
+      holderScopeId: 'kamera-recherche',
+      liveHolder: true,
+      repoPublic: false,
+      metadata: { [METADATA_KEY]: { main: true, activeSteer: 'C', activeAgentId: steerC2.id, epoch: 1, scope: { id: 'kamera-recherche', kind: 'workspace', locator: ws2.id } } },
+    },
+  }, CONFIG);
+  assert.equal(res2.workspaceId, ws2.id);
+  assert.match(res2.renameError, /daemon unreachable/);
 });

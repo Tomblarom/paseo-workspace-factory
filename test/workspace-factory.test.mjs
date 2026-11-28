@@ -1973,7 +1973,8 @@ test('explicit bootstrap adopts the first eligible coordinator and resumes after
   assert.equal(resumed.report[0].status, 'complete', resumed.report[0].error);
   assert.equal(ws.metadata[METADATA_KEY].activeAgentId, coordinator.id);
   assert.equal(world.agents.length, 3);
-  assert.equal(world.calls.filter((call) => call[0] === 'paseo' && call[2] === 'update').length, 3);
+  assert.equal(world.calls.filter((call) => call[0] === 'paseo' && call[2] === 'update' && call[4] === '--label').length, 3);
+  assert.equal(world.calls.filter((call) => call[0] === 'paseo' && call[2] === 'update' && call[4] === '--name').length, 1);
 });
 
 test('adoption executor refuses late workspace, runtime, role and authority changes', async () => {
