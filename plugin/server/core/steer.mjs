@@ -726,14 +726,27 @@ export function buildResumeBrief(status, { agentId = null, agentState = null, wo
     }
   }
   if (assignments.length) {
-    lines.push('Outgoing assignments (verify source records; delivery is not proof of processing):');
-    for (const assignment of assignments.slice(0, 5)) {
-      const state = assignment.reportedAt ? 'report delivered; processing unverified' :
-        assignment.actionId ? 'report pending' : 'assignment in progress';
-      lines.push(`- ${clip(assignment.scopeId, 120)} (${clip(assignment.workspaceId, 80)}): ${state}${assignment.reportStatus ? ` (${clip(assignment.reportStatus, 40)})` : ''}; task: ${clip(assignment.task ?? 'see source', 160)}`);
-      if (assignment.reportedAt && assignment.reportText) lines.push(`  Report hint (do not blindly replay): ${clip(assignment.reportText.replace(/\s+/g, ' '), 350)}`);
+    const cpMs = Date.parse(cp?.capturedAt ?? cp?.updatedAt ?? '');
+    const pendingAssignments = [];
+    let processedCount = 0;
+    for (const assignment of assignments) {
+      const repMs = Date.parse(assignment.reportedAt ?? '');
+      if (Number.isFinite(repMs) && Number.isFinite(cpMs) && cpMs > repMs) processedCount++;
+      else pendingAssignments.push(assignment);
     }
-    if (assignments.length > 5) lines.push(`- … +${assignments.length - 5} more; inspect source assignments.`);
+    if (pendingAssignments.length) {
+      lines.push('Outgoing assignments (verify source records; delivery is not proof of processing):');
+      for (const assignment of pendingAssignments.slice(0, 5)) {
+        const state = assignment.reportedAt ? 'report delivered; processing unverified' :
+          assignment.actionId ? 'report pending' : 'assignment in progress';
+        lines.push(`- ${clip(assignment.scopeId, 120)} (${clip(assignment.workspaceId, 80)}): ${state}${assignment.reportStatus ? ` (${clip(assignment.reportStatus, 40)})` : ''}; task: ${clip(assignment.task ?? 'see source', 160)}`);
+        if (assignment.reportedAt && assignment.reportText) lines.push(`  Report hint (do not blindly replay): ${clip(assignment.reportText.replace(/\s+/g, ' '), 350)}`);
+      }
+      if (pendingAssignments.length > 5) lines.push(`- … +${pendingAssignments.length - 5} more; inspect source assignments.`);
+    }
+    if (processedCount > 0) {
+      lines.push(`Outgoing assignments: ${processedCount} ${processedCount === 1 ? 'report' : 'reports'} processed.`);
+    }
   }
   const marked = restartInterruptions({ checkpoint: cp, agentState: agents });
   const markedIds = new Set(marked.map((m) => m.agentId));

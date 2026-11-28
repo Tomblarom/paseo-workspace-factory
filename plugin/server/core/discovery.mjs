@@ -924,13 +924,12 @@ export function discoverRepository(entry, { config, gh, git, checkouts, paseo, r
     }
   }
   if (!mainOverride && !requestedMainId && forkName) {
-    // Re-plan/status after a --main adoption: the github scope already lives on
-    // a worktree workspace, which the checkout-path lookup below cannot see.
-    // The live scope (same id, worktree main with factory metadata) wins over
-    // a fresh workspace at the checkout path — never a duplicate.
+    // Re-plan/status for an already-enrolled github scope: its live main
+    // workspace (whether worktree or normal checkout) wins over any sibling
+    // dir-scoped clone of the same repo — never a cross-scope hijack.
     const live = (liveScopes ?? []).find((s) => typeof s.id === 'string' && s.id.toLowerCase() === forkName.toLowerCase());
     const ws = live ? paseo.workspaces.find((w) => w.id === live.workspaceId) ?? null : null;
-    if (ws && isWorktreeWorkspace(ws) && ws.metadata?.[METADATA_KEY]?.main === true) {
+    if (ws && ws.metadata?.[METADATA_KEY]?.main === true && (isWorktreeWorkspace(ws) || ws.metadata?.[METADATA_KEY]?.scope?.kind === 'github')) {
       mainOverride = ws;
     }
   }
@@ -940,6 +939,7 @@ export function discoverRepository(entry, { config, gh, git, checkouts, paseo, r
     // classifyCheckouts' exact list, so it is matched by path instead). A
     // scanned origin for another repository is refused; without a scanned
     // checkout the worktree is still adopted, like buildWorktreeDiscovery.
+    const overrideIsWorktree = isWorktreeWorkspace(mainOverride);
     const dirReal = real(mainOverride.workspaceDirectory, realpath);
     const atDir = dirReal ? checkouts.find((c) => real(c.path, realpath) === dirReal) ?? null : null;
     if (atDir) {
@@ -954,10 +954,10 @@ export function discoverRepository(entry, { config, gh, git, checkouts, paseo, r
       if (origin && forkName && origin !== forkName.toLowerCase()) {
         checkoutIssues.push(`Workspace ${requestedMainId} ("${mainOverride.title ?? mainOverride.name}") is a worktree of ${origin}, not of ${forkName}; --main needs a worktree of this repository`);
       } else {
-        checkout = { ...atDir, worktree: true };
+        checkout = { ...atDir, ...(overrideIsWorktree ? { worktree: true } : {}) };
       }
     } else if (dirReal) {
-      checkout = { path: dirReal, linkedWorktree: true, remotes: {}, repos: {}, worktree: true };
+      checkout = { path: dirReal, ...(overrideIsWorktree ? { linkedWorktree: true, worktree: true } : {}), remotes: {}, repos: {} };
     } else {
       checkoutIssues.push(`Workspace ${requestedMainId} has no readable directory; pass an existing worktree workspace id`);
     }

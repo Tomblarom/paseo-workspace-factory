@@ -646,3 +646,16 @@ test('--main: CLI rejects removed plan and --main flag', (t) => {
   assert.equal(out.status, 1);
   assert.match(out.stderr, /main/i);
 });
+
+test('live github scope resolves to its own non-worktree workspace over a sibling dir-scoped clone', async () => {
+  const world = githubMainWorld();
+  const dirClone = addPlainWorkspace(world, { path: '/p/mobile-clone', title: 'Main' });
+  dirClone.metadata = { [METADATA_KEY]: { main: true, activeSteer: 'E', epoch: 1, scope: { id: 'mobile', kind: 'dir', locator: '/p/mobile-clone' } } };
+  const ghWs = addPlainWorkspace(world, { path: '/p/vag/mobile', title: 'Main' });
+  ghWs.metadata = { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1, scope: { id: MOBILE, kind: 'github', locator: MOBILE } } };
+  world.checkouts['/p/mobile-clone'] = { remotes: { origin: `https://github.com/${MOBILE}.git` } };
+  world.checkouts['/p/vag/mobile'] = { remotes: { origin: `https://github.com/${MOBILE}.git` } };
+  const [d] = await runnerForGithub(world).discoverAll([MOBILE]);
+  assert.equal(d.mainWorkspace?.id, ghWs.id);
+  assert.equal(d.checkout?.path, '/p/vag/mobile');
+});

@@ -156,6 +156,22 @@ test('brief preserves outgoing work and treats delivered reports as unverified, 
   assert.ok(brief.length <= BRIEF_BUDGET);
 });
 
+test('brief collapses delivered outgoing reports once the requester checkpoint is newer', () => {
+  const world = makeWorld();
+  const { ws, steers } = provisioned(world, { checkpoint: { task: 'Integrated feature', tests: [], blockers: [], next: 'Ship', epoch: 3, capturedAt: hoursAgo(1) } });
+  addWorkspace(world, { metadata: {
+    [METADATA_KEY]: { scope: { id: 'example/source' } },
+    [CHECKPOINT_KEY]: { task: 'Build feature' },
+    'wsf.assignment': { by: steers.A.id, requesterWorkspaceId: ws.id, reportActionId: 'report-id',
+      reportText: '[Factory report] Build feature done', reportStatus: 'done', reportedAt: hoursAgo(2) },
+  } });
+  const records = outgoingAssignmentRecords(world.workspaces, ws.id, [steers.A.id]);
+  const brief = buildResumeBrief(statusOf(world, discoveryOf(world)), { agentId: steers.B.id, assignments: records });
+  assert.match(brief, /Outgoing assignments: 1 report processed\./);
+  assert.doesNotMatch(brief, /report delivered; processing unverified/);
+  assert.doesNotMatch(brief, /Build feature done/);
+});
+
 test('brief without a checkpoint still surfaces recorded outgoing work', () => {
   const world = makeWorld();
   const { ws, steers } = provisioned(world);

@@ -6,7 +6,7 @@ import { liveSlotHolders } from './discovery.mjs';
 import { idempotencyKey, profileAgentConfig, requestDigest } from './steer-create.mjs';
 import { findingsPassage } from './findings.mjs';
 import { WORKER_ROLE_PROMPT, withFactoryCli } from './role-prompts.mjs';
-import { withWorkspaceLock, workspaceLockName } from './lock.mjs';
+import { retryOnLockBusy, withWorkspaceLock, workspaceLockName } from './lock.mjs';
 import { guardScope } from './scope-guard.mjs';
 import { createExecutors } from './apply.mjs';
 import { sameScopeId } from './scope.mjs';
@@ -93,11 +93,11 @@ export async function startScopedWorker({ client, status, callerId, aliases = []
   // The same assignment keeps its key when prompt settings change between retries: the digest covers the raw task, not the appended role text.
   const key = idempotencyKey(scopeId, 'worker', slot, `e${state.epoch}`, requestDigest({ parentId: parent.id, title: request.title, prompt }));
   const run = execute ?? createExecutors({ client });
-  const created = await withWorkspaceLock(workspace.id, async (held) => {
+  const created = await retryOnLockBusy(() => withWorkspaceLock(workspace.id, async (held) => {
     await guardScope({ client, held, workspaceId: workspace.id, scopeId, epoch: state.epoch, agentId: parent.id, aliases });
     held.verify();
     return run({ key, kind: 'paseo.agent.createWorker', params: { ...request, workspaceId: workspace.id, idempotencyKey: key } }, config);
-  });
+  }));
   if (!created?.agentId) throw new Error('Worker creation returned no agent id');
   return { ...result, accountId: created.accountId ?? null, agentId: created.agentId };
 }
