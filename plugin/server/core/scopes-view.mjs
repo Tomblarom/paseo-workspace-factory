@@ -176,13 +176,20 @@ export function scopeCandidates(paseoState, { factoryCmd = '/factory' } = {}) {
   const agents = (paseoState?.agents ?? []).filter((agent) => !agent.archivedAt);
   const byId = new Map(agents.map((a) => [a.id, a]));
   const projects = new Map((paseoState?.projects ?? []).map((p) => [p.projectId, p]));
-  return (paseoState?.workspaces ?? [])
-    .filter((w) => !w.archivedAt && (!w.metadata?.[METADATA_KEY] || typeof w.metadata[METADATA_KEY] !== 'object'))
+  const liveWorkspaces = (paseoState?.workspaces ?? []).filter((w) => !w.archivedAt);
+  const dirCounts = new Map();
+  for (const w of liveWorkspaces) {
+    const dir = w.workspaceDirectory ?? null;
+    if (dir) dirCounts.set(dir, (dirCounts.get(dir) ?? 0) + 1);
+  }
+  return liveWorkspaces
+    .filter((w) => !w.metadata?.[METADATA_KEY] || typeof w.metadata[METADATA_KEY] !== 'object')
     .map((w) => {
       const live = agents.filter((a) => a.workspaceId === w.id && !a.archivedAt);
       const project = projects.get(w.projectId) ?? null;
       const worktree = isWorktreeWorkspace(w);
       const directory = w.workspaceDirectory ?? null;
+      const sharedDirectory = Boolean(directory && (dirCounts.get(directory) ?? 0) > 1);
       let directoryArg = directory;
       if (directory && !/^[\p{L}\p{N}/_.:-]+$/u.test(directory)) {
         directoryArg = factoryCmd === '/factory' ? JSON.stringify(directory) : `'${directory.replace(/'/g, "'\\''")}'`;
@@ -202,7 +209,7 @@ export function scopeCandidates(paseoState, { factoryCmd = '/factory' } = {}) {
             : null;
           return { id: a.id, title: a.title ?? null, provider: a.provider ?? null, model: a.model ?? null, status: a.status ?? null, parentId: parentOf(a), ...(hint ? { hint } : {}) };
         }),
-        suggestedPlan: worktree || !directory ? `${factoryCmd} plan workspace:${w.id}` : `${factoryCmd} plan --local ${directoryArg}`,
+        suggestedPlan: worktree || !directory || sharedDirectory ? `${factoryCmd} plan workspace:${w.id}` : `${factoryCmd} plan --local ${directoryArg}`,
       };
     });
 }

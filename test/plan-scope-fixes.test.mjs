@@ -249,8 +249,11 @@ test('2: scope-id plans ignore titles and honor --slots; unknown ids still fail'
   const project = addProject(world, '/p/plain');
   const plain = { id: 'wks_plain0000000001', projectId: project.projectId, workspaceDirectory: '/p/plain', workspaceKind: 'local_checkout', title: 'Plain', name: 'Plain', metadata: {}, createdAt: new Date().toISOString() };
   world.workspaces.push(plain);
-  const [notWorktree] = await runnerFor(world).runPlans([{ workspace: plain.id }]);
-  assert.match(notWorktree.conflicts[0].reason, /not a worktree workspace/);
+  const [adoptedPlain] = await runnerFor(world).runPlans([{ workspace: plain.id }]);
+  assert.equal(adoptedPlain.status, 'pending', JSON.stringify(adoptedPlain.conflicts));
+  assert.equal(adoptedPlain.repo, 'plain');
+  const plainAdoptOp = adoptedPlain.ops.find((op) => op.key === 'workspace.main.adopt');
+  assert.deepEqual(plainAdoptOp?.params?.metadata?.[METADATA_KEY]?.scope, { id: 'plain', kind: 'workspace', locator: plain.id });
   assert.equal(ws.id.slice(0, 4), 'wks_');
 });
 

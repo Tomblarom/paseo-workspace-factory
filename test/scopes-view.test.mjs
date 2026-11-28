@@ -142,3 +142,16 @@ test('composer candidate suggestions use slash syntax and quote local paths', ()
   assert.equal(scopeCandidates(state, { factoryCmd: '/factory' })[0].suggestedPlan, '/factory plan --local "/tmp/my project"');
   assert.equal(scopeCandidates(state, { factoryCmd: 'paseo-factory' })[0].suggestedPlan, "paseo-factory plan --local '/tmp/my project'");
 });
+
+test('scopeCandidates suggests workspace:<id> when multiple workspaces share a local directory', () => {
+  const state = {
+    workspaces: [
+      { id: 'wks_main', title: 'Caddy2k · Main', workspaceDirectory: '/p/caddy2k-archive', metadata: { wsf: { main: true, activeSteer: 'A', epoch: 1, scope: { id: 'caddy2k-archive', kind: 'dir', locator: '/p/caddy2k-archive' } } } },
+      { id: 'wks_kamera', title: 'Kamera Recherche', workspaceDirectory: '/p/caddy2k-archive', metadata: {} },
+    ],
+  };
+  const candidates = scopeCandidates(state, { factoryCmd: '/factory' });
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0].workspaceId, 'wks_kamera');
+  assert.equal(candidates[0].suggestedPlan, '/factory plan workspace:wks_kamera');
+});

@@ -573,18 +573,35 @@ function worktreeParent({ projectRootPath, dirReal, checkouts, realpath, liveSco
   }
 }
 
+function workspaceScopeId(workspace, { folder, liveScopes }) {
+  const title = (workspace.title ?? workspace.name ?? '').trim();
+  const slug = title.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '');
+  const taken = new Set((liveScopes ?? []).filter((s) => s.workspaceId !== workspace.id).map((s) => s.id.toLowerCase()));
+  const base = (!title || MAIN_TITLE.test(title)) && folder && !taken.has(folder.toLowerCase())
+    ? folder
+    : (slug || folder || workspace.id);
+  if (!taken.has(base.toLowerCase())) return base;
+  for (let i = 2; i < 100; i++) {
+    const candidate = `${base}-${i}`;
+    if (!taken.has(candidate.toLowerCase())) return candidate;
+  }
+  return workspace.id;
+}
+
 /**
- * Discovery for an existing Paseo worktree workspace adopted as the factory
- * main workspace. No new project is registered and no duplicate workspace is
- * created: the matched worktree becomes the main workspace (via metadata) and
- * the scope id names it (`--name`, else `<parent>@<branch>`, else the folder).
- * A stored scope field wins over a recomputed one (stable identity); steers
- * labelled with the legacy `local/<folder>` name still match. Unlike normal
- * discovery the title does not matter; ambiguity is reported, never resolved
- * silently.
+ * Discovery for an existing Paseo workspace adopted by id (worktree or local
+ * non-worktree workspace, including additional workspaces sharing a directory).
+ * No new project is registered and no duplicate workspace is created: the
+ * matched workspace becomes the main workspace (via metadata) and the scope id
+ * names it (`--name`, else `<parent>@<branch>` / folder for worktrees, else a
+ * collision-free slug of the workspace title for local workspaces). A stored
+ * scope field wins over a recomputed one (stable identity). Unlike `--local`
+ * discovery the title does not have to be "Main"; ambiguity is reported, never
+ * resolved silently.
  */
 function buildWorktreeDiscovery(matched, { normalized, parentDir, checkouts, paseo, realpath, checkoutIssues, git, liveScopes, zerosubSwitches = [] }) {
   const first = matched[0] ?? null;
+  const isWorktree = first ? isWorktreeWorkspace(first) : true;
   const dirReal = first ? real(first.workspaceDirectory, realpath) : null;
   const base = first ? basename(first.workspaceDirectory ?? '') : null;
   const folder = base && base !== '.' && base !== '..' && !base.includes('/') ? base : null;
@@ -601,12 +618,15 @@ function buildWorktreeDiscovery(matched, { normalized, parentDir, checkouts, pas
     scope = { id: requestedName ?? stored?.id ?? 'hub', kind: 'hub', locator: first.id };
   } else if (stored) {
     scope = { id: stored.id, kind: stored.kind, locator: stored.locator ?? mainWorkspace.id, ...(stored.parent !== undefined ? { parent: stored.parent } : {}) };
-  } else if (first && folder) {
+  } else if (first && isWorktree && folder) {
     const project = paseo.projects.find((p) => p.projectId === first.projectId) ?? null;
     const parent = worktreeParent({ projectRootPath: project?.projectRootPath, dirReal, checkouts, realpath, liveScopes });
     const branch = worktreeBranch(git, dirReal);
     const id = requestedName ?? (parent && branch ? `${parent.id}@${branch}` : folder);
     scope = { id, kind: 'workspace', locator: first.id, ...(parent ? { parent } : {}) };
+  } else if (first && !isWorktree) {
+    const id = requestedName ?? workspaceScopeId(first, { folder, liveScopes });
+    scope = { id, kind: 'workspace', locator: first.id };
   }
   // Domain pointer: an explicit --domain wins ("" clears, so the planned scope
   // carries none); otherwise the stored pointer is kept. Hubs carry no domain.
@@ -620,7 +640,7 @@ function buildWorktreeDiscovery(matched, { normalized, parentDir, checkouts, pas
   const repoKey = forkName.toLowerCase();
   const legacyKey = folder ? `local/${folder}`.toLowerCase() : null;
   const matchKeys = new Set([repoKey]);
-  if (legacyKey) matchKeys.add(legacyKey);
+  if (legacyKey && isWorktree) matchKeys.add(legacyKey);
   if (stored && stored.id.toLowerCase() !== repoKey) matchKeys.add(stored.id.toLowerCase());
   const issues = [...checkoutIssues];
 
@@ -628,9 +648,9 @@ function buildWorktreeDiscovery(matched, { normalized, parentDir, checkouts, pas
   if (dirReal && !issues.length) {
     checkout = checkouts.find((c) => real(c.path, realpath) === dirReal) ?? null;
     if (checkout) {
-      checkout = { ...checkout, local: true, worktree: true };
+      checkout = { ...checkout, local: true, worktree: isWorktree };
     } else {
-      checkout = { path: dirReal, linkedWorktree: true, remotes: {}, repos: {}, local: true, worktree: true };
+      checkout = { path: dirReal, linkedWorktree: isWorktree, remotes: {}, repos: {}, local: true, worktree: isWorktree };
     }
   }
 
@@ -674,7 +694,7 @@ function buildWorktreeDiscovery(matched, { normalized, parentDir, checkouts, pas
   };
 }
 
-/** Worktree adoption by workspace id ("workspace:<id>" or bare "wks_..."). */
+/** Workspace adoption by exact workspace id ("workspace:<id>" or bare "wks_..."). */
 function discoverWorktreeById(normalized, { checkouts, paseo, realpath, git, liveScopes, zerosubSwitches = [] }) {
   const id = normalized.workspaceId;
   const parentDir = normalized.parentDir;
@@ -682,13 +702,13 @@ function discoverWorktreeById(normalized, { checkouts, paseo, realpath, git, liv
   if (!found) {
     return buildWorktreeDiscovery([], {
       normalized, parentDir, checkouts, paseo, realpath, git, liveScopes, zerosubSwitches,
-      checkoutIssues: [`Workspace ${id} not found; pass an existing worktree workspace id (see "workspace:<id>" in docs/configuration.md)`],
+      checkoutIssues: [`Workspace ${id} not found; pass an existing workspace id (see "workspace:<id>" in docs/configuration.md)`],
     });
   }
-  if (!isWorktreeWorkspace(found)) {
+  if (found.archivedAt) {
     return buildWorktreeDiscovery([], {
       normalized, parentDir, checkouts, paseo, realpath, git, liveScopes, zerosubSwitches,
-      checkoutIssues: [`Workspace ${id} ("${found.title ?? found.name}") is not a worktree workspace. For local enrollment, use a workspace titled "Main" (or ending in "· Main") with plan --local <path>.`],
+      checkoutIssues: [`Workspace ${id} ("${found.title ?? found.name}") is archived and cannot be enrolled.`],
     });
   }
   return buildWorktreeDiscovery([found], { normalized, parentDir, checkouts, paseo, realpath, git, liveScopes, zerosubSwitches, checkoutIssues: [] });

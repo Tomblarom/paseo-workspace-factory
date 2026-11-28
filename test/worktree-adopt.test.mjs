@@ -392,16 +392,31 @@ test('normal local discovery is unchanged when worktrees do not match', async ()
   assert.ok(d.mainWorkspace, 'the plain workspace is the main');
 });
 
-test('unknown or non-worktree workspace ids are conflicts', async () => {
+test('unknown workspace ids conflict, while local non-worktree workspaces enroll by workspace:<id> even on shared directories', async () => {
   const world = makeWorld();
-  world.checkouts['/p/demo'] = { remotes: {} };
-  const plain = addPlainWorkspace(world, { path: '/p/demo' });
+  world.checkouts['/p/caddy2k-archive'] = { remotes: {} };
+  const mainWs = addPlainWorkspace(world, {
+    path: '/p/caddy2k-archive',
+    title: 'Caddy2k · Main',
+    metadata: { [METADATA_KEY]: { main: true, activeSteer: 'A', epoch: 1, scope: { id: 'caddy2k-archive', kind: 'dir', locator: '/p/caddy2k-archive' } } },
+  });
+  const shared = addPlainWorkspace(world, { path: '/p/caddy2k-archive', title: 'Kamera Recherche' });
+  world.agents.push(
+    { id: 'steer-main-a', workspaceId: mainWs.id, title: 'Steer A', provider: 'codex', model: 'gpt-6.2-sol', status: 'idle', labels: { [LABEL.role]: 'steer', [LABEL.slot]: 'A', [LABEL.scope]: 'caddy2k-archive', [LABEL.repo]: 'local/caddy2k-archive' }, archivedAt: null },
+    { id: 'steer-kamera-c', workspaceId: shared.id, title: 'Steer C', provider: 'codex', model: 'gpt-6.2-sol', status: 'idle', labels: {}, archivedAt: null },
+  );
   const [missing] = await runnerFor(world).runPlans([{ workspace: 'wks_doesnotexist0001' }]);
   assert.equal(missing.status, 'conflict');
   assert.match(missing.conflicts[0].reason, /not found/);
-  const [notWorktree] = await runnerFor(world).runPlans([{ workspace: plain.id }]);
-  assert.equal(notWorktree.status, 'conflict');
-  assert.match(notWorktree.conflicts[0].reason, /not a worktree workspace/);
+
+  const [planned] = await runnerFor(world).runPlans([{ workspace: shared.id }], { adopt: { '*': { C: 'steer-kamera-c' } } });
+  assert.equal(planned.status, 'pending', JSON.stringify(planned.conflicts));
+  assert.equal(planned.repo, 'kamera-recherche');
+  const adoptOp = planned.ops.find((op) => op.key === 'workspace.main.adopt');
+  assert.deepEqual(adoptOp?.params?.metadata?.[METADATA_KEY]?.scope, { id: 'kamera-recherche', kind: 'workspace', locator: shared.id });
+  // Must adopt Kamera Recherche's Steer C and never pull in Main's steer over legacy local/caddy2k-archive labels.
+  assert.ok(planned.ops.some((op) => op.params?.agentId === 'steer-kamera-c'));
+  assert.ok(!planned.ops.some((op) => op.params?.agentId === 'steer-main-a'));
   assert.equal(ghCalls(world).length, 0);
 });
 
